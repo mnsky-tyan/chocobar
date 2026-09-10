@@ -49,9 +49,9 @@ const DEFAULTS = {
   theme: {
     fg: '#080808',
     fgDim: '#5a5245',
-    pink: '#E8C7D0',
-    pinkDeep: '#C77B96',
-    pinkBg: '#FDEFF2',
+    pink: '#F0DEE4',      // paler rose (was #E8C7D0)
+    pinkDeep: '#D493AA',  // softened accent (was #C77B96)
+    pinkBg: '#FEF7F9',    // airier blush dashboard surface (was #FDEFF2)
     yellow: '#B8A96A',
     yellowBg: '#F5F0D8',
     warn: '#A00000',
@@ -124,9 +124,9 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
   "theme": {
     "fg": "#080808",
     "fgDim": "#5a5245",
-    "pink": "#E8C7D0",
-    "pinkDeep": "#C77B96",
-    "pinkBg": "#FDEFF2",
+    "pink": "#F0DEE4",
+    "pinkDeep": "#D493AA",
+    "pinkBg": "#FEF7F9",
     "yellow": "#B8A96A",
     "yellowBg": "#F5F0D8",
     "warn": "#A00000",

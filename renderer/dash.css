@@ -2,9 +2,9 @@
   --bg: #FDEFF2;
   --fg: #080808;
   --fg-dim: #5a5245;
-  --pink: #E8C7D0;
-  --pink-deep: #C77B96;
-  --pink-bg: #FDEFF2;
+  --pink: #F0DEE4;
+  --pink-deep: #D493AA;
+  --pink-bg: #FEF7F9;
   --yellow: #B8A96A;
   --yellow-bg: #F5F0D8;
   --warn: #A00000;
@@ -19,7 +19,7 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body { background: var(--pink-bg, #FDEFF2); }
+html, body { background: var(--pink-bg, #FEF7F9); }
 
 body {
   font-family: var(--font);
@@ -165,7 +165,7 @@ table.dt th {
 table.dt th:first-child { text-align: left; padding-left: 2px; }
 table.dt td { padding: 2.5px 6px 2.5px 0; text-align: right; font-variant-numeric: tabular-nums; }
 table.dt td:first-child { text-align: left; padding-left: 2px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
-table.dt tr:nth-child(even) { background: rgba(253, 239, 242, 0.5); }
+table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
 .share { position: relative; }
 .share i {
   position: absolute; left: 2px; top: 15%; height: 70%;
