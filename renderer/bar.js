@@ -32,6 +32,7 @@ const ICONS = {
       bolt + `</svg>`;
   },
   buds: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 3a3 3 0 0 0-3 3v2.2a3 3 0 1 0 3 3V3z"/><path d="M8.5 13.5v2a3.5 3.5 0 0 1-3.4 3.5"/><path d="M15.5 3a3 3 0 0 1 3 3v2.2a3 3 0 1 1-3 3V3z"/><path d="M15.5 13.5v2a3.5 3.5 0 0 0 3.4 3.5"/></svg>`,
+  agent: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>`,
   clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>`,
   diamond: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3 21 12 12 21 3 12z"/></svg>`
 };
@@ -100,8 +101,8 @@ function rebuildSegments() {
     if ((theme.bar.align || 'right') === 'right') el('bar').insertBefore(s, el('segments'));
     else c.appendChild(s);
   }
-  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
-  for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['clock', ICONS.clock]]) {
+  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', agents: 'Firstmate fleet activity', clock: 'Local time' };
+  for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['agents', ICONS.agent], ['clock', ICONS.clock]]) {
     if (m[id] && m[id].enabled) {
       const s = seg(id, icon);
       s.title = titles[id];
@@ -213,6 +214,19 @@ function render() {
     } else {
       setVal('bluetooth', '—', 'dim');
       segEls.bluetooth.root.title = 'Bluetooth battery (no device reporting right now)';
+    }
+  }
+  if (segEls.agents) {
+    const a = stats && stats.agents;
+    if (a && a.state === 'working') {
+      setVal('agents', a.count > 0 ? a.count + ' live' : 'busy', '');
+      segEls.agents.root.title = a.note || 'Firstmate fleet is working';
+    } else if (a && a.state === 'idle') {
+      setVal('agents', 'idle', 'dim');
+      segEls.agents.root.title = 'Firstmate fleet is idle';
+    } else {
+      setVal('agents', '—', 'dim');
+      segEls.agents.root.title = 'Firstmate fleet activity — no status file yet';
     }
   }
   if (segEls.clock) {

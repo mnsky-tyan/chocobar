@@ -2,6 +2,7 @@
 // System metrics collector. Each module polls at its own cadence; a 1s ticker
 // emits a combined snapshot for the bar renderer.
 const os = require('os');
+const fs = require('fs');
 const { spawn } = require('child_process');
 const native = require('./native');
 
@@ -17,6 +18,7 @@ class MetricsEngine extends require('events') {
       battery: null,      // { percent, ac, charging }
       volume: null,       // { level, muted }
       bluetooth: [],      // [{ name, level }]
+      agents: null,       // { state: working|idle|unknown, count, note } from the fleet status file
       volumeError: null
     };
     this._cpuPrev = os.cpus().map((c) => c.times);
@@ -57,6 +59,10 @@ class MetricsEngine extends require('events') {
     }
     if (m.gpu.enabled) this._startGpuWorker(m.gpu);
     if (m.bluetooth.enabled) this._startBtWorker(m.bluetooth);
+    if (m.agents && m.agents.enabled) {
+      this._timers.push(setInterval(() => this._pollAgents(), Math.max(2000, m.agents.intervalMs || 5000)));
+      this._pollAgents();
+    }
   }
 
   stop() {
@@ -122,6 +128,32 @@ class MetricsEngine extends require('events') {
     this.state.volume = native.getVolume();
     if (!this.state.volume && !this.state.volumeError) {
       this.state.volumeError = native.volumeState.error;
+    }
+  }
+
+  // --- agent fleet activity -----------------------------------------------------
+  // The main firstmate keeps a tiny status file updated; JSON preferred,
+  // {"state":"working"|"idle","agents":N,"note":"..."}, but a bare first line
+  // containing "working"/"idle" is accepted too. Missing file = null (dim dash).
+  _pollAgents() {
+    const cfgFile = this.cfg.modules.agents && this.cfg.modules.agents.file;
+    if (!cfgFile) { this.state.agents = null; return; }
+    try {
+      const raw = fs.readFileSync(cfgFile.replace(/^~/, os.homedir()), 'utf8');
+      let d = null;
+      try { d = JSON.parse(raw); } catch (_) {}
+      let out;
+      if (d && typeof d === 'object') {
+        out = { state: String(d.state || 'unknown').toLowerCase(), count: d.agents, note: d.note };
+      } else {
+        out = { state: raw.split(/\r?\n/)[0].trim().toLowerCase() || 'unknown' };
+      }
+      if (out.state !== 'working' && out.state !== 'idle') {
+        out.state = /work|busy|active/.test(out.state) ? 'working' : /idle|free/.test(out.state) ? 'idle' : 'unknown';
+      }
+      this.state.agents = out;
+    } catch (_) {
+      this.state.agents = null; // no file yet
     }
   }
 
