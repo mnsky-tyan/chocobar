@@ -4,9 +4,12 @@
 // Sources (all local, read-only):
 //  - zcode:  ~/.zcode/cli/db/db.sqlite  -> `turn_usage` table (per-turn token totals).
 //            Durable history for every model call the zcode client makes.
-//  - zai:    the zcode engine shares that same DB. Sessions whose id also appears as
-//            ~/.zai/agent/sessions/ZCODE_sess_<uuid>_*.jsonl were launched from zai,
-//            so we attribute those turns to "zai" and the rest to "zcode".
+//  - zai:    two stores. DB turns whose session id appears as
+//            ~/.zai/agent/sessions/ZCODE_sess_<uuid>_*.jsonl were launched from the
+//            pre-rebuild zai wrapper and stay attributed via the DB. The rebuilt
+//            pi-based engine (2026-09-10) keeps transcripts named <utc-ts>_<uuid>.jsonl
+//            whose ids never reach the zcode DB; their assistant messages carry a
+//            `usage` object, which we scan directly.
 //  - opencode: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 //            assistant messages carry a `tokens` object.
 //
@@ -56,6 +59,7 @@ class TokenTracker extends require('events') {
       const t0 = Date.now();
       let added = 0;
       try { added += this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
+      try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
       try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
       this.lastScan = new Date().toISOString();
       this._saveCache();
@@ -114,6 +118,52 @@ class TokenTracker extends require('events') {
     return added;
   }
 
+  // --- zai (pi agent sessions) ---------------------------------------------------
+  // Legacy ZCODE_* files are skipped: those sessions are DB-backed (turn_usage), so
+  // counting the files too would double them. New-format files are the only store
+  // for post-rebuild zai usage.
+  _scanZaiSessions() {
+    const src = this.cfg.sources.zai;
+    if (!src.enabled || !src.sessionsDir) return 0;
+    let files;
+    try { files = fs.readdirSync(src.sessionsDir); } catch (_) { return 0; }
+    const cutoff = (this._zaiMtimeFloor || 0);
+    let added = 0, high = (this._zaiMtimeHigh || 0);
+    for (const fn of files) {
+      if (!fn.endsWith('.jsonl') || fn.startsWith('ZCODE_')) continue;
+      const full = path.join(src.sessionsDir, fn);
+      let st;
+      try { st = fs.statSync(full); } catch (_) { continue; }
+      if (st.mtimeMs < cutoff) continue;
+      if (st.mtimeMs > high) high = st.mtimeMs;
+      let lines;
+      try { lines = fs.readFileSync(full, 'utf8').split('\n'); } catch (_) { continue; }
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line.includes('"usage"')) continue;
+        let d;
+        try { d = JSON.parse(line); } catch (_) { continue; } // partial tail line while appending
+        if (d.type !== 'message' || !d.message || d.message.role !== 'assistant') continue;
+        const u = d.message.usage || {};
+        const input = u.input || 0, output = u.output || 0;
+        const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
+        if (!(input || output || cacheRead || cacheWrite)) continue;
+        const key = `zf:${fn}:${(d.message && d.message.id) || 'l' + i}`;
+        if (this.records.has(key)) continue;
+        this.records.set(key, {
+          app: 'zai',
+          ts: Number(d.message.timestamp) || st.mtimeMs,
+          model: d.message.model || 'unknown',
+          input, output, cacheRead, cacheWrite, reasoning: 0
+        });
+        added++;
+      }
+    }
+    if (high) this._zaiMtimeHigh = high;
+    if (this._zaiMtimeHigh) this._zaiMtimeFloor = this._zaiMtimeHigh - 60000; // 1min slack for in-flight writes
+    return added;
+  }
+
   // --- opencode ----------------------------------------------------------------
   _scanOpencode() {
     const src = this.cfg.sources.opencode;
@@ -163,6 +213,7 @@ class TokenTracker extends require('events') {
       const arr = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
       for (const [k, r] of arr) this.records.set(k, r);
       this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
+      this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
       console.log(`[wizbar] token cache: ${this.records.size} records`);
     } catch (_) {}
   }
