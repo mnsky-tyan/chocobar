@@ -64,7 +64,6 @@ function statsLoop() {
     if (!bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
     bar.send('stats', metrics.snapshot());
-    if (dashWin && !dashWin.isDestroyed()) dashWin.send('stats', metrics.snapshot());
   }, 100);
 }
 
@@ -205,7 +204,6 @@ function wireBar() {
   ipcMain.handle('get-config', () => configManager.config);
   ipcMain.handle('get-theme', () => themePayload(configManager.config));
   ipcMain.handle('get-tokens', () => tokens ? tokens.aggregate() : null);
-  ipcMain.handle('get-stats', () => metrics.snapshot());
   ipcMain.on('open-dash', () => openDashboard());
   ipcMain.on('bar-context', () => {
     Menu.buildFromTemplate([

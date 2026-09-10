@@ -248,16 +248,3 @@ window.wizbar.onTheme(applyTheme);
 window.wizbar.onTokens((a) => { agg = a; render(); });
 window.wizbar.getTheme().then(applyTheme);
 window.wizbar.getTokens().then((a) => { if (a) { agg = a; render(); } });
-
-// Live system readout (CPU temperature via HWiNFO when available); hidden entirely
-// while no sensor reports so the dashboard stays token-only in shape.
-function renderSysInfo(s) {
-  const el = $('sys-info');
-  if (!el) return;
-  const t = s && s.cpuTemp;
-  const txt = t && t.state === 'ok' && t.c != null ? ` · CPU ${t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)}°C` : '';
-  el.textContent = txt;
-  el.classList.toggle('hidden', !txt);
-}
-window.wizbar.onStats(renderSysInfo);
-window.wizbar.getStats().then(renderSysInfo);
