@@ -1,0 +1,91 @@
+:root {
+  --bg: rgba(251, 242, 226, 0.70);
+  --fg: #080808;
+  --fg-dim: #5a5245;
+  --pink: #E8C7D0;
+  --pink-deep: #C77B96;
+  --pink-bg: #FDEFF2;
+  --yellow: #B8A96A;
+  --yellow-bg: #F5F0D8;
+  --warn: #A00000;
+  --good: #006400;
+  --divider: rgba(184, 169, 106, 0.45);
+  --font: 'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace;
+  --fs: 11px;
+  --radius: 8px;
+  --seg-gap: 14px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  background: transparent;
+  overflow: hidden;
+  height: 100%;
+  user-select: none;
+  cursor: default;
+}
+
+body {
+  font-family: var(--font);
+  font-size: var(--fs);
+  font-weight: 600;
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+#bar {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 12px 0 8px;
+  background: var(--bg);
+  /* The page IS the paint: translucent tint over a transparent window.
+     Corners come from here too (CSS), since DWM rounding needs an opaque rect. */
+  border-radius: var(--radius, 8px);
+  overflow: hidden;
+}
+
+#bar.align-left { justify-content: flex-start; }
+#bar.align-center { justify-content: center; }
+
+#segments {
+  display: flex;
+  align-items: center;
+  gap: var(--seg-gap);
+  white-space: nowrap;
+}
+
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+  line-height: normal; /* natural line box keeps glyph baselines optically centered */
+}
+
+.seg svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  opacity: 0.9;
+}
+
+.seg .ico { color: var(--pink-deep); display: inline-flex; }
+.seg .val { color: var(--fg); }
+.seg .val.dim { color: var(--fg-dim); }
+.seg .val.warn { color: var(--warn); }
+.seg .val.good { color: var(--good); }
+
+.seg.divider-sep { color: var(--divider); font-weight: 400; }
+
+.seg.clickable { cursor: pointer; border-radius: 5px; padding: 2px 5px; margin: -2px -5px; }
+.seg.clickable:hover { background: rgba(232, 199, 208, 0.5); }
+
+#seg-tokens .ico { color: var(--yellow); }
+#seg-tokens .val { color: var(--fg-dim); }
+#seg-tokens:hover .val { color: var(--pink-deep); }
+#bar > #seg-tokens { margin-right: auto; }
+
+body.rtl-shadow #bar { box-shadow: none; }
