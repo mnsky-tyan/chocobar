@@ -289,10 +289,127 @@ function forceSize(hwnd, wPhys, hPhys) {
   return !!SetWindowPos(hwnd, 0, 0, 0, wPhys, hPhys, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// --- CPU temperature via HWiNFO shared memory -----------------------------------
+// HWiNFO publishes every sensor reading to a named section (Global\HWiNFO_SENS_SM)
+// when "Shared Memory Support" is enabled in its settings. Mapping it read-only
+// needs no helper and no elevation; the section dies with the HWiNFO process, so
+// an absent map is the normal "not running / setting off" case and returns null.
+const OpenFileMappingW = kernel32.func('uintptr_t __stdcall OpenFileMappingW(uint32_t access, int inherit, str16 name)');
+const MapViewOfFile = kernel32.func('void *__stdcall MapViewOfFile(uintptr_t h, uint32_t access, uint32_t hi, uint32_t lo, size_t bytes)');
+const UnmapViewOfFile = kernel32.func('int __stdcall UnmapViewOfFile(void *p)');
+const CloseHandle = kernel32.func('int __stdcall CloseHandle(uintptr_t h)');
+const HWI_MBI = koffi.struct('HWI_MBI', {
+  BaseAddress: 'void *', AllocationBase: 'void *', AllocationProtect: 'uint32', pad1: 'uint32',
+  RegionSize: 'size_t', State: 'uint32', Protect: 'uint32', Type: 'uint32', pad2: 'uint32'
+});
+const VirtualQuery = kernel32.func('size_t __stdcall VirtualQuery(void *addr, _Out_ HWI_MBI *mbi, size_t len)');
+
+const HWINFO_MAP = 'Global\\HWiNFO_SENS_SM';
+
+// Stateless by design: each poll opens, maps, parses and releases the section.
+// Holding a mapping would pin a dead section object after HWiNFO restarts, and
+// at a 2s cadence the three extra syscalls are free.
+
+// Pure parser over an explicit-length byte reader so tests can drive it without a
+// live section. Layout per HWiNFO's SDK: 40-byte header (signature 0x10, version,
+// revision, two 8-byte timestamps, sensor and reading element sizes), then a
+// NUL-terminated sensor array, then reading elements. String fields are UTF-16 or
+// UTF-8 depending on revision — the element sizes tell which, and every offset
+// derives from them (label field is 8x the suffix field). koffi string decodes are
+// never used here: they run past mapped memory unless NUL-terminated, so all reads
+// are explicit-length bytes.
+function parseHwinfoCpuTemp(get, bytes) {
+  try {
+    if (!get || bytes < 40) return null;
+    const hdr = get(0, 40);
+    if (hdr.readUInt32LE(0) !== 0x10) return null;
+    const sensorSize = hdr.readUInt32LE(32);
+    const readingSize = hdr.readUInt32LE(36);
+    // reading element = 48 bytes of scalars + label + suffix + 8 bytes of ids
+    const suffixBytes = (readingSize - 56) / 9;
+    if ((suffixBytes !== 16 && suffixBytes !== 32) || sensorSize !== (suffixBytes === 32 ? 512 : 256)) return null;
+    const wide = suffixBytes === 32;
+    const dec = (buf) => {
+      const s = buf.toString(wide ? 'utf16le' : 'utf8');
+      const z = s.indexOf('\0');
+      return (z >= 0 ? s.slice(0, z) : s).trim();
+    };
+
+    const sensors = [];
+    let off = 40, readingsAt = -1;
+    for (let i = 0; i < 256; i++) {
+      const name = dec(get(off, sensorSize / 2));
+      if (!name) { readingsAt = off; break; }
+      sensors.push(name);
+      off += sensorSize;
+    }
+    if (readingsAt < 0) return null;
+
+    // collect(start): walk reading elements until an empty label (fresh maps are
+    // zero-filled past the live entries). The SDK leaves it ambiguous whether the
+    // readings begin on the sensor terminator slot or after it, so callers try both.
+    const labelBytes = suffixBytes * 8;
+    const collect = (start) => {
+      const temps = [];
+      for (let i = 0; i < 1024; i++) {
+        const ro = start + i * readingSize;
+        const label = dec(get(ro + 48, labelBytes));
+        if (!label) break;
+        const sfx = dec(get(ro + 48 + labelBytes, suffixBytes));
+        if (!sfx.includes('°')) continue;
+        const v = get(ro + 16, 8).readDoubleLE(0);
+        if (!(v > 0 && v < 150)) continue;
+        const id = get(ro + 48 + labelBytes + suffixBytes, 4).readUInt32LE(0);
+        temps.push({ c: Math.round(v * 10) / 10, label, sensor: sensors[id] || '' });
+      }
+      return temps;
+    };
+    let temps = collect(readingsAt);
+    if (!temps.length) temps = collect(readingsAt + sensorSize);
+    if (!temps.length) return null;
+    // Prefer the CPU package temp, then a CPU-labeled reading, then the hottest core.
+    const onCpu = (t) => /cpu/i.test(t.sensor);
+    const pkg = temps.find((t) => onCpu(t) && /package/i.test(t.label));
+    if (pkg) return pkg;
+    const cpuLbl = temps.find((t) => onCpu(t) && /(^|\W)(cpu|tctl|tdie)\b/i.test(t.label));
+    if (cpuLbl) return cpuLbl;
+    const cores = temps.filter(onCpu);
+    if (cores.length) return cores.reduce((a, b) => (b.c > a.c ? b : a));
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getHwinfoTemp(mapName) {
+  let h = null, p = null;
+  try {
+    h = OpenFileMappingW(4 /* FILE_MAP_READ */, 0, mapName || HWINFO_MAP);
+    if (!h) return null; // HWiNFO not running or shared memory support off
+    p = MapViewOfFile(h, 4, 0, 0, 0);
+    if (!p) return null;
+    // RegionSize bounds every later read: decoding past a mapped section would crash.
+    const mbi = {};
+    let bytes = 0;
+    if (VirtualQuery(p, mbi, koffi.sizeof(HWI_MBI)) === koffi.sizeof(HWI_MBI)) bytes = Number(mbi.RegionSize) || 0;
+    if (bytes < 40) return null;
+    const get = (o, n) => {
+      if (o + n > bytes) throw new Error('hwinfo read past section');
+      return Buffer.from(koffi.decode(p, o, 'uint8', n));
+    };
+    return parseHwinfoCpuTemp(get, bytes);
+  } catch (_) {
+    return null;
+  } finally {
+    if (p) { try { UnmapViewOfFile(p); } catch (_) {} }
+    if (h) { try { CloseHandle(h); } catch (_) {} }
+  }
+}
+
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
   setWindowPosAfter, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
-  getBattery, initVolume, getVolume, volumeState,
+  getBattery, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   getForegroundWindow: () => GetForegroundWindow()
 };

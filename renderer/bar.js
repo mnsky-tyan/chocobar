@@ -5,6 +5,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 const ICONS = {
   cpu: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>`,
+  temp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4a2 2 0 1 1 4 0v9.3a4.5 4.5 0 1 1-4 0z"/><path d="M12 9.5v6.5"/></svg>`,
   gpu: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="16" height="10" rx="1.5"/><circle cx="9" cy="12" r="2.4"/><path d="M14 9.5v5M17 9.5v5M19 10v4M6 17v3M10 17v3"/></svg>`,
   ram: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="9" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 11v3M11 11v3M15 11v3"/></svg>`,
   vol: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19V5z"/><path d="M15.5 9.5a4 4 0 0 1 0 5M18 7a7.5 7.5 0 0 1 0 10"/></svg>`,
@@ -99,8 +100,8 @@ function rebuildSegments() {
     if ((theme.bar.align || 'right') === 'right') el('bar').insertBefore(s, el('segments'));
     else c.appendChild(s);
   }
-  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
-  for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['clock', ICONS.clock]]) {
+  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
+  for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['clock', ICONS.clock]]) {
     if (m[id] && m[id].enabled) {
       const s = seg(id, icon);
       s.title = titles[id];
@@ -165,6 +166,17 @@ function render() {
   if (segEls.cpu) {
     setVal('cpu', stats && stats.cpu != null ? stats.cpu + '%' : '—',
       stats && m.cpu.warnAt && stats.cpu >= m.cpu.warnAt ? 'warn' : '');
+  }
+  if (segEls.cputemp) {
+    const t = stats && stats.cpuTemp;
+    if (t && t.c != null) {
+      setVal('cputemp', (t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)) + '°C',
+        m.cputemp && m.cputemp.warnAt && t.c >= m.cputemp.warnAt ? 'warn' : '');
+      segEls.cputemp.root.title = t.label ? `CPU temperature — ${t.label}` : 'CPU temperature';
+    } else {
+      setVal('cputemp', '—', 'dim');
+      segEls.cputemp.root.title = 'CPU temperature — needs HWiNFO running with "Shared Memory Support" enabled';
+    }
   }
   if (segEls.ram) {
     setVal('ram', stats && stats.ram ? stats.ram.pct + '%' : '—',
