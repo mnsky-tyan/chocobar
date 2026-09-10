@@ -54,7 +54,8 @@ function rawZaiByDay(sessionsDir) {
       const input = u.input || 0, output = u.output || 0;
       if (!(input || output || u.cacheRead || u.cacheWrite)) continue;
       const dk = localDateKey(Number(d.message.timestamp));
-      byDay.set(dk, (byDay.get(dk) || 0) + input + output);
+      // pi totalTokens = input+output+cacheRead+cacheWrite (input excludes cache)
+      byDay.set(dk, (byDay.get(dk) || 0) + input + output + (u.cacheRead || 0) + (u.cacheWrite || 0));
     }
   }
   return byDay;
@@ -80,6 +81,7 @@ function main() {
 
   const tracker = new TokenTracker(cfg);
   tracker.records.clear(); // drop the live token cache; measure this machine's scans only
+  tracker._zaiMtimeFloor = 0; tracker._zaiMtimeHigh = 0; // rescan every pi file, not just past the live bar's cursor
 
   tracker._scanZcode();
   const before = zaiByDayFromRecords(tracker.records);
@@ -90,7 +92,7 @@ function main() {
   const days = [];
   for (let i = DAYS_SHOWN - 1; i >= 0; i--) days.push(localDateKey(Date.now() - i * DAY_MS));
 
-  console.log('zai in+out per local day  (before = DB only, after = DB + pi session files):');
+  console.log('zai total tokens per local day  (before = DB only, after = DB + pi session files):');
   console.log('  day         before          after  pi-files');
   for (const dk of days) {
     console.log(`  ${dk}  ${(before.get(dk) || 0).toLocaleString().padStart(12)}  ${(after.get(dk) || 0).toLocaleString().padStart(12)}  ${(raw.get(dk) || 0).toLocaleString().padStart(12)}`);
