@@ -61,6 +61,7 @@ const DEFAULTS = {
   modules: {
     gpu:      { enabled: true, mode: 'sum', intervalMs: 1200 },
     cpu:      { enabled: true, intervalMs: 800, warnAt: 85 },
+    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // via HWiNFO shared memory
     ram:      { enabled: true, intervalMs: 800, warnAt: 90 },
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
@@ -136,6 +137,9 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // GPU %: mode "sum" adds all engines (Task-Manager-like), "max" takes the busiest
     "gpu":       { "enabled": true, "mode": "sum", "intervalMs": 1200 },
     "cpu":       { "enabled": true, "intervalMs": 800, "warnAt": 85 },
+    // CPU temperature from HWiNFO's shared memory ("Shared Memory Support" in HWiNFO's
+    // settings). Shows "—" while HWiNFO is not publishing sensors.
+    "cputemp":   { "enabled": true, "intervalMs": 2000, "warnAt": 85 },
     "ram":       { "enabled": true, "intervalMs": 800, "warnAt": 90 },
     "volume":    { "enabled": true, "intervalMs": 500, "role": "multimedia" },
     "battery":   { "enabled": true, "intervalMs": 1500 },

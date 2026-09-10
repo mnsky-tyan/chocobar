@@ -11,6 +11,7 @@ class MetricsEngine extends require('events') {
     this.cfg = config;
     this.state = {
       cpu: null,          // %
+      cpuTemp: null,      // { c, label } from HWiNFO shared memory, or null
       ram: null,          // { pct, usedGB, totalGB }
       gpu: null,          // { sum, max } or null
       battery: null,      // { percent, ac, charging }
@@ -33,6 +34,10 @@ class MetricsEngine extends require('events') {
     if (m.cpu.enabled) {
       this._timers.push(setInterval(() => this._pollCpu(), Math.max(250, m.cpu.intervalMs)));
       this._pollCpu();
+    }
+    if (m.cputemp && m.cputemp.enabled) {
+      this._timers.push(setInterval(() => this._pollCpuTemp(), Math.max(1000, m.cputemp.intervalMs || 2000)));
+      this._pollCpuTemp();
     }
     if (m.ram.enabled) {
       this._timers.push(setInterval(() => this._pollRam(), Math.max(250, m.ram.intervalMs)));
@@ -89,6 +94,10 @@ class MetricsEngine extends require('events') {
     }
     this._cpuPrev = next;
     if (total > 0) this.state.cpu = Math.round((1 - idle / total) * 100);
+  }
+
+  _pollCpuTemp() {
+    this.state.cpuTemp = native.getHwinfoTemp();
   }
 
   // --- RAM -------------------------------------------------------------------
