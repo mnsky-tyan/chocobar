@@ -61,7 +61,7 @@ function themePayload(cfg) {
 
 function statsLoop() {
   setInterval(() => {
-    if (!bar || !bar.win) return;
+    if (!bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
     bar.send('stats', metrics.snapshot());
   }, 100);
@@ -152,9 +152,23 @@ function buildTray() {
   tray.on('double-click', () => openDashboard());
 }
 
-function wireBar() {
+function spawnBar() {
   bar = new BarWindow(configManager.config);
   bar.create();
+  // Self-heal: if the bar window is destroyed externally (Alt-F4, shell
+  // close), rebuild it instead of leaving the stats and geometry loops
+  // throwing on a dangling window. Skipped while the app is quitting.
+  bar.win.on('closed', () => {
+    setTimeout(() => {
+      if (!shuttingDown && bar && (!bar.win || bar.win.isDestroyed())) spawnBar();
+    }, 250);
+  });
+}
+
+let shuttingDown = false;
+
+function wireBar() {
+  spawnBar();
 
   let lastZSync = 0;
   const syncZ = (hwnd, force) => {

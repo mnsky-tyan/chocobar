@@ -55,6 +55,14 @@ class BarWindow {
 
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'bar.html'));
 
+    // An externally destroyed window (Alt-F4, shell close) must not leave this
+    // reference dangling on a destroyed object - the stats and geometry loops
+    // poll it every tick and would throw "Object has been destroyed" forever.
+    this.win.on('closed', () => {
+      this.win = null;
+      this._shouldShow = false;
+    });
+
     // Periodic size guard (see healSize) — heals any OS-side growth of the window.
     this._sizeTarget = null;
     this._healTimer = setInterval(() => {
@@ -67,7 +75,7 @@ class BarWindow {
   // arrive via the theme push — there is no native color layer to re-apply.
 
   applyGeometry(bounds) {
-    if (!this.win) return;
+    if (!this.win || this.win.isDestroyed()) return;
     this._shouldShow = true; // bounds exist → the bar belongs on screen
     const key = `${bounds.x.toFixed(1)},${bounds.y.toFixed(1)},${bounds.width.toFixed(1)},${bounds.height}`;
     this._sizeTarget = { w: Math.round(bounds.width), h: Math.round(bounds.height), scale: bounds.scale || 1 };
