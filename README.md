@@ -58,12 +58,24 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
 
 ## Run
 
+Recommended — the silent launcher (double-click, or autostart uses it too):
+
+```powershell
+wscript C:\Users\tyanw\work\general\wizbar\scripts\start-wizbar.vbs
+```
+
+The vbs launcher detaches the bar from your terminal: it survives the terminal
+closing, and never prints console noise. `scripts\start-wizbar.cmd` is the same
+launch with a console, for debugging.
+
 ```powershell
 cd C:\Users\tyanw\work\general\wizbar
 npm start
 ```
 
-Silent launchers: `scripts\start-wizbar.vbs` (no console) and `scripts\start-wizbar.cmd`.
+`npm start` also works, but it runs Electron **as a child of your terminal** —
+close the terminal and the bar dies with it. Use it for development; use the
+vbs launcher for daily driving.
 Autostart at login: set `"general": { "autostart": true }` in the config (writes an
 `HKCU\...\Run` entry pointing at the vbs launcher).
 
