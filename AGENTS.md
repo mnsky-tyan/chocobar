@@ -20,5 +20,11 @@ zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change 
   Since the 2026-09-10 rebuild these are named `<utc-ts>_<uuid>.jsonl` and never touch
   the zcode DB; the legacy `ZCODE_sess_<uuid>_*.jsonl` files are DB-backed (imports /
   pre-rebuild sessions) and must NOT be counted from disk too, or they double-count.
+- Raw usage semantics differ by store: zcode DB input_tokens already INCLUDES cached
+  tokens; pi and opencode report cache BESIDE input (and opencode reasoning is a
+  breakdown of output, never additive). _scanZaiSessions/_scanOpencode therefore fold
+  cache into the stored input, so every stored record is cache-inclusive and
+  aggregate() totals stay input+output. pi per-message totalTokens
+  (= input+output+cacheRead+cacheWrite) is the raw ground truth to check against.
 Authoritative reader: `src/tokens.js`; contract check: `node scripts/token_regression.js`.
 

@@ -154,7 +154,10 @@ class TokenTracker extends require('events') {
           app: 'zai',
           ts: Number(d.message.timestamp) || st.mtimeMs,
           model: d.message.model || 'unknown',
-          input, output, cacheRead, cacheWrite, reasoning: 0
+          // pi reports cache beside input (its input EXCLUDES cache, unlike the
+          // zcode DB) and its own totalTokens = input+output+cacheRead+cacheWrite;
+          // folding cache into input makes the record cache-inclusive like DB rows.
+          input: input + cacheRead + cacheWrite, output, cacheRead, cacheWrite, reasoning: 0
         });
         added++;
       }
@@ -192,8 +195,10 @@ class TokenTracker extends require('events') {
           app: 'opencode',
           ts: (msg.time && msg.time.created) || st.mtimeMs,
           model: (msg.model && (msg.model.modelID || msg.model.modelId)) || 'unknown',
-          input: t.input || 0,
-          output: (t.output || 0) + (t.reasoning || 0),
+          // Same normalization as the pi scan: opencode's input excludes cache, and
+          // reasoning is a breakdown of output (never additive).
+          input: (t.input || 0) + ((t.cache && t.cache.read) || 0) + ((t.cache && t.cache.write) || 0),
+          output: t.output || 0,
           reasoning: t.reasoning || 0,
           cacheRead: (t.cache && t.cache.read) || 0,
           cacheWrite: (t.cache && t.cache.write) || 0
@@ -210,10 +215,14 @@ class TokenTracker extends require('events') {
   _loadCache() {
     try {
       if (!fs.existsSync(CACHE_PATH)) return;
-      const arr = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
-      for (const [k, r] of arr) this.records.set(k, r);
-      this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
-      this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
+      const parsed = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
+      // v2 wraps entries as {entries}; a bare array is a pre-normalization cache
+      // whose records lack the folded input - discard it so the next scan is full.
+      const arr = Array.isArray(parsed) ? null : parsed.entries;
+      if (arr) for (const [k, r] of arr) this.records.set(k, r);
+      else console.log('[wizbar] token cache: stale pre-normalization cache discarded; full rescan');
+      if (arr) this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
+      if (arr) this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
       console.log(`[wizbar] token cache: ${this.records.size} records`);
     } catch (_) {}
   }
@@ -221,16 +230,18 @@ class TokenTracker extends require('events') {
   _saveCache() {
     try {
       const arr = [...this.records.entries()].slice(-50000);
-      fs.writeFileSync(CACHE_PATH, JSON.stringify(arr), 'utf8');
+      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 2, entries: arr }), 'utf8');
     } catch (e) {
       console.error('[wizbar] token cache write failed:', e.message);
     }
   }
 
   // --- aggregation -----------------------------------------------------------------
-  // Totals count input + output only. zcode's input_tokens ALREADY includes cached
-  // tokens (cache_read_input_tokens overlaps it), so adding cache reads back in
-  // double-counts them (~2x input). Cache columns stay for per-app/model detail.
+  // Totals count input + output only. Every scan site stores a cache-INCLUSIVE
+  // input: zcode DB input_tokens already include cached tokens, while pi and
+  // opencode report cache beside input and their scans fold it in, so
+  // input+output is the provider total for every source. Adding the cache
+  // columns to the total would double-count them; they stay as detail only.
   aggregate() {
     const rowTotal = (r) => (r.input || 0) + (r.output || 0);
     const byDay = new Map();     // dateKey -> { total, apps: { app: agg } }
