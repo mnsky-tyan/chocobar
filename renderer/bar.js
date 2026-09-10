@@ -169,13 +169,15 @@ function render() {
   }
   if (segEls.cputemp) {
     const t = stats && stats.cpuTemp;
-    if (t && t.c != null) {
+    if (t && t.state === 'ok' && t.c != null) {
       setVal('cputemp', (t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)) + '°C',
         m.cputemp && m.cputemp.warnAt && t.c >= m.cputemp.warnAt ? 'warn' : '');
       segEls.cputemp.root.title = t.label ? `CPU temperature — ${t.label}` : 'CPU temperature';
     } else {
       setVal('cputemp', '—', 'dim');
-      segEls.cputemp.root.title = 'CPU temperature — needs HWiNFO running with "Shared Memory Support" enabled';
+      segEls.cputemp.root.title = t && t.state === 'no-temp'
+        ? 'CPU temperature — HWiNFO sensors are live but report no CPU temperature'
+        : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
     }
   }
   if (segEls.ram) {
