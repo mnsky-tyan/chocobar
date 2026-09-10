@@ -23,8 +23,9 @@ async function main() {
   const { TokenTracker } = require('../src/tokens');
   const tt = new TokenTracker(cfg);
   const n1 = tt._scanZcode();
+  const n3 = tt._scanZaiSessions();
   const n2 = tt._scanOpencode();
-  console.log(`scan: zcode +${n1}, opencode +${n2}, total ${tt.records.size}`);
+  console.log(`scan: zcode +${n1}, zai pi-files +${n3}, opencode +${n2}, total ${tt.records.size}`);
   const agg = tt.aggregate();
   console.log('today:', agg.today.total, 'week:', agg.week, 'allTime:', agg.allTime);
   console.log('byApp:', JSON.stringify(agg.byApp, null, 1).slice(0, 600));

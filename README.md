@@ -48,8 +48,11 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
   separately in the tables for anyone who wants the raw picture.
 - Sources, all read-only from local files:
   - **zcode**: `~/.zcode/cli/db/db.sqlite` → `turn_usage` table (durable, every model call)
-  - **zai**: zai runs the same engine and writes to the same DB; sessions whose id also
-    appears in `~/.zai/agent/sessions/ZCODE_sess_*` are attributed to `zai`, the rest to `zcode`
+  - **zai**: two stores. Sessions launched before the 2026-09-10 engine rebuild are in the
+    zcode DB, attributed to `zai` when the session id appears as `~/.zai/agent/sessions/ZCODE_sess_*`.
+    The rebuilt pi-based engine keeps transcripts as `<utc-ts>_<uuid>.jsonl` in that same
+    folder whose ids never reach the DB; wizbar scans those files directly and reads the
+    per-message `usage` on assistant messages
   - **opencode**: `~/.local/share/opencode/storage/message/**` (assistant messages with `tokens`)
 - Rescans every 5 minutes; needs `python` on PATH for the sqlite read.
 
