@@ -255,7 +255,7 @@ function renderSysInfo(s) {
   const el = $('sys-info');
   if (!el) return;
   const t = s && s.cpuTemp;
-  const txt = t && t.c != null ? ` · CPU ${t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)}°C` : '';
+  const txt = t && t.state === 'ok' && t.c != null ? ` · CPU ${t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)}°C` : '';
   el.textContent = txt;
   el.classList.toggle('hidden', !txt);
 }

@@ -371,39 +371,99 @@ function parseHwinfoCpuTemp(get, bytes) {
     const onCpu = (t) => /cpu/i.test(t.sensor);
     const pkg = temps.find((t) => onCpu(t) && /package/i.test(t.label));
     if (pkg) return pkg;
-    const cpuLbl = temps.find((t) => onCpu(t) && /(^|\W)(cpu|tctl|tdie)\b/i.test(t.label));
+    const cpuLbl = temps.find((t) => onCpu(t) && /(^|\W)(cpu|tctl|tdie)\b/i.test(t.label) && !/distance/i.test(t.label));
     if (cpuLbl) return cpuLbl;
-    const cores = temps.filter(onCpu);
+    const cores = temps.filter((t) => onCpu(t) && !/distance/i.test(t.label));
     if (cores.length) return cores.reduce((a, b) => (b.c > a.c ? b : a));
-    return null;
+    return { none: true };
   } catch (_) {
     return null;
   }
 }
 
-function getHwinfoTemp(mapName) {
-  let h = null, p = null;
+// --- SM2 (HWiNFO 8.24+): Global\HWiNFO_SENS_SM2, signature 'HWiS' -------------
+// 48-byte header: signature, version, revision, unix poll time, uptime, header
+// size, sensor element size, sensor count, readings offset, reading element
+// size, reading count, capacity. Sensor records carry the sensor name at +8;
+// reading records (stride 460 on 8.52) carry parent sensor id at +0, label at
+// +12, unit at +268, then current/min/max/avg doubles at +284..+308. Strings
+// are byte-oriented with the degree sign as raw latin-1 0xB0, so decode latin1.
+const HWINFO_MAP2 = 'Global\\HWiNFO_SENS_SM2';
+
+function parseHwinfoSm2CpuTemp(get, bytes) {
   try {
-    h = OpenFileMappingW(4 /* FILE_MAP_READ */, 0, mapName || HWINFO_MAP);
-    if (!h) return null; // HWiNFO not running or shared memory support off
-    p = MapViewOfFile(h, 4, 0, 0, 0);
-    if (!p) return null;
-    // RegionSize bounds every later read: decoding past a mapped section would crash.
-    const mbi = {};
-    let bytes = 0;
-    if (VirtualQuery(p, mbi, koffi.sizeof(HWI_MBI)) === koffi.sizeof(HWI_MBI)) bytes = Number(mbi.RegionSize) || 0;
-    if (bytes < 40) return null;
-    const get = (o, n) => {
-      if (o + n > bytes) throw new Error('hwinfo read past section');
-      return Buffer.from(koffi.decode(p, o, 'uint8', n));
-    };
-    return parseHwinfoCpuTemp(get, bytes);
+    if (bytes < 48) return null;
+    const hdr = get(0, 48);
+    if (hdr.readUInt32LE(0) !== 0x53695748) return null; // 'HWiS'
+    const sensorSize = hdr.readUInt32LE(24), sensorCount = hdr.readUInt32LE(28);
+    const readingsOff = hdr.readUInt32LE(32), readingSize = hdr.readUInt32LE(36), readingCount = hdr.readUInt32LE(40);
+    if (sensorSize < 136 || readingSize < 320 || !sensorCount || !readingCount) return null;
+    if (readingsOff + readingCount * readingSize > bytes) return null;
+    const sensors = [];
+    for (let i = 0; i < sensorCount; i++) sensors.push(strLat(get(48 + i * sensorSize + 8, 120)));
+    const degc = [];
+    for (let j = 0; j < readingCount; j++) {
+      const rec = readingsOff + j * readingSize;
+      const unit = strLat(get(rec + 268, 8));
+      if (unit !== '\u00B0C') continue;
+      const v = get(rec + 284, 8).readDoubleLE(0);
+      if (!(v > 0 && v < 150)) continue;
+      degc.push({ c: Math.round(v * 10) / 10, label: strLat(get(rec + 12, 100)), sensor: sensors[get(rec, 4).readUInt32LE(0)] || '' });
+    }
+    if (!degc.length) return { none: true };
+    const onCpu = (t) => /cpu/i.test(t.sensor);
+    const pkg = degc.find((t) => onCpu(t) && /package/i.test(t.label));
+    if (pkg) return pkg;
+    const cpuLbl = degc.find((t) => onCpu(t) && /(^|\W)(cpu|tctl|tdie)\b/i.test(t.label) && !/distance/i.test(t.label));
+    if (cpuLbl) return cpuLbl;
+    const cores = degc.filter((t) => onCpu(t) && /core/i.test(t.label) && !/distance/i.test(t.label));
+    if (cores.length) return cores.reduce((a, b) => (b.c > a.c ? b : a));
+    return { none: true };
   } catch (_) {
     return null;
-  } finally {
-    if (p) { try { UnmapViewOfFile(p); } catch (_) {} }
-    if (h) { try { CloseHandle(h); } catch (_) {} }
   }
+}
+
+function strLat(bytes) {
+  const z = bytes.indexOf(0);
+  return (z >= 0 ? bytes.toString('latin1', 0, z) : bytes.toString('latin1')).trim();
+}
+
+// Returns a STATE object, never null:
+//   { state: 'ok', c, label }   live CPU temperature
+//   { state: 'no-temp' }        section live but no CPU temperature reading
+//   { state: 'no-section' }     HWiNFO not running, shm setting off, or HWiNFO
+//                               restarting (sections die with the process)
+function getHwinfoTemp(mapName) {
+  const names = mapName ? [mapName] : [HWINFO_MAP2, HWINFO_MAP];
+  for (const name of names) {
+    let h = null, p = null;
+    try {
+      h = OpenFileMappingW(4 /* FILE_MAP_READ */, 0, name);
+      if (!h) continue;
+      p = MapViewOfFile(h, 4, 0, 0, 0);
+      if (!p) continue;
+      // RegionSize bounds every later read: decoding past a mapped section would crash.
+      const mbi = {};
+      let bytes = 0;
+      if (VirtualQuery(p, mbi, koffi.sizeof(HWI_MBI)) === koffi.sizeof(HWI_MBI)) bytes = Number(mbi.RegionSize) || 0;
+      if (bytes < 48) continue;
+      const get = (o, n) => {
+        if (o + n > bytes) throw new Error('hwinfo read past section');
+        return Buffer.from(koffi.decode(p, o, 'uint8', n));
+      };
+      const parsed = get(0, 4).readUInt32LE(0) === 0x53695748 ? parseHwinfoSm2CpuTemp(get, bytes) : parseHwinfoCpuTemp(get, bytes);
+      if (!parsed) continue; // structurally invalid: HWiNFO restarting; retry next poll
+      if (parsed.none) return { state: 'no-temp' };
+      return { state: 'ok', c: parsed.c, label: parsed.label };
+    } catch (_) {
+      continue;
+    } finally {
+      if (p) { try { UnmapViewOfFile(p); } catch (_) {} }
+      if (h) { try { CloseHandle(h); } catch (_) {} }
+    }
+  }
+  return { state: 'no-section' };
 }
 
 module.exports = {
