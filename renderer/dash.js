@@ -240,7 +240,19 @@ function tableHtml(headers, rows, shares) {
 }
 
 $('btn-close').addEventListener('click', () => window.wizbar.close());
-$('btn-refresh').addEventListener('click', () => { window.wizbar.getTokens().then((a) => { if (a) { agg = a; render(); } }); });
+$('btn-refresh').addEventListener('click', async () => {
+  const btn = $('btn-refresh');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const a = await window.wizbar.rescanTokens();
+    if (a) { agg = a; render(); }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'refresh';
+  }
+});
 
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.wizbar.close(); });
 

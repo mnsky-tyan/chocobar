@@ -67,6 +67,9 @@ const DEFAULTS = {
     battery:  { enabled: true, intervalMs: 1500 },
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
     agents:   { enabled: true, intervalMs: 5000, file: '~/work/harness/firstmate/state/fleet-status.json' },
+    // Little Remielle desktop pet: a bow chip pinned next to the token chip;
+    // click = start the exe, click again = kill it.
+    remielle: { enabled: true, exePath: 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe' },
     clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
   },
   terminal: {
@@ -81,11 +84,14 @@ const DEFAULTS = {
     sources: {
       zcode:    { enabled: true, dbPath: '~/.zcode/cli/db/db.sqlite' },
       zai:      { enabled: true, sessionsDir: '~/.zai/agent/sessions' },
-      opencode: { enabled: true, storageDir: '~/.local/share/opencode/storage/message' }
+      opencode: { enabled: true, storageDir: '~/.local/share/opencode/storage/message' },
+      // Xiaomi MiMo AI desktop: reads the app's local HTTP API while it runs
+      // (nothing to configure — port+token come from the app's desktop-api.json).
+      mimo:     { enabled: true }
     }
   },
   general: {
-    showTray: true,
+    showTray: false,
     autostart: false,
     debug: false
   }
@@ -151,6 +157,9 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // keeps updated: {"state":"working"|"idle","agents":2,"note":"optional"} —
     // a bare first line saying working/idle also works. Missing file shows "—".
     "agents":    { "enabled": true, "intervalMs": 5000, "file": "~/work/harness/firstmate/state/fleet-status.json" },
+    // Little Remielle desktop pet: a bow chip pinned next to the token chip.
+    // Click to launch the exe, click again to stop it ("on"/"off").
+    "remielle":  { "enabled": true, "exePath": "C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe" },
     // {MMM} month, {dd} day, {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
   },
@@ -169,11 +178,14 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "sources": {
       "zcode":    { "enabled": true, "dbPath": "~/.zcode/cli/db/db.sqlite" },
       "zai":      { "enabled": true, "sessionsDir": "~/.zai/agent/sessions" },
-      "opencode": { "enabled": true, "storageDir": "~/.local/share/opencode/storage/message" }
+      "opencode": { "enabled": true, "storageDir": "~/.local/share/opencode/storage/message" },
+      // Xiaomi MiMo AI desktop app token usage, read live from its local API
+      // while the app runs (auto-discovered; nothing to configure).
+      "mimo":     { "enabled": true }
     }
   },
   "general": {
-    "showTray": true,
+    "showTray": false,
     // start WizBar at login (writes an HKCU Run entry)
     "autostart": false,
     "debug": false
