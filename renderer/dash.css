@@ -178,6 +178,7 @@ table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
 .app-zcode { background: var(--pink-deep); }
 .app-zai { background: var(--yellow); }
 .app-opencode { background: #7FA8A0; }
+.app-mimo { background: #B79CE0; }
 
 #footer {
   font-size: 9px; color: var(--fg-dim);

@@ -12,6 +12,11 @@
 //            `usage` object, which we scan directly.
 //  - opencode: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 //            assistant messages carry a `tokens` object.
+//  - mimo:  Xiaomi MiMo AI desktop exposes a localhost HTTP API while it runs
+//            (port + bearer token in %APPDATA%\Xiaomi MiMo AI\desktop-api.json);
+//            GET /v1/sessions and /v1/sessions/<id>/messages return transcripts
+//            whose assistant messages carry a `tokens` object. History persists
+//            in our own token cache — when the app is closed nothing new scans.
 //
 // The sources themselves are the durable store; we keep an in-memory record map
 // keyed by a stable source id (dedup) and a small cache file for fast restarts.
@@ -55,20 +60,39 @@ class TokenTracker extends require('events') {
   }
 
   start() {
-    const run = async () => {
-      const t0 = Date.now();
-      let added = 0;
-      try { added += this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
-      try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
-      try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
-      this.lastScan = new Date().toISOString();
-      this._saveCache();
-      this.emit('updated', this.aggregate());
-      if (added) console.log(`[wizbar] tokens: +${added} records (${Date.now() - t0}ms)`);
-    };
-    run();
     clearInterval(this._timer);
-    this._timer = setInterval(run, Math.max(1, this.cfg.rescanMinutes) * 60000);
+    this._timer = setInterval(() => this.rescan(), Math.max(1, this.cfg.rescanMinutes) * 60000);
+    this.rescan();
+  }
+
+  // Scan all sources now. Concurrent callers share one in-flight scan (a
+  // manual refresh during the periodic tick queues behind it). `full` drops
+  // the zai/opencode mtime cursors so every source file is re-read — the
+  // record-key dedup makes that safe, and it recovers anything a stale cursor
+  // skipped.
+  rescan({ full = false } = {}) {
+    if (!this._scanPromise) {
+      this._scanPromise = this._runScan(full).finally(() => { this._scanPromise = null; });
+    }
+    return this._scanPromise;
+  }
+
+  async _runScan(full) {
+    if (full) {
+      this._zaiMtimeFloor = 0; this._zaiMtimeHigh = 0;
+      this._ocMtimeFloor = 0; this._ocMtimeHigh = 0;
+    }
+    const t0 = Date.now();
+    let added = 0;
+    try { added += this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
+    try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
+    try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
+    try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
+    this.lastScan = new Date().toISOString();
+    this._saveCache();
+    this.emit('updated', this.aggregate());
+    if (added) console.log(`[wizbar] tokens: +${added} records (${Date.now() - t0}ms)`);
+    return this.aggregate();
   }
 
   setConfig(config) {
@@ -211,6 +235,62 @@ class TokenTracker extends require('events') {
     return added;
   }
 
+  // --- Xiaomi MiMo AI desktop ---------------------------------------------------
+  // Assistant messages from the app's local API carry
+  // tokens {input, output, reasoning, cache:{read,write}} where input EXCLUDES
+  // cache (total = input+output+cacheRead+cacheWrite) — same shape as
+  // pi/opencode, so cache folds into the stored input the same way.
+  async _scanMimo() {
+    const src = this.cfg.sources.mimo;
+    if (!src || !src.enabled) return 0;
+    const apiFile = path.join(process.env.APPDATA || '', 'Xiaomi MiMo AI', 'desktop-api.json');
+    let api;
+    try { api = JSON.parse(fs.readFileSync(apiFile, 'utf8')); } catch (_) { return 0; } // app not running
+    if (!api || !api.port || !api.token) return 0;
+    const base = `http://127.0.0.1:${api.port}`;
+    const headers = { Authorization: 'Bearer ' + api.token };
+    const sessions = await this._mimoFetch(base + '/v1/sessions?limit=200', headers);
+    if (!Array.isArray(sessions)) return 0;
+    if (!this._mimoSigs) this._mimoSigs = {};
+    let added = 0;
+    for (const s of sessions) {
+      // Skip sessions whose last-update stamp already scanned: keeps the poll
+      // cheap even though every fetch returns the whole transcript payload.
+      const sig = s.time && s.time.updated;
+      if (sig != null && this._mimoSigs[s.id] === sig) continue;
+      const msgs = await this._mimoFetch(`${base}/v1/sessions/${encodeURIComponent(s.id)}/messages`, headers);
+      if (Array.isArray(msgs)) {
+        for (const m of msgs) {
+          const info = m && m.info;
+          const t = info && info.tokens;
+          if (!info || info.role !== 'assistant' || !t) continue;
+          const input = t.input || 0, output = t.output || 0;
+          const cacheRead = (t.cache && t.cache.read) || 0, cacheWrite = (t.cache && t.cache.write) || 0;
+          if (!(input || output || cacheRead || cacheWrite)) continue;
+          const key = `m:${info.id}`;
+          if (this.records.has(key)) continue;
+          this.records.set(key, {
+            app: 'mimo',
+            ts: (info.time && info.time.created) || 0,
+            model: info.modelID || 'unknown',
+            input: input + cacheRead + cacheWrite,
+            output,
+            reasoning: t.reasoning || 0,
+            cacheRead, cacheWrite
+          });
+          added++;
+        }
+      }
+      if (sig != null) this._mimoSigs[s.id] = sig;
+    }
+    return added;
+  }
+
+  _mimoFetch(url, headers) {
+    return fetch(url, { headers, signal: AbortSignal.timeout(5000) })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+  }
+
   // --- cache ---------------------------------------------------------------------
   _loadCache() {
     try {
@@ -221,6 +301,7 @@ class TokenTracker extends require('events') {
       const arr = Array.isArray(parsed) ? null : parsed.entries;
       if (arr) for (const [k, r] of arr) this.records.set(k, r);
       else console.log('[wizbar] token cache: stale pre-normalization cache discarded; full rescan');
+      if (parsed.mimoSigs) this._mimoSigs = parsed.mimoSigs;
       if (arr) this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
       if (arr) this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
       console.log(`[wizbar] token cache: ${this.records.size} records`);
@@ -230,7 +311,7 @@ class TokenTracker extends require('events') {
   _saveCache() {
     try {
       const arr = [...this.records.entries()].slice(-50000);
-      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 2, entries: arr }), 'utf8');
+      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 2, entries: arr, mimoSigs: this._mimoSigs || {} }), 'utf8');
     } catch (e) {
       console.error('[wizbar] token cache write failed:', e.message);
     }

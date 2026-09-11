@@ -88,4 +88,7 @@ body {
 #seg-tokens:hover .val { color: var(--pink-deep); }
 #bar > #seg-tokens { margin-right: auto; }
 
+#seg-remielle .ico { color: var(--pink-deep); }
+#seg-remielle:hover .ico { color: var(--pink-deep); }
+
 body.rtl-shadow #bar { box-shadow: none; }
