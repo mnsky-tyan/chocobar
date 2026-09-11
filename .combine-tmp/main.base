@@ -3,7 +3,6 @@
 const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn, execFile } = require('child_process');
 const { ConfigManager, CONFIG_PATH, APP_DIR } = require('./src/config');
 const { TerminalTracker } = require('./src/tracker');
 const { MetricsEngine } = require('./src/metrics');
@@ -81,11 +80,11 @@ function raiseDash() {
   dashWin.focus();
 }
 
-// No z-watchdog for the dashboard, on purpose. The dash is a NORMAL window
-// (see openDashboard): when the windows above it close or minimize, Windows
-// activates it instead of skipping it, so it can't be demoted the way the old
-// toolwindow dash was. Re-raising from a watchdog would also fight deliberate
-// clicks — a user who clicks the terminal wants the terminal in front.
+// NOTE: no z-watchdog. A previous version re-anchored the dashboard above the
+// terminal whenever the terminal was foreground — but after a minimize-storm
+// the terminal sits DEEP in the z-stack, so that yanked the dashboard to the
+// bottom too. The dashboard keeps whatever z it has; summoning it again raises
+// it via bringToFront from any position.
 
 function openDashboard() {
   if (dashWin && !dashWin.isDestroyed()) {
@@ -101,17 +100,11 @@ function openDashboard() {
     transparent: false,
     resizable: true,
     backgroundColor: '#FBF2E2',
-    // A NORMAL window, deliberately. The old toolwindow styling (skipTaskbar +
-    // type:'toolbar') made Windows skip the dash when choosing the next window
-    // to activate — so the moment every window above it closed/minimized,
-    // activation fell through to the terminal and raised it over the dash
-    // (the "dashboard sinks" bug). As a normal window the dash simply gets
-    // activated when it becomes the top window and can never be demoted that
-    // way. Cost: a taskbar/Alt-Tab entry while open (with the WizBar icon —
-    // no Electron glyph); the tray stays empty either way.
-    skipTaskbar: false,
+    // No taskbar button and no Alt-Tab entry — the tray menu and the bar's
+    // token chip are the only ways in, and no Electron glyph appears anywhere.
+    skipTaskbar: true,
+    type: 'toolbar',
     icon: path.join(__dirname, 'assets', 'tray.png'),
-    title: 'WizBar dashboard',
     webPreferences: {
       preload: path.join(__dirname, 'renderer', 'dash-preload.js'),
       contextIsolation: true,
@@ -131,9 +124,6 @@ function openDashboard() {
     } catch (_) {}
   }, 1500);
   dashWin.on('closed', () => { dashWin = null; });
-  for (const ev of ['minimize', 'restore', 'show', 'hide', 'maximize', 'unmaximize']) {
-    dashWin.on(ev, () => DBG('dash event:', ev));
-  }
 }
 
 function buildTray() {
@@ -160,113 +150,6 @@ function buildTray() {
   // one summon that always works, even when other windows cover the bar chip.
   tray.on('click', () => openDashboard());
   tray.on('double-click', () => openDashboard());
-}
-
-// --- Little Remielle desktop-pet toggle ------------------------------------------
-// The bow chip on the bar: click = launch the exe (detached), click again =
-// kill it. Truth comes from a tasklist poll (not the child handle) so a pet
-// started or stopped outside WizBar is reflected too. The poll only checks for
-// a CSV data row in tasklist's output — the image name itself comes back in
-// the console codepage, so comparing decoded text would be unreliable.
-let remielleState = { running: false, exists: false };
-let remiellePid = null;          // pet process id from the last live poll
-let remielleRestorePending = false; // set on launch, consumed by the poll
-let remielleLastPosSig = null;   // skip re-writing an unchanged position
-
-function remiellePosFile() { return path.join(APP_DIR, 'remielle-position.json'); }
-
-// Remember where the figure is: its window rect, written while it runs and
-// right before we kill it, so the next toggle and the next app restart can
-// put it back exactly where the captain left it.
-function remielleSavePosition() {
-  if (!remiellePid) return;
-  try {
-    const hwnds = native.findPidWindows(remiellePid);
-    if (!hwnds.length) return;
-    const rc = native.getWindowRect(hwnds[0]);
-    if (!rc || rc.right <= rc.left || rc.bottom <= rc.top) return;
-    const sig = rc.left + ',' + rc.top;
-    if (sig === remielleLastPosSig) return;
-    remielleLastPosSig = sig;
-    fs.writeFileSync(remiellePosFile(), JSON.stringify({
-      x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top, savedAt: new Date().toISOString()
-    }));
-  } catch (e) { DBG('remielle position save failed:', e.message); }
-}
-
-// Put the figure back where it was. A saved position that lands off-screen
-// or on a monitor that is no longer connected is ignored: the pet then shows
-// up at its own default position instead.
-function remielleRestorePosition(pid) {
-  let pos = null;
-  try { pos = JSON.parse(fs.readFileSync(remiellePosFile(), 'utf8')); } catch (_) { return; }
-  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return;
-  if (!native.rectOnAnyMonitor(pos.x, pos.y, pos.w, pos.h)) {
-    DBG('remielle restore: saved position is off-screen; keeping the default');
-    return;
-  }
-  let tries = 0;
-  const iv = setInterval(() => {
-    const hwnds = native.findPidWindows(pid);
-    if (hwnds.length) {
-      clearInterval(iv);
-      native.moveWindow(hwnds[0], pos.x, pos.y);
-      DBG('remielle restore: moved pet to', pos.x, pos.y);
-    } else if (++tries > 20) { clearInterval(iv); DBG('remielle restore: window never appeared'); }
-  }, 500);
-}
-
-function remielleCfg() {
-  return (configManager && configManager.config.modules || {}).remielle || {};
-}
-
-function pushRemielle() {
-  if (bar && bar.win && !bar.win.isDestroyed()) bar.send('remielle', remielleState);
-}
-
-function pollRemielle() {
-  const cfg = remielleCfg();
-  if (!cfg.enabled) return;
-  const exe = cfg.exePath;
-  if (!exe || !fs.existsSync(exe)) {
-    remielleState = { running: false, exists: false };
-    pushRemielle();
-    return;
-  }
-  execFile('tasklist', ['/FI', 'IMAGENAME eq ' + path.basename(exe), '/FO', 'CSV', '/NH'],
-    { windowsHide: true }, (err, stdout) => {
-      const running = !err && /","/.test(stdout || '');
-      let pid = null;
-      if (running) {
-        const m = String(stdout || '').match(/",\s*"(\d+)"/);
-        if (m) pid = Number(m[1]);
-      }
-      remiellePid = running ? pid : null;
-      if (running) remielleSavePosition();
-      if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
-      if (remielleState.exists !== true || remielleState.running !== running) {
-        DBG('remielle poll:', JSON.stringify({ err: err && err.message, running, out: String(stdout).slice(0, 120) }));
-      }
-      remielleState = { running, exists: true };
-      pushRemielle();
-    });
-}
-
-function toggleRemielle() {
-  const cfg = remielleCfg();
-  const exe = cfg.exePath;
-  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return;
-  if (remielleState.running) {
-    remielleSavePosition(); // capture the last spot before the process dies
-    execFile('taskkill', ['/IM', path.basename(exe), '/F', '/T'], { windowsHide: true },
-      () => setTimeout(pollRemielle, 300));
-  } else {
-    try {
-      spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' }).unref();
-    } catch (e) { DBG('remielle spawn failed:', e.message); }
-    remielleRestorePending = true; // the poll hands the pid to the restore flow
-    setTimeout(pollRemielle, 1500);
-  }
 }
 
 function spawnBar() {
@@ -321,8 +204,6 @@ function wireBar() {
   ipcMain.handle('get-config', () => configManager.config);
   ipcMain.handle('get-theme', () => themePayload(configManager.config));
   ipcMain.handle('get-tokens', () => tokens ? tokens.aggregate() : null);
-  ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
-  ipcMain.handle('toggle-remielle', () => { toggleRemielle(); return remielleState; });
   ipcMain.on('open-dash', () => openDashboard());
   ipcMain.on('bar-context', () => {
     Menu.buildFromTemplate([
@@ -365,9 +246,6 @@ function wireBar() {
     bar.send('theme', themePayload(cfg));
     bar.send('tokens', tokens.aggregate());
     applyAutostart(cfg.general.autostart);
-    // Tray follows showTray live (no restart needed to add/remove it).
-    if (tray && !cfg.general.showTray) { tray.destroy(); tray = null; }
-    else if (!tray && cfg.general.showTray) buildTray();
   });
 }
 
@@ -400,8 +278,6 @@ app.whenReady().then(() => {
     metrics.start();
     tokens.start();
     tracker.start();
-    pollRemielle();
-    setInterval(pollRemielle, 3000);
     // Ctrl+Alt+D summons/toggles the dashboard from anywhere — works even when
     // the token chip is buried under other windows.
     try {
@@ -423,10 +299,7 @@ app.whenReady().then(() => {
   }
 });
 
-app.on('will-quit', () => {
-  remielleSavePosition(); // the pet survives the quit; remember where it sits
-  try { globalShortcut.unregisterAll(); } catch (_) {}
-});
+app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch (_) {} });
 app.on('window-all-closed', (e) => {
   // Bar/dash closing must not quit the app; only tray Quit does.
 });

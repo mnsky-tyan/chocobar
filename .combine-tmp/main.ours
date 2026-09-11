@@ -81,15 +81,66 @@ function raiseDash() {
   dashWin.focus();
 }
 
-// No z-watchdog for the dashboard, on purpose. The dash is a NORMAL window
-// (see openDashboard): when the windows above it close or minimize, Windows
-// activates it instead of skipping it, so it can't be demoted the way the old
-// toolwindow dash was. Re-raising from a watchdog would also fight deliberate
-// clicks — a user who clicks the terminal wants the terminal in front.
+// Dashboard z-guard (raise-only). Minimizing any app makes Windows re-activate
+// the terminal, and that demotes the skipTaskbar dashboard to the bottom of the
+// z-stack. While the dash is open we check ~3x/s: if (and only if) it has sunk
+// BELOW the terminal, it is re-inserted directly above the terminal — never
+// activated, never moved. The raise-only rule is what makes this safe where the
+// old watchdog failed: a dash that already sits above the terminal (the normal
+// case, including one deliberately covered by a focused app) is left untouched,
+// so the guard can never yank it below a window it was beating, and can never
+// pop it over the user's foreground window.
+let dashZTimer = null;
+let dashBelowStreak = 0;   // consecutive ticks the dash read below the terminal
+let dashTopmostEscalated = false;
+function stopDashZGuard() {
+  if (dashZTimer) DBG('dash-z-guard stop');
+  clearInterval(dashZTimer);
+  dashZTimer = null;
+  dashBelowStreak = 0;
+  dashTopmostEscalated = false;
+}
+function startDashZGuard() {
+  stopDashZGuard();
+  DBG('dash-z-guard start');
+  dashZTimer = setInterval(() => {
+    if (!dashWin || dashWin.isDestroyed()) return stopDashZGuard();
+    if (!tracker || !tracker.hwnd) return; // terminal gone temporarily; keep guarding
+    try {
+      if (dashWin.isMinimized()) {
+        DBG('dash-z-guard dash is MINIMIZED -> restore');
+        dashWin.restore();
+        return;
+      }
+      const term = tracker.hwnd;
+      if (!native.isWindow(term) || native.isIconic(term)) return;
+      const dh = native.hwndNumberFromBuffer(dashWin.getNativeWindowHandle());
+      if (!dh) return;
+      if (native.isBelowInZOrder(dh, term)) {
+        dashBelowStreak++;
+        const ok = native.setWindowPosAfter(dh, term);
+        DBG('dash-z-guard RAISE below-term streak=' + dashBelowStreak, ok ? 'ok' : 'FAILED',
+          'dashTop=' + native.isTopmost(dh), 'termTop=' + native.isTopmost(term));
+        // The normal-band raise provably doesn't stick in some window states.
+        // After a few failed ticks, pin the dash above EVERYTHING — a buried
+        // dashboard is useless, and this triggers only on the failure path,
+        // never during normal above-terminal life.
+        if (dashBelowStreak >= 3 && !dashTopmostEscalated) {
+          dashTopmostEscalated = native.setTopmost(dh, true);
+          DBG('dash-z-guard ESCALATE to topmost:', dashTopmostEscalated);
+        }
+      } else {
+        if (dashBelowStreak > 0) DBG('dash-z-guard back above term (streak was ' + dashBelowStreak + ')');
+        dashBelowStreak = 0;
+      }
+    } catch (e) { DBG('dash-z-guard err', e.message); }
+  }, 300);
+}
 
 function openDashboard() {
   if (dashWin && !dashWin.isDestroyed()) {
     raiseDash();
+    startDashZGuard();
     return;
   }
   dashWin = new (require('electron').BrowserWindow)({
@@ -101,17 +152,11 @@ function openDashboard() {
     transparent: false,
     resizable: true,
     backgroundColor: '#FBF2E2',
-    // A NORMAL window, deliberately. The old toolwindow styling (skipTaskbar +
-    // type:'toolbar') made Windows skip the dash when choosing the next window
-    // to activate — so the moment every window above it closed/minimized,
-    // activation fell through to the terminal and raised it over the dash
-    // (the "dashboard sinks" bug). As a normal window the dash simply gets
-    // activated when it becomes the top window and can never be demoted that
-    // way. Cost: a taskbar/Alt-Tab entry while open (with the WizBar icon —
-    // no Electron glyph); the tray stays empty either way.
-    skipTaskbar: false,
+    // No taskbar button and no Alt-Tab entry — the tray menu and the bar's
+    // token chip are the only ways in, and no Electron glyph appears anywhere.
+    skipTaskbar: true,
+    type: 'toolbar',
     icon: path.join(__dirname, 'assets', 'tray.png'),
-    title: 'WizBar dashboard',
     webPreferences: {
       preload: path.join(__dirname, 'renderer', 'dash-preload.js'),
       contextIsolation: true,
@@ -121,6 +166,7 @@ function openDashboard() {
   dashWin.loadFile(path.join(__dirname, 'renderer', 'dash.html'));
   dashWin.once('ready-to-show', () => {
     raiseDash();
+    startDashZGuard();
     dashWin.send('tokens', tokens.aggregate());
     dashWin.send('theme', themePayload(configManager.config));
   });
@@ -130,7 +176,7 @@ function openDashboard() {
       if (dashWin && !dashWin.isDestroyed() && !dashWin.isVisible()) dashWin.showInactive();
     } catch (_) {}
   }, 1500);
-  dashWin.on('closed', () => { dashWin = null; });
+  dashWin.on('closed', () => { dashWin = null; stopDashZGuard(); });
   for (const ev of ['minimize', 'restore', 'show', 'hide', 'maximize', 'unmaximize']) {
     dashWin.on(ev, () => DBG('dash event:', ev));
   }

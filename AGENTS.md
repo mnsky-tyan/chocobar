@@ -26,5 +26,12 @@ zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change 
   cache into the stored input, so every stored record is cache-inclusive and
   aggregate() totals stay input+output. pi per-message totalTokens
   (= input+output+cacheRead+cacheWrite) is the raw ground truth to check against.
+- Xiaomi MiMo AI desktop: no local transcript store — the app serves a localhost HTTP API
+  while running (port + bearer token in `%APPDATA%\Xiaomi MiMo AI\desktop-api.json`;
+  routes `GET /v1/sessions`, `GET /v1/sessions/<id>/messages`). Assistant messages carry
+  `tokens {input, output, reasoning, cache:{read,write}}` with input EXCLUDING cache
+  (total = input+output+cacheRead+cacheWrite). _scanMimo folds cache like pi/opencode,
+  dedups on `m:<message id>`, and skips unchanged sessions via a `mimoSigs` cursor
+  (session `time.updated` → stamped into token-cache.json).
 Authoritative reader: `src/tokens.js`; contract check: `node scripts/token_regression.js`.
 
