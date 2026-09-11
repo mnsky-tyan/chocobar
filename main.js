@@ -205,14 +205,34 @@ function remielleRestorePosition(pid) {
     DBG('remielle restore: saved position is off-screen; keeping the default');
     return;
   }
-  let tries = 0;
+  let tries = 0, moved = false, defaultSig = null, reasserts = 0, startedAt = 0;
   const iv = setInterval(() => {
     const hwnds = native.findPidWindows(pid);
-    if (hwnds.length) {
-      clearInterval(iv);
+    if (!hwnds.length) {
+      if (moved) { clearInterval(iv); return; } // pet closed; done
+      if (++tries > 20) { clearInterval(iv); DBG('remielle restore: window never appeared'); }
+      return;
+    }
+    const rc = native.getWindowRect(hwnds[0]);
+    if (!rc) return;
+    const sig = rc.left + ',' + rc.top;
+    if (!moved) {
+      defaultSig = sig; // where the pet placed itself: its own default spot
       native.moveWindow(hwnds[0], pos.x, pos.y);
+      moved = true; startedAt = Date.now();
       DBG('remielle restore: moved pet to', pos.x, pos.y);
-    } else if (++tries > 20) { clearInterval(iv); DBG('remielle restore: window never appeared'); }
+      return;
+    }
+    // The pet’s own startup init can re-snap the window to its default after
+    // our move; re-assert for a bounded window. The moment the rect is
+    // neither the default nor the saved spot, the captain is dragging it -
+    // stand down immediately and never fight the captain.
+    if (sig === defaultSig && reasserts < 30) {
+      native.moveWindow(hwnds[0], pos.x, pos.y);
+      reasserts++;
+      return;
+    }
+    if (sig !== pos.x + ',' + pos.y || Date.now() - startedAt > 20000) clearInterval(iv);
   }, 500);
 }
 
