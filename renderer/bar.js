@@ -113,6 +113,10 @@ function rebuildSegments() {
       const bow = document.getElementById('seg-remielle');
       if (bow && bow.parentElement === el('bar')) {
         s.style.marginRight = 'auto'; // last pinned chip carries the group push
+        // .seg.clickable pulls neighbours 5px into its own hover box with a
+        // negative margin - give the two buttons real clearance so a hover
+        // highlight can only ever cover the chip under the cursor.
+        s.style.marginLeft = '8px';
         el('bar').insertBefore(s, bow.nextSibling);
       } else {
         s.style.marginRight = 'auto';
