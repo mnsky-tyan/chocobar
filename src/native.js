@@ -35,6 +35,12 @@ const SYSTEM_POWER_STATUS = koffi.struct('SYSTEM_POWER_STATUS', {
   Reserved1: 'uint8', BatteryLifeTime: 'uint32', BatteryFullLifeTime: 'uint32'
 });
 const GetSystemPowerStatus = kernel32.func('int __stdcall GetSystemPowerStatus(_Out_ SYSTEM_POWER_STATUS *sps)');
+const GetWindowLongW = user32.func('long __stdcall GetWindowLongW(uintptr_t hwnd, int nIndex)');
+const GWL_EXSTYLE = -20;
+const WS_EX_TOPMOST = 0x8;
+function isTopmost(hwnd) {
+  try { return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) !== 0; } catch (_) { return false; }
+}
 const CoInitializeEx = ole32.func('long __stdcall CoInitializeEx(void *pvReserved, int dwCoInit)');
 const GUID = koffi.struct('GUID', { Data1: 'uint32', Data2: 'uint16', Data3: 'uint16', Data4: 'uint8[8]' });
 const CoCreateInstance = ole32.func('long __stdcall CoCreateInstance(const GUID *rclsid, void *pUnkOuter, int dwClsContext, const GUID *riid, _Out_ void **ppv)');
@@ -68,6 +74,26 @@ function getFrameBounds(hwnd) {
 const SWP_NOMOVE = 0x2, SWP_NOSIZE = 0x1, SWP_NOACTIVATE = 0x10;
 function setWindowPosAfter(hwnd, afterHwnd) {
   return !!SetWindowPos(hwnd, afterHwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// True when `hwndA` currently sits BELOW `hwndB` in the z-order (EnumWindows
+// walks top→bottom). False when either window is absent from the enumeration.
+function isBelowInZOrder(hwndA, hwndB) {
+  const hwnds = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  let ia = -1, ib = -1;
+  for (let i = 0; i < hwnds.length && (ia < 0 || ib < 0); i++) {
+    if (hwnds[i] === hwndA && ia < 0) ia = i;
+    if (hwnds[i] === hwndB && ib < 0) ib = i;
+  }
+  return ia >= 0 && ib >= 0 && ia > ib;
+}
+
+// Band movers. HWND_TOPMOST(-1) lifts the window into the topmost band (above
+// every normal window); HWND_NOTOPMOST(-2) drops it back to the normal band.
+function setTopmost(hwnd, topmost) {
+  const insert = topmost ? 0xFFFFFFFF : 0xFFFFFFFE; // -1 / -2 as unsigned uintptr
+  return !!SetWindowPos(hwnd, insert, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 // Windows Terminal keeps an invisible DRAG_BAR_WINDOW_CLASS overlay along its
@@ -466,10 +492,74 @@ function getHwinfoTemp(mapName) {
   return { state: 'no-section' };
 }
 
+// --- window discovery by pid + monitor geometry (Little Remielle pet) ----------
+const MonitorProc = koffi.proto('int __stdcall MonitorProc(uintptr_t hMonitor, void *hdc, void *clipRect, void *data)');
+const EnumDisplayMonitors = user32.func('int __stdcall EnumDisplayMonitors(void *hdc, void *clipRect, MonitorProc *proc, void *data)');
+
+// Visible top-level windows of a process, largest-area first (the pet's main
+// window wins over helper popups). Same two-pass rule as listWindowsByClass:
+// collect inside the callback, classify after it returns.
+function findPidWindows(pid) {
+  const hwnds = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  const out = [];
+  for (const hwnd of hwnds) {
+    try {
+      if (!IsWindowVisible(hwnd)) continue;
+      const p = [0];
+      GetWindowThreadProcessId(hwnd, p);
+      if (Number(p[0]) !== pid) continue;
+      const rc = getWindowRect(hwnd);
+      if (!rc) continue;
+      const area = (rc.right - rc.left) * (rc.bottom - rc.top);
+      if (area <= 0) continue;
+      out.push({ hwnd, area });
+    } catch (_) {}
+  }
+  out.sort((a, b) => b.area - a.area);
+  return out.map((x) => x.hwnd);
+}
+
+function moveWindow(hwnd, x, y) {
+  const SWP_NOSIZE = 0x1, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
+  try { return !!SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); }
+  catch (_) { return false; }
+}
+
+// Physical-pixel rects of every connected monitor. The rect arrives as the
+// callback's clipRect pointer and is decoded with koffi.decode inside the
+// callback - GetMonitorInfoW after the fact kept failing under koffi, and
+// decoding the mapped rect avoids it entirely. Only array pushes and a
+// decode happen in the callback body, mirroring the EnumWindows caution.
+function getMonitorRects() {
+  const out = [];
+  try {
+    EnumDisplayMonitors(null, null, (hmon, hdc, clip) => {
+      try {
+        const rc = koffi.decode(clip, 0, 'RECT');
+        out.push({ left: rc.left, top: rc.top, right: rc.right, bottom: rc.bottom });
+      } catch (_) {}
+      return 1;
+    }, null);
+  } catch (_) {}
+  return out;
+}
+
+// True when the rect at x,y (w,h, defaults 1x1) intersects any monitor - the
+// guard that keeps a saved pet position from landing off-screen or on a
+// monitor that is no longer connected.
+function rectOnAnyMonitor(x, y, w, h) {
+  const mons = getMonitorRects();
+  if (!mons.length) return false;
+  w = w || 1; h = h || 1;
+  return mons.some((m) => x < m.right && x + w > m.left && y < m.bottom && y + h > m.top);
+}
+
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
-  setWindowPosAfter, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
+  findPidWindows, moveWindow, getMonitorRects, rectOnAnyMonitor,
   getForegroundWindow: () => GetForegroundWindow()
 };
