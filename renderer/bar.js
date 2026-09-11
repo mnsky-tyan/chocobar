@@ -34,12 +34,15 @@ const ICONS = {
   buds: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 3a3 3 0 0 0-3 3v2.2a3 3 0 1 0 3 3V3z"/><path d="M8.5 13.5v2a3.5 3.5 0 0 1-3.4 3.5"/><path d="M15.5 3a3 3 0 0 1 3 3v2.2a3 3 0 1 1-3 3V3z"/><path d="M15.5 13.5v2a3.5 3.5 0 0 0 3.4 3.5"/></svg>`,
   agent: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>`,
   clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>`,
-  diamond: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3 21 12 12 21 3 12z"/></svg>`
+  diamond: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3 21 12 12 21 3 12z"/></svg>`,
+  // Little Remielle's bow: two loops per side around a small knot.
+  bow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 11C8.5 7.5 5.5 6.5 4.5 8s.5 4 6.5 3"/><path d="M13 11c2.5-3.5 5.5-4.5 6.5-3s-.5 4-6.5 3"/><path d="M11 13c-2.5 3.5-5.5 4.5-6.5 3s.5-4 6.5-3"/><path d="M13 13c2.5 3.5 5.5 4.5 6.5 3s-.5-4-6.5-3"/><circle cx="12" cy="12" r="1.1"/></svg>`
 };
 
 let theme = null;
 let stats = null;
 let tokensAgg = null;
+let remielleState = null;
 let segEls = {};
 
 function el(id) { return document.getElementById(id); }
@@ -83,13 +86,14 @@ function seg(id, iconSvg, clickable) {
 
 function rebuildSegments() {
   const c = el('segments');
-  // Pinned token chips are direct children of #bar — remove stale ones from
-  // earlier rebuilds before appending a fresh chip.
-  for (const n of [...el('bar').querySelectorAll(':scope > #seg-tokens')]) n.remove();
+  // Pinned token/remielle chips are direct children of #bar — remove stale ones
+  // from earlier rebuilds before appending fresh chips.
+  for (const n of [...el('bar').querySelectorAll(':scope > #seg-tokens, :scope > #seg-remielle')]) n.remove();
   c.innerHTML = '';
   segEls = {};
   if (!theme) return;
   const m = theme.modules || {};
+  const pinned = (theme.bar.align || 'right') === 'right';
 
   if (theme.tokens && theme.tokens.showOnBar) {
     const s = seg('tokens', ICONS.diamond, true);
@@ -98,8 +102,23 @@ function rebuildSegments() {
     // With the default right-aligned group, pin the token chip to the far left
     // of the bar: it must be a direct child of #bar, inserted BEFORE #segments,
     // and its margin-right:auto eats all free space so the group stays right.
-    if ((theme.bar.align || 'right') === 'right') el('bar').insertBefore(s, el('segments'));
+    if (pinned) el('bar').insertBefore(s, el('segments'));
     else c.appendChild(s);
+  }
+  if (m.remielle && m.remielle.enabled) {
+    const s = seg('remielle', ICONS.bow, true);
+    s.addEventListener('click', () => window.wizbar.toggleRemielle());
+    if (pinned) {
+      const tok = document.getElementById('seg-tokens');
+      // The auto margin (which pushes the module group to the right) must sit
+      // on the LAST pinned chip — otherwise the free space lands between the
+      // two chips and the bow drifts over to the module group.
+      s.style.marginRight = 'auto';
+      if (tok && tok.parentElement === el('bar')) {
+        tok.style.marginRight = '0';
+        el('bar').insertBefore(s, tok.nextSibling);
+      } else el('bar').insertBefore(s, el('segments'));
+    } else c.appendChild(s);
   }
   const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', agents: 'Firstmate fleet activity', clock: 'Local time' };
   for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['agents', ICONS.agent], ['clock', ICONS.clock]]) {
@@ -157,6 +176,18 @@ function render() {
   const m = theme.modules || {};
 
   if (segEls.tokens) setVal('tokens', fmtTokens(tokensAgg ? tokensAgg.today.total : null), 'dim');
+
+  if (segEls.remielle) {
+    if (remielleState && remielleState.exists) {
+      setVal('remielle', remielleState.running ? 'on' : 'off', remielleState.running ? 'good' : 'dim');
+      segEls.remielle.root.title = remielleState.running
+        ? 'Little Remielle is out — click to send her away'
+        : 'Little Remielle — click to summon her';
+    } else {
+      setVal('remielle', '—', 'dim');
+      segEls.remielle.root.title = 'Little Remielle — exe not found (modules.remielle.exePath in config)';
+    }
+  }
 
   if (segEls.gpu) {
     if (stats && stats.gpu && !stats.gpu.error) {
@@ -237,6 +268,7 @@ function render() {
 window.wizbar.onTheme(applyTheme);
 window.wizbar.onStats((s) => { stats = s; render(); });
 window.wizbar.onTokens((t) => { tokensAgg = t; render(); });
+window.wizbar.onRemielle((r) => { remielleState = r; render(); });
 
 window.wizbar.getTheme().then(applyTheme);
 // local clock tick for smooth seconds if the format uses them

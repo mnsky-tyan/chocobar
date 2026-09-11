@@ -91,22 +91,9 @@ function isBelowInZOrder(hwndA, hwndB) {
 
 // Band movers. HWND_TOPMOST(-1) lifts the window into the topmost band (above
 // every normal window); HWND_NOTOPMOST(-2) drops it back to the normal band.
-// 64-bit handles are sign-extended, so the constants must go in as full-width
-// BigInts (0xFFFF...FF) — 0xFFFFFFFF truncates to an invalid handle value and
-// SetWindowPos fails with ERROR_INVALID_HANDLE.
-const HWND_TOPMOST_B = (1n << 64n) - 1n;   // -1
-const HWND_NOTOPMOST_B = (1n << 64n) - 2n; // -2
 function setTopmost(hwnd, topmost) {
-  const insert = topmost ? HWND_TOPMOST_B : HWND_NOTOPMOST_B;
+  const insert = topmost ? 0xFFFFFFFF : 0xFFFFFFFE; // -1 / -2 as unsigned uintptr
   return !!SetWindowPos(hwnd, insert, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-}
-
-// Diagnostics: the raw positions of two hwnds in OUR EnumWindows walk plus the
-// total window count, so a disagreeing external observer can be debugged.
-function debugZOrder(hwndA, hwndB) {
-  const hwnds = [];
-  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
-  return { n: hwnds.length, ia: hwnds.indexOf(hwndA), ib: hwnds.indexOf(hwndB) };
 }
 
 // Windows Terminal keeps an invisible DRAG_BAR_WINDOW_CLASS overlay along its
@@ -570,7 +557,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, moveWindow, getMonitorRects, rectOnAnyMonitor,

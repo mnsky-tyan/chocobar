@@ -1,7 +1,8 @@
 # WizBar
 
 A slim acrylic system-status bar that floats **above your Windows Terminal window**, plus a
-cross-CLI **token usage tracker** (zcode · zai · opencode) with a GitHub-style heatmap.
+cross-CLI **token usage tracker** (zcode · zai · opencode · Xiaomi MiMo AI) with a GitHub-style
+heatmap.
 
 Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`), pink accents
 (`#E8C7D0`), MesloLGLDZ Nerd Font.
@@ -19,7 +20,8 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
 ## What it does
 
 **Bar** (thin strip above the terminal, right-aligned modules):
-- today's tokens (click it → dashboard) · GPU % · CPU % · RAM % · volume % · battery %
+- today's tokens (click it → dashboard) · 🎀 Little Remielle pet toggle (click = start/stop)
+- GPU % · CPU % · CPU temp (HWiNFO) · RAM % · volume % · battery %
 - Bluetooth device battery (earbuds — shows `87·85` for L/R when the device reports it)
 - clock
 
@@ -38,7 +40,7 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
 - Width tracks the terminal's *visible* frame (DWM extended frame bounds, excluding the
   invisible resize borders), so the edges line up exactly.
 
-**Token tracker** — click the `◇` chip, double-launch WizBar, or tray → Token dashboard:
+**Token tracker** — click the `◇` chip, double-launch WizBar, or Ctrl+Alt+D → Token dashboard:
 - GitHub-style daily heatmap (26 weeks, shades spread by quantiles so heavy usage days
   still differentiate)
 - Today / 7 days / 30 days / all-time totals
@@ -54,6 +56,11 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
     folder whose ids never reach the DB; wizbar scans those files directly and reads the
     per-message `usage` on assistant messages
   - **opencode**: `~/.local/share/opencode/storage/message/**` (assistant messages with `tokens`)
+  - **Xiaomi MiMo AI**: while the desktop app is running it publishes a localhost HTTP API
+    (`%APPDATA%\Xiaomi MiMo AI\desktop-api.json` holds the port + token); wizbar reads
+    `/v1/sessions` + `/v1/sessions/<id>/messages` and counts the per-message `tokens`
+    (input excludes cache there, same fold as pi/opencode). History persists in wizbar's own
+    token cache; when the app is closed there is simply nothing new to scan.
 - Rescans every 5 minutes; needs `python` on PATH for the sqlite read.
 
 ## Run
@@ -101,8 +108,12 @@ no restart needed. The main dials, all under `"bar"`:
 Theme colors (`"theme"`), module toggles/intervals (`"modules"`), window-follow behavior
 (`"terminal"`), and token sources (`"tokens"`) are documented in the same file.
 
-Tray icon: dashboard · edit config · reload config · quit. Right-click the bar for the same
-menu. Single-instance locked.
+No tray icon by default (`general.showTray: true` brings one back — it follows config live).
+Summon the dashboard via the `◇` chip, Ctrl+Alt+D, or double-launching WizBar. Right-click the
+bar for edit config · reload config · quit. Single-instance locked. The dashboard is a normal
+window on purpose: when the windows above it close or minimize, it is activated like any
+window and can never be demoted below the terminal (its taskbar/Alt-Tab entry shows the
+WizBar icon while it is open; the tray stays empty).
 
 ## Notes & limits
 
