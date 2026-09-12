@@ -171,15 +171,43 @@ function buildTray() {
 let remielleState = { running: false, exists: false };
 let remiellePid = null;          // pet process id from the last live poll
 let remielleRestorePending = false; // set on launch, consumed by the poll
+let remielleRestoreActive = false;  // true while the restore watcher runs
+let remielleDefaultSig = null;   // the pet's built-in default spot (x,y),
+                                 // learned during restore - never save it,
+                                 // or a poll would clobber the real
+                                 // position with the default every time
 let remielleLastPosSig = null;   // skip re-writing an unchanged position
 
 function remiellePosFile() { return path.join(APP_DIR, 'remielle-position.json'); }
+
+ // The pet keeps its own position memory in 设置.json next to its exe and
+ // restores it on every launch - that file, not WizBar, was what put the
+ // figure back at the wrong spot on every toggle. Make WizBar the authority:
+ // before launching, write the saved position into the pet’s own settings so
+ // the pet places itself where the captain left it. Coordinates are physical
+ // pixels, same space as GetWindowRect; the sprite scale field is preserved.
+function remielleSyncPetConfig(x, y) {
+  const cfg = remielleCfg();
+  if (!cfg.exePath) return;
+  const petFile = path.join(path.dirname(cfg.exePath), '设置.json');
+  try {
+    let scale = 1;
+    try { scale = JSON.parse(fs.readFileSync(petFile, 'utf8')).scale || 1; } catch (_) {}
+    fs.writeFileSync(petFile, JSON.stringify({ x, y, scale }), 'utf8');
+  } catch (e) { DBG('remielle pet-config sync failed:', e.message); }
+}
 
 // Remember where the figure is: its window rect, written while it runs and
 // right before we kill it, so the next toggle and the next app restart can
 // put it back exactly where the captain left it.
 function remielleSavePosition() {
   if (!remiellePid) return;
+  // A poll must never record the pet’s transient states: while a restore is
+  // pending/running the window is being placed by us, and the built-in default
+  // spot is exactly what the restore exists to move it away from. Saving
+  // either would clobber the captain’s position and poison every later
+  // toggle (the works-once-or-twice-then-fails bug).
+  if (remielleRestorePending || remielleRestoreActive) return;
   try {
     const hwnds = native.findPidWindows(remiellePid);
     if (!hwnds.length) return;
@@ -187,6 +215,7 @@ function remielleSavePosition() {
     if (!rc || rc.right <= rc.left || rc.bottom <= rc.top) return;
     const sig = rc.left + ',' + rc.top;
     if (sig === remielleLastPosSig) return;
+    if (remielleDefaultSig && sig === remielleDefaultSig) return; // the default is not a placement
     remielleLastPosSig = sig;
     fs.writeFileSync(remiellePosFile(), JSON.stringify({
       x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top, savedAt: new Date().toISOString()
@@ -205,14 +234,39 @@ function remielleRestorePosition(pid) {
     DBG('remielle restore: saved position is off-screen; keeping the default');
     return;
   }
-  let tries = 0;
+  let tries = 0, moved = false, reasserts = 0, startedAt = 0;
+  const finish = () => { remielleRestoreActive = false; };
+  remielleRestoreActive = true;
   const iv = setInterval(() => {
     const hwnds = native.findPidWindows(pid);
-    if (hwnds.length) {
-      clearInterval(iv);
+    if (!hwnds.length) {
+      if (moved) { clearInterval(iv); finish(); return; } // pet closed; done
+      if (++tries > 20) { clearInterval(iv); finish(); DBG('remielle restore: window never appeared'); }
+      return;
+    }
+    const rc = native.getWindowRect(hwnds[0]);
+    if (!rc) return;
+    const sig = rc.left + ',' + rc.top;
+    if (!moved) {
+      // where the pet placed itself is its built-in default: remember it so
+      // poll-time saves can never record it (that clobbered the captain's
+      // position and broke every toggle after the first couple)
+      remielleDefaultSig = sig;
       native.moveWindow(hwnds[0], pos.x, pos.y);
+      moved = true; startedAt = Date.now();
       DBG('remielle restore: moved pet to', pos.x, pos.y);
-    } else if (++tries > 20) { clearInterval(iv); DBG('remielle restore: window never appeared'); }
+      return;
+    }
+    // The pet’s own startup init can re-snap the window to its default after
+    // our move; re-assert for a bounded window. The moment the rect is
+    // neither the default nor the saved spot, the captain is dragging it -
+    // stand down immediately and never fight the captain.
+    if (sig === remielleDefaultSig && reasserts < 30) {
+      native.moveWindow(hwnds[0], pos.x, pos.y);
+      reasserts++;
+      return;
+    }
+    if (sig !== pos.x + ',' + pos.y || Date.now() - startedAt > 20000) { clearInterval(iv); finish(); }
   }, 500);
 }
 
@@ -261,6 +315,14 @@ function toggleRemielle() {
     execFile('taskkill', ['/IM', path.basename(exe), '/F', '/T'], { windowsHide: true },
       () => setTimeout(pollRemielle, 300));
   } else {
+    // Position authority: seed the pet’s own settings with the saved spot so
+    // it launches there (its init would otherwise put it back at whatever its
+    // own settings file held).
+    let saved = null;
+    try { saved = JSON.parse(fs.readFileSync(remiellePosFile(), 'utf8')); } catch (_) {}
+    if (saved && typeof saved.x === 'number' && typeof saved.y === 'number' && native.rectOnAnyMonitor(saved.x, saved.y, saved.w, saved.h)) {
+      remielleSyncPetConfig(saved.x, saved.y);
+    }
     try {
       spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' }).unref();
     } catch (e) { DBG('remielle spawn failed:', e.message); }
