@@ -95,29 +95,33 @@ function rebuildSegments() {
   const m = theme.modules || {};
   const pinned = (theme.bar.align || 'right') === 'right';
 
+  // Captain’s chip order: bowtie leftmost, token dashboard second. With the
+  // right-aligned group both chips pin left of #segments as direct children
+  // of #bar, and the auto margin that pushes the module group right sits on
+  // the LAST pinned chip.
+  if (m.remielle && m.remielle.enabled) {
+    const s = seg('remielle', ICONS.bow, true);
+    s.addEventListener('click', () => window.wizbar.toggleRemielle());
+    if (pinned) el('bar').insertBefore(s, el('segments'));
+    else c.appendChild(s);
+  }
   if (theme.tokens && theme.tokens.showOnBar) {
     const s = seg('tokens', ICONS.diamond, true);
     s.title = 'Token usage today — click to open dashboard';
     s.addEventListener('click', () => window.wizbar.openDash());
-    // With the default right-aligned group, pin the token chip to the far left
-    // of the bar: it must be a direct child of #bar, inserted BEFORE #segments,
-    // and its margin-right:auto eats all free space so the group stays right.
-    if (pinned) el('bar').insertBefore(s, el('segments'));
-    else c.appendChild(s);
-  }
-  if (m.remielle && m.remielle.enabled) {
-    const s = seg('remielle', ICONS.bow, true);
-    s.addEventListener('click', () => window.wizbar.toggleRemielle());
     if (pinned) {
-      const tok = document.getElementById('seg-tokens');
-      // The auto margin (which pushes the module group to the right) must sit
-      // on the LAST pinned chip — otherwise the free space lands between the
-      // two chips and the bow drifts over to the module group.
-      s.style.marginRight = 'auto';
-      if (tok && tok.parentElement === el('bar')) {
-        tok.style.marginRight = '0';
-        el('bar').insertBefore(s, tok.nextSibling);
-      } else el('bar').insertBefore(s, el('segments'));
+      const bow = document.getElementById('seg-remielle');
+      if (bow && bow.parentElement === el('bar')) {
+        s.style.marginRight = 'auto'; // last pinned chip carries the group push
+        // .seg.clickable pulls neighbours 5px into its own hover box with a
+        // negative margin - give the two buttons real clearance so a hover
+        // highlight can only ever cover the chip under the cursor.
+        s.style.marginLeft = '8px';
+        el('bar').insertBefore(s, bow.nextSibling);
+      } else {
+        s.style.marginRight = 'auto';
+        el('bar').insertBefore(s, el('segments'));
+      }
     } else c.appendChild(s);
   }
   const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', agents: 'Firstmate fleet activity', clock: 'Local time' };
