@@ -35,3 +35,14 @@ zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change 
   (session `time.updated` → stamped into token-cache.json).
 Authoritative reader: `src/tokens.js`; contract check: `node scripts/token_regression.js`.
 
+## CPU hot-loop baselines (measured 2026-09-13, this machine)
+
+- GPU widget: the PowerShell Get-Counter loop dominates; the sleep floor is the lever
+  (0.8s floor ≈ 41.7% of one core, 5s ≈ 9.5%). Floor lives in _startGpuWorker.
+- pollRemielle: a tasklist.exe spawn cost ~290ms CPU per 3s poll; the in-process
+  Toolhelp32 snapshot (native.findProcessIdByName) costs ~5ms. Keep it in-process.
+- zcode token scan: python scripts/zcode_query.py ≈ 650ms per run; _scanZcode must
+  stay async or the bar main process freezes for that long every rescan.
+- Negligible despite tight cadence (do not churn without re-measuring): tracker
+  follow-tick natives ≈ 0.01ms per 8ms tick, HWiNFO temp parse ≈ 1.4ms per 2s,
+  z-sync EnumWindows ≈ 0.6ms per 400ms.
