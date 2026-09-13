@@ -34,6 +34,10 @@ class BarWindow {
       minimizable: false,
       maximizable: false,
       skipTaskbar: true,
+      // The bar never belongs in the taskbar. If an entry ever resurrects for it
+      // (display power events re-showing the window after long uptime have done
+      // this), it must at least carry the WizBar icon, never the Electron glyph.
+      icon: path.join(__dirname, '..', 'assets', 'tray.png'),
       // focusable must stay DEFAULT (true): Electron combines focusable:false
       // with transparent:true into a click-through window on Windows (the OS
       // hit-tests it as transparent, so real mouse clicks never reach the
@@ -45,7 +49,7 @@ class BarWindow {
         preload: path.join(__dirname, '..', 'renderer', 'bar-preload.js'),
         contextIsolation: true,
         nodeIntegration: false,
-        backgroundThrottling: false
+        backgroundThrottling: true
       }
     });
 
@@ -82,7 +86,7 @@ class BarWindow {
     if (key === this._lastBoundsKey) {
       // Bounds unchanged, but the window can still have been hidden behind our
       // back (shell minimize-all, DWM churn). Re-assert visibility anyway.
-      if (!this.win.isVisible()) this.win.showInactive();
+      if (!this.win.isVisible()) this.win.showInactive(); this.win.setSkipTaskbar(true);
       return;
     }
     this._lastBoundsKey = key;
@@ -96,7 +100,7 @@ class BarWindow {
     if (Math.abs(ch - Math.round(bounds.height)) > 1) {
       this.win.setContentSize(Math.round(bounds.width), Math.round(bounds.height));
     }
-    if (!this.win.isVisible()) this.win.showInactive();
+    if (!this.win.isVisible()) this.win.showInactive(); this.win.setSkipTaskbar(true);
   }
 
   // Keep the OS window at the exact physical size Electron believes. Windows
@@ -108,7 +112,7 @@ class BarWindow {
     // this guard the heal loop fights hide() on minimize/detach (flicker).
     if (!this.win.isVisible() && this._shouldShow && this._sizeTarget) {
       console.log('[wizbar] heal: window was hidden, re-showing');
-      this.win.showInactive();
+      this.win.showInactive(); this.win.setSkipTaskbar(true);
     }
     const wPhys = Math.round(targetW * (scale || 1));
     const hPhys = Math.round(targetH * (scale || 1));
