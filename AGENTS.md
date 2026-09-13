@@ -11,6 +11,17 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 
+## herdr socket (sharp edge)
+
+The agent-count chip talks to the herdr server socket live (see README). Non-obvious facts
+from wiring it up:
+- On Windows, an AF_UNIX socket bound at <path> answers on the named pipe \\.\pipe\<path>;
+  Node net.connect({path}) works directly - no PowerShell worker needed.
+- The server CLOSES the connection after answering session.snapshot (CLI one-shot flow).
+  Keep one persistent connection for events.subscribe only (per-pane subscriptions;
+  pane.agent_status_changed requires pane_id), and fetch state via throwaway connections.
+- Probe scripts: scripts/herdr_transport_probe.js (transport), scripts/wizbar_cpu_profile.ps1
+  (per-widget CPU audit).
 ## Token usage stores (sharp edge)
 
 zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change across engine rebuilds:
