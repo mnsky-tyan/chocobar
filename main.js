@@ -488,6 +488,7 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   remielleSavePosition(); // the pet survives the quit; remember where it sits
   try { globalShortcut.unregisterAll(); } catch (_) {}
+  try { if (metrics) metrics.stop(); } catch (_) {} // stop the PowerShell workers now, not "eventually"
 });
 app.on('window-all-closed', (e) => {
   // Bar/dash closing must not quit the app; only tray Quit does.
