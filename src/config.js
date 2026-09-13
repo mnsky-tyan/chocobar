@@ -79,7 +79,7 @@ const DEFAULTS = {
   tokens: {
     enabled: true,
     showOnBar: true,
-    rescanMinutes: 5,
+    rescanMinutes: 1,
     heatmapWeeks: 26,
     sources: {
       zcode:    { enabled: true, dbPath: '~/.zcode/cli/db/db.sqlite' },
@@ -173,7 +173,8 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
   "tokens": {
     "enabled": true,
     "showOnBar": true,
-    "rescanMinutes": 5,
+    // minutes between usage scans (drives the dashboard's live refresh)
+    "rescanMinutes": 1,
     "heatmapWeeks": 26,
     "sources": {
       "zcode":    { "enabled": true, "dbPath": "~/.zcode/cli/db/db.sqlite" },
