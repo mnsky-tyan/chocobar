@@ -61,10 +61,19 @@ function themePayload(cfg) {
 }
 
 function statsLoop() {
+  let lastVals = '';
   setInterval(() => {
     if (!bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
-    bar.send('stats', metrics.snapshot());
+    // Push only when a module value actually changed: every snapshot() stamps
+    // `now`, so at a fixed 100ms tick every push looked new — 10 IPC messages
+    // and full bar re-renders per second for values moving at 0.5-5s cadences.
+    const snap = metrics.snapshot();
+    const { now, ...vals } = snap;
+    const sig = JSON.stringify(vals);
+    if (sig === lastVals) return;
+    lastVals = sig;
+    bar.send('stats', snap);
   }, 100);
 }
 
@@ -164,10 +173,9 @@ function buildTray() {
 
 // --- Little Remielle desktop-pet toggle ------------------------------------------
 // The bow chip on the bar: click = launch the exe (detached), click again =
-// kill it. Truth comes from a tasklist poll (not the child handle) so a pet
-// started or stopped outside WizBar is reflected too. The poll only checks for
-// a CSV data row in tasklist's output — the image name itself comes back in
-// the console codepage, so comparing decoded text would be unreliable.
+// kill it. Truth comes from a process-name poll (not the child handle) so a pet
+// started or stopped outside WizBar is reflected too; the in-process Toolhelp
+// snapshot reads proper UTF-16 image names, so no console-codepage workarounds.
 let remielleState = { running: false, exists: false };
 let remiellePid = null;          // pet process id from the last live poll
 let remielleRestorePending = false; // set on launch, consumed by the poll
@@ -287,23 +295,18 @@ function pollRemielle() {
     pushRemielle();
     return;
   }
-  execFile('tasklist', ['/FI', 'IMAGENAME eq ' + path.basename(exe), '/FO', 'CSV', '/NH'],
-    { windowsHide: true }, (err, stdout) => {
-      const running = !err && /","/.test(stdout || '');
-      let pid = null;
-      if (running) {
-        const m = String(stdout || '').match(/",\s*"(\d+)"/);
-        if (m) pid = Number(m[1]);
-      }
-      remiellePid = running ? pid : null;
-      if (running) remielleSavePosition();
-      if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
-      if (remielleState.exists !== true || remielleState.running !== running) {
-        DBG('remielle poll:', JSON.stringify({ err: err && err.message, running, out: String(stdout).slice(0, 120) }));
-      }
-      remielleState = { running, exists: true };
-      pushRemielle();
-    });
+  // In-process lookup — spawning tasklist.exe cost ~290ms of CPU per poll,
+  // 20 polls per minute, just to watch one process.
+  const pid = native.findProcessIdByName(path.basename(exe));
+  const running = pid != null;
+  remiellePid = running ? pid : null;
+  if (running) remielleSavePosition();
+  if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
+  if (remielleState.exists !== true || remielleState.running !== running) {
+    DBG('remielle poll:', JSON.stringify({ running, pid }));
+  }
+  remielleState = { running, exists: true };
+  pushRemielle();
 }
 
 function toggleRemielle() {

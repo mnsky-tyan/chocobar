@@ -505,6 +505,44 @@ function getHwinfoTemp(mapName) {
   return { state: 'no-section' };
 }
 
+// --- process lookup by image name (Toolhelp32 snapshot) ------------------------
+// pollRemielle used to spawn tasklist.exe every 3s just to learn whether the pet
+// process is alive (~290ms of CPU per spawn here); an in-process snapshot costs
+// ~5ms. Returns the matching pid, or null when no process carries that image name.
+const TH32CS_SNAPPROCESS = 0x2;
+const PROCESSENTRY32W = koffi.struct('PROCESSENTRY32W', {
+  dwSize: 'uint32', cntUsage: 'uint32', th32ProcessID: 'uint32',
+  th32DefaultHeapID: 'uintptr_t', th32ModuleID: 'uint32', cntThreads: 'uint32',
+  th32ParentProcessID: 'uint32', pcPriClassBase: 'long', dwFlags: 'uint32',
+  szExeFile: 'uint16[260]'
+});
+const CreateToolhelp32Snapshot = kernel32.func('uintptr_t __stdcall CreateToolhelp32Snapshot(uint32_t flags, uint32_t th32ProcessID)');
+// The entry is _Inout_, not _Out_: Process32FirstW validates dwSize, so our
+// pre-filled size must pass through instead of a zeroed output buffer.
+const Process32FirstW = kernel32.func('int __stdcall Process32FirstW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
+const Process32NextW = kernel32.func('int __stdcall Process32NextW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
+
+function findProcessIdByName(imageName) {
+  const needle = String(imageName || '').toLowerCase();
+  if (!needle) return null;
+  const h = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (!h || h === -1 || h === -1n) return null;
+  try {
+    const entry = { dwSize: koffi.sizeof(PROCESSENTRY32W) };
+    for (let ok = Process32FirstW(h, entry); ok; ok = Process32NextW(h, entry)) {
+      const chars = entry.szExeFile;
+      let name = '';
+      for (let i = 0; i < chars.length && chars[i]; i++) name += String.fromCharCode(chars[i]);
+      if (name.toLowerCase() === needle) return entry.th32ProcessID;
+    }
+  } catch (_) {
+    return null;
+  } finally {
+    try { CloseHandle(h); } catch (_) {}
+  }
+  return null;
+}
+
 // --- window discovery by pid + monitor geometry (Little Remielle pet) ----------
 const MonitorProc = koffi.proto('int __stdcall MonitorProc(uintptr_t hMonitor, void *hdc, void *clipRect, void *data)');
 const EnumDisplayMonitors = user32.func('int __stdcall EnumDisplayMonitors(void *hdc, void *clipRect, MonitorProc *proc, void *data)');
@@ -573,6 +611,6 @@ module.exports = {
   setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
-  findPidWindows, moveWindow, getMonitorRects, rectOnAnyMonitor,
+  findPidWindows, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName,
   getForegroundWindow: () => GetForegroundWindow()
 };
