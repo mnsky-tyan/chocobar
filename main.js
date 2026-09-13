@@ -399,7 +399,7 @@ function wireBar() {
   ipcMain.on('close-dash', () => { if (dashWin) dashWin.close(); });
 
   tokens.on('updated', (agg) => {
-    bar.send('tokens', agg);
+    bar.send('tokens', { today: agg.today }); // bar reads today only; full agg goes to the dash
     if (dashWin && !dashWin.isDestroyed()) dashWin.send('tokens', agg);
   });
 
@@ -414,7 +414,7 @@ function wireBar() {
     DBG('bar did-finish-load');
     bar.send('theme', themePayload(configManager.config));
     bar.send('stats', metrics.snapshot());
-    bar.send('tokens', tokens.aggregate());
+    bar.send('tokens', { today: tokens.aggregate().today }); // bar reads today only; full agg goes to the dash
   });
 
   // config hot reload
@@ -425,7 +425,7 @@ function wireBar() {
     tokens.setConfig(cfg);
     bar.cfg = cfg;
     bar.send('theme', themePayload(cfg));
-    bar.send('tokens', tokens.aggregate());
+    bar.send('tokens', { today: tokens.aggregate().today }); // bar reads today only; full agg goes to the dash
     applyAutostart(cfg.general.autostart);
     // Tray follows showTray live (no restart needed to add/remove it).
     if (tray && !cfg.general.showTray) { tray.destroy(); tray = null; }
