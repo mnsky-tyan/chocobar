@@ -1,6 +1,6 @@
 'use strict';
 // WizBar — slim acrylic status bar floating above Windows Terminal + token tracker.
-const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
+const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
@@ -286,6 +286,23 @@ function pushRemielle() {
   if (bar && bar.win && !bar.win.isDestroyed()) bar.send('remielle', remielleState);
 }
 
+// 小雷米 must ALWAYS sit above every normal window. Windows drops the pet's
+// WS_EX_TOPMOST whenever anything calls SetWindowPos on it without the
+// topmost flag (fullscreen apps, some launchers, the pet's own init), and the
+// occlusion then just sticks until the captain clicks it. Truth is read from
+// the window's ex-style each poll and the flag is re-applied only when lost,
+// so the pet's z-order among topmost windows is otherwise left alone.
+function remielleEnsureTopmost(pid) {
+  try {
+    const hwnds = native.findPidWindows(pid);
+    if (!hwnds.length) return;
+    if (!native.isTopmost(hwnds[0])) {
+      native.setTopmost(hwnds[0], true);
+      DBG('remielle: topmost re-asserted');
+    }
+  } catch (_) {}
+}
+
 function pollRemielle() {
   const cfg = remielleCfg();
   if (!cfg.enabled) return;
@@ -300,7 +317,7 @@ function pollRemielle() {
   const pid = native.findProcessIdByName(path.basename(exe));
   const running = pid != null;
   remiellePid = running ? pid : null;
-  if (running) remielleSavePosition();
+  if (running) { remielleEnsureTopmost(pid); remielleSavePosition(); }
   if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
   if (remielleState.exists !== true || remielleState.running !== running) {
     DBG('remielle poll:', JSON.stringify({ running, pid }));
@@ -475,6 +492,15 @@ app.whenReady().then(() => {
         else openDashboard();
       });
     } catch (_) {}
+    // Sleep/wake and display topology changes are the events that rebuilt the
+    // taskbar and re-minted a button for the bar (PR#5 only covered re-shows).
+    // The toolwindow style should already make that impossible; re-asserting
+    // here too makes the belt+suspenders immediate instead of waiting for the
+    // next heal tick.
+    for (const ev of ['resume', 'unlock-screen', 'display-added', 'display-removed', 'display-metrics-changed']) {
+      powerMonitor.on(ev, () => { DBG('power event:', ev); if (bar) bar.assertNoTaskbar(); });
+    }
+
     DBG('all started');
 
     statsLoop();
