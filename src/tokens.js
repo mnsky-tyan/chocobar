@@ -327,7 +327,8 @@ class TokenTracker extends require('events') {
     const rowTotal = (r) => (r.input || 0) + (r.output || 0);
     const byDay = new Map();     // dateKey -> { total, apps: { app: agg } }
     const byApp = new Map();     // app -> agg
-    const byModel = new Map();   // "app|model" -> agg
+    const byModel = new Map();   // "app|lowercased model" -> agg
+    const modelVariants = new Map(); // byModel key -> Map(raw model id -> record count)
     let allTime = 0;
 
     for (const r of this.records.values()) {
@@ -341,9 +342,26 @@ class TokenTracker extends require('events') {
 
       if (!byApp.has(r.app)) byApp.set(r.app, emptyAgg());
       addAgg(byApp.get(r.app), r);
-      const mk = `${r.app}|${r.model || 'unknown'}`;
+      // Same model can be recorded under different casing ("GLM-5.3-Flash" vs
+      // "glm-5.3-flash" — the casing flips between sources and even
+      // mid-session), so the grouping key is case-insensitive; the raw
+      // variants are tallied to pick one display label below.
+      const model = r.model || 'unknown';
+      const mk = `${r.app}|${model.toLowerCase()}`;
       if (!byModel.has(mk)) byModel.set(mk, emptyAgg());
       addAgg(byModel.get(mk), r);
+      let variants = modelVariants.get(mk);
+      if (!variants) modelVariants.set(mk, (variants = new Map()));
+      variants.set(model, (variants.get(model) || 0) + 1);
+    }
+
+    // Display label per merged group: the most frequent raw variant; ties
+    // break deterministically on codepoint order (so "GLM-5.3-Flash" wins over
+    // "glm-5.3-flash" on an even split).
+    for (const [mk, group] of byModel) {
+      const ranked = [...modelVariants.get(mk).entries()]
+        .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      group.modelLabel = ranked[0][0];
     }
 
     const todayKey = localDateKey(Date.now());

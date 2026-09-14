@@ -219,7 +219,9 @@ function renderTables() {
   $('model-table').innerHTML = tableHtml(['model', 'input', 'output', 'cache R', 'cache W', 'calls'],
     models.map(([mk, a]) => {
       const [app, ...rest] = mk.split('|');
-      const model = rest.join('|');
+      // modelLabel is the tracker's canonical casing for the merged group;
+      // fall back to the (lowercased) key for older aggregates.
+      const model = a.modelLabel || rest.join('|');
       return [`<span class="app-dot app-${esc(app)}" title="${esc(app)}"></span>${esc(model)}`,
         fmt(a.input), fmt(a.output), fmt(a.cacheRead), fmt(a.cacheWrite), String(a.requests)];
     }),
