@@ -172,7 +172,7 @@ class MetricsEngine extends require('events') {
       '      (\'{"sum":\' + $sum + \',"max":\' + $mx + \'}\')',
       "    } else { '{\"sum\":0,\"max\":0}' }",
       '  }catch{ \'{"err":1}\'; Write-Error $_ }',
-      `  Start-Sleep -Milliseconds ${Math.max(400, Math.min(cfg.intervalMs, 800))}`,
+      `  Start-Sleep -Milliseconds ${Math.max(5000, Math.min(cfg.intervalMs, 8000))}`,
       '}'
     ].join('\n');
     const buf = { v: '' };
