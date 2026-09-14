@@ -10,6 +10,7 @@ const { MetricsEngine } = require('./src/metrics');
 const { TokenTracker } = require('./src/tokens');
 const { BarWindow } = require('./src/bar');
 const native = require('./src/native');
+const petguard = require('./src/petguard');
 
 // --- single instance -----------------------------------------------------------
 if (!app.requestSingleInstanceLock()) {
@@ -286,21 +287,21 @@ function pushRemielle() {
   if (bar && bar.win && !bar.win.isDestroyed()) bar.send('remielle', remielleState);
 }
 
-// 小雷米 must ALWAYS sit above every normal window. Windows drops the pet's
-// WS_EX_TOPMOST whenever anything calls SetWindowPos on it without the
-// topmost flag (fullscreen apps, some launchers, the pet's own init), and the
-// occlusion then just sticks until the captain clicks it. Truth is read from
-// the window's ex-style each poll and the flag is re-applied only when lost,
-// so the pet's z-order among topmost windows is otherwise left alone.
+// 小雷米 must ALWAYS sit above every normal window; src/petguard.js holds the
+// policy and the two ways she gets buried. Note the split of cadences: the pid
+// poll below only answers "is she running", while the z-order guard runs far
+// more often, because a pet that is behind the terminal for three seconds is
+// exactly the "she stays hidden until I click her" report.
 function remielleEnsureTopmost(pid) {
-  try {
-    const hwnds = native.findPidWindows(pid);
-    if (!hwnds.length) return;
-    if (!native.isTopmost(hwnds[0])) {
-      native.setTopmost(hwnds[0], true);
-      DBG('remielle: topmost re-asserted');
-    }
-  } catch (_) {}
+  const r = petguard.ensureTopmost(pid);
+  if (r.action) DBG('remielle guard:', r.reason, 'hwnd=' + r.hwnd);
+}
+
+// ~0.6ms per tick (one EnumWindows walk), and only while the pet is running.
+const PET_GUARD_MS = 400;
+function petGuardTick() {
+  if (!remiellePid) return;
+  try { remielleEnsureTopmost(remiellePid); } catch (_) {}
 }
 
 function pollRemielle() {
@@ -484,6 +485,7 @@ app.whenReady().then(() => {
     tracker.start();
     pollRemielle();
     setInterval(pollRemielle, 3000);
+    setInterval(petGuardTick, PET_GUARD_MS);
     // Ctrl+Alt+D summons/toggles the dashboard from anywhere — works even when
     // the token chip is buried under other windows.
     try {

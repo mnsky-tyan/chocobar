@@ -112,6 +112,9 @@ function isBelowInZOrder(hwndA, hwndB) {
 // 64-bit handles are sign-extended, so the constants must go in as full-width
 // BigInts (0xFFFF...FF) — 0xFFFFFFFF truncates to an invalid handle value and
 // SetWindowPos fails with ERROR_INVALID_HANDLE.
+// SetWindowLongW(GWL_EXSTYLE) is not an alternative: Windows silently ignores
+// WS_EX_TOPMOST in that write (measured - the read-back bit does not change),
+// so only SetWindowPos moves a window between the two bands.
 const HWND_TOPMOST_B = (1n << 64n) - 1n;   // -1
 const HWND_NOTOPMOST_B = (1n << 64n) - 2n; // -2
 function setTopmost(hwnd, topmost) {
@@ -589,6 +592,36 @@ function findPidWindows(pid) {
   return out.map((x) => x.hwnd);
 }
 
+// One EnumWindows walk that answers both questions the pet guardian asks: the
+// pet's main window (largest visible window of `pid`, same rule as
+// findPidWindows) and whether it sits BELOW `refHwnd` in the z-order. Folding
+// them into one pass keeps the guard tick (~400ms) at the cost of the bar's
+// existing z-sync instead of two walks. EnumWindows walks top to bottom, so a
+// larger index is further back.
+function petGuardSnapshot(pid, refHwnd) {
+  const hwnds = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  const ref = Number(refHwnd) || 0;
+  let refIdx = -1, pet = 0, petIdx = -1, petArea = 0;
+  for (let i = 0; i < hwnds.length; i++) {
+    const hwnd = hwnds[i];
+    if (hwnd === ref) refIdx = i;
+    try {
+      if (!IsWindowVisible(hwnd)) continue;
+      const p = [0];
+      GetWindowThreadProcessId(hwnd, p);
+      if (Number(p[0]) !== pid) continue;
+      const rc = getWindowRect(hwnd);
+      if (!rc) continue;
+      const area = (rc.right - rc.left) * (rc.bottom - rc.top);
+      if (area <= petArea) continue;
+      petArea = area; pet = hwnd; petIdx = i;
+    } catch (_) {}
+  }
+  if (!pet) return { hwnd: 0, topmost: false, belowRef: false };
+  return { hwnd: pet, topmost: isTopmost(pet), belowRef: refIdx >= 0 && petIdx > refIdx };
+}
+
 function moveWindow(hwnd, x, y) {
   const SWP_NOSIZE = 0x1, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
   try { return !!SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); }
@@ -629,6 +662,6 @@ module.exports = {
   setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
-  findPidWindows, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName,
+  findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName,
   getForegroundWindow: () => GetForegroundWindow()
 };
