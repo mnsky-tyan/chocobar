@@ -23,7 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile, execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const { APP_DIR } = require('./config');
 
 const CACHE_PATH = path.join(APP_DIR, 'token-cache.json');
@@ -84,7 +84,7 @@ class TokenTracker extends require('events') {
     }
     const t0 = Date.now();
     let added = 0;
-    try { added += this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
+    try { added += await this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
     try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
     try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
@@ -112,16 +112,21 @@ class TokenTracker extends require('events') {
     return ids;
   }
 
-  _scanZcode() {
+  // Async spawn: a synchronous execFileSync would freeze the main process
+  // (bar follow loop included) for the length of the python run every scan.
+  async _scanZcode() {
     const src = this.cfg.sources.zcode;
     if (!src.enabled || !src.dbPath || !fs.existsSync(src.dbPath)) return 0;
     const zaiIds = this._zaiSessionIds(this.cfg.sources.zai.sessionsDir);
     const script = path.join(__dirname, '..', 'scripts', 'zcode_query.py');
-    const rows = JSON.parse(execFileSync('python', [script, src.dbPath], {
-      windowsHide: true,
-      maxBuffer: 64 * 1024 * 1024,
-      encoding: 'utf8'
-    }));
+    const stdout = await new Promise((resolve, reject) => {
+      execFile('python', [script, src.dbPath], {
+        windowsHide: true,
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: 'utf8'
+      }, (err, out) => (err ? reject(err) : resolve(out)));
+    });
+    const rows = JSON.parse(stdout);
     let added = 0;
     for (const r of rows) {
       const key = `z:${r.session}:${r.turn}`;
