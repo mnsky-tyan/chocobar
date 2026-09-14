@@ -66,7 +66,6 @@ const DEFAULTS = {
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
-    agents:   { enabled: true, intervalMs: 5000, file: '~/work/harness/firstmate/state/fleet-status.json' },
     // Little Remielle desktop pet: a bow chip pinned next to the token chip;
     // click = start the exe, click again = kill it.
     remielle: { enabled: true, exePath: 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe' },
@@ -153,10 +152,6 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // earbud/BT battery; shows "—" unless a device reports via Windows' standard
     // battery property (many earbuds only report to their vendor app)
     "bluetooth": { "enabled": true, "intervalMs": 30000, "filter": "", "maxDevices": 2 },
-    // firstmate fleet activity chip; the file is a tiny JSON the main firstmate
-    // keeps updated: {"state":"working"|"idle","agents":2,"note":"optional"} —
-    // a bare first line saying working/idle also works. Missing file shows "—".
-    "agents":    { "enabled": true, "intervalMs": 5000, "file": "~/work/harness/firstmate/state/fleet-status.json" },
     // Little Remielle desktop pet: a bow chip pinned next to the token chip.
     // Click to launch the exe, click again to stop it ("on"/"off").
     "remielle":  { "enabled": true, "exePath": "C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe" },
