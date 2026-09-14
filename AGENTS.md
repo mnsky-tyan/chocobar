@@ -46,3 +46,13 @@ Authoritative reader: `src/tokens.js`; contract check: `node scripts/token_regre
 - Negligible despite tight cadence (do not churn without re-measuring): tracker
   follow-tick natives ≈ 0.01ms per 8ms tick, HWiNFO temp parse ≈ 1.4ms per 2s,
   z-sync EnumWindows ≈ 0.6ms per 400ms.
+## Running and restarting (sharp edges)
+
+- WizBar is not packaged: the app IS a git worktree (`electron .`), autostarted at login
+  by `HKCU\...\Run` -> that worktree's `scripts/start-wizbar.vbs`. A commit is therefore
+  NOT live until the app is restarted - check the running electron's start time against
+  the commit date before concluding that a fix did not work.
+- The pet 小蕾米 is spawned by the app, so `taskkill /PID <app> /T` kills her too; `/F` on
+  the app pid alone leaves her running. To bring her back, spawn her detached with her own
+  cwd (what the bar's toggle does) and save the spot in `~/.wizbar/remielle-position.json`
+  plus her own `设置.json`; the app adopts the new process through its name poll.
