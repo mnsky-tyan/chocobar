@@ -54,6 +54,12 @@ class BarWindow {
     });
 
     this.hwnd = native.hwndNumberFromBuffer(this.win.getNativeWindowHandle());
+    // Structural taskbar exclusion: WS_EX_TOOLWINDOW makes the shell skip the
+    // window on EVERY enumeration, so no taskbar rebuild (explorer restart,
+    // sleep/wake, display topology change) can ever resurrect a button for the
+    // bar. Applied while the window is still unshown. Alt-Tab exclusion is a
+    // welcome side effect - the bar is a passive strip, never a switch target.
+    native.setToolWindow(this.hwnd, true);
     // Rounded corners are painted by the page (CSS border-radius) since the
     // window itself is translucent; DWM rounding/borders don't apply here.
 
@@ -71,6 +77,7 @@ class BarWindow {
     this._sizeTarget = null;
     this._healTimer = setInterval(() => {
       if (this._sizeTarget) this.healSize(this._sizeTarget.w, this._sizeTarget.h, this._sizeTarget.scale);
+      this.assertNoTaskbar(); // keep the shell from ever minting a taskbar button
     }, 400);
     return this.win;
   }
@@ -86,7 +93,8 @@ class BarWindow {
     if (key === this._lastBoundsKey) {
       // Bounds unchanged, but the window can still have been hidden behind our
       // back (shell minimize-all, DWM churn). Re-assert visibility anyway.
-      if (!this.win.isVisible()) this.win.showInactive(); this.win.setSkipTaskbar(true);
+      if (!this.win.isVisible()) this.win.showInactive();
+      this.assertNoTaskbar();
       return;
     }
     this._lastBoundsKey = key;
@@ -100,7 +108,20 @@ class BarWindow {
     if (Math.abs(ch - Math.round(bounds.height)) > 1) {
       this.win.setContentSize(Math.round(bounds.width), Math.round(bounds.height));
     }
-    if (!this.win.isVisible()) this.win.showInactive(); this.win.setSkipTaskbar(true);
+    if (!this.win.isVisible()) this.win.showInactive();
+    this.assertNoTaskbar();
+  }
+
+  // Both layers of taskbar exclusion, re-asserted. setSkipTaskbar is Electron's
+  // ITaskbarList::DeleteTab: stateless, and forgotten the moment the shell
+  // re-enumerates windows - which is exactly why PR#5's per-show re-assert
+  // still let the icon return after long uptime. setToolWindow is the
+  // structural half (WS_EX_TOOLWINDOW re-read on every enumeration); each
+  // call is a cheap no-op unless something cleared the state.
+  assertNoTaskbar() {
+    if (!this.win || this.win.isDestroyed() || !this.hwnd) return;
+    native.setToolWindow(this.hwnd, true);
+    this.win.setSkipTaskbar(true);
   }
 
   // Keep the OS window at the exact physical size Electron believes. Windows
@@ -112,8 +133,9 @@ class BarWindow {
     // this guard the heal loop fights hide() on minimize/detach (flicker).
     if (!this.win.isVisible() && this._shouldShow && this._sizeTarget) {
       console.log('[wizbar] heal: window was hidden, re-showing');
-      this.win.showInactive(); this.win.setSkipTaskbar(true);
+      this.win.showInactive();
     }
+    this.assertNoTaskbar();
     const wPhys = Math.round(targetW * (scale || 1));
     const hPhys = Math.round(targetH * (scale || 1));
     const [, ch] = this.win.getContentSize();
