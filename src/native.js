@@ -36,10 +36,28 @@ const SYSTEM_POWER_STATUS = koffi.struct('SYSTEM_POWER_STATUS', {
 });
 const GetSystemPowerStatus = kernel32.func('int __stdcall GetSystemPowerStatus(_Out_ SYSTEM_POWER_STATUS *sps)');
 const GetWindowLongW = user32.func('long __stdcall GetWindowLongW(uintptr_t hwnd, int nIndex)');
+const SetWindowLongW = user32.func('long __stdcall SetWindowLongW(uintptr_t hwnd, int nIndex, long dwNewLong)');
 const GWL_EXSTYLE = -20;
 const WS_EX_TOPMOST = 0x8;
+const WS_EX_TOOLWINDOW = 0x80;
 function isTopmost(hwnd) {
   try { return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) !== 0; } catch (_) { return false; }
+}
+// WS_EX_TOOLWINDOW: the STRUCTURAL "never in the taskbar" bit. Electron's
+// setSkipTaskbar is a stateless ITaskbarList::DeleteTab - the moment the shell
+// re-enumerates windows (explorer restart, taskbar rebuild, sleep/wake, display
+// topology change) it re-adds a button for every eligible window and the
+// deletion is forgotten. The ex-style is re-read on every enumeration, so it
+// survives all of those. Cheap enough to re-assert on a timer; no-op write
+// when the bit is already correct.
+function setToolWindow(hwnd, enable) {
+  try {
+    const ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    const next = enable ? (ex | WS_EX_TOOLWINDOW) : (ex & ~WS_EX_TOOLWINDOW);
+    if (next === ex) return true;
+    SetWindowLongW(hwnd, GWL_EXSTYLE, next);
+    return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) === (enable ? WS_EX_TOOLWINDOW : 0);
+  } catch (_) { return false; }
 }
 const CoInitializeEx = ole32.func('long __stdcall CoInitializeEx(void *pvReserved, int dwCoInit)');
 const GUID = koffi.struct('GUID', { Data1: 'uint32', Data2: 'uint16', Data3: 'uint16', Data4: 'uint8[8]' });
@@ -608,7 +626,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName,
