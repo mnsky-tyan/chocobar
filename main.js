@@ -1,6 +1,6 @@
 'use strict';
 // WizBar — slim acrylic status bar floating above Windows Terminal + token tracker.
-const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut, powerMonitor } = require('electron');
+const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
@@ -10,7 +10,6 @@ const { MetricsEngine } = require('./src/metrics');
 const { TokenTracker } = require('./src/tokens');
 const { BarWindow } = require('./src/bar');
 const native = require('./src/native');
-const petguard = require('./src/petguard');
 
 // --- single instance -----------------------------------------------------------
 if (!app.requestSingleInstanceLock()) {
@@ -62,19 +61,10 @@ function themePayload(cfg) {
 }
 
 function statsLoop() {
-  let lastVals = '';
   setInterval(() => {
     if (!bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
-    // Push only when a module value actually changed: every snapshot() stamps
-    // `now`, so at a fixed 100ms tick every push looked new — 10 IPC messages
-    // and full bar re-renders per second for values moving at 0.5-5s cadences.
-    const snap = metrics.snapshot();
-    const { now, ...vals } = snap;
-    const sig = JSON.stringify(vals);
-    if (sig === lastVals) return;
-    lastVals = sig;
-    bar.send('stats', snap);
+    bar.send('stats', metrics.snapshot());
   }, 100);
 }
 
@@ -174,9 +164,10 @@ function buildTray() {
 
 // --- Little Remielle desktop-pet toggle ------------------------------------------
 // The bow chip on the bar: click = launch the exe (detached), click again =
-// kill it. Truth comes from a process-name poll (not the child handle) so a pet
-// started or stopped outside WizBar is reflected too; the in-process Toolhelp
-// snapshot reads proper UTF-16 image names, so no console-codepage workarounds.
+// kill it. Truth comes from a tasklist poll (not the child handle) so a pet
+// started or stopped outside WizBar is reflected too. The poll only checks for
+// a CSV data row in tasklist's output — the image name itself comes back in
+// the console codepage, so comparing decoded text would be unreliable.
 let remielleState = { running: false, exists: false };
 let remiellePid = null;          // pet process id from the last live poll
 let remielleRestorePending = false; // set on launch, consumed by the poll
@@ -287,23 +278,6 @@ function pushRemielle() {
   if (bar && bar.win && !bar.win.isDestroyed()) bar.send('remielle', remielleState);
 }
 
-// 小雷米 must ALWAYS sit above every normal window; src/petguard.js holds the
-// policy and the two ways she gets buried. Note the split of cadences: the pid
-// poll below only answers "is she running", while the z-order guard runs far
-// more often, because a pet that is behind the terminal for three seconds is
-// exactly the "she stays hidden until I click her" report.
-function remielleEnsureTopmost(pid) {
-  const r = petguard.ensureTopmost(pid);
-  if (r.action) DBG('remielle guard:', r.reason, 'hwnd=' + r.hwnd);
-}
-
-// ~0.6ms per tick (one EnumWindows walk), and only while the pet is running.
-const PET_GUARD_MS = 400;
-function petGuardTick() {
-  if (!remiellePid) return;
-  try { remielleEnsureTopmost(remiellePid); } catch (_) {}
-}
-
 function pollRemielle() {
   const cfg = remielleCfg();
   if (!cfg.enabled) return;
@@ -313,18 +287,23 @@ function pollRemielle() {
     pushRemielle();
     return;
   }
-  // In-process lookup — spawning tasklist.exe cost ~290ms of CPU per poll,
-  // 20 polls per minute, just to watch one process.
-  const pid = native.findProcessIdByName(path.basename(exe));
-  const running = pid != null;
-  remiellePid = running ? pid : null;
-  if (running) { remielleEnsureTopmost(pid); remielleSavePosition(); }
-  if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
-  if (remielleState.exists !== true || remielleState.running !== running) {
-    DBG('remielle poll:', JSON.stringify({ running, pid }));
-  }
-  remielleState = { running, exists: true };
-  pushRemielle();
+  execFile('tasklist', ['/FI', 'IMAGENAME eq ' + path.basename(exe), '/FO', 'CSV', '/NH'],
+    { windowsHide: true }, (err, stdout) => {
+      const running = !err && /","/.test(stdout || '');
+      let pid = null;
+      if (running) {
+        const m = String(stdout || '').match(/",\s*"(\d+)"/);
+        if (m) pid = Number(m[1]);
+      }
+      remiellePid = running ? pid : null;
+      if (running) remielleSavePosition();
+      if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
+      if (remielleState.exists !== true || remielleState.running !== running) {
+        DBG('remielle poll:', JSON.stringify({ err: err && err.message, running, out: String(stdout).slice(0, 120) }));
+      }
+      remielleState = { running, exists: true };
+      pushRemielle();
+    });
 }
 
 function toggleRemielle() {
@@ -420,7 +399,7 @@ function wireBar() {
   ipcMain.on('close-dash', () => { if (dashWin) dashWin.close(); });
 
   tokens.on('updated', (agg) => {
-    bar.send('tokens', { today: agg.today }); // bar reads today only; full agg goes to the dash
+    bar.send('tokens', agg);
     if (dashWin && !dashWin.isDestroyed()) dashWin.send('tokens', agg);
   });
 
@@ -435,7 +414,7 @@ function wireBar() {
     DBG('bar did-finish-load');
     bar.send('theme', themePayload(configManager.config));
     bar.send('stats', metrics.snapshot());
-    bar.send('tokens', { today: tokens.aggregate().today }); // bar reads today only; full agg goes to the dash
+    bar.send('tokens', tokens.aggregate());
   });
 
   // config hot reload
@@ -446,7 +425,7 @@ function wireBar() {
     tokens.setConfig(cfg);
     bar.cfg = cfg;
     bar.send('theme', themePayload(cfg));
-    bar.send('tokens', { today: tokens.aggregate().today }); // bar reads today only; full agg goes to the dash
+    bar.send('tokens', tokens.aggregate());
     applyAutostart(cfg.general.autostart);
     // Tray follows showTray live (no restart needed to add/remove it).
     if (tray && !cfg.general.showTray) { tray.destroy(); tray = null; }
@@ -485,7 +464,6 @@ app.whenReady().then(() => {
     tracker.start();
     pollRemielle();
     setInterval(pollRemielle, 3000);
-    setInterval(petGuardTick, PET_GUARD_MS);
     // Ctrl+Alt+D summons/toggles the dashboard from anywhere — works even when
     // the token chip is buried under other windows.
     try {
@@ -494,15 +472,6 @@ app.whenReady().then(() => {
         else openDashboard();
       });
     } catch (_) {}
-    // Sleep/wake and display topology changes are the events that rebuilt the
-    // taskbar and re-minted a button for the bar (PR#5 only covered re-shows).
-    // The toolwindow style should already make that impossible; re-asserting
-    // here too makes the belt+suspenders immediate instead of waiting for the
-    // next heal tick.
-    for (const ev of ['resume', 'unlock-screen', 'display-added', 'display-removed', 'display-metrics-changed']) {
-      powerMonitor.on(ev, () => { DBG('power event:', ev); if (bar) bar.assertNoTaskbar(); });
-    }
-
     DBG('all started');
 
     statsLoop();
@@ -519,6 +488,7 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   remielleSavePosition(); // the pet survives the quit; remember where it sits
   try { globalShortcut.unregisterAll(); } catch (_) {}
+  try { if (metrics) metrics.stop(); } catch (_) {} // stop the PowerShell workers now, not "eventually"
 });
 app.on('window-all-closed', (e) => {
   // Bar/dash closing must not quit the app; only tray Quit does.

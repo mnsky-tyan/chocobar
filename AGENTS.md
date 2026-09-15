@@ -11,6 +11,17 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 
+## herdr socket (sharp edge)
+
+The agent-count chip talks to the herdr server socket live (see README). Non-obvious facts
+from wiring it up:
+- On Windows, an AF_UNIX socket bound at <path> answers on the named pipe \\.\pipe\<path>;
+  Node net.connect({path}) works directly - no PowerShell worker needed.
+- The server CLOSES the connection after answering session.snapshot (CLI one-shot flow).
+  Keep one persistent connection for events.subscribe only (per-pane subscriptions;
+  pane.agent_status_changed requires pane_id), and fetch state via throwaway connections.
+- Probe scripts: scripts/herdr_transport_probe.js (transport), scripts/wizbar_cpu_profile.ps1
+  (per-widget CPU audit).
 ## Token usage stores (sharp edge)
 
 zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change across engine rebuilds:
@@ -35,24 +46,3 @@ zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change 
   (session `time.updated` → stamped into token-cache.json).
 Authoritative reader: `src/tokens.js`; contract check: `node scripts/token_regression.js`.
 
-## CPU hot-loop baselines (measured 2026-09-13, this machine)
-
-- GPU widget: the PowerShell Get-Counter loop dominates; the sleep floor is the lever
-  (0.8s floor ≈ 41.7% of one core, 5s ≈ 9.5%). Floor lives in _startGpuWorker.
-- pollRemielle: a tasklist.exe spawn cost ~290ms CPU per 3s poll; the in-process
-  Toolhelp32 snapshot (native.findProcessIdByName) costs ~5ms. Keep it in-process.
-- zcode token scan: python scripts/zcode_query.py ≈ 650ms per run; _scanZcode must
-  stay async or the bar main process freezes for that long every rescan.
-- Negligible despite tight cadence (do not churn without re-measuring): tracker
-  follow-tick natives ≈ 0.01ms per 8ms tick, HWiNFO temp parse ≈ 1.4ms per 2s,
-  z-sync EnumWindows ≈ 0.6ms per 400ms.
-## Running and restarting (sharp edges)
-
-- WizBar is not packaged: the app IS a git worktree (`electron .`), autostarted at login
-  by `HKCU\...\Run` -> that worktree's `scripts/start-wizbar.vbs`. A commit is therefore
-  NOT live until the app is restarted - check the running electron's start time against
-  the commit date before concluding that a fix did not work.
-- The pet 小蕾米 is spawned by the app, so `taskkill /PID <app> /T` kills her too; `/F` on
-  the app pid alone leaves her running. To bring her back, spawn her detached with her own
-  cwd (what the bar's toggle does) and save the spot in `~/.wizbar/remielle-position.json`
-  plus her own `设置.json`; the app adopts the new process through its name poll.
