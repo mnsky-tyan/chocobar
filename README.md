@@ -23,6 +23,8 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
 - today's tokens (click it → dashboard) · 🎀 Little Remielle pet toggle (click = start/stop)
 - GPU % · CPU % · CPU temp (HWiNFO) · RAM % · volume % · battery %
 - Bluetooth device battery (earbuds — shows `87·85` for L/R when the device reports it)
+- agent fleet chip (`6 live`) — real-time count of coding agents running in herdr,
+  with `1/6 working` detail on hover
 - clock
 
 **Follow semantics** (exactly as specified):
@@ -61,7 +63,9 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
     `/v1/sessions` + `/v1/sessions/<id>/messages` and counts the per-message `tokens`
     (input excludes cache there, same fold as pi/opencode). History persists in wizbar's own
     token cache; when the app is closed there is simply nothing new to scan.
-- Rescans every 5 minutes; needs `python` on PATH for the sqlite read.
+- Rescans every minute (`tokens.rescanMinutes`); needs `python` on PATH for the sqlite read.
+  Scans are incremental — file mtimes / per-session stamps skip everything already scanned,
+  and the record map + `~/.wizbar/token-cache.json` dedupe make rescans idempotent.
 
 ## Run
 
@@ -130,10 +134,19 @@ WizBar icon while it is open; the tray stays empty).
 - If there isn't room above the terminal (maximized / opened at the very top), the bar **hides**
   until there's room again — it never relocates.
 - Bluetooth battery chip **auto-hides** until a device reports a level; hover it for names.
-- Follow loop runs at ~60fps; metrics: CPU/RAM 0.8s, GPU ~1.2s, battery 1.5s, volume 0.5s.
+- Follow loop runs at ~60fps; metrics: CPU/RAM 0.8s, battery 1.5s, volume 0.5s, CPU temp 2s.
+  Expensive counters have hard floors: the GPU Engine counter polls no faster than every 5s
+  (its own query dominates the cost), Bluetooth every 30s. Initial polls are staggered so
+  the cadences never align.
 - Your terminal's `initialPosition` was nudged from `140,40` to `140,60` so new terminal
   windows open with room for the floating bar.
 - The bar's bottom edge has a subtle 1px pink divider (hardcoded in `renderer/bar.css`).
+
+- The agent fleet chip talks to the **herdr server socket** directly (on Windows an AF_UNIX
+  socket is reachable as `\\.\pipe\<path>`): one persistent connection receives push
+  events for agent status changes, plus a slow 60s refresh. No PowerShell worker involved.
+  When herdr is not running the chip falls back to the orchestrator's `fleet-status.json`
+  and shows `—` when neither source exists.
 
 - GPU % comes from the Windows `GPU Engine` performance counters (same as Task Manager,
   summed across engines, capped at 100). English counter names — on a non-English Windows

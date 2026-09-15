@@ -112,8 +112,9 @@ class TokenTracker extends require('events') {
     return ids;
   }
 
-  // Async spawn: a synchronous execFileSync would freeze the main process
-  // (bar follow loop included) for the length of the python run every scan.
+  // Async spawn: at a 1-minute scan cadence a synchronous execFileSync would
+  // freeze the main process (bar follow loop included) for the length of the
+  // python run every scan.
   async _scanZcode() {
     const src = this.cfg.sources.zcode;
     if (!src.enabled || !src.dbPath || !fs.existsSync(src.dbPath)) return 0;
