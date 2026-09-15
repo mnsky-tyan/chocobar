@@ -35,7 +35,7 @@ runtime and its chip simply shows `—` instead of crashing or faking data.
 |---|---|---|
 | Bar window, themes, clock, token usage dashboard | ✅ | ✅ |
 | CPU % / RAM % | ✅ | ✅ |
-| Battery | Win32 `GetSystemPowerStatus` | ✅ sysfs (`/sys/class/power_supply`) |
+| Battery | Win32 `GetSystemPowerStatus` | ✅ Linux sysfs (`/sys/class/power_supply`); macOS shows `—` |
 | CPU temperature | HWiNFO shared memory | ✅ sysfs hwmon / thermal zones (if sensors exist) |
 | Follows the terminal window (attach/move/minimize/z-order) | ✅ Win32 window tracking | — (no equivalent API): Linux can't measure the terminal, so the bar becomes a **corner pill** by default; `bar.staticWidth: "workarea"` gives a full-width top strip instead |
 | GPU % (GPU Engine counters) | ✅ | — (chip shows `—`) |

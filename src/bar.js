@@ -13,6 +13,7 @@ class BarWindow {
     this.win = null;
     this.hwnd = null;          // numeric hwnd of the bar itself (for z-order sync)
     this._lastBoundsKey = '';
+    this._pillShrunk = false;  // window shrunk to pill width by setPillWidth
   }
 
   create() {
@@ -94,13 +95,14 @@ class BarWindow {
     this._shouldShow = true; // bounds exist → the bar belongs on screen
     const key = `${bounds.x.toFixed(1)},${bounds.y.toFixed(1)},${bounds.width.toFixed(1)},${bounds.height}`;
     this._sizeTarget = { w: Math.round(bounds.width), h: Math.round(bounds.height), scale: bounds.scale || 1 };
-    if (key === this._lastBoundsKey) {
+    if (key === this._lastBoundsKey && !this._pillShrunk) {
       // Bounds unchanged: touch nothing. The 400ms heal loop already re-asserts
       // visibility and taskbar exclusion — doing it here too meant two native
       // window-manager calls per follow tick (~120Hz) for zero benefit.
       return;
     }
     this._lastBoundsKey = key;
+    this._pillShrunk = false;
     this.win.setBounds({
       x: Math.round(bounds.x), y: Math.round(bounds.y),
       width: Math.round(bounds.width), height: Math.round(bounds.height)
@@ -117,6 +119,29 @@ class BarWindow {
     // display change, staticWidth hot-reload): forget the last reported pill
     // width so the next 'bar-content-size' report re-shrinks the window.
     this._lastPillW = 0;
+  }
+
+  // Static corner-pill mode: shrink to the renderer-reported content width,
+  // anchored top-right of the work area (an invisible wider strip would
+  // swallow clicks along the top edge). Records the divergence from the
+  // logical bounds so the next applyGeometry re-expands even when those
+  // bounds are unchanged (staticWidth hot-reload to 'workarea' re-emits
+  // identical geometry — the window would otherwise stay a truncated strip).
+  setPillWidth(width, barCfg) {
+    if (!this.win || this.win.isDestroyed()) return;
+    this._lastPillW = width;
+    try {
+      const { screen } = require('electron');
+      const wa = screen.getPrimaryDisplay().workArea;
+      const margin = 6;
+      this.win.setBounds({
+        x: wa.x + wa.width - width - margin,
+        y: wa.y + margin,
+        width,
+        height: barCfg.height
+      });
+      this._pillShrunk = true;
+    } catch (_) {}
   }
 
   // Both layers of taskbar exclusion, re-asserted. setSkipTaskbar is Electron's
@@ -177,6 +202,7 @@ class BarWindow {
     this._lastBoundsKey = '';
     this._taskbarAssertedAt = 0; // next show re-asserts immediately
     this._lastPillW = 0;
+    this._pillShrunk = false;
   }
 
   send(channel, payload) {
@@ -191,6 +217,7 @@ class BarWindow {
     this.win = null;
     this.hwnd = null;
     this._lastPillW = 0;
+    this._pillShrunk = false;
   }
 }
 

@@ -192,12 +192,18 @@ function render() {
   // Static mode: keep the main process informed of the pill's natural width
   // so the window can shrink to it (corner-pill mode only; see
   // 'bar-content-size' in main.js — full-strip mode ignores this).
-  if (sizeReportTimer == null && theme.bar && theme.bar.mode === 'static-top' &&
+  if (theme.bar && theme.bar.mode === 'static-top' &&
       theme.bar.staticWidth === 'content') {
-    sizeReportTimer = setInterval(() => {
-      const b = el('bar');
-      if (b) window.wizbar.reportSize(b.offsetWidth);
-    }, 1000);
+    if (sizeReportTimer == null) {
+      sizeReportTimer = setInterval(() => {
+        const b = el('bar');
+        if (b) window.wizbar.reportSize(b.offsetWidth);
+      }, 1000);
+    }
+  } else if (sizeReportTimer != null) {
+    // No longer corner-pill mode: the main process ignores these reports.
+    clearInterval(sizeReportTimer);
+    sizeReportTimer = null;
   }
 
   if (segEls.tokens) setVal('tokens', fmtTokens(tokensAgg ? tokensAgg.today.total : null), 'dim');

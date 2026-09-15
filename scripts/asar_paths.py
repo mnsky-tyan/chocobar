@@ -1,5 +1,5 @@
 # Extract path-like strings from a byte range of the asar (route discovery).
-import re, sys
+import os, re, sys
 
 data = open(os.environ["MIMO_ASAR"], "rb").read()  # e.g. %LOCALAPPDATA%\Programs\Xiaomi MiMo AI\resources\app.asar
 region = data[16040000:16150000].decode("utf-8", "replace")

@@ -2,6 +2,7 @@
 Usage: python setconfig.py key.subkey value [key2.subkey2 value2 ...]
 """
 import json
+import os
 import sys
 
 P = os.path.join(os.path.expanduser('~'), '.wizbar', 'config.json')

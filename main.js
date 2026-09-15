@@ -420,18 +420,7 @@ function wireBar() {
     if ((bar.cfg.bar.staticWidth || 'workarea') !== 'content') return; // full strip: no shrinking
     const width = Math.max(60, Math.ceil(Number(w) || 0));
     if (!width || bar._lastPillW === width) return;
-    bar._lastPillW = width;
-    try {
-      const { screen } = require('electron');
-      const wa = screen.getPrimaryDisplay().workArea;
-      const margin = 6;
-      bar.win.setBounds({
-        x: wa.x + wa.width - width - margin,
-        y: wa.y + margin,
-        width,
-        height: bar.cfg.bar.height
-      });
-    } catch (_) {}
+    bar.setPillWidth(width, bar.cfg.bar);
   });
   ipcMain.on('bar-context', () => {
     Menu.buildFromTemplate([

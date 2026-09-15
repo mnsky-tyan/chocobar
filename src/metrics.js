@@ -1,6 +1,7 @@
 'use strict';
-// System metrics collector. Each module polls at its own cadence; a 1s ticker
-// emits a combined snapshot for the bar renderer.
+// System metrics collector. Each module polls at its own cadence into a
+// dirty-tracked snapshot; the main process pushes it to the bar renderer,
+// at most every 250ms and only when a poll changed a value.
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
