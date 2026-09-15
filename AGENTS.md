@@ -11,38 +11,79 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 
-## herdr socket (sharp edge)
+## Tests & checks
 
-The agent-count chip talks to the herdr server socket live (see README). Non-obvious facts
-from wiring it up:
-- On Windows, an AF_UNIX socket bound at <path> answers on the named pipe \\.\pipe\<path>;
-  Node net.connect({path}) works directly - no PowerShell worker needed.
-- The server CLOSES the connection after answering session.snapshot (CLI one-shot flow).
-  Keep one persistent connection for events.subscribe only (per-pane subscriptions;
-  pane.agent_status_changed requires pane_id), and fetch state via throwaway connections.
-- Probe scripts: scripts/herdr_transport_probe.js (transport), scripts/wizbar_cpu_profile.ps1
-  (per-widget CPU audit).
+- `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
+  public-release default guarantees; headless, any platform) + `scripts/pi_source_regression.js`
+  (pi session-log source; synthetic fixture + raw-sum cross-check when a real
+  `~/.pi/agent/sessions` exists).
+- Windows-side: `scripts/token_regression.js` (zcode+zai attribution; needs those stores),
+  `scripts/cputemp_regression.js` (HWiNFO shm reader, Windows only).
+
+## Cross-platform architecture (since the portability pass)
+
+Windows is primary; non-Windows must degrade gracefully, never fake data:
+
+- `src/native.js` is the platform gate: koffi loads/bindings are guarded (`IS_WIN`,
+  `loadLib`/`bind`/`kstruct`/`ksize` wrappers); with koffi absent or broken every binding
+  is a stub returning 0 and all helpers degrade (null/false/[]/'no-section'). Portable
+  readers live there too: battery + CPU temp via sysfs (`getBatteryLinux`, `getCpuTempLinux`).
+- `src/tracker.js`: static mode off-Windows (STATIC_MODE) — no Win32 classes to follow;
+  bar is a pill/strip (`bar.staticWidth`: 'content' default | 'workarea'); the
+  `bar-content-size` IPC handshake lets the window shrink to the pill.
+- Platform gates elsewhere: PowerShell GPU/Bluetooth workers + Core Audio volume +
+  remielle pet + registry autostart are Windows-only (guarded in `src/metrics.js` /
+  `main.js`); `src/tokens.js` probes `python3` when `python` is missing.
+- Non-Windows acryl­ic does not exist: `themePayload` sends the tint SOLID off-Windows.
+
+## Running on Linux (WSLg) — recipe
+
+- Repo electron's binary needs system libs WSL lacks; use the nix-wrapped one:
+  `nix run nixpkgs#electron -- . --no-sandbox --disable-gpu` (add
+  `--extra-experimental-features 'nix-command flakes'`), with
+  `LD_LIBRARY_PATH=<nix gcc.cc.lib>/lib64` so koffi's libstdc++ dep resolves.
+  koffi is optional though — the app boots with the stub path too.
+- Isolate the user home for test runs (`HOME=/tmp/...`) so `~/.wizbar` stays untouched.
+- WSLg blocks screen capture (grim unsupported, xwd BadMatch). Verify windows instead via
+  `xwininfo -root -tree` (window size/position proves static-mode placement).
+- Sustained RAM/CPU method: sample `/proc/<pid>/stat` utime+stime + `status` VmRSS per
+  electron process (main/renderer/gpu/utility) every 5s over minutes; compare like-for-like.
+
+## Perf invariants (do not reintroduce)
+
+- Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);
+  no fixed heartbeat, and `snapshot()` has no always-different `now` field.
+- Follow loop is 16ms (60Hz) and the unchanged-bounds fast path touches nothing
+  (no isVisible()/assertNoTaskbar per tick); `assertNoTaskbar` has a 2s re-assert floor.
+- Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
+  never a tasklist.exe spawn (~164ms/spawn measured; ~290ms in older notes).
+- The bar's heal interval must die with its window (see `BarWindow` closed/destroy) —
+  it used to leak one 400ms timer per rebuild.
+- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
+  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
+
+## Public release (de-personalized)
+
+Shipped defaults are neutral: `tokens.enabled=false` with all sources off and empty paths,
+pet + agents chips off, no personal identifiers in repo code/config/docs (a portable test
+guards this). Personal stores/pet/fleet wiring belongs only in the user-level
+`~/.wizbar/config.json` (outside the repo). Dashboard shows an explanatory empty state
+(`sourcesEnabled`) when nothing is configured.
+
 ## Token usage stores (sharp edge)
 
-zcode CLI and zai persist usage in DIFFERENT stores, and zai's store can change across engine rebuilds:
+Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
-- zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` (read via `scripts/zcode_query.py`).
-- zai (pi-based engine): per-message `usage` inside `~/.zai/agent/sessions/*.jsonl`.
-  Since the 2026-09-10 rebuild these are named `<utc-ts>_<uuid>.jsonl` and never touch
-  the zcode DB; the legacy `ZCODE_sess_<uuid>_*.jsonl` files are DB-backed (imports /
-  pre-rebuild sessions) and must NOT be counted from disk too, or they double-count.
-- Raw usage semantics differ by store: zcode DB input_tokens already INCLUDES cached
-  tokens; pi and opencode report cache BESIDE input (and opencode reasoning is a
-  breakdown of output, never additive). _scanZaiSessions/_scanOpencode therefore fold
-  cache into the stored input, so every stored record is cache-inclusive and
-  aggregate() totals stay input+output. pi per-message totalTokens
-  (= input+output+cacheRead+cacheWrite) is the raw ground truth to check against.
-- Xiaomi MiMo AI desktop: no local transcript store — the app serves a localhost HTTP API
-  while running (port + bearer token in `%APPDATA%\Xiaomi MiMo AI\desktop-api.json`;
-  routes `GET /v1/sessions`, `GET /v1/sessions/<id>/messages`). Assistant messages carry
-  `tokens {input, output, reasoning, cache:{read,write}}` with input EXCLUDING cache
-  (total = input+output+cacheRead+cacheWrite). _scanMimo folds cache like pi/opencode,
-  dedups on `m:<message id>`, and skips unchanged sessions via a `mimoSigs` cursor
-  (session `time.updated` → stamped into token-cache.json).
-Authoritative reader: `src/tokens.js`; contract check: `node scripts/token_regression.js`.
-
+- zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` (via `scripts/zcode_query.py`).
+- zai: per-message `usage` in `~/.zai/agent/sessions/*.jsonl` (flat; `ZCODE_sess_*` files
+  are DB-backed legacy — never count them from disk too, they double-count).
+- pi (new source): `~/.pi/agent/sessions/<project-slug>/*.jsonl` — same per-message
+  `usage` records, nested per project; scanned by the shared `_scanPiSessions`
+  (zai = 'zf:' keys/flat, pi = 'pf:' keys/nested, per-source mtime cursors).
+- opencode: cache BESIDE input; mimo: input EXCLUDES cache. All scans fold cache into
+  stored input so aggregate() totals stay input+output (zcode DB input already includes
+  cache). Contract checks: `npm test` + `scripts/token_regression.js`.
+- herdr agents socket: on Windows an AF_UNIX path answers as `\\.\pipe\<path>`;
+  the server closes after each session.snapshot answer — one throwaway connection per
+  snapshot, one persistent connection for events only. `modules.agents.sockPath` overrides
+  the platform default path.
