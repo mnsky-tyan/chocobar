@@ -66,8 +66,11 @@ function applyTheme(t) {
     bar.classList.remove('align-left', 'align-center');
     if (t.bar.align === 'left') bar.classList.add('align-left');
     else if (t.bar.align === 'center') bar.classList.add('align-center');
-    // Static top pill (non-Windows): hug content to the right of the screen.
-    bar.classList.toggle('static', t.bar.mode === 'static-top');
+    // Static mode (non-Windows): full-width strip ('workarea', like the bar
+    // above a maximized terminal) or corner pill ('content').
+    const isStatic = t.bar.mode === 'static-top';
+    bar.classList.toggle('static', isStatic);
+    bar.classList.toggle('static-content', isStatic && t.bar.staticWidth === 'content');
   }
   rebuildSegments();
 }
@@ -187,8 +190,10 @@ function render() {
   const m = theme.modules || {};
 
   // Static mode: keep the main process informed of the pill's natural width
-  // so the window can shrink to hug it (see 'bar-content-size' in main.js).
-  if (sizeReportTimer == null && theme.bar && theme.bar.mode === 'static-top') {
+  // so the window can shrink to it (corner-pill mode only; see
+  // 'bar-content-size' in main.js — full-strip mode ignores this).
+  if (sizeReportTimer == null && theme.bar && theme.bar.mode === 'static-top' &&
+      theme.bar.staticWidth === 'content') {
     sizeReportTimer = setInterval(() => {
       const b = el('bar');
       if (b) window.wizbar.reportSize(b.offsetWidth);

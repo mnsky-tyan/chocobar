@@ -38,7 +38,7 @@ runtime and its chip simply shows `—` instead of crashing or faking data.
 | CPU % / RAM % | ✅ | ✅ |
 | Battery | Win32 `GetSystemPowerStatus` | ✅ sysfs (`/sys/class/power_supply`) |
 | CPU temperature | HWiNFO shared memory | ✅ sysfs hwmon / thermal zones (if sensors exist) |
-| Follows the terminal window (attach/move/minimize/z-order) | ✅ Win32 window tracking | — (no equivalent API): the bar floats as a **content-hugging pill at the top-right** of the primary work area |
+| Follows the terminal window (attach/move/minimize/z-order) | ✅ Win32 window tracking | — (no equivalent API): Linux can't measure the terminal, so the bar becomes a **corner pill** by default; `bar.staticWidth: "workarea"` gives a full-width top strip instead |
 | GPU % (GPU Engine counters) | ✅ | — (chip shows `—`) |
 | Volume (Core Audio master level) | ✅ | — (chip shows `—`) |
 | Bluetooth device battery (PnP property) | ✅ | — (chip shows `—`) |
@@ -178,7 +178,10 @@ own exe path if you want it.
 - If there isn't room above the terminal (maximized / opened at the very top), the bar **hides**
   until there's room again — it never relocates.
 - Bluetooth battery chip **auto-hides** until a device reports a level; hover it for names.
-- Follow loop runs at ~120Hz (8ms); metrics: CPU/RAM 0.8s, battery 1.5s, volume 0.5s, CPU temp 2s.
+- Follow loop runs at 60Hz (16ms, display refresh) and only touches the window when the
+  terminal's geometry actually changes; stats reach the renderer only when a value
+  changed (≤4 pushes/s instead of a 10Hz heartbeat). Metrics: CPU/RAM 0.8s, battery 1.5s,
+  volume 0.5s, CPU temp 2s.
   Expensive counters have hard floors: the GPU Engine counter polls no faster than every 5s
   (its own query dominates the cost), Bluetooth every 30s. Initial polls are staggered so
   the cadences never align.
@@ -199,10 +202,9 @@ own exe path if you want it.
   (`{83DA6326-…},2`). Devices that don't report battery over the standard GATT service
   (some earbuds only report to their vendor app) show `—`. Use `modules.bluetooth.filter`
   to match your earbuds by name.
-- Volume is the default render device master level (Core Audio, read-only).
-- The follow loop repositions the OS window only when the terminal's geometry actually
-  changes (compared via a sub-pixel-stable key), so dragging stays smooth without
-  touching the window manager on every poll.
+- Volume is the default render device master volume (Core Audio, read-only).
+- The desktop-pet presence check is an in-process Toolhelp32 snapshot (~5ms per 3s poll),
+  not a tasklist.exe spawn (~164ms measured per spawn — it dominated the CPU budget).
 
 ## Layout
 

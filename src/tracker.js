@@ -9,7 +9,8 @@
 const { screen } = require('electron');
 const native = require('./native');
 
-const FOLLOW_INTERVAL_MS = 8;    // ~120Hz follow while attached
+const FOLLOW_INTERVAL_MS = 16;   // 60Hz follow while attached (matches display refresh;
+                                 // 120Hz doubled tracker cost for sub-DWM-pixel gains)
 const SCAN_INTERVAL_MS = 400;   // look for new terminal windows while unattached
 
 // Window-class tracking is a Win32 capability. On other platforms there is no

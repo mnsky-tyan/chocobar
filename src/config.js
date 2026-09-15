@@ -41,6 +41,11 @@ const DEFAULTS = {
     fontFamily: "'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace",
     align: 'right',        // right | left | center
     position: 'above',     // above | below
+    // Non-Windows only, static bar: 'content' (default) = small pill hugging
+    // the chips at the top-right corner, out of the way of everything;
+    // 'workarea' = full-width strip pinned to the top of the screen (matches
+    // the bar above a maximized terminal, but covers that 24px band).
+    staticWidth: 'content',
     backdrop: 'acrylic',   // acrylic | solid | none
     backgroundTint: '#FBF2E2',   // pale yellow/pink blend to match terminal acrylic
     backgroundAlpha: 110,        // 0-255 — ACTUAL fill opacity over the blur (0 = clear)
@@ -124,6 +129,10 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "align": "right",
     // bar above or below the terminal window
     "position": "above",
+    // non-Windows only: "content" = corner pill (default, out of the way);
+    // "workarea" = full-width strip at the top of the screen (like above a
+    // maximized terminal)
+    "staticWidth": "content",
     // "acrylic" = blurred see-through, "solid" = opaque, "none" = clear
     "backdrop": "acrylic",
     // the tint color of the box
