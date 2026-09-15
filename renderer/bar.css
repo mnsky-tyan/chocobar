@@ -50,6 +50,21 @@ body {
 #bar.align-left { justify-content: flex-start; }
 #bar.align-center { justify-content: center; }
 
+/* Static top pill (non-Windows, bar.mode === 'static-top'): there is no
+   terminal window to match in width, so the bar floats as a content-hugging
+   pill at the top-right of the work area — same shape language as the Windows
+   strip above a terminal. The window shrinks to this pill via the
+   'bar-content-size' handshake (main.js). */
+#bar.static {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: max-content;
+  height: 100%;
+  padding: 0 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.22);
+}
+
 #segments {
   display: flex;
   align-items: center;

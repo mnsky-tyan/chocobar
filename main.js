@@ -41,19 +41,27 @@ function themePayload(cfg) {
   const { theme, bar } = cfg;
   const a = (bar.backgroundAlpha ?? 110) / 255; // direct: 0 = clear, 255 = solid tint
   const tint = hexToRgb(bar.backgroundTint || '#FBF2E2');
+  const staticTop = process.platform !== 'win32';
   return {
     ...theme,
     bar: {
       height: bar.height, fontSize: bar.fontSize, fontFamily: bar.fontFamily,
       align: bar.align, radius: bar.radius, segmentSpacing: bar.segmentSpacing,
       backdrop: bar.backdrop,
-      // The page paints the ONLY tint layer (the window is transparent:true),
-      // so backgroundAlpha maps 1:1 to real opacity: 0 = invisible, 255 = solid.
+      // Non-Windows has no DWM acrylic: composing the config alpha over an
+      // arbitrary wallpaper reads dark/murky (the Windows look comes from the
+      // LIGHT system blur behind the tint). The closest honest match there is
+      // the tint itself, solid. Windows rendering is untouched.
       bgCss: bar.backdrop === 'solid'
         ? `rgb(${tint.r},${tint.g},${tint.b})`
-        : `rgba(${tint.r},${tint.g},${tint.b},${a.toFixed(3)})`,
+        : staticTop
+          ? `rgb(${tint.r},${tint.g},${tint.b})`
+          : `rgba(${tint.r},${tint.g},${tint.b},${a.toFixed(3)})`,
       // Opaque version for opaque surfaces (dashboard card follows the bar tint)
-      tintOpaque: `rgb(${tint.r},${tint.g},${tint.b})`
+      tintOpaque: `rgb(${tint.r},${tint.g},${tint.b})`,
+      // Static top pill (non-Windows): the renderer hugs content to the right
+      // and reports its width so the window itself can shrink to the pill.
+      mode: staticTop ? 'static-top' : null
     },
     modules: cfg.modules,
     tokens: { showOnBar: cfg.tokens.showOnBar }
@@ -162,12 +170,11 @@ function buildTray() {
   tray.on('double-click', () => openDashboard());
 }
 
-// --- Little Remielle desktop-pet toggle ------------------------------------------
-// The bow chip on the bar: click = launch the exe (detached), click again =
-// kill it. Truth comes from a tasklist poll (not the child handle) so a pet
-// started or stopped outside WizBar is reflected too. The poll only checks for
-// a CSV data row in tasklist's output — the image name itself comes back in
-// the console codepage, so comparing decoded text would be unreliable.
+// --- Little Remielle desktop-pet toggle (WINDOWS-ONLY) --------------------------
+// The pet is a Windows exe managed through tasklist/taskkill and Win32 window
+// placement; there is no portable equivalent, so the module reports "exists:
+// false" (chip renders "—") on other platforms. Private/local module: disabled
+// by default in the shipped config template, enabled from a user config.
 let remielleState = { running: false, exists: false };
 let remiellePid = null;          // pet process id from the last live poll
 let remielleRestorePending = false; // set on launch, consumed by the poll
@@ -279,6 +286,13 @@ function pushRemielle() {
 }
 
 function pollRemielle() {
+  if (process.platform !== 'win32') { // pet exe + tasklist/taskkill are Windows-only
+    if (remielleState.exists !== false) {
+      remielleState = { running: false, exists: false };
+      pushRemielle();
+    }
+    return;
+  }
   const cfg = remielleCfg();
   if (!cfg.enabled) return;
   const exe = cfg.exePath;
@@ -307,9 +321,10 @@ function pollRemielle() {
 }
 
 function toggleRemielle() {
+  if (process.platform !== 'win32') return remielleState; // Windows-only module
   const cfg = remielleCfg();
   const exe = cfg.exePath;
-  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return;
+  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return remielleState;
   if (remielleState.running) {
     remielleSavePosition(); // capture the last spot before the process dies
     execFile('taskkill', ['/IM', path.basename(exe), '/F', '/T'], { windowsHide: true },
@@ -357,25 +372,31 @@ function wireBar() {
     bar.syncZ(hwnd);
   };
 
-  tracker.on('geometry', (rect) => {
-    const bounds = tracker.computeBarBounds(rect, configManager.config.bar);
-    if (!bounds) { bar.hide(); return; }
-    if (configManager.config.general.debug) DBG('geometry', JSON.stringify(rect), '->', JSON.stringify(bounds));
-    bar.applyGeometry(bounds);
-    syncZ(tracker.hwnd); // keep bar directly above the terminal's z-position
-  });
-  tracker.on('visibility', (v) => {
-    if (configManager.config.general.debug) DBG('visibility', v);
-    if (v) {
-      syncZ(tracker.hwnd, true); // re-insert above terminal on restore
-    } else {
-      bar.hide();
-    }
-  });
-  tracker.on('detached', (h) => { DBG('detached', h); bar.hide(); });
+  if (process.platform !== 'win32') {
+    // Non-Windows: the tracker has no Win32 window classes to follow; it emits
+    // a static bar position (top of the primary work area) on display changes.
+    tracker.on('static-geometry', (bounds) => bar.applyGeometry(bounds));
+  } else {
+    tracker.on('geometry', (rect) => {
+      const bounds = tracker.computeBarBounds(rect, configManager.config.bar);
+      if (!bounds) { bar.hide(); return; }
+      if (configManager.config.general.debug) DBG('geometry', JSON.stringify(rect), '->', JSON.stringify(bounds));
+      bar.applyGeometry(bounds);
+      syncZ(tracker.hwnd); // keep bar directly above the terminal's z-position
+    });
+    tracker.on('visibility', (v) => {
+      if (configManager.config.general.debug) DBG('visibility', v);
+      if (v) {
+        syncZ(tracker.hwnd, true); // re-insert above terminal on restore
+      } else {
+        bar.hide();
+      }
+    });
+    tracker.on('detached', (h) => { DBG('detached', h); bar.hide(); });
+  }
   tracker.on('attached', (h) => {
     DBG('attached', h);
-    syncZ(h, true);
+    if (process.platform === 'win32') syncZ(h, true);
     bar.send('theme', themePayload(configManager.config));
   });
 
@@ -386,6 +407,27 @@ function wireBar() {
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
   ipcMain.handle('toggle-remielle', () => { toggleRemielle(); return remielleState; });
   ipcMain.on('open-dash', () => openDashboard());
+  // Static mode (non-Windows): the renderer reports the pill's natural width;
+  // shrink the window to it, anchored top-right of the work area, so the bar
+  // floats like the Windows one instead of spanning the screen (an invisible
+  // full-width strip would also swallow clicks along the top edge).
+  ipcMain.on('bar-content-size', (_e, w) => {
+    if (process.platform === 'win32' || !bar || !bar.win || bar.win.isDestroyed()) return;
+    const width = Math.max(60, Math.ceil(Number(w) || 0));
+    if (!width || bar._lastPillW === width) return;
+    bar._lastPillW = width;
+    try {
+      const { screen } = require('electron');
+      const wa = screen.getPrimaryDisplay().workArea;
+      const margin = 6;
+      bar.win.setBounds({
+        x: wa.x + wa.width - width - margin,
+        y: wa.y + margin,
+        width,
+        height: bar.cfg.bar.height
+      });
+    } catch (_) {}
+  });
   ipcMain.on('bar-context', () => {
     Menu.buildFromTemplate([
       { label: 'Token dashboard', click: () => openDashboard() },
@@ -434,7 +476,8 @@ function wireBar() {
 }
 
 function applyAutostart(enable) {
-  // HKCU\...\Run pointing at the silent launcher.
+  // Windows only: HKCU\...\Run pointing at the silent launcher.
+  if (process.platform !== 'win32') return;
   const { exec } = require('child_process');
   const launcher = path.join(__dirname, 'scripts', 'start-wizbar.vbs');
   const cmd = enable

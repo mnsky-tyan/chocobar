@@ -1,42 +1,75 @@
 'use strict';
-// Win32 interop via koffi: window tracking helpers, battery, master volume.
+// Platform interop. Windows: Win32 via koffi (window tracking, battery, master
+// volume). Other platforms: every DLL load is skipped and each binding becomes
+// a no-op stub (returns 0), so this module loads safely at require time and
+// every helper degrades to "unavailable" instead of crashing the app. Where a
+// portable native source exists (battery, CPU temperature via sysfs on Linux)
+// it is used automatically; genuinely Windows-only features (window-class
+// tracking, DWM chrome, Core Audio volume, HWiNFO shared memory) report null
+// / 'no-section' and the UI shows "—".
 // NOTE: koffi crashes if you call other native functions from inside an EnumWindows
 // callback, so enumeration is two-pass: collect hwnds in the callback, classify after.
-const koffi = require('koffi');
+const fs = require('fs');
+const path = require('path');
+// koffi is required only on Windows (all bindings below are Win32). The require
+// itself is defensive so a broken/unusable native install can never crash the
+// app at load time; every binding degrades to a stub instead.
+let koffi = null;
+try { koffi = require('koffi'); } catch (_) { koffi = null; }
 
-const user32 = koffi.load('user32.dll');
-const dwmapi = koffi.load('dwmapi.dll');
-const kernel32 = koffi.load('kernel32.dll');
-const ole32 = koffi.load('ole32.dll');
+const IS_WIN = process.platform === 'win32';
 
-const RECT = koffi.struct('RECT', { left: 'long', top: 'long', right: 'long', bottom: 'long' });
+function loadLib(name) {
+  try { return (IS_WIN && koffi) ? koffi.load(name) : null; } catch (_) { return null; }
+}
+// Stub bindings return 0 (false/null-ish) so callers' existing failure paths
+// ("GetWindowRect returned null", "no windows found", ...) handle everything.
+const _stub = () => 0;
+function bind(lib, def) {
+  try { return lib ? lib.func(def) : _stub; } catch (_) { return _stub; }
+}
 
-const EnumCb = koffi.proto('int __stdcall EnumCb(uintptr_t hwnd, void *lparam)');
-const EnumWindows = user32.func('int __stdcall EnumWindows(EnumCb *cb, void *lParam)');
-const GetWindowThreadProcessId = user32.func('uintptr_t __stdcall GetWindowThreadProcessId(uintptr_t hwnd, _Out_ uint32_t *pid)');
-const GetClassNameW = user32.func('int __stdcall GetClassNameW(uintptr_t hwnd, _Out_ uint16_t *lpClassName, int nMaxCount)');
-const GetWindowRect = user32.func('int __stdcall GetWindowRect(uintptr_t hwnd, _Out_ RECT *lpRect)');
-const GetClientRect = user32.func('int __stdcall GetClientRect(uintptr_t hwnd, _Out_ RECT *lpRect)');
-const IsWindowVisible = user32.func('int __stdcall IsWindowVisible(uintptr_t hwnd)');
-const IsIconic = user32.func('int __stdcall IsIconic(uintptr_t hwnd)');
-const GetWindowTextLengthW = user32.func('int __stdcall GetWindowTextLengthW(uintptr_t hwnd)');
-const IsWindow = user32.func('int __stdcall IsWindow(uintptr_t hwnd)');
-const SetWindowPos = user32.func('int __stdcall SetWindowPos(uintptr_t hwnd, uintptr_t after, int x, int y, int cx, int cy, int flags)');
-const DwmGetWindowAttribute = dwmapi.func('long __stdcall DwmGetWindowAttribute(uintptr_t hwnd, int attr, _Out_ int *pvAttr, int cbAttr)');
-const DwmGetWindowAttributeRect = dwmapi.func('long __stdcall DwmGetWindowAttribute(uintptr_t hwnd, int attr, _Out_ RECT *pvAttr, int cbAttr)');
-const DwmSetWindowAttribute = dwmapi.func('long __stdcall DwmSetWindowAttribute(uintptr_t hwnd, int attr, int *pvAttr, int cbAttr)');
+// Struct/proto/sizeof helpers that no-op safely when koffi itself could not be
+// loaded (non-Windows or broken native install). The resulting dummy values are
+// only ever passed to stub bindings, which ignore them.
+const kstruct = (name, def) => (koffi ? koffi.struct(name, def) : { __name: name });
+const kproto = (def) => (koffi ? koffi.proto(def) : def);
+const kpointer = (t) => (koffi ? koffi.pointer(t) : t);
+const ksize = (t) => (koffi ? koffi.sizeof(t) : 0);
+
+const user32 = loadLib('user32.dll');
+const dwmapi = loadLib('dwmapi.dll');
+const kernel32 = loadLib('kernel32.dll');
+const ole32 = loadLib('ole32.dll');
+
+const RECT = kstruct('RECT', { left: 'long', top: 'long', right: 'long', bottom: 'long' });
+
+const EnumCb = kproto('int __stdcall EnumCb(uintptr_t hwnd, void *lparam)');
+const EnumWindows = bind(user32, 'int __stdcall EnumWindows(EnumCb *cb, void *lParam)');
+const GetWindowThreadProcessId = bind(user32, 'uintptr_t __stdcall GetWindowThreadProcessId(uintptr_t hwnd, _Out_ uint32_t *pid)');
+const GetClassNameW = bind(user32, 'int __stdcall GetClassNameW(uintptr_t hwnd, _Out_ uint16_t *lpClassName, int nMaxCount)');
+const GetWindowRect = bind(user32, 'int __stdcall GetWindowRect(uintptr_t hwnd, _Out_ RECT *lpRect)');
+const GetClientRect = bind(user32, 'int __stdcall GetClientRect(uintptr_t hwnd, _Out_ RECT *lpRect)');
+const IsWindowVisible = bind(user32, 'int __stdcall IsWindowVisible(uintptr_t hwnd)');
+const IsIconic = bind(user32, 'int __stdcall IsIconic(uintptr_t hwnd)');
+const GetWindowTextLengthW = bind(user32, 'int __stdcall GetWindowTextLengthW(uintptr_t hwnd)');
+const IsWindow = bind(user32, 'int __stdcall IsWindow(uintptr_t hwnd)');
+const SetWindowPos = bind(user32, 'int __stdcall SetWindowPos(uintptr_t hwnd, uintptr_t after, int x, int y, int cx, int cy, int flags)');
+const DwmGetWindowAttribute = bind(dwmapi, 'long __stdcall DwmGetWindowAttribute(uintptr_t hwnd, int attr, _Out_ int *pvAttr, int cbAttr)');
+const DwmGetWindowAttributeRect = bind(dwmapi, 'long __stdcall DwmGetWindowAttribute(uintptr_t hwnd, int attr, _Out_ RECT *pvAttr, int cbAttr)');
+const DwmSetWindowAttribute = bind(dwmapi, 'long __stdcall DwmSetWindowAttribute(uintptr_t hwnd, int attr, int *pvAttr, int cbAttr)');
 const DWMWA_CLOAKED = 14;
 const DWMWA_EXTENDED_FRAME_BOUNDS = 9;   // visible frame (excludes invisible resize borders)
 const DWMWA_WINDOW_CORNER_PREFERENCE = 33;
 const DWMWCP_ROUND = 2;
 
-const SYSTEM_POWER_STATUS = koffi.struct('SYSTEM_POWER_STATUS', {
+const SYSTEM_POWER_STATUS = kstruct('SYSTEM_POWER_STATUS', {
   ACLineStatus: 'uint8', BatteryFlag: 'uint8', BatteryLifePercent: 'uint8',
   Reserved1: 'uint8', BatteryLifeTime: 'uint32', BatteryFullLifeTime: 'uint32'
 });
-const GetSystemPowerStatus = kernel32.func('int __stdcall GetSystemPowerStatus(_Out_ SYSTEM_POWER_STATUS *sps)');
-const GetWindowLongW = user32.func('long __stdcall GetWindowLongW(uintptr_t hwnd, int nIndex)');
-const SetWindowLongW = user32.func('long __stdcall SetWindowLongW(uintptr_t hwnd, int nIndex, long dwNewLong)');
+const GetSystemPowerStatus = bind(kernel32, 'int __stdcall GetSystemPowerStatus(_Out_ SYSTEM_POWER_STATUS *sps)');
+const GetWindowLongW = bind(user32, 'long __stdcall GetWindowLongW(uintptr_t hwnd, int nIndex)');
+const SetWindowLongW = bind(user32, 'long __stdcall SetWindowLongW(uintptr_t hwnd, int nIndex, long dwNewLong)');
 const GWL_EXSTYLE = -20;
 const WS_EX_TOPMOST = 0x8;
 const WS_EX_TOOLWINDOW = 0x80;
@@ -59,9 +92,9 @@ function setToolWindow(hwnd, enable) {
     return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) === (enable ? WS_EX_TOOLWINDOW : 0);
   } catch (_) { return false; }
 }
-const CoInitializeEx = ole32.func('long __stdcall CoInitializeEx(void *pvReserved, int dwCoInit)');
-const GUID = koffi.struct('GUID', { Data1: 'uint32', Data2: 'uint16', Data3: 'uint16', Data4: 'uint8[8]' });
-const CoCreateInstance = ole32.func('long __stdcall CoCreateInstance(const GUID *rclsid, void *pUnkOuter, int dwClsContext, const GUID *riid, _Out_ void **ppv)');
+const CoInitializeEx = bind(ole32, 'long __stdcall CoInitializeEx(void *pvReserved, int dwCoInit)');
+const GUID = kstruct('GUID', { Data1: 'uint32', Data2: 'uint16', Data3: 'uint16', Data4: 'uint8[8]' });
+const CoCreateInstance = bind(ole32, 'long __stdcall CoCreateInstance(const GUID *rclsid, void *pUnkOuter, int dwClsContext, const GUID *riid, _Out_ void **ppv)');
 
 // --- window helpers -----------------------------------------------------------
 
@@ -82,7 +115,7 @@ function getWindowRect(hwnd) {
 // Visible frame bounds (what the user perceives as the window edge).
 function getFrameBounds(hwnd) {
   const rc = {};
-  if (DwmGetWindowAttributeRect(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, rc, koffi.sizeof(RECT)) === 0) {
+  if (DwmGetWindowAttributeRect(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, rc, ksize(RECT)) === 0) {
     return rc;
   }
   return getWindowRect(hwnd);
@@ -166,9 +199,9 @@ function raiseAboveTerminalChrome(barHwnd, terminalHwnd) {
 // process. Windows denies SetForegroundWindow to processes that didn't receive
 // the last input — the classic workaround is a synthetic ALT tap, which grants
 // the calling process foreground rights for the next call.
-const keybd_event = user32.func('void __stdcall keybd_event(uint8_t key, uint8_t scan, uint32_t flags, uintptr_t extra)');
-const SetForegroundWindow = user32.func('int __stdcall SetForegroundWindow(uintptr_t hwnd)');
-const GetForegroundWindow = user32.func('uintptr_t __stdcall GetForegroundWindow()');
+const keybd_event = bind(user32, 'void __stdcall keybd_event(uint8_t key, uint8_t scan, uint32_t flags, uintptr_t extra)');
+const SetForegroundWindow = bind(user32, 'int __stdcall SetForegroundWindow(uintptr_t hwnd)');
+const GetForegroundWindow = bind(user32, 'uintptr_t __stdcall GetForegroundWindow()');
 const HWND_TOP = 0;
 function bringToFront(hwnd) {
   try {
@@ -215,13 +248,13 @@ function removeBorderColor(hwnd) {
 // NOTE: tried for the bar — renders MOSAIC/blocky on Win11. The bar now uses
 // backgroundMaterial + setImmersiveDarkMode(false) instead. Kept here only as
 // reference for future experiments.
-const ACCENT_POLICY = koffi.struct('ACCENT_POLICY', {
+const ACCENT_POLICY = kstruct('ACCENT_POLICY', {
   AccentState: 'int', AccentFlags: 'int', GradientColor: 'uint32', AnimationId: 'int'
 });
-const WINCOMPATTRDATA = koffi.struct('WINCOMPATTRDATA', {
-  Attribute: 'int', Data: koffi.pointer(ACCENT_POLICY), SizeOfData: 'int'
+const WINCOMPATTRDATA = kstruct('WINCOMPATTRDATA', {
+  Attribute: 'int', Data: kpointer(ACCENT_POLICY), SizeOfData: 'int'
 });
-const SetWindowCompositionAttribute = user32.func('int __stdcall SetWindowCompositionAttribute(uintptr_t hwnd, WINCOMPATTRDATA *data)');
+const SetWindowCompositionAttribute = bind(user32, 'int __stdcall SetWindowCompositionAttribute(uintptr_t hwnd, WINCOMPATTRDATA *data)');
 
 function hwndNumberFromBuffer(buf) {
   if (!buf || buf.length < 4) return null;
@@ -261,8 +294,9 @@ function listWindowsByClass(className) {
 }
 
 // --- battery -------------------------------------------------------------------
+// Windows: GetSystemPowerStatus. Linux: /sys/class/power_supply (AC + battery).
 
-function getBattery() {
+function getBatteryWin() {
   const sps = {};
   try {
     if (!GetSystemPowerStatus(sps)) return null;
@@ -281,6 +315,48 @@ function getBattery() {
   }
 }
 
+// Linux: read every /sys/class/power_supply entry once per poll. AC adapters
+// carry type "Mains"+online; batteries carry capacity + status. No battery
+// entries at all = desktop ("AC" chip, same as Windows' noBattery case).
+function getBatteryLinux(dir) {
+  dir = dir || '/sys/class/power_supply';
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch (_) { return null; }
+  let battery = null, ac = false;
+  for (const name of entries) {
+    const base = path.join(dir, name);
+    const type = readSysfsFirstLine(path.join(base, 'type'));
+    if (type === 'Battery') {
+      const cap = parseInt(readSysfsFirstLine(path.join(base, 'capacity')), 10);
+      const status = (readSysfsFirstLine(path.join(base, 'status')) || '').toLowerCase();
+      const cand = {
+        percent: Number.isNaN(cap) ? null : cap,
+        charging: status === 'charging',
+        ac: status === 'charging' || status === 'full' || status === 'not charging'
+      };
+      if (!battery || battery.percent == null) battery = cand;
+    } else if (type === 'Mains' || type === 'USB' || type === 'Wireless') {
+      if (readSysfsFirstLine(path.join(base, 'online')) === '1') ac = true;
+    }
+  }
+  if (!battery) return { percent: null, ac: true, charging: false, noBattery: true };
+  battery.ac = battery.ac || ac;
+  battery.noBattery = false;
+  return battery;
+}
+
+function readSysfsFirstLine(file) {
+  try {
+    const v = fs.readFileSync(file, 'utf8');
+    const z = v.indexOf('\n');
+    return (z >= 0 ? v.slice(0, z) : v).trim();
+  } catch (_) { return ''; }
+}
+
+function getBattery() {
+  return IS_WIN ? getBatteryWin() : getBatteryLinux();
+}
+
 // --- master volume via Core Audio (IAudioEndpointVolume) ------------------------
 
 const CLSID_MMDeviceEnumerator = { Data1: 0xBCDE0395, Data2: 0xE52F, Data3: 0x467C, Data4: [0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E] };
@@ -289,10 +365,10 @@ const IID_IAudioEndpointVolume = { Data1: 0x5CDF2C82, Data2: 0x841E, Data3: 0x45
 
 const volumeState = { ok: false, endpointVolume: null, error: null };
 
-const protoGetDefaultEP = koffi.proto('long __stdcall GetDefaultAudioEndpoint(void *self, int flow, int role, _Out_ void **ppDevice)');
-const protoActivate = koffi.proto('long __stdcall Activate(void *self, const GUID *iid, int clsCtx, void *activationParams, _Out_ void **ppInterface)');
-const protoGetVolume = koffi.proto('long __stdcall GetMasterVolumeLevelScalar(void *self, _Out_ float *pfLevel)');
-const protoGetMute = koffi.proto('long __stdcall GetMute(void *self, _Out_ int *pbMute)');
+const protoGetDefaultEP = kproto('long __stdcall GetDefaultAudioEndpoint(void *self, int flow, int role, _Out_ void **ppDevice)');
+const protoActivate = kproto('long __stdcall Activate(void *self, const GUID *iid, int clsCtx, void *activationParams, _Out_ void **ppInterface)');
+const protoGetVolume = kproto('long __stdcall GetMasterVolumeLevelScalar(void *self, _Out_ float *pfLevel)');
+const protoGetMute = kproto('long __stdcall GetMute(void *self, _Out_ int *pbMute)');
 
 function initVolume(role) {
   try { CoInitializeEx(null, 0x2 /* APARTMENTTHREADED */); } catch (_) { /* already initialized - fine */ }
@@ -354,15 +430,15 @@ function forceSize(hwnd, wPhys, hPhys) {
 // when "Shared Memory Support" is enabled in its settings. Mapping it read-only
 // needs no helper and no elevation; the section dies with the HWiNFO process, so
 // an absent map is the normal "not running / setting off" case and returns null.
-const OpenFileMappingW = kernel32.func('uintptr_t __stdcall OpenFileMappingW(uint32_t access, int inherit, str16 name)');
-const MapViewOfFile = kernel32.func('void *__stdcall MapViewOfFile(uintptr_t h, uint32_t access, uint32_t hi, uint32_t lo, size_t bytes)');
-const UnmapViewOfFile = kernel32.func('int __stdcall UnmapViewOfFile(void *p)');
-const CloseHandle = kernel32.func('int __stdcall CloseHandle(uintptr_t h)');
-const HWI_MBI = koffi.struct('HWI_MBI', {
+const OpenFileMappingW = bind(kernel32, 'uintptr_t __stdcall OpenFileMappingW(uint32_t access, int inherit, str16 name)');
+const MapViewOfFile = bind(kernel32, 'void *__stdcall MapViewOfFile(uintptr_t h, uint32_t access, uint32_t hi, uint32_t lo, size_t bytes)');
+const UnmapViewOfFile = bind(kernel32, 'int __stdcall UnmapViewOfFile(void *p)');
+const CloseHandle = bind(kernel32, 'int __stdcall CloseHandle(uintptr_t h)');
+const HWI_MBI = kstruct('HWI_MBI', {
   BaseAddress: 'void *', AllocationBase: 'void *', AllocationProtect: 'uint32', pad1: 'uint32',
   RegionSize: 'size_t', State: 'uint32', Protect: 'uint32', Type: 'uint32', pad2: 'uint32'
 });
-const VirtualQuery = kernel32.func('size_t __stdcall VirtualQuery(void *addr, _Out_ HWI_MBI *mbi, size_t len)');
+const VirtualQuery = bind(kernel32, 'size_t __stdcall VirtualQuery(void *addr, _Out_ HWI_MBI *mbi, size_t len)');
 
 const HWINFO_MAP = 'Global\\HWiNFO_SENS_SM';
 
@@ -489,12 +565,61 @@ function strLat(bytes) {
   return (z >= 0 ? bytes.toString('latin1', 0, z) : bytes.toString('latin1')).trim();
 }
 
+// --- Linux CPU temperature via sysfs (hwmon + thermal zones) --------------------
+// Portable fallback for getHwinfoTemp's STATE contract when HWiNFO cannot exist.
+// hwmon first (labeled sensors: "Package id 0", "Tctl", ...), preferring CPU-ish
+// labels; then thermal zones preferring x86_pkg_temp; else the hottest zone.
+function getCpuTempLinux(hwmonDir, tzDir) {
+  hwmonDir = hwmonDir || '/sys/class/hwmon';
+  tzDir = tzDir || '/sys/class/thermal';
+  const CPU_RE = /cpu|package|tctl|tdie|soc|core/i;
+  try {
+    const devs = fs.readdirSync(hwmonDir);
+    const labeled = [];
+    for (const d of devs) {
+      const base = path.join(hwmonDir, d);
+      for (const f of fs.readdirSync(base)) {
+        if (!/^temp\d+_input$/.test(f)) continue;
+        const c = parseInt(readSysfsFirstLine(path.join(base, f)), 10) / 1000;
+        if (!(c > 0 && c < 150)) continue;
+        const label = readSysfsFirstLine(path.join(base, f.replace('_input', '_label'))) || d;
+        labeled.push({ c: Math.round(c * 10) / 10, label, sensor: label, cpu: CPU_RE.test(label) });
+      }
+    }
+    if (labeled.length) {
+      const pkg = labeled.find((t) => /package/i.test(t.label));
+      if (pkg) return { state: 'ok', c: pkg.c, label: pkg.label };
+      const cpu = labeled.filter((t) => t.cpu);
+      if (cpu.length) return { state: 'ok', c: Math.max(...cpu.map((t) => t.c)), label: cpu[0].label };
+      return { state: 'ok', c: Math.max(...labeled.map((t) => t.c)), label: labeled[0].label };
+    }
+    const zones = fs.readdirSync(tzDir);
+    const temps = [];
+    for (const z of zones) {
+      if (!z.startsWith('thermal_zone')) continue;
+      const base = path.join(tzDir, z);
+      const c = parseInt(readSysfsFirstLine(path.join(base, 'temp')), 10) / 1000;
+      if (!(c > 0 && c < 150)) continue;
+      temps.push({ c: Math.round(c * 10) / 10, type: readSysfsFirstLine(path.join(base, 'type')) || z });
+    }
+    if (!temps.length) return { state: 'no-section' };
+    const pkg = temps.find((t) => /x86_pkg_temp|cpu/i.test(t.type));
+    if (pkg) return { state: 'ok', c: pkg.c, label: pkg.type };
+    const hot = temps.reduce((a, b) => (b.c > a.c ? b : a));
+    return { state: 'ok', c: hot.c, label: hot.type };
+  } catch (_) {
+    return { state: 'no-section' };
+  }
+}
+
 // Returns a STATE object, never null:
 //   { state: 'ok', c, label }   live CPU temperature
 //   { state: 'no-temp' }        section live but no CPU temperature reading
 //   { state: 'no-section' }     HWiNFO not running, shm setting off, or HWiNFO
-//                               restarting (sections die with the process)
+//                               restarting (sections die with the process);
+//                               on Linux: no sysfs sensor readable either
 function getHwinfoTemp(mapName) {
+  if (!IS_WIN) return getCpuTempLinux(); // portable sysfs reader, same STATE shape
   const names = mapName ? [mapName] : [HWINFO_MAP2, HWINFO_MAP];
   for (const name of names) {
     let h = null, p = null;
@@ -506,7 +631,7 @@ function getHwinfoTemp(mapName) {
       // RegionSize bounds every later read: decoding past a mapped section would crash.
       const mbi = {};
       let bytes = 0;
-      if (VirtualQuery(p, mbi, koffi.sizeof(HWI_MBI)) === koffi.sizeof(HWI_MBI)) bytes = Number(mbi.RegionSize) || 0;
+      if (VirtualQuery(p, mbi, ksize(HWI_MBI)) === ksize(HWI_MBI)) bytes = Number(mbi.RegionSize) || 0;
       if (bytes < 48) continue;
       const get = (o, n) => {
         if (o + n > bytes) throw new Error('hwinfo read past section');
@@ -531,17 +656,17 @@ function getHwinfoTemp(mapName) {
 // process is alive (~290ms of CPU per spawn here); an in-process snapshot costs
 // ~5ms. Returns the matching pid, or null when no process carries that image name.
 const TH32CS_SNAPPROCESS = 0x2;
-const PROCESSENTRY32W = koffi.struct('PROCESSENTRY32W', {
+const PROCESSENTRY32W = kstruct('PROCESSENTRY32W', {
   dwSize: 'uint32', cntUsage: 'uint32', th32ProcessID: 'uint32',
   th32DefaultHeapID: 'uintptr_t', th32ModuleID: 'uint32', cntThreads: 'uint32',
   th32ParentProcessID: 'uint32', pcPriClassBase: 'long', dwFlags: 'uint32',
   szExeFile: 'uint16[260]'
 });
-const CreateToolhelp32Snapshot = kernel32.func('uintptr_t __stdcall CreateToolhelp32Snapshot(uint32_t flags, uint32_t th32ProcessID)');
+const CreateToolhelp32Snapshot = bind(kernel32, 'uintptr_t __stdcall CreateToolhelp32Snapshot(uint32_t flags, uint32_t th32ProcessID)');
 // The entry is _Inout_, not _Out_: Process32FirstW validates dwSize, so our
 // pre-filled size must pass through instead of a zeroed output buffer.
-const Process32FirstW = kernel32.func('int __stdcall Process32FirstW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
-const Process32NextW = kernel32.func('int __stdcall Process32NextW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
+const Process32FirstW = bind(kernel32, 'int __stdcall Process32FirstW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
+const Process32NextW = bind(kernel32, 'int __stdcall Process32NextW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
 
 function findProcessIdByName(imageName) {
   const needle = String(imageName || '').toLowerCase();
@@ -549,7 +674,7 @@ function findProcessIdByName(imageName) {
   const h = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (!h || h === -1 || h === -1n) return null;
   try {
-    const entry = { dwSize: koffi.sizeof(PROCESSENTRY32W) };
+    const entry = { dwSize: ksize(PROCESSENTRY32W) };
     for (let ok = Process32FirstW(h, entry); ok; ok = Process32NextW(h, entry)) {
       const chars = entry.szExeFile;
       let name = '';
@@ -565,8 +690,8 @@ function findProcessIdByName(imageName) {
 }
 
 // --- window discovery by pid + monitor geometry (Little Remielle pet) ----------
-const MonitorProc = koffi.proto('int __stdcall MonitorProc(uintptr_t hMonitor, void *hdc, void *clipRect, void *data)');
-const EnumDisplayMonitors = user32.func('int __stdcall EnumDisplayMonitors(void *hdc, void *clipRect, MonitorProc *proc, void *data)');
+const MonitorProc = kproto('int __stdcall MonitorProc(uintptr_t hMonitor, void *hdc, void *clipRect, void *data)');
+const EnumDisplayMonitors = bind(user32, 'int __stdcall EnumDisplayMonitors(void *hdc, void *clipRect, MonitorProc *proc, void *data)');
 
 // Visible top-level windows of a process, largest-area first (the pet's main
 // window wins over helper popups). Same two-pass rule as listWindowsByClass:
