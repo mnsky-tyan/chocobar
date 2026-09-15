@@ -296,20 +296,27 @@ function listWindowsByClass(className) {
 // --- battery -------------------------------------------------------------------
 // Windows: GetSystemPowerStatus. Linux: /sys/class/power_supply (AC + battery).
 
+// Pure decision so both the shape below and the tests agree on semantics:
+//   - charging (green): on AC and the flag says charging. Windows DROPS the
+//     charging flag at 100% on AC (top-of-charge), so full-on-AC counts as
+//     charging too — a plugged-in laptop shows green at every percent.
+//   - a charging flag stuck set after unplug is neutralized by gating on AC.
+function batteryFromPowerStatus(sps) {
+  const onAc = sps.ACLineStatus === 1;
+  const pct = sps.BatteryLifePercent <= 100 ? sps.BatteryLifePercent : null;
+  return {
+    percent: pct,
+    ac: onAc,
+    charging: onAc && ((sps.BatteryFlag & 0x8) !== 0 || (pct != null && pct >= 100)),
+    noBattery: (sps.BatteryFlag & 0x80) !== 0
+  };
+}
+
 function getBatteryWin() {
   const sps = {};
   try {
     if (!GetSystemPowerStatus(sps)) return null;
-    return {
-      percent: sps.BatteryLifePercent <= 100 ? sps.BatteryLifePercent : null,
-      ac: sps.ACLineStatus === 1,
-      // BatteryFlag is unreliable (Windows keeps 0x8 set after unplug and
-      // drops it at 100% on AC). Gate on ACLineStatus: charging = on AC and
-      // not yet full.
-      charging: sps.ACLineStatus === 1 && (sps.BatteryFlag & 0x8) !== 0 &&
-        sps.BatteryLifePercent < 100,
-      noBattery: (sps.BatteryFlag & 0x80) !== 0
-    };
+    return batteryFromPowerStatus(sps);
   } catch {
     return null;
   }
@@ -341,6 +348,9 @@ function getBatteryLinux(dir) {
   }
   if (!battery) return { percent: null, ac: true, charging: false, noBattery: true };
   battery.ac = battery.ac || ac;
+  // Full-on-AC reads status "Full", not "charging" — still a plugged-in laptop,
+  // so it renders charging (green), same as the Windows source.
+  if (battery.ac && (battery.percent != null && battery.percent >= 100)) battery.charging = true;
   battery.noBattery = false;
   return battery;
 }
@@ -786,7 +796,7 @@ module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
   setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
-  getBattery, getBatteryLinux, getCpuTempLinux, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
+  getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName,
   getForegroundWindow: () => GetForegroundWindow()
 };
