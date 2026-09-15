@@ -304,7 +304,7 @@ class MetricsEngine extends require('events') {
 
   _agentsEmit() {
     const entries = [...this._agentsMap.values()];
-    // blocked still means the agent needs its captain - count it as live.
+    // blocked still means the agent needs attention - count it as live.
     const working = entries.filter((st) => st === 'working' || st === 'blocked').length;
     const total = entries.length;
     const note = total === 0 ? 'herdr reachable, no agent panes' : `${working}/${total} working`;
@@ -330,7 +330,7 @@ class MetricsEngine extends require('events') {
     if (this._agentsFileTimer) { clearInterval(this._agentsFileTimer); this._agentsFileTimer = null; }
   }
 
-  // The main firstmate keeps a tiny status file updated; JSON preferred,
+  // The fleet's status file (if configured); JSON preferred,
   // {"state":"working"|"idle","agents":N,"note":"..."}, but a bare first line
   // containing "working"/"idle" is accepted too. Missing file = null (dim dash).
   _pollAgents() {

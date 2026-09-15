@@ -278,7 +278,7 @@ function listWindowsByClass(className) {
       // Windows Terminal keeps ghost clones (no title, stale on-screen rect,
       // invisible yet "visible" to every DWM check) that hijack the tracker —
       // following one hides the bar forever. A real terminal always has a
-      // title (e.g. "MNSKY_LAPTOP: harness") and is never iconic while shown.
+      // title (e.g. the live terminal's host/title text) and is never iconic while shown.
       if (!GetWindowTextLengthW(hwnd)) continue;
       if (IsIconic(hwnd)) continue;
       // Minimized windows park at physical (-32000,-32000); nothing real is

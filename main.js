@@ -64,7 +64,7 @@ function themePayload(cfg) {
       mode: staticTop ? 'static-top' : null
     },
     modules: cfg.modules,
-    tokens: { showOnBar: cfg.tokens.showOnBar }
+    tokens: { showOnBar: cfg.tokens.showOnBar && !!cfg.tokens.enabled }
   };
 }
 
@@ -191,7 +191,7 @@ function remiellePosFile() { return path.join(APP_DIR, 'remielle-position.json')
  // restores it on every launch - that file, not WizBar, was what put the
  // figure back at the wrong spot on every toggle. Make WizBar the authority:
  // before launching, write the saved position into the pet’s own settings so
- // the pet places itself where the captain left it. Coordinates are physical
+ // the pet places itself where the user left it. Coordinates are physical
  // pixels, same space as GetWindowRect; the sprite scale field is preserved.
 function remielleSyncPetConfig(x, y) {
   const cfg = remielleCfg();
@@ -206,13 +206,13 @@ function remielleSyncPetConfig(x, y) {
 
 // Remember where the figure is: its window rect, written while it runs and
 // right before we kill it, so the next toggle and the next app restart can
-// put it back exactly where the captain left it.
+// put it back exactly where the user left it.
 function remielleSavePosition() {
   if (!remiellePid) return;
   // A poll must never record the pet’s transient states: while a restore is
   // pending/running the window is being placed by us, and the built-in default
   // spot is exactly what the restore exists to move it away from. Saving
-  // either would clobber the captain’s position and poison every later
+  // either would clobber the user’s position and poison every later
   // toggle (the works-once-or-twice-then-fails bug).
   if (remielleRestorePending || remielleRestoreActive) return;
   try {
@@ -256,7 +256,7 @@ function remielleRestorePosition(pid) {
     const sig = rc.left + ',' + rc.top;
     if (!moved) {
       // where the pet placed itself is its built-in default: remember it so
-      // poll-time saves can never record it (that clobbered the captain's
+      // poll-time saves can never record it (that clobbered the user's
       // position and broke every toggle after the first couple)
       remielleDefaultSig = sig;
       native.moveWindow(hwnds[0], pos.x, pos.y);
@@ -266,8 +266,8 @@ function remielleRestorePosition(pid) {
     }
     // The pet’s own startup init can re-snap the window to its default after
     // our move; re-assert for a bounded window. The moment the rect is
-    // neither the default nor the saved spot, the captain is dragging it -
-    // stand down immediately and never fight the captain.
+    // neither the default nor the saved spot, the user is dragging it -
+    // stand down immediately and never fight the user.
     if (sig === remielleDefaultSig && reasserts < 30) {
       native.moveWindow(hwnds[0], pos.x, pos.y);
       reasserts++;

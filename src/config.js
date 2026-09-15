@@ -61,15 +61,17 @@ const DEFAULTS = {
   modules: {
     gpu:      { enabled: true, mode: 'sum', intervalMs: 1200 },
     cpu:      { enabled: true, intervalMs: 800, warnAt: 85 },
-    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // via HWiNFO shared memory
+    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // via HWiNFO shared memory (Windows)
     ram:      { enabled: true, intervalMs: 800, warnAt: 90 },
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
-    agents:   { enabled: true, intervalMs: 5000, file: '~/work/harness/firstmate/state/fleet-status.json' },
-    // Little Remielle desktop pet: a bow chip pinned next to the token chip;
-    // click = start the exe, click again = kill it.
-    remielle: { enabled: true, exePath: 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe' },
+    // Agent fleet chip (herdr orchestrator). Off by default: point it at your
+    // own fleet via `file` (status JSON) and/or `sockPath` (herdr socket).
+    agents:   { enabled: false, intervalMs: 5000, file: '', sockPath: '' },
+    // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
+    // public build: set enabled + exePath in your own config to use it.
+    remielle: { enabled: false, exePath: '' },
     clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
   },
   terminal: {
@@ -77,17 +79,21 @@ const DEFAULTS = {
     reattachToExisting: false   // after followed window closes, wait for a NEW window
   },
   tokens: {
-    enabled: true,
+    enabled: false,        // master switch for the usage chip + dashboard
     showOnBar: true,
     rescanMinutes: 1,
     heatmapWeeks: 26,
+    // Usage sources — all opt-in, all local read-only. Enable the ones you use
+    // and point them at your own stores; with none enabled the bar and the
+    // dashboard stay empty.
     sources: {
-      zcode:    { enabled: true, dbPath: '~/.zcode/cli/db/db.sqlite' },
-      zai:      { enabled: true, sessionsDir: '~/.zai/agent/sessions' },
-      opencode: { enabled: true, storageDir: '~/.local/share/opencode/storage/message' },
+      zcode:    { enabled: false, dbPath: '' },   // e.g. ~/.zcode/cli/db/db.sqlite
+      zai:      { enabled: false, sessionsDir: '' }, // e.g. ~/.zai/agent/sessions
+      pi:       { enabled: false, sessionsDir: '' }, // e.g. ~/.pi/agent/sessions
+      opencode: { enabled: false, storageDir: '' },   // e.g. ~/.local/share/opencode/storage/message
       // Xiaomi MiMo AI desktop: reads the app's local HTTP API while it runs
-      // (nothing to configure — port+token come from the app's desktop-api.json).
-      mimo:     { enabled: true }
+      // (port + token auto-discovered from the app's own desktop-api.json).
+      mimo:     { enabled: false }
     }
   },
   general: {
@@ -153,13 +159,16 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // earbud/BT battery; shows "—" unless a device reports via Windows' standard
     // battery property (many earbuds only report to their vendor app)
     "bluetooth": { "enabled": true, "intervalMs": 30000, "filter": "", "maxDevices": 2 },
-    // firstmate fleet activity chip; the file is a tiny JSON the main firstmate
-    // keeps updated: {"state":"working"|"idle","agents":2,"note":"optional"} —
-    // a bare first line saying working/idle also works. Missing file shows "—".
-    "agents":    { "enabled": true, "intervalMs": 5000, "file": "~/work/harness/firstmate/state/fleet-status.json" },
-    // Little Remielle desktop pet: a bow chip pinned next to the token chip.
-    // Click to launch the exe, click again to stop it ("on"/"off").
-    "remielle":  { "enabled": true, "exePath": "C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe" },
+    // Agent fleet chip (herdr orchestrator), off by default. Two sources:
+    // "sockPath" = herdr server socket for live push updates (Windows serves an
+    // AF_UNIX socket over \\.\pipe\<path>; other platforms connect directly);
+    // "file" = fallback status JSON: {"state":"working"|"idle","agents":2,
+    // "note":"optional"} — a bare first line saying working/idle also works.
+    "agents":    { "enabled": false, "intervalMs": 5000, "sockPath": "", "file": "" },
+    // Desktop-pet toggle chip (WINDOWS-ONLY, private module, off by default).
+    // Set enabled + exePath here to show the bow chip: click launches the exe,
+    // click again stops it ("on"/"off").
+    "remielle":  { "enabled": false, "exePath": "" },
     // {MMM} month, {dd} day, {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
   },
@@ -171,18 +180,23 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "reattachToExisting": false
   },
   "tokens": {
-    "enabled": true,
+    // master switch: false hides the usage chip and keeps the dashboard empty
+    "enabled": false,
     "showOnBar": true,
     // minutes between usage scans (drives the dashboard's live refresh)
     "rescanMinutes": 1,
     "heatmapWeeks": 26,
+    // usage sources — all opt-in, all local read-only. Enable the ones you use
+    // and point them at your own stores; the typical locations are shown in
+    // the comments. With none enabled, bar + dashboard stay empty.
     "sources": {
-      "zcode":    { "enabled": true, "dbPath": "~/.zcode/cli/db/db.sqlite" },
-      "zai":      { "enabled": true, "sessionsDir": "~/.zai/agent/sessions" },
-      "opencode": { "enabled": true, "storageDir": "~/.local/share/opencode/storage/message" },
+      "zcode":    { "enabled": false, "dbPath": "" },       // e.g. "~/.zcode/cli/db/db.sqlite"
+      "zai":      { "enabled": false, "sessionsDir": "" },  // e.g. "~/.zai/agent/sessions"
+      "pi":       { "enabled": false, "sessionsDir": "" },  // e.g. "~/.pi/agent/sessions"
+      "opencode": { "enabled": false, "storageDir": "" },   // e.g. "~/.local/share/opencode/storage/message"
       // Xiaomi MiMo AI desktop app token usage, read live from its local API
       // while the app runs (auto-discovered; nothing to configure).
-      "mimo":     { "enabled": true }
+      "mimo":     { "enabled": false }
     }
   },
   "general": {
