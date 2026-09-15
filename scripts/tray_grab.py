@@ -1,5 +1,6 @@
 # DPI-aware native-resolution grab of the taskbar tray corner.
 import ctypes
+import os
 ctypes.windll.user32.SetProcessDPIAware()
 from PIL import Image, ImageGrab
 
