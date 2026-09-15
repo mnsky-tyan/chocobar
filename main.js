@@ -72,11 +72,15 @@ function statsLoop() {
   // Push only when a poll actually changed a value (consumeDirty), and send at
   // most every 250ms. The old 100ms heartbeat serialized + IPC'd the full
   // snapshot ten times a second whether or not anything moved, making the
-  // renderer the highest-CPU process in the app.
+  // renderer the highest-CPU process in the app. The bar gates are checked
+  // BEFORE consuming the dirty flag: a change observed while the bar is
+  // hidden or destroyed must stay pending and flush on restore — consuming
+  // it first would drop the send and leave stale chip values until some
+  // later poll changed a value again.
   setInterval(() => {
-    if (!metrics || !metrics.consumeDirty()) return;
-    if (!bar || !bar.win || bar.win.isDestroyed()) return;
+    if (!metrics || !bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
+    if (!metrics.consumeDirty()) return;
     bar.send('stats', metrics.snapshot());
   }, 250);
 }
