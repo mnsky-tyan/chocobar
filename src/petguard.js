@@ -6,7 +6,7 @@
 //   1. She loses her topmost band - something calls SetWindowPos on her without
 //      the topmost flag (fullscreen apps, some launchers, her own init), and
 //      WS_EX_TOPMOST reads back clear. Nothing restores it, so the occlusion
-//      sticks until the captain clicks her.
+//      sticks until the user clicks her.
 //   2. She KEEPS the bit and is still not in front. Among topmost windows the
 //      one raised last wins, so a window that raises itself afterwards sits over
 //      her while isTopmost() keeps reporting true. Clicking her "levitates" her

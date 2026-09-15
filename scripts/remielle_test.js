@@ -6,7 +6,7 @@ const { spawn, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const exe = 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe';
+const exe = ''; // point at your own pet executable (modules.remielle.exePath)
 const img = path.basename(exe);
 
 const probe = () => new Promise((res) => {

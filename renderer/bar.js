@@ -97,7 +97,7 @@ function rebuildSegments() {
   const m = theme.modules || {};
   const pinned = (theme.bar.align || 'right') === 'right';
 
-  // Captain’s chip order: bowtie leftmost, token dashboard second. With the
+  // Chip order: bowtie leftmost, token dashboard second. With the
   // right-aligned group both chips pin left of #segments as direct children
   // of #bar, and the auto margin that pushes the module group right sits on
   // the LAST pinned chip.

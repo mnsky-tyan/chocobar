@@ -50,6 +50,10 @@ function totalOfAgg(a) {
 function render() {
   if (!agg) return;
 
+  // Empty state: no usage source configured — explain instead of bare zeros.
+  const noSources = (agg.sourcesEnabled || 0) === 0;
+  $('no-sources').classList.toggle('hidden', !noSources);
+
   // --- stat cards
   const todayReq = Object.values(agg.today.apps || {}).reduce((n, a) => n + a.requests, 0);
   $('statcards').innerHTML =

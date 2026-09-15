@@ -81,12 +81,14 @@ class TokenTracker extends require('events') {
   async _runScan(full) {
     if (full) {
       this._zaiMtimeFloor = 0; this._zaiMtimeHigh = 0;
+      this._piMtimeFloor = 0; this._piMtimeHigh = 0;
       this._ocMtimeFloor = 0; this._ocMtimeHigh = 0;
     }
     const t0 = Date.now();
     let added = 0;
     try { added += await this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
     try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
+    try { added += this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
     try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
     this.lastScan = new Date().toISOString();
@@ -161,24 +163,43 @@ class TokenTracker extends require('events') {
     return added;
   }
 
-  // --- zai (pi agent sessions) ---------------------------------------------------
-  // Legacy ZCODE_* files are skipped: those sessions are DB-backed (turn_usage), so
-  // counting the files too would double them. New-format files are the only store
-  // for post-rebuild zai usage.
-  _scanZaiSessions() {
-    const src = this.cfg.sources.zai;
-    if (!src.enabled || !src.sessionsDir) return 0;
-    let files;
-    try { files = fs.readdirSync(src.sessionsDir); } catch (_) { return 0; }
-    const cutoff = (this._zaiMtimeFloor || 0);
-    let added = 0, high = (this._zaiMtimeHigh || 0);
-    for (const fn of files) {
-      if (!fn.endsWith('.jsonl') || fn.startsWith('ZCODE_')) continue;
-      const full = path.join(src.sessionsDir, fn);
+  // --- pi-format session stores (zai + pi) ------------------------------------
+  // Both the rebuilt zai engine and the standalone pi coding agent persist
+  // JSONL transcripts whose assistant messages carry a `usage` object:
+  //   {type:"message", message:{role:"assistant", usage:{input,output,
+  //    cacheRead,cacheWrite}, model, timestamp}}
+  // zai keeps them FLAT in one folder; pi nests them under per-project
+  // subfolders of ~/.pi/agent/sessions. One scanner serves both.
+  // Legacy ZCODE_* files are skipped: those sessions are DB-backed (turn_usage),
+  // so counting the files too would double them.
+  _listSessionFiles(rootDir, depth) {
+    const files = [];
+    let entries;
+    try { entries = fs.readdirSync(rootDir, { withFileTypes: true }); } catch (_) { return files; }
+    for (const e of entries) {
+      const full = path.join(rootDir, e.name);
+      if (e.isDirectory()) {
+        if (depth > 0) files.push(...this._listSessionFiles(full, depth - 1));
+      } else if (e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('ZCODE_')) {
+        files.push(full);
+      }
+    }
+    return files;
+  }
+
+  _scanPiSessions(source, app, keyPrefix, floorKey, highKey) {
+    if (!source || !source.enabled || !source.sessionsDir) return 0;
+    const files = this._listSessionFiles(source.sessionsDir, 2);
+    const cutoff = (this[floorKey] || 0);
+    let added = 0, high = (this[highKey] || 0);
+    for (const full of files) {
       let st;
       try { st = fs.statSync(full); } catch (_) { continue; }
       if (st.mtimeMs < cutoff) continue;
       if (st.mtimeMs > high) high = st.mtimeMs;
+      // Key on the path relative to the store root: stable across rescans,
+      // unique across nested project folders.
+      const rel = path.relative(source.sessionsDir, full);
       let lines;
       try { lines = fs.readFileSync(full, 'utf8').split('\n'); } catch (_) { continue; }
       for (let i = 0; i < lines.length; i++) {
@@ -191,10 +212,10 @@ class TokenTracker extends require('events') {
         const input = u.input || 0, output = u.output || 0;
         const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
         if (!(input || output || cacheRead || cacheWrite)) continue;
-        const key = `zf:${fn}:${(d.message && d.message.id) || 'l' + i}`;
+        const key = `${keyPrefix}:${rel}:${(d.message && d.message.id) || 'l' + i}`;
         if (this.records.has(key)) continue;
         this.records.set(key, {
-          app: 'zai',
+          app,
           ts: Number(d.message.timestamp) || st.mtimeMs,
           model: d.message.model || 'unknown',
           // pi reports cache beside input (its input EXCLUDES cache, unlike the
@@ -205,9 +226,17 @@ class TokenTracker extends require('events') {
         added++;
       }
     }
-    if (high) this._zaiMtimeHigh = high;
-    if (this._zaiMtimeHigh) this._zaiMtimeFloor = this._zaiMtimeHigh - 60000; // 1min slack for in-flight writes
+    if (high) this[highKey] = high;
+    if (this[highKey]) this[floorKey] = this[highKey] - 60000; // 1min slack for in-flight writes
     return added;
+  }
+
+  _scanZaiSessions() {
+    return this._scanPiSessions(this.cfg.sources.zai, 'zai', 'zf', '_zaiMtimeFloor', '_zaiMtimeHigh');
+  }
+
+  _scanPiAgentSessions() {
+    return this._scanPiSessions(this.cfg.sources.pi, 'pi', 'pf', '_piMtimeFloor', '_piMtimeHigh');
   }
 
   // --- opencode ----------------------------------------------------------------
@@ -323,6 +352,7 @@ class TokenTracker extends require('events') {
       if (parsed.mimoSigs) this._mimoSigs = parsed.mimoSigs;
       if (arr) this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
       if (arr) this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
+      if (arr) this._piMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('pf:')).map(([, r]) => r.ts || 0));
       console.log(`[wizbar] token cache: ${this.records.size} records`);
     } catch (_) {}
   }
@@ -403,7 +433,10 @@ class TokenTracker extends require('events') {
       byApp: Object.fromEntries(byApp),
       byModel: Object.fromEntries(byModel),
       recordCount: this.records.size,
-      heatmapWeeks: this.cfg.heatmapWeeks
+      heatmapWeeks: this.cfg.heatmapWeeks,
+      // How many usage sources are switched on — lets the dashboard explain an
+      // empty state ("no sources configured") instead of just showing zeros.
+      sourcesEnabled: Object.values(this.cfg.sources || {}).filter((s) => s && s.enabled).length
     };
   }
 }
