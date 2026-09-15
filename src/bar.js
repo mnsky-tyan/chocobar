@@ -102,11 +102,13 @@ class BarWindow {
     // next renderer report. Exception: leaving pill mode — the window may
     // still sit at the shrunk pill size while the bounds already say full
     // strip (staticWidth hot-reload re-emits identical geometry), so re-apply
-    // to expand it back.
+    // to expand it back. _staticContent records the last SEEN mode (updated
+    // before this gate): a mode flip with identical bounds must still register,
+    // or the return flip to 'workarea' would not re-expand the shrunk window.
     const leavingPill = this._staticContent && !content;
+    this._staticContent = content;
     if (key === this._lastBoundsKey && !leavingPill) return;
     this._lastBoundsKey = key;
-    this._staticContent = content;
     this.win.setBounds({
       x: Math.round(bounds.x), y: Math.round(bounds.y),
       width: Math.round(bounds.width), height: Math.round(bounds.height)

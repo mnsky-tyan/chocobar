@@ -362,7 +362,13 @@ function spawnBar() {
   // throwing on a dangling window. Skipped while the app is quitting.
   bar.win.on('closed', () => {
     setTimeout(() => {
-      if (!shuttingDown && bar && (!bar.win || bar.win.isDestroyed())) spawnBar();
+      if (!shuttingDown && bar && (!bar.win || bar.win.isDestroyed())) {
+        spawnBar();
+        // The rebuilt window starts hidden with no geometry; in static mode
+        // nothing else re-delivers it (no follow loop, and static-geometry
+        // only fires on start/display/config events).
+        tracker.reemitStatic();
+      }
     }, 250);
   });
 }
