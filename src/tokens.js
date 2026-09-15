@@ -56,6 +56,7 @@ class TokenTracker extends require('events') {
     this.records = new Map();   // key -> { app, ts, model, input, output, cacheRead, cacheWrite, reasoning }
     this.lastScan = null;
     this._timer = null;
+    this._pythonCmd = 'python'; // may be re-probed to python3 on Linux
     this._loadCache();
   }
 
@@ -114,19 +115,31 @@ class TokenTracker extends require('events') {
 
   // Async spawn: at a 1-minute scan cadence a synchronous execFileSync would
   // freeze the main process (bar follow loop included) for the length of the
-  // python run every scan.
+  // python run every scan. Interpreter name is platform-dependent: Windows
+  // installs usually provide `python`, Debian/Ubuntu often only `python3`.
   async _scanZcode() {
     const src = this.cfg.sources.zcode;
     if (!src.enabled || !src.dbPath || !fs.existsSync(src.dbPath)) return 0;
     const zaiIds = this._zaiSessionIds(this.cfg.sources.zai.sessionsDir);
     const script = path.join(__dirname, '..', 'scripts', 'zcode_query.py');
-    const stdout = await new Promise((resolve, reject) => {
-      execFile('python', [script, src.dbPath], {
+    const run = (py) => new Promise((resolve, reject) => {
+      execFile(py, [script, src.dbPath], {
         windowsHide: true,
         maxBuffer: 64 * 1024 * 1024,
         encoding: 'utf8'
       }, (err, out) => (err ? reject(err) : resolve(out)));
     });
+    let stdout;
+    try {
+      stdout = await run(this._pythonCmd);
+    } catch (e) {
+      if (e && e.code === 'ENOENT' && this._pythonCmd !== 'python3') {
+        this._pythonCmd = 'python3'; // remember the working interpreter
+        stdout = await run('python3');
+      } else {
+        throw e;
+      }
+    }
     const rows = JSON.parse(stdout);
     let added = 0;
     for (const r of rows) {

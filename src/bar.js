@@ -71,6 +71,10 @@ class BarWindow {
     this.win.on('closed', () => {
       this.win = null;
       this._shouldShow = false;
+      // The heal interval must not outlive its window: main.js rebuilds the bar
+      // as a NEW BarWindow on 'closed', and without this each rebuild would
+      // leak another 400ms timer doing no-op work forever.
+      if (this._healTimer) { clearInterval(this._healTimer); this._healTimer = null; }
     });
 
     // Periodic size guard (see healSize) — heals any OS-side growth of the window.
@@ -171,6 +175,7 @@ class BarWindow {
   }
 
   destroy() {
+    if (this._healTimer) { clearInterval(this._healTimer); this._healTimer = null; }
     if (this.win && !this.win.isDestroyed()) this.win.destroy();
     this.win = null;
     this.hwnd = null;

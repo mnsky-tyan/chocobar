@@ -11,7 +11,8 @@ const native = require('./native');
 // Windows implements AF_UNIX sockets on top of the named-pipe filesystem: a
 // socket bound at C:\dir\file.sock is reachable as \\.\pipe\C:\dir\file.sock,
 // which is how the herdr agents connection below works from plain Node.
-const pipePrefix = '\\\\.\\pipe\\';
+const IS_WIN = process.platform === 'win32';
+const pipePrefix = IS_WIN ? '\\\\.\\pipe\\' : '';
 
 class MetricsEngine extends require('events') {
   constructor(config) {
@@ -67,16 +68,19 @@ class MetricsEngine extends require('events') {
       this._timers.push(setInterval(() => this._pollBattery(), Math.max(500, m.battery.intervalMs)));
       setTimeout(() => { if (!this._stopping) this._pollBattery(); }, 240);
     }
-    if (m.volume.enabled) {
+    if (m.volume.enabled && IS_WIN) {
       if (!native.initVolume(m.volume.role)) {
         this.state.volumeError = native.volumeState.error;
         console.error('[wizbar] volume init failed:', this.state.volumeError);
       }
       this._timers.push(setInterval(() => this._pollVolume(), Math.max(250, m.volume.intervalMs)));
       setTimeout(() => { if (!this._stopping) this._pollVolume(); }, 160);
+    } else if (m.volume.enabled) {
+      this.state.volume = null; // Core Audio is Windows-only; the chip shows "—"
     }
-    if (m.gpu.enabled) this._startGpuWorker(m.gpu);
-    if (m.bluetooth.enabled) this._startBtWorker(m.bluetooth);
+    // PowerShell workers cannot exist off Windows; the modules stay "—" there.
+    if (m.gpu.enabled && IS_WIN) this._startGpuWorker(m.gpu);
+    if (m.bluetooth.enabled && IS_WIN) this._startBtWorker(m.bluetooth);
     if (m.agents && m.agents.enabled) this._startAgentsLive();
   }
 
@@ -219,8 +223,14 @@ class MetricsEngine extends require('events') {
     ];
   }
 
+  // Socket path: modules.agents.sockPath overrides. Windows default is
+  // %APPDATA%\herdr\herdr.sock (an AF_UNIX path served over the named-pipe
+  // filesystem); other platforms default to the XDG data location.
   _agentsSockPath() {
-    return path.join(process.env.APPDATA, 'herdr', 'herdr.sock');
+    const override = this.cfg.modules.agents && this.cfg.modules.agents.sockPath;
+    if (override) return String(override).replace(/^~/, os.homedir());
+    if (IS_WIN) return path.join(process.env.APPDATA || '', 'herdr', 'herdr.sock');
+    return path.join(os.homedir(), '.local', 'share', 'herdr', 'herdr.sock');
   }
 
   // One-shot state fetch: connect, ask, read one line. The server closes the

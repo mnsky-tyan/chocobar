@@ -43,6 +43,7 @@ let stats = null;
 let tokensAgg = null;
 let remielleState = null;
 let segEls = {};
+let sizeReportTimer = null;
 
 function el(id) { return document.getElementById(id); }
 
@@ -65,6 +66,8 @@ function applyTheme(t) {
     bar.classList.remove('align-left', 'align-center');
     if (t.bar.align === 'left') bar.classList.add('align-left');
     else if (t.bar.align === 'center') bar.classList.add('align-center');
+    // Static top pill (non-Windows): hug content to the right of the screen.
+    bar.classList.toggle('static', t.bar.mode === 'static-top');
   }
   rebuildSegments();
 }
@@ -182,6 +185,15 @@ function fmtClock(fmt, d) {
 function render() {
   if (!theme) return;
   const m = theme.modules || {};
+
+  // Static mode: keep the main process informed of the pill's natural width
+  // so the window can shrink to hug it (see 'bar-content-size' in main.js).
+  if (sizeReportTimer == null && theme.bar && theme.bar.mode === 'static-top') {
+    sizeReportTimer = setInterval(() => {
+      const b = el('bar');
+      if (b) window.wizbar.reportSize(b.offsetWidth);
+    }, 1000);
+  }
 
   if (segEls.tokens) setVal('tokens', fmtTokens(tokensAgg ? tokensAgg.today.total : null), 'dim');
 
