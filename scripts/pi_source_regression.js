@@ -65,7 +65,7 @@ mkSession(store, 'ZCODE_sess_00000000-0000-0000-0000-000000000000_x', [msg('m5',
 fs.writeFileSync(path.join(projA, 'corrupt.jsonl'),
   JSON.stringify({ type: 'message', id: 'm6', message: { role: 'assistant', usage: U1 } }) + '\n{"trunc'); // tail line: m6 only
 
-const cfg = { tokens: { rescanMinutes: 5, heatmapWeeks: 26, sources: {
+const cfg = { tokens: { enabled: true, rescanMinutes: 5, heatmapWeeks: 26, sources: {
   zcode: { enabled: false, dbPath: '' },
   zai: { enabled: false, sessionsDir: '' },
   pi: { enabled: true, sessionsDir: store },
@@ -95,7 +95,7 @@ check('warm cursor skips files', t.records.size === 4, `size ${t.records.size}`)
 // --- 2. real store cross-check -----------------------------------------------
 const realDir = path.join(REAL_HOME, '.pi', 'agent', 'sessions');
 if (fs.existsSync(realDir)) {
-  const realCfg = { tokens: { rescanMinutes: 5, heatmapWeeks: 26, sources: {
+  const realCfg = { tokens: { enabled: true, rescanMinutes: 5, heatmapWeeks: 26, sources: {
     zcode: { enabled: false, dbPath: '' },
     zai: { enabled: false, sessionsDir: '' },
     pi: { enabled: true, sessionsDir: realDir },

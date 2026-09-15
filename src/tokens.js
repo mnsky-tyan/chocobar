@@ -57,11 +57,13 @@ class TokenTracker extends require('events') {
     this.lastScan = null;
     this._timer = null;
     this._pythonCmd = 'python'; // may be re-probed to python3 on Linux
-    this._loadCache();
+    if (this.cfg.enabled) this._loadCache(); // master off: nothing is read at all
   }
 
   start() {
     clearInterval(this._timer);
+    this._timer = null;
+    if (!this.cfg.enabled) return; // master off: no scan timer, zero scans
     this._timer = setInterval(() => this.rescan(), Math.max(1, this.cfg.rescanMinutes) * 60000);
     this.rescan();
   }
@@ -72,6 +74,7 @@ class TokenTracker extends require('events') {
   // record-key dedup makes that safe, and it recovers anything a stale cursor
   // skipped.
   rescan({ full = false } = {}) {
+    if (!this.cfg.enabled) return Promise.resolve(this.aggregate()); // master off: no scan
     if (!this._scanPromise) {
       this._scanPromise = this._runScan(full).finally(() => { this._scanPromise = null; });
     }
@@ -373,6 +376,17 @@ class TokenTracker extends require('events') {
   // input+output is the provider total for every source. Adding the cache
   // columns to the total would double-count them; they stay as detail only.
   aggregate() {
+    if (!this.cfg.enabled) {
+      // Master off: no sources are running, so the only honest dashboard state
+      // is all zeros with nothing enabled.
+      return {
+        generatedAt: new Date().toISOString(), lastScan: null,
+        today: { total: 0, apps: {} },
+        week: 0, month: 0, allTime: 0,
+        byDay: {}, byApp: {}, byModel: {},
+        recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0
+      };
+    }
     const rowTotal = (r) => (r.input || 0) + (r.output || 0);
     const byDay = new Map();     // dateKey -> { total, apps: { app: agg } }
     const byApp = new Map();     // app -> agg

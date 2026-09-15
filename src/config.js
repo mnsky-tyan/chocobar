@@ -81,7 +81,7 @@ const DEFAULTS = {
     reattachToExisting: false   // after followed window closes, wait for a NEW window
   },
   tokens: {
-    enabled: false,        // master switch for the usage chip + dashboard
+    enabled: false,        // master switch: off = no scans, no dashboard data, no chip
     showOnBar: true,
     rescanMinutes: 1,
     heatmapWeeks: 26,
@@ -180,7 +180,8 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "reattachToExisting": false
   },
   "tokens": {
-    // master switch: false hides the usage chip and keeps the dashboard empty
+    // master switch: off = no scans, no dashboard data, no usage chip;
+    // on = the per-source flags below decide which stores are read
     "enabled": false,
     "showOnBar": true,
     // minutes between usage scans (drives the dashboard's live refresh)
