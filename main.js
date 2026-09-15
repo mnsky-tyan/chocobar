@@ -59,9 +59,9 @@ function themePayload(cfg) {
           : `rgba(${tint.r},${tint.g},${tint.b},${a.toFixed(3)})`,
       // Opaque version for opaque surfaces (dashboard card follows the bar tint)
       tintOpaque: `rgb(${tint.r},${tint.g},${tint.b})`,
-      // Static top pill (non-Windows): the renderer hugs content to the right
-      // and reports its width so the window itself can shrink to the pill.
-      mode: staticTop ? 'static-top' : null
+      // Static mode (non-Windows): full workarea strip or corner pill.
+      mode: staticTop ? 'static-top' : null,
+      staticWidth: staticTop ? (bar.staticWidth === 'content' ? 'content' : 'workarea') : null
     },
     modules: cfg.modules,
     tokens: { showOnBar: cfg.tokens.showOnBar && !!cfg.tokens.enabled }
@@ -69,11 +69,16 @@ function themePayload(cfg) {
 }
 
 function statsLoop() {
+  // Push only when a poll actually changed a value (consumeDirty), and send at
+  // most every 250ms. The old 100ms heartbeat serialized + IPC'd the full
+  // snapshot ten times a second whether or not anything moved, making the
+  // renderer the highest-CPU process in the app.
   setInterval(() => {
+    if (!metrics || !metrics.consumeDirty()) return;
     if (!bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
     bar.send('stats', metrics.snapshot());
-  }, 100);
+  }, 250);
 }
 
 function raiseDash() {
@@ -171,10 +176,14 @@ function buildTray() {
 }
 
 // --- Little Remielle desktop-pet toggle (WINDOWS-ONLY) --------------------------
-// The pet is a Windows exe managed through tasklist/taskkill and Win32 window
-// placement; there is no portable equivalent, so the module reports "exists:
-// false" (chip renders "—") on other platforms. Private/local module: disabled
-// by default in the shipped config template, enabled from a user config.
+// The pet is a Windows exe managed through taskkill and Win32 window placement;
+// there is no portable equivalent, so the module reports "exists: false" (chip
+// renders "—") on other platforms. Private/local module: disabled by default in
+// the shipped config template, enabled from a user config.
+// Truth comes from an in-process Toolhelp32 snapshot (native.findProcessIdByName,
+// ~5ms) rather than spawning tasklist.exe every 3s (~290ms of CPU per spawn,
+// measured on this machine — it dominated wizbar's CPU budget). Unlike the child
+// handle, a snapshot also sees a pet started or stopped outside WizBar.
 let remielleState = { running: false, exists: false };
 let remiellePid = null;          // pet process id from the last live poll
 let remielleRestorePending = false; // set on launch, consumed by the poll
@@ -301,23 +310,18 @@ function pollRemielle() {
     pushRemielle();
     return;
   }
-  execFile('tasklist', ['/FI', 'IMAGENAME eq ' + path.basename(exe), '/FO', 'CSV', '/NH'],
-    { windowsHide: true }, (err, stdout) => {
-      const running = !err && /","/.test(stdout || '');
-      let pid = null;
-      if (running) {
-        const m = String(stdout || '').match(/",\s*"(\d+)"/);
-        if (m) pid = Number(m[1]);
-      }
-      remiellePid = running ? pid : null;
-      if (running) remielleSavePosition();
-      if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
-      if (remielleState.exists !== true || remielleState.running !== running) {
-        DBG('remielle poll:', JSON.stringify({ err: err && err.message, running, out: String(stdout).slice(0, 120) }));
-      }
-      remielleState = { running, exists: true };
-      pushRemielle();
-    });
+  // In-process Toolhelp32 snapshot: no child process, ~5ms instead of a
+  // ~290ms tasklist spawn every 3s.
+  const pid = native.findProcessIdByName(path.basename(exe));
+  const running = pid != null;
+  remiellePid = running ? pid : null;
+  if (running) remielleSavePosition();
+  if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
+  if (remielleState.exists !== true || remielleState.running !== running) {
+    DBG('remielle poll:', JSON.stringify({ running, pid }));
+  }
+  remielleState = { running, exists: true };
+  pushRemielle();
 }
 
 function toggleRemielle() {
@@ -407,12 +411,13 @@ function wireBar() {
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
   ipcMain.handle('toggle-remielle', () => { toggleRemielle(); return remielleState; });
   ipcMain.on('open-dash', () => openDashboard());
-  // Static mode (non-Windows): the renderer reports the pill's natural width;
-  // shrink the window to it, anchored top-right of the work area, so the bar
-  // floats like the Windows one instead of spanning the screen (an invisible
-  // full-width strip would also swallow clicks along the top edge).
+  // Static mode (non-Windows, bar.staticWidth === 'content'): the renderer
+  // reports the pill's natural width; shrink the window to it, anchored
+  // top-right of the work area, so the bar floats as a corner pill (an
+  // invisible wider strip would swallow clicks along the top edge).
   ipcMain.on('bar-content-size', (_e, w) => {
     if (process.platform === 'win32' || !bar || !bar.win || bar.win.isDestroyed()) return;
+    if ((bar.cfg.bar.staticWidth || 'workarea') !== 'content') return; // full strip: no shrinking
     const width = Math.max(60, Math.ceil(Number(w) || 0));
     if (!width || bar._lastPillW === width) return;
     bar._lastPillW = width;

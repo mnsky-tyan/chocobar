@@ -50,19 +50,22 @@ body {
 #bar.align-left { justify-content: flex-start; }
 #bar.align-center { justify-content: center; }
 
-/* Static top pill (non-Windows, bar.mode === 'static-top'): there is no
-   terminal window to match in width, so the bar floats as a content-hugging
-   pill at the top-right of the work area — same shape language as the Windows
-   strip above a terminal. The window shrinks to this pill via the
-   'bar-content-size' handshake (main.js). */
+/* Static mode (non-Windows, bar.mode === 'static-top'): no terminal to follow.
+   'workarea' (default): full-width strip pinned to the top of the screen — the
+   same look as the Windows bar above a maximized terminal.
+   'content' (bar.staticWidth): shrink to a corner pill hugging the chips; the
+   window itself shrinks via the 'bar-content-size' handshake (main.js) so the
+   rest of the top edge stays clickable. */
 #bar.static {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.22);
+}
+#bar.static.static-content {
   position: absolute;
   top: 0;
   right: 0;
   width: max-content;
   height: 100%;
   padding: 0 10px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.22);
 }
 
 #segments {

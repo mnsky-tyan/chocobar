@@ -95,10 +95,9 @@ class BarWindow {
     const key = `${bounds.x.toFixed(1)},${bounds.y.toFixed(1)},${bounds.width.toFixed(1)},${bounds.height}`;
     this._sizeTarget = { w: Math.round(bounds.width), h: Math.round(bounds.height), scale: bounds.scale || 1 };
     if (key === this._lastBoundsKey) {
-      // Bounds unchanged, but the window can still have been hidden behind our
-      // back (shell minimize-all, DWM churn). Re-assert visibility anyway.
-      if (!this.win.isVisible()) this.win.showInactive();
-      this.assertNoTaskbar();
+      // Bounds unchanged: touch nothing. The 400ms heal loop already re-asserts
+      // visibility and taskbar exclusion — doing it here too meant two native
+      // window-manager calls per follow tick (~120Hz) for zero benefit.
       return;
     }
     this._lastBoundsKey = key;
@@ -122,8 +121,14 @@ class BarWindow {
   // still let the icon return after long uptime. setToolWindow is the
   // structural half (WS_EX_TOOLWINDOW re-read on every enumeration); each
   // call is a cheap no-op unless something cleared the state.
+  // A 2s floor keeps the periodic re-assert from turning into constant shell
+  // COM chatter (DeleteTab is not free); anything that genuinely clears the
+  // state is re-asserted within 2s, which no shell rebuild outlasts.
   assertNoTaskbar() {
     if (!this.win || this.win.isDestroyed() || !this.hwnd) return;
+    const now = Date.now();
+    if (this._taskbarAssertedAt && now - this._taskbarAssertedAt < 2000) return;
+    this._taskbarAssertedAt = now;
     native.setToolWindow(this.hwnd, true);
     this.win.setSkipTaskbar(true);
   }
@@ -166,6 +171,7 @@ class BarWindow {
     this._shouldShow = false; // healSize must NOT resurrect a deliberate hide
     if (this.win && this.win.isVisible()) this.win.hide();
     this._lastBoundsKey = '';
+    this._taskbarAssertedAt = 0; // next show re-asserts immediately
   }
 
   send(channel, payload) {

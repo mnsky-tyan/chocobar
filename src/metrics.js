@@ -18,6 +18,7 @@ class MetricsEngine extends require('events') {
   constructor(config) {
     super();
     this.cfg = config;
+    this._dirty = false;   // set by every poll that changed state; stats push reads-and-clears
     this.state = {
       cpu: null,          // %
       cpuTemp: null,      // { c, label } from HWiNFO shared memory, or null
@@ -30,8 +31,7 @@ class MetricsEngine extends require('events') {
       volumeError: null
     };
     this._cpuPrev = os.cpus().map((c) => c.times);
-    this._timers = [];
-    // Persistent PowerShell workers (GPU / Bluetooth), keyed by module. `gen`
+    this._timers = [];    // Persistent PowerShell workers (GPU / Bluetooth), keyed by module. `gen`
     // invalidates stale exit handlers: without it a worker killed by stop()
     // respawns alongside the fresh one start() just spawned, because the
     // killed child's exit event only fires after setConfig reset _stopping.
@@ -44,6 +44,14 @@ class MetricsEngine extends require('events') {
     this._agentsBackoff = 0;
     this._gpuBuf = '';
     this._btBuf = '';
+  }
+
+  // True at most once since the last consume — the stats push loop sends only
+  // when a poll actually changed a value instead of on a fixed heartbeat.
+  consumeDirty() {
+    const d = this._dirty;
+    this._dirty = false;
+    return d;
   }
 
   start() {
@@ -126,11 +134,17 @@ class MetricsEngine extends require('events') {
       idle += didle; total += dtotal + didle;
     }
     this._cpuPrev = next;
-    if (total > 0) this.state.cpu = Math.round((1 - idle / total) * 100);
+    if (total > 0) {
+      const cpu = Math.round((1 - idle / total) * 100);
+      if (cpu !== this.state.cpu) this._dirty = true;
+      this.state.cpu = cpu;
+    }
   }
 
   _pollCpuTemp() {
-    this.state.cpuTemp = native.getHwinfoTemp();
+    const t = native.getHwinfoTemp();
+    if (JSON.stringify(t) !== JSON.stringify(this.state.cpuTemp)) this._dirty = true;
+    this.state.cpuTemp = t;
   }
 
   // --- RAM -------------------------------------------------------------------
@@ -138,21 +152,27 @@ class MetricsEngine extends require('events') {
     const total = os.totalmem();
     const free = os.freemem(); // ullAvailPhys - matches Task Manager "available"
     const used = total - free;
-    this.state.ram = {
+    const ram = {
       pct: Math.round((used / total) * 100),
       usedGB: +(used / 1024 ** 3).toFixed(1),
       totalGB: +(total / 1024 ** 3).toFixed(1)
     };
+    if (JSON.stringify(ram) !== JSON.stringify(this.state.ram)) this._dirty = true;
+    this.state.ram = ram;
   }
 
   // --- battery -----------------------------------------------------------------
   _pollBattery() {
-    this.state.battery = native.getBattery();
+    const b = native.getBattery();
+    if (JSON.stringify(b) !== JSON.stringify(this.state.battery)) this._dirty = true;
+    this.state.battery = b;
   }
 
   // --- volume ------------------------------------------------------------------
   _pollVolume() {
-    this.state.volume = native.getVolume();
+    const v = native.getVolume();
+    if (JSON.stringify(v) !== JSON.stringify(this.state.volume)) this._dirty = true;
+    this.state.volume = v;
     if (!this.state.volume && !this.state.volumeError) {
       this.state.volumeError = native.volumeState.error;
     }
@@ -313,6 +333,7 @@ class MetricsEngine extends require('events') {
     this._agentsLastLine = line;
     this._agentsLive = true;
     this._agentsStopFile();
+    this._dirty = true;
     this.state.agents = JSON.parse(line);
   }
 
@@ -378,11 +399,13 @@ class MetricsEngine extends require('events') {
       try {
         const d = JSON.parse(line);
         if (d.err) { if (!this.state.gpu) this.state.gpu = { error: 'counter' }; return; }
-        this.state.gpu = {
+        const gpu = {
           [mode]: Math.min(100, Math.round(d[mode])),
           sum: Math.min(100, Math.round(d.sum)),
           max: Math.min(100, Math.round(d.max))
         };
+        if (JSON.stringify(gpu) !== JSON.stringify(this.state.gpu)) this._dirty = true;
+        this.state.gpu = gpu;
       } catch (_) {}
     }, buf, (l) => l.startsWith('{'));
   }
@@ -413,6 +436,7 @@ class MetricsEngine extends require('events') {
           .filter((x) => x && typeof x.level === 'number' && x.level >= 0 && x.level <= 100)
           .filter((x) => !filter || (x.name || '').toLowerCase().includes(filter));
         devs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        if (JSON.stringify(devs.slice(0, maxDev)) !== JSON.stringify(this.state.bluetooth)) this._dirty = true;
         this.state.bluetooth = devs.slice(0, maxDev);
       } catch (_) {}
     }, buf, (l) => l.startsWith('[') || l.startsWith('{'));
@@ -464,7 +488,7 @@ class MetricsEngine extends require('events') {
   }
 
   snapshot() {
-    return { ...this.state, now: new Date().toISOString() };
+    return { ...this.state };
   }
 }
 
