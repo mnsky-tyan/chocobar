@@ -1,0 +1,15 @@
+// One-shot: update the live ~/.wizbar/config.json (tray off, mimo source, remielle module).
+const fs = require('fs');
+const path = require('path');
+
+const p = path.join(process.env.USERPROFILE, '.wizbar', 'config.json');
+const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+c.general.showTray = false;
+c.modules.remielle = {
+  enabled: true,
+  exePath: 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe'
+};
+c.tokens.sources.mimo = { enabled: true };
+fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');
+console.log('written. remielle exists on disk:', fs.existsSync(c.modules.remielle.exePath));
+console.log('showTray:', c.general.showTray, '| mimo:', JSON.stringify(c.tokens.sources.mimo));
