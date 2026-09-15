@@ -206,6 +206,24 @@ own exe path if you want it.
 - The desktop-pet presence check is an in-process Toolhelp32 snapshot (~5ms per 3s poll),
   not a tasklist.exe spawn (~164ms measured per spawn — it dominated the CPU budget).
 
+## Tests
+
+Headless, no GUI required, safe on every platform (never touch your real stores or cache):
+
+```
+npm test
+```
+
+- `scripts/portable_regression.js` — portability layer (synthetic sysfs battery/CPU-temp trees,
+  metrics on-change dirty tracking, neutral-defaults guarantees, module load with koffi
+  completely broken),
+- `scripts/pi_source_regression.js` — pi session-log source: synthetic fixture (nested projects,
+  legacy-file skip, corrupt tail line, dedup, mtime cursors) + exact raw-sum cross-check when a
+  real `~/.pi/agent/sessions` exists.
+
+Windows-side extras: `scripts/token_regression.js` (zcode+zai attribution, needs those stores),
+`scripts/cputemp_regression.js` (HWiNFO shared-memory reader, Windows only).
+
 ## Layout
 
 ```
