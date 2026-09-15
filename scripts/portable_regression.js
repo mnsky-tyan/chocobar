@@ -236,6 +236,19 @@ const native = require('../src/native');
     win.bounds && win.bounds.width === 1920, JSON.stringify(win.bounds));
   check('pill: reported width forgotten after re-expand', bar._lastPillW === 0);
 
+  // Regression: content mode ENTERED with identical bounds must still be
+  // registered as the current mode, or the return flip to 'workarea' would
+  // leave the window truncated at the pill width forever.
+  bar.applyGeometry(bounds, 'content');
+  check('pill: entering content mode with identical bounds is a no-op',
+    win.bounds && win.bounds.width === 1920, JSON.stringify(win.bounds));
+  bar.setPillWidth(320, cfg.bar);
+  check('pill: entered content mode shrinks via renderer report',
+    win.bounds && win.bounds.width === 320, JSON.stringify(win.bounds));
+  bar.applyGeometry(bounds, 'workarea');
+  check('pill: workarea->content->workarea round trip re-expands',
+    win.bounds && win.bounds.width === 1920, JSON.stringify(win.bounds));
+
   bar.setPillWidth(320, cfg.bar);
   const wider = { x: 0, y: 0, width: 2560, height: 24, scale: 1 };
   bar.applyGeometry(wider, 'content');

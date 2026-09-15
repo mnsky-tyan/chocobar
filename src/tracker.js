@@ -58,6 +58,16 @@ class TerminalTracker extends require('events') {
     } catch (_) {}
   }
 
+  // Re-deliver the current static bounds outside the display/config events
+  // that normally emit them. The bar window can be rebuilt after an external
+  // destroy at any moment, and in static mode the fresh window has no other
+  // source for its geometry (no follow loop exists here). No-op on Windows,
+  // where the follow loop re-delivers geometry on its own.
+  reemitStatic() {
+    if (!STATIC_MODE) return;
+    this._emitStaticGeometry();
+  }
+
   // Bar bounds pinned to the top of the primary work area, full width.
   computeStaticBarBounds(cfgBar) {
     const bar = cfgBar || { height: 24 };
