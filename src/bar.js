@@ -113,6 +113,10 @@ class BarWindow {
     }
     if (!this.win.isVisible()) this.win.showInactive();
     this.assertNoTaskbar();
+    // The window was just resized out of pill mode (static-geometry re-apply,
+    // display change, staticWidth hot-reload): forget the last reported pill
+    // width so the next 'bar-content-size' report re-shrinks the window.
+    this._lastPillW = 0;
   }
 
   // Both layers of taskbar exclusion, re-asserted. setSkipTaskbar is Electron's
@@ -172,6 +176,7 @@ class BarWindow {
     if (this.win && this.win.isVisible()) this.win.hide();
     this._lastBoundsKey = '';
     this._taskbarAssertedAt = 0; // next show re-asserts immediately
+    this._lastPillW = 0;
   }
 
   send(channel, payload) {
@@ -185,6 +190,7 @@ class BarWindow {
     if (this.win && !this.win.isDestroyed()) this.win.destroy();
     this.win = null;
     this.hwnd = null;
+    this._lastPillW = 0;
   }
 }
 

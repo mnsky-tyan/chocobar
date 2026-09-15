@@ -1,6 +1,6 @@
 import json
 
-p = r'C:/Users/tyanw/.wizbar/config.json'
+p = os.path.join(os.path.expanduser('~'), '.wizbar', 'config.json')
 w = json.load(open(p))
 w['bar']['gap'] = 16
 w['bar']['roundCorners'] = True

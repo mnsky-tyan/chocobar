@@ -1,3 +1,7 @@
+import os
+# WizBar checkout to launch (set WIZBAR_HOME if not the default location)
+WIZBAR = os.environ.get('WIZBAR_HOME', r'C:\path\to\wizbar')
+ELECTRON = os.path.join(WIZBAR, 'node_modules', 'electron', 'dist', 'electron.exe')
 # Storm test for the NORMAL-window dashboard: minimize-storm and close-storm.
 # The dash should be activated (raised, focused) when the covering window goes
 # away — never sunk below the terminal.
@@ -64,8 +68,8 @@ def snap(label, dash, term):
     print(f'  [{label}] dash {st(dash)} term {st(term)} fgIsDash={fg == dash}')
 
 def summon():
-    subprocess.Popen([r'C:\Users\tyanw\work\general\wizbar\node_modules\electron\dist\electron.exe', '.'],
-                     cwd=r'C:\Users\tyanw\work\general\wizbar',
+    subprocess.Popen([ELECTRON, '.'],
+                     cwd=WIZBAR,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def alt_tap_focus(h):

@@ -10,12 +10,23 @@
 //    mtime cursor skipping unchanged files.
 // 2. If a real ~/.pi/agent/sessions exists, independently re-sums every
 //    assistant `usage` record and asserts the scanner matches it exactly.
-// Never calls start()/rescan() and points the cache at the temp dir, so the
-// user's real token cache is not touched.
+// Never calls start()/rescan() and HOME is overridden to a temp dir, so the
+// user's real token cache is neither read nor written.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+// Real home captured BEFORE the hermetic override below: the real-store
+// cross-check still reads the user's actual ~/.pi sessions (read-only).
+const REAL_HOME = os.homedir();
+// Hermeticity: point HOME/USERPROFILE at a temp dir before src/config.js (which
+// computes APP_DIR from os.homedir() at require time) is loaded, so TokenTracker
+// never reads or writes the real ~/.wizbar token cache.
+const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'wizbar-test-home-'));
+process.env.HOME = FAKE_HOME;
+process.env.USERPROFILE = FAKE_HOME;
+
 const { TokenTracker } = require('../src/tokens');
 
 let failures = 0;
@@ -82,7 +93,7 @@ t._scanPiAgentSessions();
 check('warm cursor skips files', t.records.size === 4, `size ${t.records.size}`);
 
 // --- 2. real store cross-check -----------------------------------------------
-const realDir = path.join(os.homedir(), '.pi', 'agent', 'sessions');
+const realDir = path.join(REAL_HOME, '.pi', 'agent', 'sessions');
 if (fs.existsSync(realDir)) {
   const realCfg = { tokens: { rescanMinutes: 5, heatmapWeeks: 26, sources: {
     zcode: { enabled: false, dbPath: '' },

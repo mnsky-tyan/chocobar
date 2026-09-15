@@ -1,3 +1,7 @@
+import os
+# WizBar checkout to launch (set WIZBAR_HOME if not the default location)
+WIZBAR = os.environ.get('WIZBAR_HOME', r'C:\path\to\wizbar')
+ELECTRON = os.path.join(WIZBAR, 'node_modules', 'electron', 'dist', 'electron.exe')
 # Faithful repro of the user's dashboard-sink flow with a REAL minimize
 # (WM_SYSCOMMAND SC_MINIMIZE = what the minimize button sends), plus a
 # fine-grained z-order timeline so we can watch the sink and the guard's
@@ -59,8 +63,8 @@ def find_middle_app():
     return cands
 
 def summon_dash():
-    subprocess.run([r'C:\Users\tyanw\work\general\wizbar\node_modules\electron\dist\electron.exe', '.'],
-                   cwd=r'C:\Users\tyanw\work\general\wizbar', capture_output=True, timeout=15)
+    subprocess.run([ELECTRON, '.'],
+                   cwd=WIZBAR, capture_output=True, timeout=15)
 
 def alt_tap_focus(h):
     u32.keybd_event(0x12, 0, 0, 0)

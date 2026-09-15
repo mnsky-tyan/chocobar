@@ -71,9 +71,6 @@ const DEFAULTS = {
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
-    // Agent fleet chip (herdr orchestrator). Off by default: point it at your
-    // own fleet via `file` (status JSON) and/or `sockPath` (herdr socket).
-    agents:   { enabled: false, intervalMs: 5000, file: '', sockPath: '' },
     // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
     // public build: set enabled + exePath in your own config to use it.
     remielle: { enabled: false, exePath: '' },
@@ -168,12 +165,6 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // earbud/BT battery; shows "—" unless a device reports via Windows' standard
     // battery property (many earbuds only report to their vendor app)
     "bluetooth": { "enabled": true, "intervalMs": 30000, "filter": "", "maxDevices": 2 },
-    // Agent fleet chip (herdr orchestrator), off by default. Two sources:
-    // "sockPath" = herdr server socket for live push updates (Windows serves an
-    // AF_UNIX socket over \\.\pipe\<path>; other platforms connect directly);
-    // "file" = fallback status JSON: {"state":"working"|"idle","agents":2,
-    // "note":"optional"} — a bare first line saying working/idle also works.
-    "agents":    { "enabled": false, "intervalMs": 5000, "sockPath": "", "file": "" },
     // Desktop-pet toggle chip (WINDOWS-ONLY, private module, off by default).
     // Set enabled + exePath here to show the bow chip: click launches the exe,
     // click again stops it ("on"/"off").

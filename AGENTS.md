@@ -83,7 +83,6 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 - opencode: cache BESIDE input; mimo: input EXCLUDES cache. All scans fold cache into
   stored input so aggregate() totals stay input+output (zcode DB input already includes
   cache). Contract checks: `npm test` + `scripts/token_regression.js`.
-- herdr agents socket: on Windows an AF_UNIX path answers as `\\.\pipe\<path>`;
-  the server closes after each session.snapshot answer — one throwaway connection per
-  snapshot, one persistent connection for events only. `modules.agents.sockPath` overrides
-  the platform default path.
+- The experimental herdr agents-chip wiring was removed (no renderer ever drew it);
+  `modules.agents` no longer exists in the config. History: commit b9c9f8d removed the
+  chip, the 2026-09 public-release pass removed the polling/socket wiring.
