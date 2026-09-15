@@ -13,7 +13,7 @@ class BarWindow {
     this.win = null;
     this.hwnd = null;          // numeric hwnd of the bar itself (for z-order sync)
     this._lastBoundsKey = '';
-    this._pillShrunk = false;  // window shrunk to pill width by setPillWidth
+    this._staticContent = false; // last applied staticWidth mode was 'content'
   }
 
   create() {
@@ -90,19 +90,23 @@ class BarWindow {
   // All bar visuals (tint, alpha, backdrop) are painted by the renderer and
   // arrive via the theme push — there is no native color layer to re-apply.
 
-  applyGeometry(bounds) {
+  applyGeometry(bounds, staticWidth) {
     if (!this.win || this.win.isDestroyed()) return;
     this._shouldShow = true; // bounds exist → the bar belongs on screen
+    const content = staticWidth === 'content';
     const key = `${bounds.x.toFixed(1)},${bounds.y.toFixed(1)},${bounds.width.toFixed(1)},${bounds.height}`;
     this._sizeTarget = { w: Math.round(bounds.width), h: Math.round(bounds.height), scale: bounds.scale || 1 };
-    if (key === this._lastBoundsKey && !this._pillShrunk) {
-      // Bounds unchanged: touch nothing. The 400ms heal loop already re-asserts
-      // visibility and taskbar exclusion — doing it here too meant two native
-      // window-manager calls per follow tick (~120Hz) for zero benefit.
-      return;
-    }
+    // Unchanged bounds re-applies (config saves, spurious display events) must
+    // touch nothing: in pill mode the shrunk window IS the correct size, and
+    // re-expanding would flash a full-width click-swallowing strip until the
+    // next renderer report. Exception: leaving pill mode — the window may
+    // still sit at the shrunk pill size while the bounds already say full
+    // strip (staticWidth hot-reload re-emits identical geometry), so re-apply
+    // to expand it back.
+    const leavingPill = this._staticContent && !content;
+    if (key === this._lastBoundsKey && !leavingPill) return;
     this._lastBoundsKey = key;
-    this._pillShrunk = false;
+    this._staticContent = content;
     this.win.setBounds({
       x: Math.round(bounds.x), y: Math.round(bounds.y),
       width: Math.round(bounds.width), height: Math.round(bounds.height)
@@ -123,10 +127,10 @@ class BarWindow {
 
   // Static corner-pill mode: shrink to the renderer-reported content width,
   // anchored top-right of the work area (an invisible wider strip would
-  // swallow clicks along the top edge). Records the divergence from the
-  // logical bounds so the next applyGeometry re-expands even when those
-  // bounds are unchanged (staticWidth hot-reload to 'workarea' re-emits
-  // identical geometry — the window would otherwise stay a truncated strip).
+  // swallow clicks along the top edge). Only reachable while the static
+  // width mode is 'content'; applyGeometry expands the window again when
+  // the mode leaves 'content' (a staticWidth hot-reload re-emits identical
+  // geometry, so the transition cannot be seen from the bounds alone).
   setPillWidth(width, barCfg) {
     if (!this.win || this.win.isDestroyed()) return;
     this._lastPillW = width;
@@ -140,7 +144,6 @@ class BarWindow {
         width,
         height: barCfg.height
       });
-      this._pillShrunk = true;
     } catch (_) {}
   }
 
@@ -202,7 +205,6 @@ class BarWindow {
     this._lastBoundsKey = '';
     this._taskbarAssertedAt = 0; // next show re-asserts immediately
     this._lastPillW = 0;
-    this._pillShrunk = false;
   }
 
   send(channel, payload) {
@@ -217,7 +219,6 @@ class BarWindow {
     this.win = null;
     this.hwnd = null;
     this._lastPillW = 0;
-    this._pillShrunk = false;
   }
 }
 

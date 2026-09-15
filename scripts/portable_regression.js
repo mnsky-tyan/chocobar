@@ -6,7 +6,8 @@
 //
 // Covers: sysfs battery/CPU-temp readers (synthetic trees), metrics dirty
 // tracking (the on-change stats push), config defaults sanity, koffi-less
-// module load (child process), and the tokens aggregate empty state.
+// module load (child process), the tokens aggregate empty state, and the
+// static-pill geometry handshake (BarWindow against a stubbed window).
 
 const fs = require('fs');
 const os = require('os');
@@ -182,6 +183,66 @@ const native = require('../src/native');
   W(path.join(full, 'AC/online'), '1\n');
   const bf = native.getBatteryLinux(full);
   check('linux: 100% Full on AC is charging', bf.percent === 100 && bf.charging === true, JSON.stringify(bf));
+}
+
+// --- 8. static-pill geometry handshake (BarWindow against a stubbed window) ---
+{
+  const Module = require('module');
+  const origLoad = Module._load;
+  class StubWin {
+    constructor(opts) {
+      this.opts = opts; this.bounds = null; this.destroyed = false; this.visible = false;
+    }
+    isDestroyed() { return this.destroyed; }
+    isVisible() { return this.visible; }
+    setBounds(b) { this.bounds = b; }
+    getContentSize() { return [this.bounds ? this.bounds.width : 900, this.opts.height || 24]; }
+    showInactive() { this.visible = true; }
+    on() {} loadFile() {} setSkipTaskbar() {} setContentSize() {}
+    getNativeWindowHandle() { return Buffer.alloc(8); }
+  }
+  Module._load = function (request) {
+    if (request === 'electron') {
+      return {
+        BrowserWindow: StubWin,
+        screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }) }
+      };
+    }
+    return origLoad.apply(this, arguments);
+  };
+  const { BarWindow } = require('../src/bar');
+  const cfg = { bar: { height: 24 } };
+  const bar = new BarWindow(cfg);
+  bar.create();
+  const win = bar.win;
+  const bounds = { x: 0, y: 0, width: 1920, height: 24, scale: 1 };
+
+  bar.applyGeometry(bounds, 'content');
+  bar.setPillWidth(320, cfg.bar);
+  check('pill: shrinks to the renderer-reported width',
+    win.bounds && win.bounds.width === 320, JSON.stringify(win.bounds));
+
+  // Regression: a config save re-emits identical geometry; in content mode the
+  // shrunk window IS the correct size and must not be re-expanded (the
+  // full-width strip would swallow top-edge clicks until the next report).
+  bar.applyGeometry(bounds, 'content');
+  check('pill: unchanged bounds in content mode keep the pill size',
+    win.bounds && win.bounds.width === 320, JSON.stringify(win.bounds));
+
+  // Regression: leaving content mode must re-expand even with identical
+  // bounds, or the full-strip layout stays truncated in a pill-sized window.
+  bar.applyGeometry(bounds, 'workarea');
+  check('pill: leaving content mode re-expands despite unchanged bounds',
+    win.bounds && win.bounds.width === 1920, JSON.stringify(win.bounds));
+  check('pill: reported width forgotten after re-expand', bar._lastPillW === 0);
+
+  bar.setPillWidth(320, cfg.bar);
+  const wider = { x: 0, y: 0, width: 2560, height: 24, scale: 1 };
+  bar.applyGeometry(wider, 'content');
+  check('pill: genuinely changed bounds re-apply full geometry',
+    win.bounds && win.bounds.width === 2560, JSON.stringify(win.bounds));
+
+  Module._load = origLoad;
 }
 
 function done() {

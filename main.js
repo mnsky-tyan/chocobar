@@ -383,7 +383,12 @@ function wireBar() {
   if (process.platform !== 'win32') {
     // Non-Windows: the tracker has no Win32 window classes to follow; it emits
     // a static bar position (top of the primary work area) on display changes.
-    tracker.on('static-geometry', (bounds) => bar.applyGeometry(bounds));
+    // staticWidth must be read from configManager.config, not bar.cfg: the
+    // config-changed handler calls tracker.setConfig (emitting synchronously)
+    // BEFORE bar.cfg is reassigned, so bar.cfg would carry the previous mode
+    // and a content->workarea hot reload would skip the re-expand.
+    tracker.on('static-geometry', (bounds) =>
+      bar.applyGeometry(bounds, configManager.config.bar.staticWidth));
   } else {
     tracker.on('geometry', (rect) => {
       const bounds = tracker.computeBarBounds(rect, configManager.config.bar);
