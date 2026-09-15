@@ -147,6 +147,40 @@ const native = require('../src/native');
       done();
     });
 }
+// --- 7. battery charging semantics (100% on AC renders green) -----------------
+{
+  const cases = [
+    { name: 'win: 100% on AC (flag dropped at top-of-charge) is charging',
+      sps: { ACLineStatus: 1, BatteryFlag: 0x1, BatteryLifePercent: 100 }, want: true },
+    { name: 'win: actively charging below 100 is charging',
+      sps: { ACLineStatus: 1, BatteryFlag: 0x8, BatteryLifePercent: 42 }, want: true },
+    { name: 'win: charging flag stuck set after unplug is NOT charging',
+      sps: { ACLineStatus: 0, BatteryFlag: 0x8, BatteryLifePercent: 60 }, want: false },
+    { name: 'win: on AC mid-charge without flag is not charging',
+      sps: { ACLineStatus: 1, BatteryFlag: 0x1, BatteryLifePercent: 55 }, want: false },
+    { name: 'win: 99% holding on AC (trickle, flag dropped) not charging',
+      sps: { ACLineStatus: 1, BatteryFlag: 0x1, BatteryLifePercent: 99 }, want: false }
+  ];
+  for (const c of cases) {
+    const b = native.batteryFromPowerStatus(c.sps);
+    check(c.name, b.charging === c.want, JSON.stringify(b));
+  }
+  // Linux reader: status "Full" + AC online = plugged at 100% -> charging green
+  const full = fs.mkdtempSync(path.join(os.tmpdir(), 'wizbar-batfull-'));
+  W(path.join(full, 'BAT0/type'), 'Battery\n');
+  W(path.join(full, 'BAT0/capacity'), '100\n');
+  W(path.join(full, 'BAT0/status'), 'Full\n');
+  W(path.join(full, 'AC/type'), 'Mains\n');
+  W(path.join(full, 'AC/online'), '1\n');
+  const bf = native.getBatteryLinux(full);
+  check('linux: 100% Full on AC is charging', bf.percent === 100 && bf.charging === true, JSON.stringify(bf));
+
+  // renderer semantics mirror: charging -> 'good' class at any percent
+  const greenAt = (b) => (b.percent <= 20 && !b.ac ? 'warn' : (b.charging ? 'good' : ''));
+  check('renderer rule: 100% on AC gets good class',
+    greenAt(native.batteryFromPowerStatus({ ACLineStatus: 1, BatteryFlag: 0x1, BatteryLifePercent: 100 })) === 'good');
+}
+
 function done() {
   if (failures) { console.error(`\n${failures} FAILURE(S)`); process.exit(1); }
   console.log('\nAll portable regression checks passed.');
