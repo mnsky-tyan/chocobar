@@ -23,7 +23,6 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
 - today's tokens (click it → dashboard) · desktop-pet toggle (private module, off by default — see Config)
 - GPU % · CPU % · CPU temp · RAM % · volume % · battery %
 - Bluetooth device battery (earbuds — shows `87·85` for L/R when the device reports it)
-- agent fleet chip (opt-in; see `modules.agents` in the config)
 - clock
 
 ## Platform support
@@ -43,7 +42,6 @@ runtime and its chip simply shows `—` instead of crashing or faking data.
 | Volume (Core Audio master level) | ✅ | — (chip shows `—`) |
 | Bluetooth device battery (PnP property) | ✅ | — (chip shows `—`) |
 | Acrylic backdrop | ✅ DWM blur + tint | tint renders solid (no OS blur API); same colors |
-| Agent fleet chip (herdr) | ✅ named-pipe socket | ✅ direct socket (`modules.agents.sockPath`) |
 | Desktop-pet toggle | private module, opt-in | Windows executables only — stays off |
 | Autostart at login | ✅ HKCU Run entry | — (no-op; use your desktop environment's autostart) |
 | Token sources (zcode / zai / pi / opencode / mimo) | ✅ | ✅ (paths are user config; mimo auto-discovers only on Windows) |
@@ -159,9 +157,8 @@ WizBar icon while it's open; the tray stays empty).
 The shipped defaults are neutral: no usage sources enabled, no pet, no fleet chip, no
 personal paths anywhere in the repo. Everything machine- or person-specific lives in the
 **user-level config** (`~/.wizbar/config.json`, written as an annotated template on first
-run and hot-reloaded on save). Point `tokens.sources` at your own stores, opt into
-`modules.agents` if you run a herdr fleet, and enable the pet module (Windows) with your
-own exe path if you want it.
+run and hot-reloaded on save). Point `tokens.sources` at your own stores and enable the
+pet module (Windows) with your own exe path if you want it.
 
 ## Notes & limits
 
@@ -189,11 +186,6 @@ own exe path if you want it.
   headroom so the floating bar has room to appear above them.
 - The bar's bottom edge has a subtle 1px pink divider (hardcoded in `renderer/bar.css`).
 
-- The agent fleet chip (opt-in) talks to the **herdr server socket** directly (on Windows an AF_UNIX
-  socket is reachable as `\\.\pipe\<path>`): one persistent connection receives push
-  events for agent status changes, plus a slow 60s refresh. No PowerShell worker involved.
-  When herdr is not running the chip falls back to the `modules.agents.file` status JSON
-  and shows `—` when neither source exists.
 
 - GPU % comes from the Windows `GPU Engine` performance counters (same as Task Manager,
   summed across engines, capped at 100). English counter names — on a non-English Windows
@@ -208,7 +200,8 @@ own exe path if you want it.
 
 ## Tests
 
-Headless, no GUI required, safe on every platform (never touch your real stores or cache):
+Headless, no GUI required, safe on every platform: tests run against a temp HOME (your real
+`~/.wizbar` cache is never read or written) and only ever read the real stores:
 
 ```
 npm test

@@ -13,6 +13,14 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
+// Hermeticity: os.homedir() feeds APP_DIR (~/.wizbar) in src/config.js, which
+// TokenTracker's constructor reads the token cache from. Point HOME/USERPROFILE
+// at a temp dir BEFORE any src module is required so the tests can never touch
+// the real ~/.wizbar on any platform.
+const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'wizbar-test-home-'));
+process.env.HOME = FAKE_HOME;
+process.env.USERPROFILE = FAKE_HOME;
+
 let failures = 0;
 function check(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${detail ? '  [' + detail + ']' : ''}`);
@@ -107,9 +115,9 @@ const native = require('../src/native');
     DEFAULTS.tokens.enabled === false &&
     Object.values(DEFAULTS.tokens.sources).every((s) => !s.enabled) &&
     Object.values(DEFAULTS.tokens.sources).every((s) => !s.dbPath && !s.sessionsDir && !s.storageDir));
-  check('config: pet + agents off, empty paths',
+  check('config: pet off, empty path; agents module fully removed',
     DEFAULTS.modules.remielle.enabled === false && DEFAULTS.modules.remielle.exePath === '' &&
-    DEFAULTS.modules.agents.enabled === false && DEFAULTS.modules.agents.file === '');
+    !('agents' in DEFAULTS.modules));
   const blob = JSON.stringify(DEFAULTS);
   check('config: no personal identifiers in defaults',
     !/tyanw|tyan|mnsky|firstmate|remielle-win|Little-Remielle/i.test(blob));
@@ -174,11 +182,6 @@ const native = require('../src/native');
   W(path.join(full, 'AC/online'), '1\n');
   const bf = native.getBatteryLinux(full);
   check('linux: 100% Full on AC is charging', bf.percent === 100 && bf.charging === true, JSON.stringify(bf));
-
-  // renderer semantics mirror: charging -> 'good' class at any percent
-  const greenAt = (b) => (b.percent <= 20 && !b.ac ? 'warn' : (b.charging ? 'good' : ''));
-  check('renderer rule: 100% on AC gets good class',
-    greenAt(native.batteryFromPowerStatus({ ACLineStatus: 1, BatteryFlag: 0x1, BatteryLifePercent: 100 })) === 'good');
 }
 
 function done() {

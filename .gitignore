@@ -5,3 +5,4 @@ out/
 .env
 .env.*
 Thumbs.db
+__pycache__/

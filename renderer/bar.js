@@ -252,7 +252,9 @@ function render() {
     const b = stats && stats.battery;
     if (b && b.percent != null && !b.noBattery) {
       // One proportional icon: fill volume = charge, red below 10%, bolt while
-      // charging. "Plugged at 100%" simply renders full with no bolt.
+      // charging. Since the 100%-on-AC fix, native reports charging=true at
+      // full charge on AC, so "plugged in at 100%" shows a full body, bolt and
+      // the green 'good' class.
       setIcon('battery', ICONS.batBody(b.percent, b.charging));
       setVal('battery', b.percent + '%', b.percent <= 20 && !b.ac ? 'warn' : (b.charging ? 'good' : ''));
     } else if (b && (b.ac || b.noBattery)) {
