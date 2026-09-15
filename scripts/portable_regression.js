@@ -23,6 +23,10 @@ process.env.HOME = FAKE_HOME;
 process.env.USERPROFILE = FAKE_HOME;
 
 let failures = 0;
+let pendingAsync = 1; // the section-6 child-process callback
+function asyncFinished() {
+  if (--pendingAsync === 0) done();
+}
 function check(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${detail ? '  [' + detail + ']' : ''}`);
   if (!ok) failures++;
@@ -124,7 +128,7 @@ const native = require('../src/native');
     !/tyanw|tyan|mnsky|firstmate|remielle-win|Little-Remielle/i.test(blob));
 }
 
-// --- 5. tokens aggregate empty state ------------------------------------------
+// --- 5. tokens aggregate empty state + master switch --------------------------
 {
   const { TokenTracker } = require('../src/tokens');
   const { DEFAULTS } = require('../src/config');
@@ -132,6 +136,33 @@ const native = require('../src/native');
   const agg = t.aggregate();
   check('tokens: empty state is zeros + sourcesEnabled 0',
     agg.recordCount === 0 && agg.today.total === 0 && agg.sourcesEnabled === 0);
+
+  // Master switch: enabled=false means ZERO scans even when a source is on;
+  // the same store must scan once the master is switched on.
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'wizbar-pi-master-'));
+  fs.mkdirSync(path.join(FAKE_HOME, '.wizbar'), { recursive: true }); // cache dir, as the app creates it
+  const proj = path.join(store, '--home-user--proj--');
+  fs.mkdirSync(proj, { recursive: true });
+  const msg = JSON.stringify({ type: 'message', id: 'm1', message: {
+    role: 'assistant', model: 'model-x', timestamp: Date.UTC(2026, 0, 1, 12),
+    usage: { input: 100, output: 10, cacheRead: 0, cacheWrite: 0 } } });
+  fs.writeFileSync(path.join(proj, 's1.jsonl'), msg + '\n');
+  const mkCfg = (enabled) => ({ ...DEFAULTS, tokens: {
+    ...DEFAULTS.tokens, enabled, rescanMinutes: 5,
+    sources: { ...DEFAULTS.tokens.sources, pi: { enabled: true, sessionsDir: store } }
+  } });
+  pendingAsync++;
+  (async () => {
+    const off = await new TokenTracker(mkCfg(false)).rescan();
+    check('tokens: master off with a source on scans nothing',
+      off.recordCount === 0 && off.today.total === 0 && off.sourcesEnabled === 0,
+      JSON.stringify({ recordCount: off.recordCount, sourcesEnabled: off.sourcesEnabled }));
+    const on = await new TokenTracker(mkCfg(true)).rescan();
+    check('tokens: master on scans the enabled source',
+      on.recordCount === 1 && on.allTime === 110 && on.sourcesEnabled === 1,
+      JSON.stringify({ recordCount: on.recordCount, allTime: on.allTime }));
+  })().catch((e) => check('tokens: master-switch block', false, e.message))
+    .finally(asyncFinished);
 }
 
 // --- 6. koffi-less module load (child process; broken native must not crash) --
@@ -153,7 +184,7 @@ const native = require('../src/native');
       check('native: loads with koffi completely broken', !err && /KOFFILESS_OK/.test(stdout),
         err ? err.message : (stdout || '').trim());
       fs.rmSync(child, { force: true });
-      done();
+      asyncFinished();
     });
 }
 // --- 7. battery charging semantics (100% on AC renders green) -----------------
