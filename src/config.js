@@ -72,7 +72,7 @@ const DEFAULTS = {
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
     // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
     // public build: set enabled + exePath in your own config to use it.
-    remielle: { enabled: false, exePath: '' },
+    pet:      { enabled: false, exePath: '' },
     clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
   },
   terminal: {
@@ -168,7 +168,7 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // Desktop-pet toggle chip (WINDOWS-ONLY, private module, off by default).
     // Set enabled + exePath here to show the bow chip: click launches the exe,
     // click again stops it ("on"/"off").
-    "remielle":  { "enabled": false, "exePath": "" },
+    "pet":       { "enabled": false, "exePath": "" },
     // {MMM} month, {dd} day, {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
   },

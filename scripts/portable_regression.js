@@ -121,11 +121,11 @@ const native = require('../src/native');
     Object.values(DEFAULTS.tokens.sources).every((s) => !s.enabled) &&
     Object.values(DEFAULTS.tokens.sources).every((s) => !s.dbPath && !s.sessionsDir && !s.storageDir));
   check('config: pet off, empty path; agents module fully removed',
-    DEFAULTS.modules.remielle.enabled === false && DEFAULTS.modules.remielle.exePath === '' &&
+    DEFAULTS.modules.pet.enabled === false && DEFAULTS.modules.pet.exePath === '' &&
     !('agents' in DEFAULTS.modules));
   const blob = JSON.stringify(DEFAULTS);
   check('config: no personal identifiers in defaults',
-    !/tyanw|tyan|mnsky|firstmate|remielle-win|Little-Remielle/i.test(blob));
+    !/tyanw|tyan|mnsky|firstmate/i.test(blob));
 }
 
 // --- 5. tokens aggregate empty state + master switch --------------------------

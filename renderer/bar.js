@@ -34,14 +34,14 @@ const ICONS = {
   buds: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 3a3 3 0 0 0-3 3v2.2a3 3 0 1 0 3 3V3z"/><path d="M8.5 13.5v2a3.5 3.5 0 0 1-3.4 3.5"/><path d="M15.5 3a3 3 0 0 1 3 3v2.2a3 3 0 1 1-3 3V3z"/><path d="M15.5 13.5v2a3.5 3.5 0 0 0 3.4 3.5"/></svg>`,
   clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>`,
   diamond: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3 21 12 12 21 3 12z"/></svg>`,
-  // Little Remielle's bow: two loops per side around a small knot.
+  // Pet bow icon: two loops per side around a small knot.
   bow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 11C8.5 7.5 5.5 6.5 4.5 8s.5 4 6.5 3"/><path d="M13 11c2.5-3.5 5.5-4.5 6.5-3s-.5 4-6.5 3"/><path d="M11 13c-2.5 3.5-5.5 4.5-6.5 3s.5-4 6.5-3"/><path d="M13 13c2.5 3.5 5.5 4.5 6.5 3s-.5-4-6.5-3"/><circle cx="12" cy="12" r="1.1"/></svg>`
 };
 
 let theme = null;
 let stats = null;
 let tokensAgg = null;
-let remielleState = null;
+let petState = null;
 let segEls = {};
 let sizeReportTimer = null;
 
@@ -91,9 +91,9 @@ function seg(id, iconSvg, clickable) {
 
 function rebuildSegments() {
   const c = el('segments');
-  // Pinned token/remielle chips are direct children of #bar — remove stale ones
+  // Pinned token/pet chips are direct children of #bar — remove stale ones
   // from earlier rebuilds before appending fresh chips.
-  for (const n of [...el('bar').querySelectorAll(':scope > #seg-tokens, :scope > #seg-remielle')]) n.remove();
+  for (const n of [...el('bar').querySelectorAll(':scope > #seg-tokens, :scope > #seg-pet')]) n.remove();
   c.innerHTML = '';
   segEls = {};
   if (!theme) return;
@@ -104,9 +104,9 @@ function rebuildSegments() {
   // right-aligned group both chips pin left of #segments as direct children
   // of #bar, and the auto margin that pushes the module group right sits on
   // the LAST pinned chip.
-  if (m.remielle && m.remielle.enabled) {
-    const s = seg('remielle', ICONS.bow, true);
-    s.addEventListener('click', () => window.wizbar.toggleRemielle());
+  if (m.pet && m.pet.enabled) {
+    const s = seg('pet', ICONS.bow, true);
+    s.addEventListener('click', () => window.wizbar.togglePet());
     if (pinned) el('bar').insertBefore(s, el('segments'));
     else c.appendChild(s);
   }
@@ -115,7 +115,7 @@ function rebuildSegments() {
     s.title = 'Token usage today — click to open dashboard';
     s.addEventListener('click', () => window.wizbar.openDash());
     if (pinned) {
-      const bow = document.getElementById('seg-remielle');
+      const bow = document.getElementById('seg-pet');
       if (bow && bow.parentElement === el('bar')) {
         s.style.marginRight = 'auto'; // last pinned chip carries the group push
         // .seg.clickable pulls neighbours 5px into its own hover box with a
@@ -208,15 +208,15 @@ function render() {
 
   if (segEls.tokens) setVal('tokens', fmtTokens(tokensAgg ? tokensAgg.today.total : null), 'dim');
 
-  if (segEls.remielle) {
-    if (remielleState && remielleState.exists) {
-      setVal('remielle', remielleState.running ? 'on' : 'off', remielleState.running ? 'good' : 'dim');
-      segEls.remielle.root.title = remielleState.running
-        ? 'Little Remielle is out — click to send her away'
-        : 'Little Remielle — click to summon her';
+  if (segEls.pet) {
+    if (petState && petState.exists) {
+      setVal('pet', petState.running ? 'on' : 'off', petState.running ? 'good' : 'dim');
+      segEls.pet.root.title = petState.running
+        ? 'Pet is out — click to send it away'
+        : 'Pet — click to summon it';
     } else {
-      setVal('remielle', '—', 'dim');
-      segEls.remielle.root.title = 'Little Remielle — exe not found (modules.remielle.exePath in config)';
+      setVal('pet', '—', 'dim');
+      segEls.pet.root.title = 'Pet — exe not found (modules.pet.exePath in config)';
     }
   }
 
@@ -293,7 +293,7 @@ function render() {
 window.wizbar.onTheme(applyTheme);
 window.wizbar.onStats((s) => { stats = s; render(); });
 window.wizbar.onTokens((t) => { tokensAgg = t; render(); });
-window.wizbar.onRemielle((r) => { remielleState = r; render(); });
+window.wizbar.onPet((r) => { petState = r; render(); });
 
 window.wizbar.getTheme().then(applyTheme);
 // local clock tick for smooth seconds if the format uses them

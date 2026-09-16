@@ -32,7 +32,7 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
   bar is a pill/strip (`bar.staticWidth`: 'content' default | 'workarea'); the
   `bar-content-size` IPC handshake lets the window shrink to the pill.
 - Platform gates elsewhere: PowerShell GPU/Bluetooth workers + Core Audio volume +
-  remielle pet + registry autostart are Windows-only (guarded in `src/metrics.js` /
+  desktop pet + registry autostart are Windows-only (guarded in `src/metrics.js` /
   `main.js`); `src/tokens.js` probes `python3` when `python` is missing.
 - Non-Windows acryl­ic does not exist: `themePayload` sends the tint SOLID off-Windows.
 

@@ -2,7 +2,7 @@
 // Smoke test for the dock/topmost fix primitives and the pet guardian: drive
 // throwaway BrowserWindows through native.setToolWindow / setTopmost and assert
 // the WS_EX_TOOLWINDOW / WS_EX_TOPMOST ex-style bits actually land, then replay
-// the two ways 小雷米 ends up behind another window. The guardian section shows
+// the two ways the pet window ends up behind another window. The guardian section shows
 // two small windows for about a second.
 //
 // Run: electron scripts/toolwindow_smoke.js
@@ -54,8 +54,8 @@ app.whenReady().then(async () => {
 
   // --- pet guardian: the case a topmost-bit check alone misses ---------------
   // Two topmost windows z-fight and the one raised last is in front. The pet
-  // keeps WS_EX_TOPMOST the whole time, so isTopmost() reports "fine" while she
-  // sits behind the other window - the reported "she hides until I click her".
+  // keeps WS_EX_TOPMOST the whole time, so isTopmost() reports "fine" while it
+  // sits behind the other window - the reported "it hides until I click it".
   const petWin = new BrowserWindow({ width: 420, height: 300, x: 60, y: 60, frame: false, skipTaskbar: true, show: false });
   const otherWin = new BrowserWindow({ width: 260, height: 180, x: 560, y: 60, frame: false, skipTaskbar: true, show: false });
   petWin.showInactive();
