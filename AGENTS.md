@@ -74,11 +74,6 @@ guards this). Personal stores/pet wiring belongs only in the user-level
 off = zero scans, zero dashboard data, no chip (the dashboard says so via
 `masterEnabled:false`); per-source flags decide which stores are read only when it is on
 (regression: the master-switch block in `scripts/portable_regression.js`).
-- Desktop-pet module key is `pet` (renamed off the personal name, 2026-09);
-  `applyLegacyModuleKeys` in `src/config.js` maps a legacy `remielle` module key onto
-  `pet` (both keys present = `pet` wins), and `readPetPosition` in `main.js` still reads
-  the old position file as a fallback. Regression: the legacy-key block in
-  `scripts/portable_regression.js`.
 
 ## Token usage stores (sharp edge)
 
