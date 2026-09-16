@@ -1,7 +1,7 @@
-# WizBar
+# Chocobar
 
-A slim acrylic system-status bar that floats **above your Windows Terminal window**, plus a
-cross-CLI **token usage tracker** (zcode · zai · opencode · Xiaomi MiMo AI) with a GitHub-style
+A slim acrylic system-status bar that floats **above your terminal window**, plus a
+cross-CLI **token usage tracker** (zcode · zai · pi · opencode · Xiaomi MiMo AI · subscription plans) with a GitHub-style
 heatmap.
 
 Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`), pink accents
@@ -9,7 +9,7 @@ Built to match your terminal theme: pale-yellow acrylic (`#F5F0D8` / `#FDEFF2`),
 
 ```
         ┌────────────────────────────────────────────────────────────────────┐
-        │                       ◇ 235.7M  ⬡23% ⌗18% ▤60% 🔇0% 🔋65% Sep 09 20:04 │   <- WizBar (24px, follows width)
+        │                       ◇ 235.7M  ⬡23% ⌗18% ▤60% 🔇0% 🔋65% Sep 09 20:04 │   <- Chocobar (24px, follows width)
         └────────────────────────────────────────────────────────────────────┘
         ┌────────────────────────────────────────────────────────────────────┐
         │  − □ ✕   PowerShell                                                │   <- Windows Terminal
@@ -44,13 +44,18 @@ runtime and its chip simply shows `—` instead of crashing or faking data.
 | Acrylic backdrop | ✅ translucent tint, alpha 0–255 over a transparent window | tint renders solid (alpha over arbitrary wallpapers reads murky); same colors |
 | Desktop-pet toggle | private module, opt-in | Windows executables only — stays off |
 | Autostart at login | ✅ HKCU Run entry | — (no-op; use your desktop environment's autostart) |
-| Token sources (zcode / zai / pi / opencode / mimo) | ✅ | ✅ (paths are user config; mimo auto-discovers only on Windows) |
+| Token sources (zcode / zai / pi / opencode / mimo / subscription) | ✅ | ✅ (paths are user config; mimo auto-discovers only on Windows) |
 
 Use `terminal.reattachToExisting` / `terminal.className` only on Windows; they are ignored
 elsewhere.
 
 **Follow semantics** (exactly as specified):
-- The bar attaches to the **first** terminal window it sees (frontmost when WizBar starts).
+- The bar attaches to the **first** terminal window it sees (frontmost when Chocobar starts).
+- **Terminal-agnostic by default**: with `terminal.className` left empty it auto-detects
+  what you actually run — Windows Terminal, classic conhost (cmd/PowerShell console),
+  ConEmu and mintty by window class, then WezTerm, Alacritty and Hyper by owning process
+  (their window class is the generic winit/Electron one). The first candidate with a real
+  window wins; set `terminal.className` to a Win32 class to pin one specific terminal.
 - It follows only that window: move, resize (width), minimize (bar hides), restore (bar returns).
 - Opening more terminal windows does **not** retrigger it.
 - When the followed window closes, the bar hides and waits for the **next newly opened**
@@ -64,11 +69,15 @@ elsewhere.
 - Width tracks the terminal's *visible* frame (DWM extended frame bounds, excluding the
   invisible resize borders), so the edges line up exactly.
 
-**Token tracker** — click the `◇` chip, double-launch WizBar, or Ctrl+Alt+D → Token dashboard:
+**Token tracker** — click the `◇` chip, double-launch Chocobar, or Ctrl+Alt+D → Token dashboard:
 - GitHub-style daily heatmap (26 weeks, shades spread by quantiles so heavy usage days
   still differentiate)
 - Today / 7 days / 30 days / all-time totals
 - Per-app and per-model breakdown (input / output / cache read / cache write / calls)
+- **Subscription plans**: quota-based plan credits don't come from session logs — point
+  `tokens.sources.subscription.usagePath` at a small JSON file you keep anywhere
+  (`{ "plans": [{ "name": "Pro Plan", "total": 1500, "used": 430, "resetsAt": "2026-10-14" }] }`)
+  and the dashboard renders each plan as a soft pastel usage card (bar, percent, reset date)
 - **Totals = input + output.** zcode's `input_tokens` already includes cached tokens, so
   adding cache reads back in would double-count (~2x input). Cache columns are shown
   separately in the tables for anyone who wants the raw picture.
@@ -77,22 +86,23 @@ elsewhere.
   the config template). Nothing is read unless the **tokens.enabled** master switch is
   on: with it off the bar chip is hidden and the dashboard explains how to turn usage
   on, with it on but no source enabled the dashboard shows an explanatory empty state.
-  WizBar ships with zero usage data.
+  Chocobar ships with zero usage data.
   - **zcode**: `~/.zcode/cli/db/db.sqlite` → `turn_usage` table (durable, every model call; needs `python`/`python3` on PATH)
   - **zai**: two stores. Sessions launched before the 2026-09-10 engine rebuild are in the
     zcode DB, attributed to `zai` when the session id appears as `~/.zai/agent/sessions/ZCODE_sess_*`.
     The rebuilt pi-based engine keeps transcripts as `<utc-ts>_<uuid>.jsonl` in that same
-    folder whose ids never reach the DB; wizbar scans those files directly and reads the
+    folder whose ids never reach the DB; chocobar scans those files directly and reads the
     per-message `usage` on assistant messages
   - **pi**: [pi coding-agent](https://github.com/badlogic/pi-mono) session logs under
     `~/.pi/agent/sessions` (scans the per-project subfolders recursively, same
     per-message `usage` records as zai's post-rebuild store)
   - **opencode**: `~/.local/share/opencode/storage/message/**` (assistant messages with `tokens`)
   - **Xiaomi MiMo AI**: while the desktop app is running it publishes a localhost HTTP API
-    (`%APPDATA%\Xiaomi MiMo AI\desktop-api.json` holds the port + token); wizbar reads
+    (`%APPDATA%\Xiaomi MiMo AI\desktop-api.json` holds the port + token); chocobar reads
     `/v1/sessions` + `/v1/sessions/<id>/messages` and counts the per-message `tokens`
-    (input excludes cache there, same fold as pi/opencode). History persists in wizbar's own
+    (input excludes cache there, same fold as pi/opencode). History persists in chocobar's own
     token cache; when the app is closed there is simply nothing new to scan.
+  - **subscription**: plan credit usage read from your own JSON file (see above)
 - Rescans every minute (`tokens.rescanMinutes`). Scans are incremental — file mtimes /
   per-session stamps skip everything already scanned, and the record map +
   `~/.wizbar/token-cache.json` dedupe make rescans idempotent.
@@ -149,11 +159,11 @@ Theme colors (`"theme"`), module toggles/intervals (`"modules"`), window-follow 
 (`"terminal"`), and token sources (`"tokens"`) are documented in the same file.
 
 No tray icon by default (`general.showTray: true` brings one back — it follows config live).
-Summon the dashboard via the `◇` chip, Ctrl+Alt+D, or double-launching WizBar. Right-click the
-bar for edit config · reload config · quit. Single-instance locked. The dashboard is a normal
+Summon the dashboard via the `◇` chip, Ctrl+Alt+D, or double-launching Chocobar. Right-click the
+bar for token dashboard · reload chocobar · edit config · reload config · quit. Single-instance locked. The dashboard is a normal
 window on purpose: when the windows above it close or minimize, it is activated like any
 window and can never be demoted below the terminal (its taskbar/Alt-Tab entry shows the
-WizBar icon while it's open; the tray stays empty).
+Chocobar icon while it's open; the tray stays empty).
 
 ## De-personalized by default
 

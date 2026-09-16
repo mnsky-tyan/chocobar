@@ -180,6 +180,27 @@ table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
 .app-opencode { background: #7FA8A0; }
 .app-mimo { background: #B79CE0; }
 
+/* subscription plan usage: soft-rounded rows with a calm pastel fill,
+   same language as the stat cards (translucent white over the pink card) */
+.plan-row { padding: 4px 0 2px; }
+.plan-row + .plan-row { border-top: 1px dashed var(--divider); margin-top: 7px; padding-top: 9px; }
+.plan-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+.plan-name { font-size: 11px; font-weight: 700; }
+.plan-nums { font-size: 10px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.plan-bar {
+  height: 7px; border-radius: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--divider);
+  overflow: hidden;
+}
+.plan-bar i {
+  display: block; height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, var(--yellow), var(--pink-deep));
+  opacity: 0.55;
+}
+.plan-bar i.high { background: var(--warn); opacity: 0.45; }
+.plan-meta { font-size: 9px; color: var(--fg-dim); margin-top: 4px; }
+
 #footer {
   font-size: 9px; color: var(--fg-dim);
   text-align: right; padding-top: 6px;
