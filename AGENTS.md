@@ -52,7 +52,9 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
 ## Perf invariants (do not reintroduce)
 
 - Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);
-  no fixed heartbeat, and `snapshot()` has no always-different `now` field.
+  no fixed heartbeat, and `snapshot()` has no always-different `now` field. The bar/
+  visibility gates run BEFORE `consumeDirty()` so changes observed while the bar is
+  hidden stay pending and flush on restore.
 - Follow loop is 16ms (60Hz) and the unchanged-bounds fast path touches nothing
   (no isVisible()/assertNoTaskbar per tick); `assertNoTaskbar` has a 2s re-assert floor.
 - Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
@@ -68,7 +70,10 @@ Shipped defaults are neutral: `tokens.enabled=false` with all sources off and em
 pet + agents chips off, no personal identifiers in repo code/config/docs (a portable test
 guards this). Personal stores/pet/fleet wiring belongs only in the user-level
 `~/.wizbar/config.json` (outside the repo). Dashboard shows an explanatory empty state
-(`sourcesEnabled`) when nothing is configured.
+(`sourcesEnabled`) when nothing is configured. `tokens.enabled` is a true master switch:
+off = zero scans, zero dashboard data, no chip (the dashboard says so via
+`masterEnabled:false`); per-source flags decide which stores are read only when it is on
+(regression: the master-switch block in `scripts/portable_regression.js`).
 
 ## Token usage stores (sharp edge)
 

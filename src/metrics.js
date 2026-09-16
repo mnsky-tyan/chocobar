@@ -9,7 +9,7 @@ const { spawn } = require('child_process');
 const native = require('./native');
 
 // Windows implements AF_UNIX sockets on top of the named-pipe filesystem: a
-// socket bound at C:\dir\file.sock is reachable as \\.\pipe\C:\dir\file.sock,
+// socket bound at C:\dir\file.sock is reachable as \\.\pipe\C:\dir\file.sock.
 // No current module dials a socket here; the named-pipe prefix convention
 // stays documented for future socket work.
 const IS_WIN = process.platform === 'win32';
@@ -21,7 +21,7 @@ class MetricsEngine extends require('events') {
     this._dirty = false;   // set by every poll that changed state; stats push reads-and-clears
     this.state = {
       cpu: null,          // %
-      cpuTemp: null,      // { c, label } from HWiNFO shared memory, or null
+      cpuTemp: null,      // { c, label }: HWiNFO shm (Windows) or sysfs, or null
       ram: null,          // { pct, usedGB, totalGB }
       gpu: null,          // { sum, max } or null
       battery: null,      // { percent, ac, charging }
@@ -30,7 +30,8 @@ class MetricsEngine extends require('events') {
       volumeError: null
     };
     this._cpuPrev = os.cpus().map((c) => c.times);
-    this._timers = [];    // Persistent PowerShell workers (GPU / Bluetooth), keyed by module. `gen`
+    this._timers = [];
+    // Persistent PowerShell workers (GPU / Bluetooth), keyed by module. `gen`
     // invalidates stale exit handlers: without it a worker killed by stop()
     // respawns alongside the fresh one start() just spawned, because the
     // killed child's exit event only fires after setConfig reset _stopping.

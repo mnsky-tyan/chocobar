@@ -41,7 +41,7 @@ runtime and its chip simply shows `—` instead of crashing or faking data.
 | GPU % (GPU Engine counters) | ✅ | — (chip shows `—`) |
 | Volume (Core Audio master level) | ✅ | — (chip shows `—`) |
 | Bluetooth device battery (PnP property) | ✅ | — (chip shows `—`) |
-| Acrylic backdrop | ✅ DWM blur + tint | tint renders solid (no OS blur API); same colors |
+| Acrylic backdrop | ✅ translucent tint, alpha 0–255 over a transparent window | tint renders solid (alpha over arbitrary wallpapers reads murky); same colors |
 | Desktop-pet toggle | private module, opt-in | Windows executables only — stays off |
 | Autostart at login | ✅ HKCU Run entry | — (no-op; use your desktop environment's autostart) |
 | Token sources (zcode / zai / pi / opencode / mimo) | ✅ | ✅ (paths are user config; mimo auto-discovers only on Windows) |

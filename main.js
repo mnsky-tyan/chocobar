@@ -48,10 +48,10 @@ function themePayload(cfg) {
       height: bar.height, fontSize: bar.fontSize, fontFamily: bar.fontFamily,
       align: bar.align, radius: bar.radius, segmentSpacing: bar.segmentSpacing,
       backdrop: bar.backdrop,
-      // Non-Windows has no DWM acrylic: composing the config alpha over an
-      // arbitrary wallpaper reads dark/murky (the Windows look comes from the
-      // LIGHT system blur behind the tint). The closest honest match there is
-      // the tint itself, solid. Windows rendering is untouched.
+      // Off-Windows the acrylic translucency is not honored: composing the
+      // config alpha over an arbitrary wallpaper reads dark/murky there. The
+      // closest honest match to the Windows look is the tint itself, solid.
+      // Windows rendering is untouched.
       bgCss: bar.backdrop === 'solid'
         ? `rgb(${tint.r},${tint.g},${tint.b})`
         : staticTop
@@ -185,7 +185,7 @@ function buildTray() {
 // renders "—") on other platforms. Private/local module: disabled by default in
 // the shipped config template, enabled from a user config.
 // Truth comes from an in-process Toolhelp32 snapshot (native.findProcessIdByName,
-// ~5ms) rather than spawning tasklist.exe every 3s (~290ms of CPU per spawn,
+// ~5ms) rather than spawning tasklist.exe every 3s (~164ms of CPU per spawn,
 // measured on this machine — it dominated wizbar's CPU budget). Unlike the child
 // handle, a snapshot also sees a pet started or stopped outside WizBar.
 let remielleState = { running: false, exists: false };
@@ -315,7 +315,7 @@ function pollRemielle() {
     return;
   }
   // In-process Toolhelp32 snapshot: no child process, ~5ms instead of a
-  // ~290ms tasklist spawn every 3s.
+  // ~164ms tasklist spawn every 3s.
   const pid = native.findProcessIdByName(path.basename(exe));
   const running = pid != null;
   remiellePid = running ? pid : null;
