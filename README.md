@@ -56,8 +56,8 @@ elsewhere.
 - When the followed window closes, the bar hides and waits for the **next newly opened**
   terminal window (existing other windows are ignored). Set `terminal.reattachToExisting:
   true` to grab any existing window instead.
-- If there's no room above the terminal (maximized / snapped to top), the bar flips to the
-  bottom inside edge (`bar.maximizedBehavior`: `bottom` | `overlay` | `hide`).
+- If there's no room above the terminal (maximized / snapped to top), the bar **hides**
+  until there's room again — it never relocates.
 - **Z-order matches the terminal's band**: the bar is not topmost — it is re-inserted
   directly above the followed terminal in the window stack, so any app that covers the
   terminal covers the bar too, and focusing the terminal brings the bar back with it.
@@ -127,7 +127,8 @@ Autostart at login: set `"general": { "autostart": true }` in the config (writes
 
 ## Config
 
-`%USERPROFILE%\.wizbar\config.json` — written as an **annotated template on first run**
+`~/.wizbar/config.json` (`%USERPROFILE%\.wizbar\config.json` on Windows) — written as an
+**annotated template on first run**
 (every key explained inline with `//` comments), and **hot-reloaded the moment you save it** —
 no restart needed. The main dials, all under `"bar"`:
 
@@ -175,9 +176,7 @@ pet module (Windows) with your own exe path if you want it.
 - The dark edge you may see in the gap is the **terminal's own drop shadow** — part of Windows
   Terminal, not the bar.
 - `bar.insetX` (default 2 DIP per side) trims the bar so it doesn't overhang the terminal frame.
-- If there isn't room above the terminal (maximized / opened at the very top), the bar **hides**
-  until there's room again — it never relocates.
-- Bluetooth battery chip **auto-hides** until a device reports a level; hover it for names.
+- The Bluetooth battery chip shows `—` until a device reports a level; hover it for names.
 - Follow loop runs at 60Hz (16ms, display refresh) and only touches the window when the
   terminal's geometry actually changes; stats reach the renderer only when a value
   changed (≤4 pushes/s instead of a 10Hz heartbeat). Metrics: CPU/RAM 0.8s, battery 1.5s,
@@ -225,11 +224,12 @@ Windows-side extras: `scripts/token_regression.js` (zcode+zai attribution, needs
 ```
 main.js            app entry: tray, IPC, wiring, lifecycle
 src/config.js      defaults + ~/.wizbar/config.json hot reload
-src/tracker.js     first-window attach + follow state machine (koffi/Win32)
-src/native.js      koffi bindings: EnumWindows/GetWindowRect, battery, IAudioEndpointVolume
-src/metrics.js     cpu/ram (node), gpu + bluetooth battery (persistent PowerShell workers)
+src/tracker.js     first-window attach + follow state machine (Win32); static pill/strip placement off-Windows
+src/native.js      platform gate: koffi Win32 bindings (windows, battery, volume, HWiNFO temp)
+                   + portable readers (sysfs battery/CPU temp, Toolhelp32 process snapshot)
+src/metrics.js     cpu/ram (node); gpu + bluetooth battery via persistent PowerShell workers (Windows only)
 src/tokens.js      token scanners + aggregation, cache at ~/.wizbar/token-cache.json
 src/bar.js         the bar BrowserWindow
 renderer/          bar.html/css/js, dash.html/css/js (+ preloads)
-scripts/           launchers, zcode_query.py, smoke.js
+scripts/           launchers, regression suites (npm test), zcode_query.py, smoke.js
 ```

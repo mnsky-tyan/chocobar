@@ -45,7 +45,7 @@ const DEFAULTS = {
     // 'workarea' = full-width strip pinned to the top of the screen (matches
     // the bar above a maximized terminal, but covers that 24px band).
     staticWidth: 'content',
-    backdrop: 'acrylic',   // acrylic | solid | none
+    backdrop: 'acrylic',   // translucent tint over the desktop | 'solid' = opaque
     backgroundTint: '#FBF2E2',   // pale yellow/pink blend to match terminal acrylic
     backgroundAlpha: 110,        // 0-255 — fill opacity (0 = clear, 255 = solid)
     segmentSpacing: 14
@@ -65,7 +65,7 @@ const DEFAULTS = {
   modules: {
     gpu:      { enabled: true, mode: 'sum', intervalMs: 1200 },
     cpu:      { enabled: true, intervalMs: 800, warnAt: 85 },
-    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // via HWiNFO shared memory (Windows)
+    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // HWiNFO shm (Windows), sysfs sensors elsewhere
     ram:      { enabled: true, intervalMs: 800, warnAt: 90 },
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
@@ -155,8 +155,9 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // GPU %: mode "sum" adds all engines (Task-Manager-like), "max" takes the busiest
     "gpu":       { "enabled": true, "mode": "sum", "intervalMs": 1200 },
     "cpu":       { "enabled": true, "intervalMs": 800, "warnAt": 85 },
-    // CPU temperature from HWiNFO's shared memory ("Shared Memory Support" in HWiNFO's
-    // settings). Shows "—" while HWiNFO is not publishing sensors.
+    // CPU temperature: Windows reads HWiNFO's shared memory (enable "Shared Memory
+    // Support" in HWiNFO's settings); Linux reads sysfs sensors (hwmon / thermal
+    // zones). Shows "—" when no sensor is publishing.
     "cputemp":   { "enabled": true, "intervalMs": 2000, "warnAt": 85 },
     "ram":       { "enabled": true, "intervalMs": 800, "warnAt": 90 },
     "volume":    { "enabled": true, "intervalMs": 500, "role": "multimedia" },
