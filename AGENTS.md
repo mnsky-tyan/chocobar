@@ -85,6 +85,9 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 - pi (new source): `~/.pi/agent/sessions/<project-slug>/*.jsonl` — same per-message
   `usage` records, nested per project; scanned by the shared `_scanPiSessions`
   (zai = 'zf:' keys/flat, pi = 'pf:' keys/nested, per-source mtime cursors).
+  Timestamp shape: `message.timestamp` is epoch-ms int (verified 1402 real records);
+  the ISO string lives on the line-level top-level `timestamp` the scanner never reads —
+  don't 'fix' the `Number()` parse, it is correct (a review round was burned on this).
 - opencode: cache BESIDE input; mimo: input EXCLUDES cache. All scans fold cache into
   stored input so aggregate() totals stay input+output (zcode DB input already includes
   cache). Contract checks: `npm test` + `scripts/token_regression.js`.
