@@ -200,11 +200,8 @@ let petLastPosSig = null;        // skip re-writing an unchanged position
 
 function petPosFile() { return path.join(APP_DIR, 'pet-position.json'); }
 
-// The saved position lives in pet-position.json; installs from before the
-// rename may still have the old file next to it, so keep reading that too.
 function readPetPosition() {
   try { return JSON.parse(fs.readFileSync(petPosFile(), 'utf8')); } catch (_) {}
-  try { return JSON.parse(fs.readFileSync(path.join(APP_DIR, 'remielle-position.json'), 'utf8')); } catch (_) {}
   return null;
 }
 

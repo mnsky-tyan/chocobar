@@ -115,7 +115,7 @@ const native = require('../src/native');
 
 // --- 4. config defaults sanity (public-release neutrality) --------------------
 {
-  const { DEFAULTS, ConfigManager, applyLegacyModuleKeys } = require('../src/config');
+  const { DEFAULTS } = require('../src/config');
   check('config: token sources off, no paths',
     DEFAULTS.tokens.enabled === false &&
     Object.values(DEFAULTS.tokens.sources).every((s) => !s.enabled) &&
@@ -125,25 +125,7 @@ const native = require('../src/native');
     !('agents' in DEFAULTS.modules));
   const blob = JSON.stringify(DEFAULTS);
   check('config: no personal identifiers in defaults',
-    !/tyanw|tyan|mnsky|firstmate|Little-Remielle|remielle/i.test(blob));
-
-  // Legacy config key: a config written before the pet module's rename still
-  // enables the module through the old "remielle" key. "pet" wins when a
-  // config carries both keys, and the legacy key never lingers in the merged
-  // config the rest of the app reads.
-  check('config: applyLegacyModuleKeys maps the legacy key onto "pet"',
-    applyLegacyModuleKeys({ modules: { remielle: { enabled: true, exePath: 'x.exe' } } })
-      .modules.pet.enabled === true);
-  const both = applyLegacyModuleKeys({ modules: { pet: { enabled: false }, remielle: { enabled: true } } });
-  check('config: "pet" key wins when both keys are present',
-    both.modules.pet.enabled === false && !('remielle' in both.modules));
-  fs.mkdirSync(path.join(FAKE_HOME, '.wizbar'), { recursive: true });
-  fs.writeFileSync(path.join(FAKE_HOME, '.wizbar', 'config.json'),
-    JSON.stringify({ modules: { remielle: { enabled: true, exePath: 'C:\\pet.exe' } } }));
-  const legacyCfg = new ConfigManager().load();
-  check('config: legacy "remielle" key still enables the pet module',
-    legacyCfg.modules.pet && legacyCfg.modules.pet.enabled === true &&
-    legacyCfg.modules.pet.exePath === 'C:\\pet.exe' && !('remielle' in legacyCfg.modules));
+    !/tyanw|tyan|mnsky|firstmate/i.test(blob));
 }
 
 // --- 5. tokens aggregate empty state + master switch --------------------------

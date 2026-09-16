@@ -209,17 +209,6 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
 }
 `;
 
-// Legacy alias: the desktop-pet module was originally keyed "remielle".
-// A config that still uses that key keeps working: it is mapped onto the
-// neutral "pet" key. When both keys are present, "pet" wins.
-function applyLegacyModuleKeys(user) {
-  if (user && user.modules && user.modules.remielle) {
-    if (!user.modules.pet) user.modules.pet = user.modules.remielle;
-    delete user.modules.remielle;
-  }
-  return user;
-}
-
 function expandTilde(p) {
   if (typeof p === 'string' && p.startsWith('~/')) {
     return path.join(os.homedir(), p.slice(2));
@@ -261,7 +250,7 @@ class ConfigManager extends EventEmitter {
       // First run: write the annotated template out so the user can customize.
       try { fs.writeFileSync(CONFIG_PATH, TEMPLATE, 'utf8'); } catch (_) {}
     }
-    const merged = deepMerge(DEFAULTS, applyLegacyModuleKeys(user));
+    const merged = deepMerge(DEFAULTS, user);
     // resolve tilde paths
     for (const s of Object.values(merged.tokens.sources)) {
       if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
@@ -282,7 +271,7 @@ class ConfigManager extends EventEmitter {
         this._debounce = setTimeout(() => {
           try {
             const user = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, 'utf8')));
-            const merged = deepMerge(DEFAULTS, applyLegacyModuleKeys(user));
+            const merged = deepMerge(DEFAULTS, user);
             for (const s of Object.values(merged.tokens.sources)) {
               if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
               if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
@@ -301,4 +290,4 @@ class ConfigManager extends EventEmitter {
   }
 }
 
-module.exports = { ConfigManager, CONFIG_PATH, APP_DIR, DEFAULTS, TEMPLATE, applyLegacyModuleKeys };
+module.exports = { ConfigManager, CONFIG_PATH, APP_DIR, DEFAULTS, TEMPLATE };
