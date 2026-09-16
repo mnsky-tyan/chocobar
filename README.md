@@ -74,8 +74,10 @@ elsewhere.
   separately in the tables for anyone who wants the raw picture.
 - Sources — **all opt-in, all read-only from local files**; enable the ones you use in
   `tokens.sources` and point them at your own stores (typical paths are documented in
-  the config template). With none enabled the bar chip is hidden and the dashboard shows
-  an explanatory empty state — WizBar ships with zero usage data.
+  the config template). Nothing is read unless the **tokens.enabled** master switch is
+  on: with it off the bar chip is hidden and the dashboard explains how to turn usage
+  on, with it on but no source enabled the dashboard shows an explanatory empty state.
+  WizBar ships with zero usage data.
   - **zcode**: `~/.zcode/cli/db/db.sqlite` → `turn_usage` table (durable, every model call; needs `python`/`python3` on PATH)
   - **zai**: two stores. Sessions launched before the 2026-09-10 engine rebuild are in the
     zcode DB, attributed to `zai` when the session id appears as `~/.zai/agent/sessions/ZCODE_sess_*`.
