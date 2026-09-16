@@ -19,10 +19,46 @@ const SCAN_INTERVAL_MS = 400;   // look for new terminal windows while unattache
 // No polling timer exists in static mode (nothing to follow).
 const STATIC_MODE = process.platform !== 'win32';
 
+// Terminal-agnostic target detection. The bar follows whatever terminal the
+// user actually runs, not a hard-coded Windows Terminal class.
+//
+// config.terminal.className overrides everything:
+//   - string: probe exactly that Win32 window class (legacy single-class
+//     configs keep working untouched)
+//   - array: probe these classes in order
+//   - '' / missing (the default): AUTO mode, candidates probed in this order:
+//
+//   1. CASCADIA_HOSTING_WINDOW_CLASS  Windows Terminal (stable + Preview)
+//   2. ConsoleWindowClass             classic conhost (cmd.exe / powershell.exe)
+//   3. VirtualConsoleClass            ConEmu
+//   4. mintty                         mintty (Git Bash / Cygwin)
+//   5. wezterm-gui.exe                WezTerm     (by owning PROCESS, see below)
+//   6. alacritty.exe                  Alacritty   (by owning PROCESS)
+//   7. Hyper.exe                      Hyper       (by owning PROCESS)
+//
+// The first candidate with a live, visible, real window wins. WezTerm,
+// Alacritty and Hyper are matched by process image name instead of window
+// class because they register the generic winit/Electron class shared with
+// unrelated apps, so a class probe would false-positive.
+const AUTO_PROBE_CLASSES = [
+  'CASCADIA_HOSTING_WINDOW_CLASS',
+  'ConsoleWindowClass',
+  'VirtualConsoleClass',
+  'mintty'
+];
+const AUTO_PROBE_PROCESSES = ['wezterm-gui.exe', 'alacritty.exe', 'Hyper.exe'];
+
+// Resolve config.terminal.className into { classes, processes } probe lists.
+function resolveProbe(className) {
+  if (Array.isArray(className) && className.length) return { classes: className.slice(), processes: [] };
+  if (typeof className === 'string' && className) return { classes: [className], processes: [] };
+  return { classes: AUTO_PROBE_CLASSES.slice(), processes: AUTO_PROBE_PROCESSES.slice() };
+}
+
 class TerminalTracker extends require('events') {
   constructor(config) {
     super();
-    this.className = config.terminal.className;
+    this.probe = resolveProbe(config.terminal.className);
     this.reattachToExisting = !!config.terminal.reattachToExisting;
     this.cfgBar = config.bar;   // bar sizing for static mode
     this.hwnd = null;          // numeric hwnd of followed terminal window
@@ -95,11 +131,12 @@ class TerminalTracker extends require('events') {
   }
 
   setConfig(config) {
-    const classChanged = this.className !== config.terminal.className;
-    this.className = config.terminal.className;
+    const probe = resolveProbe(config.terminal.className);
+    const probeChanged = JSON.stringify(probe) !== JSON.stringify(this.probe);
+    this.probe = probe;
     this.reattachToExisting = !!config.terminal.reattachToExisting;
     if (STATIC_MODE) { this.setCfgBar(config); this._emitStaticGeometry(); return; }
-    if (classChanged) {
+    if (probeChanged) {
       this.seen.clear();
       this.hwnd = null;
       clearInterval(this._timer);
@@ -114,9 +151,26 @@ class TerminalTracker extends require('events') {
     this._scanTick();
   }
 
+  // All candidate terminal windows right now, best target first: the probe
+  // lists above are walked in order and the first list that yields a window
+  // wins (class probes first, then process-image probes).
+  _listCandidates() {
+    for (const cls of this.probe.classes) {
+      const wins = native.listWindowsByClass(cls);
+      if (wins.length) return wins;
+    }
+    for (const exe of this.probe.processes) {
+      const pid = native.findProcessIdByName(exe);
+      if (pid == null) continue;
+      const wins = native.findPidWindows(pid);
+      if (wins.length) return wins;
+    }
+    return [];
+  }
+
   _scanTick() {
     if (this.hwnd) return;
-    const wins = native.listWindowsByClass(this.className);
+    const wins = this._listCandidates();
     const fresh = this.reattachToExisting
       ? (wins.length ? [wins[0]] : [])
       : wins.filter((w) => !this.seen.has(w));
@@ -142,7 +196,7 @@ class TerminalTracker extends require('events') {
     this.emit('detached', wasHwnd);
     // Everything that currently exists is now "old" - only a NEW window retriggers.
     // (Drop the closed hwnd itself so a reused handle value still counts as new.)
-    const wins = native.listWindowsByClass(this.className);
+    const wins = this._listCandidates();
     this.seen = new Set(wins.filter((w) => w !== wasHwnd));
     this._ensureScan();
   }
@@ -214,4 +268,4 @@ class TerminalTracker extends require('events') {
   }
 }
 
-module.exports = { TerminalTracker };
+module.exports = { TerminalTracker, resolveProbe };

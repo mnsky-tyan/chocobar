@@ -289,6 +289,78 @@ const native = require('../src/native');
   Module._load = origLoad;
 }
 
+// --- 9. subscription plan-usage source ---------------------------------------
+{
+  const { TokenTracker } = require('../src/tokens');
+  const { DEFAULTS } = require('../src/config');
+  fs.mkdirSync(path.join(FAKE_HOME, '.wizbar'), { recursive: true }); // cache dir, as the app creates it
+  const usageFile = path.join(FAKE_HOME, 'plan-usage.json');
+  fs.writeFileSync(usageFile, JSON.stringify({ plans: [
+    { name: 'Pro Plan', total: 1500, used: 430, resetsAt: '2026-10-14' },
+    { name: 'bad total', total: 0, used: 5 },        // skipped: non-positive total
+    { name: 'no numbers', total: 'x', used: 'y' }    // skipped: non-numeric quota
+  ] }));
+  const mkCfg = (masterOn, subOn) => ({ ...DEFAULTS, tokens: {
+    ...DEFAULTS.tokens, enabled: masterOn, rescanMinutes: 5,
+    sources: { ...DEFAULTS.tokens.sources, subscription: { enabled: subOn, usagePath: usageFile } }
+  } });
+  check('subscription: default source is off with empty path',
+    DEFAULTS.tokens.sources.subscription.enabled === false &&
+    DEFAULTS.tokens.sources.subscription.usagePath === '');
+  pendingAsync++;
+  (async () => {
+    const off = await new TokenTracker(mkCfg(true, false)).rescan();
+    check('subscription: source off -> null payload, no plan card',
+      off.subscription === null && off.sourcesEnabled === 0);
+    const on = await new TokenTracker(mkCfg(true, true)).rescan();
+    const plans = on.subscription && on.subscription.plans;
+    check('subscription: enabled reads valid plans, skips invalid entries',
+      on.sourcesEnabled === 1 && plans && plans.length === 1 &&
+      plans[0].name === 'Pro Plan' && plans[0].total === 1500 &&
+      plans[0].used === 430 && plans[0].resetsAt === '2026-10-14',
+      JSON.stringify(on.subscription));
+    const master = await new TokenTracker(mkCfg(false, true)).rescan();
+    check('subscription: master off -> null payload even with the source on',
+      master.subscription === null && master.masterEnabled === false);
+    fs.writeFileSync(usageFile, '{ broken');
+    const bad = await new TokenTracker(mkCfg(true, true)).rescan();
+    check('subscription: malformed file -> null payload, scan survives', bad.subscription === null);
+    fs.writeFileSync(usageFile, JSON.stringify({ plans: [] }));
+    const empty = await new TokenTracker(mkCfg(true, true)).rescan();
+    check('subscription: empty plans -> null payload', empty.subscription === null);
+  })().catch((e) => check('subscription: block', false, e.message))
+    .finally(asyncFinished);
+}
+
+// --- 10. terminal auto-probe resolution ---------------------------------------
+{
+  const Module = require('module');
+  const origLoad = Module._load;
+  Module._load = function (request) {
+    if (request === 'electron') {
+      return { screen: { on() {}, removeListener() {}, getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }) } };
+    }
+    return origLoad.apply(this, arguments);
+  };
+  const { TerminalTracker, resolveProbe } = require('../src/tracker');
+  const auto = resolveProbe('');
+  check('probe: auto = WT/conhost/ConEmu/mintty classes then process probes',
+    JSON.stringify(auto.classes) === JSON.stringify(['CASCADIA_HOSTING_WINDOW_CLASS', 'ConsoleWindowClass', 'VirtualConsoleClass', 'mintty']) &&
+    JSON.stringify(auto.processes) === JSON.stringify(['wezterm-gui.exe', 'alacritty.exe', 'Hyper.exe']),
+    JSON.stringify(auto));
+  const pinned = resolveProbe('Foo_CLASS');
+  check('probe: string override pins one class',
+    pinned.classes.length === 1 && pinned.classes[0] === 'Foo_CLASS' && pinned.processes.length === 0);
+  const custom = resolveProbe(['A', 'B']);
+  check('probe: array override honored in order',
+    JSON.stringify(custom.classes) === JSON.stringify(['A', 'B']) && custom.processes.length === 0);
+  const t = new TerminalTracker({ terminal: { className: '' }, bar: { height: 24 } });
+  check('probe: default config resolves auto mode', t.probe.classes.length === 4 && t.probe.processes.length === 3);
+  // Headless stubs: no windows and no processes anywhere -> no candidates, no crash.
+  check('probe: empty environment yields no candidates', JSON.stringify(t._listCandidates()) === '[]');
+  Module._load = origLoad;
+}
+
 function done() {
   if (failures) { console.error(`\n${failures} FAILURE(S)`); process.exit(1); }
   console.log('\nAll portable regression checks passed.');

@@ -20,6 +20,12 @@
 //            GET /v1/sessions and /v1/sessions/<id>/messages return transcripts
 //            whose assistant messages carry a `tokens` object. History persists
 //            in our own token cache — when the app is closed nothing new scans.
+//  - subscription: plan CREDITS for subscription plans (quota-based, not
+//            per-message tokens). The user points tokens.sources.subscription
+//            at a small JSON file (usagePath) kept anywhere:
+//              { "plans": [ { "name": "Pro Plan", "total": 1500,
+//                             "used": 430, "resetsAt": "2026-10-14" } ] }
+//            Re-read on every rescan; rendered as its own dashboard card.
 //
 // The sources themselves are the durable store; we keep an in-memory record map
 // keyed by a stable source id (dedup) and a small cache file for fast restarts.
@@ -57,6 +63,7 @@ class TokenTracker extends require('events') {
     super();
     this.cfg = config.tokens;
     this.records = new Map();   // key -> { app, ts, model, input, output, cacheRead, cacheWrite, reasoning }
+    this.subscriptionPlans = null; // parsed tokens.sources.subscription file, null = off/unreadable
     this.lastScan = null;
     this._timer = null;
     this._pythonCmd = 'python'; // may be re-probed to python3 on Linux
@@ -97,6 +104,7 @@ class TokenTracker extends require('events') {
     try { added += this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
     try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
+    try { this._scanSubscription(); } catch (e) { console.error('[wizbar] subscription scan:', e.message); }
     this.lastScan = new Date().toISOString();
     this._saveCache();
     this.emit('updated', this.aggregate());
@@ -345,6 +353,34 @@ class TokenTracker extends require('events') {
       .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
   }
 
+  // --- subscription plan credits -------------------------------------------------
+  // Quota-based subscription plans don't emit per-message usage records; their
+  // state is a snapshot (credits used out of a total). The user keeps that
+  // snapshot in a JSON file and points the source at it; we re-read it on
+  // every rescan (the file is tiny) and never let one bad file break the
+  // token scan: unreadable/invalid plans are skipped, not fatal.
+  _scanSubscription() {
+    const src = this.cfg.sources.subscription;
+    this.subscriptionPlans = null;
+    if (!src || !src.enabled || !src.usagePath) return;
+    let parsed;
+    try { parsed = JSON.parse(fs.readFileSync(src.usagePath, 'utf8')); } catch (_) { return; }
+    const plans = Array.isArray(parsed && parsed.plans) ? parsed.plans : [];
+    const out = [];
+    for (const p of plans) {
+      if (!p || typeof p !== 'object') continue;
+      const total = Number(p.total), used = Number(p.used);
+      if (!Number.isFinite(total) || !Number.isFinite(used) || total <= 0) continue;
+      out.push({
+        name: String(p.name || 'Plan'),
+        total,
+        used: Math.max(0, used),
+        resetsAt: (typeof p.resetsAt === 'string' && p.resetsAt) ? p.resetsAt : null
+      });
+    }
+    this.subscriptionPlans = out.length ? out : null;
+  }
+
   // --- cache ---------------------------------------------------------------------
   _loadCache() {
     try {
@@ -387,7 +423,8 @@ class TokenTracker extends require('events') {
         today: { total: 0, apps: {} },
         week: 0, month: 0, allTime: 0,
         byDay: {}, byApp: {}, byModel: {},
-        recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0, masterEnabled: false
+        recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0, masterEnabled: false,
+        subscription: null
       };
     }
     const rowTotal = (r) => (r.input || 0) + (r.output || 0);
@@ -454,7 +491,12 @@ class TokenTracker extends require('events') {
       // How many usage sources are switched on — lets the dashboard explain an
       // empty state ("no sources configured") instead of just showing zeros.
       sourcesEnabled: Object.values(this.cfg.sources || {}).filter((s) => s && s.enabled).length,
-      masterEnabled: true
+      masterEnabled: true,
+      // Subscription plan credits ride along as a sibling payload (null when
+      // the source is off or nothing valid was read: the dashboard then hides
+      // the card instead of showing an empty one).
+      subscription: (this.cfg.enabled && this.subscriptionPlans)
+        ? { plans: this.subscriptionPlans } : null
     };
   }
 }
