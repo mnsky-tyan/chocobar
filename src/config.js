@@ -79,7 +79,7 @@ const DEFAULTS = {
     // Win32 window class to follow. '' (default) = auto-detect the terminal:
     // Windows Terminal, classic conhost, ConEmu, mintty by window class, then
     // WezTerm / Alacritty / Hyper by owning process (see src/tracker.js for
-    // the probe order). A string pins one class; an array is a custom order.
+    // the probe order). A string pins one class.
     className: '',
     reattachToExisting: false   // after followed window closes, wait for a NEW window
   },

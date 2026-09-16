@@ -351,9 +351,6 @@ const native = require('../src/native');
   const pinned = resolveProbe('Foo_CLASS');
   check('probe: string override pins one class',
     pinned.classes.length === 1 && pinned.classes[0] === 'Foo_CLASS' && pinned.processes.length === 0);
-  const custom = resolveProbe(['A', 'B']);
-  check('probe: array override honored in order',
-    JSON.stringify(custom.classes) === JSON.stringify(['A', 'B']) && custom.processes.length === 0);
   const t = new TerminalTracker({ terminal: { className: '' }, bar: { height: 24 } });
   check('probe: default config resolves auto mode', t.probe.classes.length === 4 && t.probe.processes.length === 3);
   // Headless stubs: no windows and no processes anywhere -> no candidates, no crash.
