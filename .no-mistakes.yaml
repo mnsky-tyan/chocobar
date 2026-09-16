@@ -1,0 +1,4 @@
+# WizBar has no CI workflows (personal project, no CI runner configured).
+# This trusted declaration tells the no-mistakes pipeline to conclude checks-passed
+# instead of waiting for checks that will never register.
+no_ci: true
