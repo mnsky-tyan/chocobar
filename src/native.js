@@ -666,7 +666,7 @@ function getHwinfoTemp(mapName) {
 }
 
 // --- process lookup by image name (Toolhelp32 snapshot) ------------------------
-// pollRemielle used to spawn tasklist.exe every 3s just to learn whether the pet
+// pollPet used to spawn tasklist.exe every 3s just to learn whether the pet
 // process is alive (~164ms of CPU per spawn here); an in-process snapshot costs
 // ~5ms. Returns the matching pid, or null when no process carries that image name.
 const TH32CS_SNAPPROCESS = 0x2;
@@ -703,7 +703,7 @@ function findProcessIdByName(imageName) {
   return null;
 }
 
-// --- window discovery by pid + monitor geometry (Little Remielle pet) ----------
+// --- window discovery by pid + monitor geometry (desktop pet) ----------
 const MonitorProc = kproto('int __stdcall MonitorProc(uintptr_t hMonitor, void *hdc, void *clipRect, void *data)');
 const EnumDisplayMonitors = bind(user32, 'int __stdcall EnumDisplayMonitors(void *hdc, void *clipRect, MonitorProc *proc, void *data)');
 

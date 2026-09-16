@@ -1,22 +1,23 @@
 'use strict';
-// Guardian for the 小雷米 desktop pet: she must never end up behind another
-// window. Two distinct ways she gets buried, and why a topmost-bit check alone
+// Guardian for the desktop pet: it must never end up behind another
+// window. Two distinct ways it gets buried, and why a topmost-bit check alone
 // misses the second one:
 //
-//   1. She loses her topmost band - something calls SetWindowPos on her without
-//      the topmost flag (fullscreen apps, some launchers, her own init), and
+//   1. It loses its topmost band - something calls SetWindowPos on it without
+//      the topmost flag (fullscreen apps, some launchers, its own init), and
 //      WS_EX_TOPMOST reads back clear. Nothing restores it, so the occlusion
-//      sticks until the user clicks her.
-//   2. She KEEPS the bit and is still not in front. Among topmost windows the
+//      sticks until the user clicks the pet.
+//   2. It KEEPS the bit and is still not in front. Among topmost windows the
 //      one raised last wins, so a window that raises itself afterwards sits over
-//      her while isTopmost() keeps reporting true. Clicking her "levitates" her
-//      - that raise happens inside the topmost band, with no bit ever changing.
+//      the pet while isTopmost() keeps reporting true. Clicking the pet
+//      "levitates" it - that raise happens inside the topmost band, with no bit
+//      ever changing.
 //
-// Both are answered the same way: SetWindowPos(HWND_TOPMOST), which puts her at
+// Both are answered the same way: SetWindowPos(HWND_TOPMOST), which puts it at
 // the top of the topmost band. The reference window is deliberately the
 // FOREGROUND window only - the shell's own windows (Shell_TrayWnd and its
 // helpers) are topmost too, and re-raising above everything in the band would
-// have her fighting the taskbar for no reason. She already sits below the
+// have it fighting the taskbar for no reason. The pet already sits below the
 // taskbar in practice and WindowFromPoint confirms clicks in their overlap
 // still reach the taskbar, so leaving that ordering alone is safe.
 const native = require('./native');

@@ -179,7 +179,7 @@ function buildTray() {
   tray.on('double-click', () => openDashboard());
 }
 
-// --- Little Remielle desktop-pet toggle (WINDOWS-ONLY) --------------------------
+// --- Desktop-pet toggle (WINDOWS-ONLY) ------------------------------------------
 // The pet is a Windows exe managed through taskkill and Win32 window placement;
 // there is no portable equivalent, so the module reports "exists: false" (chip
 // renders "—") on other platforms. Private/local module: disabled by default in
@@ -188,17 +188,25 @@ function buildTray() {
 // ~5ms) rather than spawning tasklist.exe every 3s (~164ms of CPU per spawn,
 // measured on this machine — it dominated wizbar's CPU budget). Unlike the child
 // handle, a snapshot also sees a pet started or stopped outside WizBar.
-let remielleState = { running: false, exists: false };
-let remiellePid = null;          // pet process id from the last live poll
-let remielleRestorePending = false; // set on launch, consumed by the poll
-let remielleRestoreActive = false;  // true while the restore watcher runs
-let remielleDefaultSig = null;   // the pet's built-in default spot (x,y),
+let petState = { running: false, exists: false };
+let petPid = null;               // pet process id from the last live poll
+let petRestorePending = false;   // set on launch, consumed by the poll
+let petRestoreActive = false;    // true while the restore watcher runs
+let petDefaultSig = null;        // the pet's built-in default spot (x,y),
                                  // learned during restore - never save it,
                                  // or a poll would clobber the real
                                  // position with the default every time
-let remielleLastPosSig = null;   // skip re-writing an unchanged position
+let petLastPosSig = null;        // skip re-writing an unchanged position
 
-function remiellePosFile() { return path.join(APP_DIR, 'remielle-position.json'); }
+function petPosFile() { return path.join(APP_DIR, 'pet-position.json'); }
+
+// The saved position lives in pet-position.json; installs from before the
+// rename may still have the old file next to it, so keep reading that too.
+function readPetPosition() {
+  try { return JSON.parse(fs.readFileSync(petPosFile(), 'utf8')); } catch (_) {}
+  try { return JSON.parse(fs.readFileSync(path.join(APP_DIR, 'remielle-position.json'), 'utf8')); } catch (_) {}
+  return null;
+}
 
  // The pet keeps its own position memory in 设置.json next to its exe and
  // restores it on every launch - that file, not WizBar, was what put the
@@ -206,62 +214,61 @@ function remiellePosFile() { return path.join(APP_DIR, 'remielle-position.json')
  // before launching, write the saved position into the pet’s own settings so
  // the pet places itself where the user left it. Coordinates are physical
  // pixels, same space as GetWindowRect; the sprite scale field is preserved.
-function remielleSyncPetConfig(x, y) {
-  const cfg = remielleCfg();
+function petSyncConfig(x, y) {
+  const cfg = petCfg();
   if (!cfg.exePath) return;
   const petFile = path.join(path.dirname(cfg.exePath), '设置.json');
   try {
     let scale = 1;
     try { scale = JSON.parse(fs.readFileSync(petFile, 'utf8')).scale || 1; } catch (_) {}
     fs.writeFileSync(petFile, JSON.stringify({ x, y, scale }), 'utf8');
-  } catch (e) { DBG('remielle pet-config sync failed:', e.message); }
+  } catch (e) { DBG('pet config sync failed:', e.message); }
 }
 
 // Remember where the figure is: its window rect, written while it runs and
 // right before we kill it, so the next toggle and the next app restart can
 // put it back exactly where the user left it.
-function remielleSavePosition() {
-  if (!remiellePid) return;
+function petSavePosition() {
+  if (!petPid) return;
   // A poll must never record the pet’s transient states: while a restore is
   // pending/running the window is being placed by us, and the built-in default
   // spot is exactly what the restore exists to move it away from. Saving
   // either would clobber the user’s position and poison every later
   // toggle (the works-once-or-twice-then-fails bug).
-  if (remielleRestorePending || remielleRestoreActive) return;
+  if (petRestorePending || petRestoreActive) return;
   try {
-    const hwnds = native.findPidWindows(remiellePid);
+    const hwnds = native.findPidWindows(petPid);
     if (!hwnds.length) return;
     const rc = native.getWindowRect(hwnds[0]);
     if (!rc || rc.right <= rc.left || rc.bottom <= rc.top) return;
     const sig = rc.left + ',' + rc.top;
-    if (sig === remielleLastPosSig) return;
-    if (remielleDefaultSig && sig === remielleDefaultSig) return; // the default is not a placement
-    remielleLastPosSig = sig;
-    fs.writeFileSync(remiellePosFile(), JSON.stringify({
+    if (sig === petLastPosSig) return;
+    if (petDefaultSig && sig === petDefaultSig) return; // the default is not a placement
+    petLastPosSig = sig;
+    fs.writeFileSync(petPosFile(), JSON.stringify({
       x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top, savedAt: new Date().toISOString()
     }));
-  } catch (e) { DBG('remielle position save failed:', e.message); }
+  } catch (e) { DBG('pet position save failed:', e.message); }
 }
 
 // Put the figure back where it was. A saved position that lands off-screen
 // or on a monitor that is no longer connected is ignored: the pet then shows
 // up at its own default position instead.
-function remielleRestorePosition(pid) {
-  let pos = null;
-  try { pos = JSON.parse(fs.readFileSync(remiellePosFile(), 'utf8')); } catch (_) { return; }
+function petRestorePosition(pid) {
+  const pos = readPetPosition();
   if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return;
   if (!native.rectOnAnyMonitor(pos.x, pos.y, pos.w, pos.h)) {
-    DBG('remielle restore: saved position is off-screen; keeping the default');
+    DBG('pet restore: saved position is off-screen; keeping the default');
     return;
   }
   let tries = 0, moved = false, reasserts = 0, startedAt = 0;
-  const finish = () => { remielleRestoreActive = false; };
-  remielleRestoreActive = true;
+  const finish = () => { petRestoreActive = false; };
+  petRestoreActive = true;
   const iv = setInterval(() => {
     const hwnds = native.findPidWindows(pid);
     if (!hwnds.length) {
       if (moved) { clearInterval(iv); finish(); return; } // pet closed; done
-      if (++tries > 20) { clearInterval(iv); finish(); DBG('remielle restore: window never appeared'); }
+      if (++tries > 20) { clearInterval(iv); finish(); DBG('pet restore: window never appeared'); }
       return;
     }
     const rc = native.getWindowRect(hwnds[0]);
@@ -271,17 +278,17 @@ function remielleRestorePosition(pid) {
       // where the pet placed itself is its built-in default: remember it so
       // poll-time saves can never record it (that clobbered the user's
       // position and broke every toggle after the first couple)
-      remielleDefaultSig = sig;
+      petDefaultSig = sig;
       native.moveWindow(hwnds[0], pos.x, pos.y);
       moved = true; startedAt = Date.now();
-      DBG('remielle restore: moved pet to', pos.x, pos.y);
+      DBG('pet restore: moved pet to', pos.x, pos.y);
       return;
     }
     // The pet’s own startup init can re-snap the window to its default after
     // our move; re-assert for a bounded window. The moment the rect is
     // neither the default nor the saved spot, the user is dragging it -
     // stand down immediately and never fight the user.
-    if (sig === remielleDefaultSig && reasserts < 30) {
+    if (sig === petDefaultSig && reasserts < 30) {
       native.moveWindow(hwnds[0], pos.x, pos.y);
       reasserts++;
       return;
@@ -290,67 +297,66 @@ function remielleRestorePosition(pid) {
   }, 500);
 }
 
-function remielleCfg() {
-  return (configManager && configManager.config.modules || {}).remielle || {};
+function petCfg() {
+  return (configManager && configManager.config.modules || {}).pet || {};
 }
 
-function pushRemielle() {
-  if (bar && bar.win && !bar.win.isDestroyed()) bar.send('remielle', remielleState);
+function pushPet() {
+  if (bar && bar.win && !bar.win.isDestroyed()) bar.send('pet', petState);
 }
 
-function pollRemielle() {
+function pollPet() {
   if (process.platform !== 'win32') { // pet exe + tasklist/taskkill are Windows-only
-    if (remielleState.exists !== false) {
-      remielleState = { running: false, exists: false };
-      pushRemielle();
+    if (petState.exists !== false) {
+      petState = { running: false, exists: false };
+      pushPet();
     }
     return;
   }
-  const cfg = remielleCfg();
+  const cfg = petCfg();
   if (!cfg.enabled) return;
   const exe = cfg.exePath;
   if (!exe || !fs.existsSync(exe)) {
-    remielleState = { running: false, exists: false };
-    pushRemielle();
+    petState = { running: false, exists: false };
+    pushPet();
     return;
   }
   // In-process Toolhelp32 snapshot: no child process, ~5ms instead of a
   // ~164ms tasklist spawn every 3s.
   const pid = native.findProcessIdByName(path.basename(exe));
   const running = pid != null;
-  remiellePid = running ? pid : null;
-  if (running) remielleSavePosition();
-  if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
-  if (remielleState.exists !== true || remielleState.running !== running) {
-    DBG('remielle poll:', JSON.stringify({ running, pid }));
+  petPid = running ? pid : null;
+  if (running) petSavePosition();
+  if (running && petRestorePending && pid) { petRestorePending = false; petRestorePosition(pid); }
+  if (petState.exists !== true || petState.running !== running) {
+    DBG('pet poll:', JSON.stringify({ running, pid }));
   }
-  remielleState = { running, exists: true };
-  pushRemielle();
+  petState = { running, exists: true };
+  pushPet();
 }
 
-function toggleRemielle() {
-  if (process.platform !== 'win32') return remielleState; // Windows-only module
-  const cfg = remielleCfg();
+function togglePet() {
+  if (process.platform !== 'win32') return petState; // Windows-only module
+  const cfg = petCfg();
   const exe = cfg.exePath;
-  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return remielleState;
-  if (remielleState.running) {
-    remielleSavePosition(); // capture the last spot before the process dies
+  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return petState;
+  if (petState.running) {
+    petSavePosition(); // capture the last spot before the process dies
     execFile('taskkill', ['/IM', path.basename(exe), '/F', '/T'], { windowsHide: true },
-      () => setTimeout(pollRemielle, 300));
+      () => setTimeout(pollPet, 300));
   } else {
     // Position authority: seed the pet’s own settings with the saved spot so
     // it launches there (its init would otherwise put it back at whatever its
     // own settings file held).
-    let saved = null;
-    try { saved = JSON.parse(fs.readFileSync(remiellePosFile(), 'utf8')); } catch (_) {}
+    const saved = readPetPosition();
     if (saved && typeof saved.x === 'number' && typeof saved.y === 'number' && native.rectOnAnyMonitor(saved.x, saved.y, saved.w, saved.h)) {
-      remielleSyncPetConfig(saved.x, saved.y);
+      petSyncConfig(saved.x, saved.y);
     }
     try {
       spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' }).unref();
-    } catch (e) { DBG('remielle spawn failed:', e.message); }
-    remielleRestorePending = true; // the poll hands the pid to the restore flow
-    setTimeout(pollRemielle, 1500);
+    } catch (e) { DBG('pet spawn failed:', e.message); }
+    petRestorePending = true; // the poll hands the pid to the restore flow
+    setTimeout(pollPet, 1500);
   }
 }
 
@@ -424,7 +430,7 @@ function wireBar() {
   ipcMain.handle('get-theme', () => themePayload(configManager.config));
   ipcMain.handle('get-tokens', () => tokens ? tokens.aggregate() : null);
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
-  ipcMain.handle('toggle-remielle', () => { toggleRemielle(); return remielleState; });
+  ipcMain.handle('toggle-pet', () => { togglePet(); return petState; });
   ipcMain.on('open-dash', () => openDashboard());
   // Static mode (non-Windows, bar.staticWidth === 'content'): the renderer
   // reports the pill's natural width; shrink the window to it, anchored
@@ -514,8 +520,8 @@ app.whenReady().then(() => {
     metrics.start();
     tokens.start();
     tracker.start();
-    pollRemielle();
-    setInterval(pollRemielle, 3000);
+    pollPet();
+    setInterval(pollPet, 3000);
     // Ctrl+Alt+D summons/toggles the dashboard from anywhere — works even when
     // the token chip is buried under other windows.
     try {
@@ -538,7 +544,7 @@ app.whenReady().then(() => {
 });
 
 app.on('will-quit', () => {
-  remielleSavePosition(); // the pet survives the quit; remember where it sits
+  petSavePosition(); // the pet survives the quit; remember where it sits
   try { globalShortcut.unregisterAll(); } catch (_) {}
   try { if (metrics) metrics.stop(); } catch (_) {} // stop the PowerShell workers now, not "eventually"
 });
