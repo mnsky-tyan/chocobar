@@ -19,6 +19,7 @@ const fs = require('fs');
 const { TokenTracker } = require('../src/tokens');
 
 const cfg = { tokens: {
+  enabled: true,
   rescanMinutes: 5,
   heatmapWeeks: 26,
   sources: {

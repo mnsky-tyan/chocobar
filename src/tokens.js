@@ -384,7 +384,7 @@ class TokenTracker extends require('events') {
         today: { total: 0, apps: {} },
         week: 0, month: 0, allTime: 0,
         byDay: {}, byApp: {}, byModel: {},
-        recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0
+        recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0, masterEnabled: false
       };
     }
     const rowTotal = (r) => (r.input || 0) + (r.output || 0);
@@ -450,7 +450,8 @@ class TokenTracker extends require('events') {
       heatmapWeeks: this.cfg.heatmapWeeks,
       // How many usage sources are switched on — lets the dashboard explain an
       // empty state ("no sources configured") instead of just showing zeros.
-      sourcesEnabled: Object.values(this.cfg.sources || {}).filter((s) => s && s.enabled).length
+      sourcesEnabled: Object.values(this.cfg.sources || {}).filter((s) => s && s.enabled).length,
+      masterEnabled: true
     };
   }
 }
