@@ -353,7 +353,7 @@ class TokenTracker extends require('events') {
       if (arr) for (const [k, r] of arr) this.records.set(k, r);
       else console.log('[wizbar] token cache: stale pre-normalization cache discarded; full rescan');
       if (parsed.mimoSigs) this._mimoSigs = parsed.mimoSigs;
-      if (arr) this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
+      if (arr) this._ocMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('o:')).map(([, r]) => r.ts || 0)) - 60000;
       if (arr) this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
       if (arr) this._piMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('pf:')).map(([, r]) => r.ts || 0));
       console.log(`[wizbar] token cache: ${this.records.size} records`);
