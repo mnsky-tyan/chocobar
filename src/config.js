@@ -72,7 +72,7 @@ const DEFAULTS = {
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
     // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
     // public build: set enabled + exePath in your own config to use it.
-    remielle: { enabled: false, exePath: '' },
+    pet:      { enabled: false, exePath: '' },
     clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
   },
   terminal: {
@@ -168,7 +168,7 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // Desktop-pet toggle chip (WINDOWS-ONLY, private module, off by default).
     // Set enabled + exePath here to show the bow chip: click launches the exe,
     // click again stops it ("on"/"off").
-    "remielle":  { "enabled": false, "exePath": "" },
+    "pet":       { "enabled": false, "exePath": "" },
     // {MMM} month, {dd} day, {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
   },
@@ -208,6 +208,17 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
   }
 }
 `;
+
+// Legacy alias: the desktop-pet module was originally keyed "remielle".
+// A config that still uses that key keeps working: it is mapped onto the
+// neutral "pet" key. When both keys are present, "pet" wins.
+function applyLegacyModuleKeys(user) {
+  if (user && user.modules && user.modules.remielle) {
+    if (!user.modules.pet) user.modules.pet = user.modules.remielle;
+    delete user.modules.remielle;
+  }
+  return user;
+}
 
 function expandTilde(p) {
   if (typeof p === 'string' && p.startsWith('~/')) {
@@ -250,7 +261,7 @@ class ConfigManager extends EventEmitter {
       // First run: write the annotated template out so the user can customize.
       try { fs.writeFileSync(CONFIG_PATH, TEMPLATE, 'utf8'); } catch (_) {}
     }
-    const merged = deepMerge(DEFAULTS, user);
+    const merged = deepMerge(DEFAULTS, applyLegacyModuleKeys(user));
     // resolve tilde paths
     for (const s of Object.values(merged.tokens.sources)) {
       if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
@@ -271,7 +282,7 @@ class ConfigManager extends EventEmitter {
         this._debounce = setTimeout(() => {
           try {
             const user = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, 'utf8')));
-            const merged = deepMerge(DEFAULTS, user);
+            const merged = deepMerge(DEFAULTS, applyLegacyModuleKeys(user));
             for (const s of Object.values(merged.tokens.sources)) {
               if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
               if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
@@ -290,4 +301,4 @@ class ConfigManager extends EventEmitter {
   }
 }
 
-module.exports = { ConfigManager, CONFIG_PATH, APP_DIR, DEFAULTS, TEMPLATE };
+module.exports = { ConfigManager, CONFIG_PATH, APP_DIR, DEFAULTS, TEMPLATE, applyLegacyModuleKeys };
