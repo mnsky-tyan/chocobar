@@ -26,7 +26,7 @@ function fmt(n) {
 function applyTheme(t) {
   theme = t;
   const r = document.documentElement.style;
-  const map = { '--fg': t.fg, '--fg-dim': t.fgDim, '--pink': t.pink, '--pink-deep': t.pinkDeep, '--pink-bg': t.pinkBg, '--yellow': t.yellow, '--divider': t.divider };
+  const map = { '--fg': t.fg, '--fg-dim': t.fgDim, '--pink': t.pink, '--pink-deep': t.pinkDeep, '--pink-bg': t.pinkBg, '--yellow': t.yellow, '--warn': t.warn, '--divider': t.divider };
   for (const [k, v] of Object.entries(map)) if (v) r.setProperty(k, v);
   // Card is PINK: follow the theme's pinkBg for the dashboard background and
   // body. (The old translucent card composited over the desktop = murky.)

@@ -25,7 +25,6 @@ const STATIC_MODE = process.platform !== 'win32';
 // config.terminal.className overrides everything:
 //   - string: probe exactly that Win32 window class (legacy single-class
 //     configs keep working untouched)
-//   - array: probe these classes in order
 //   - '' / missing (the default): AUTO mode, candidates probed in this order:
 //
 //   1. CASCADIA_HOSTING_WINDOW_CLASS  Windows Terminal (stable + Preview)
@@ -50,7 +49,6 @@ const AUTO_PROBE_PROCESSES = ['wezterm-gui.exe', 'alacritty.exe', 'Hyper.exe'];
 
 // Resolve config.terminal.className into { classes, processes } probe lists.
 function resolveProbe(className) {
-  if (Array.isArray(className) && className.length) return { classes: className.slice(), processes: [] };
   if (typeof className === 'string' && className) return { classes: [className], processes: [] };
   return { classes: AUTO_PROBE_CLASSES.slice(), processes: AUTO_PROBE_PROCESSES.slice() };
 }

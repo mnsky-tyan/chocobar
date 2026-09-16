@@ -488,6 +488,7 @@ function wireBar() {
     bar.send('theme', themePayload(configManager.config));
     bar.send('stats', metrics.snapshot());
     bar.send('tokens', tokens.aggregate());
+    bar.send('pet', petState);
   });
 
   // config hot reload
