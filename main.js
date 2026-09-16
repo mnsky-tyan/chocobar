@@ -1,5 +1,5 @@
 'use strict';
-// WizBar — slim acrylic status bar floating above Windows Terminal + token tracker.
+// WizBar — slim acrylic status bar floating above the terminal + token tracker.
 const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
