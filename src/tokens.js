@@ -10,6 +10,9 @@
 //            pi-based engine (2026-09-10) keeps transcripts named <utc-ts>_<uuid>.jsonl
 //            whose ids never reach the zcode DB; their assistant messages carry a
 //            `usage` object, which we scan directly.
+//  - pi:     ~/.pi/agent/sessions/<project-slug>/*.jsonl — the standalone pi
+//            coding agent's transcripts, nested under per-project subfolders;
+//            same per-message `usage` shape, scanned by the same reader as zai.
 //  - opencode: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 //            assistant messages carry a `tokens` object.
 //  - mimo:  Xiaomi MiMo AI desktop exposes a localhost HTTP API while it runs

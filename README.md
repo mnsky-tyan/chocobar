@@ -157,7 +157,7 @@ WizBar icon while it's open; the tray stays empty).
 
 ## De-personalized by default
 
-The shipped defaults are neutral: no usage sources enabled, no pet, no fleet chip, no
+The shipped defaults are neutral: no usage sources enabled, no pet, no
 personal paths anywhere in the repo. Everything machine- or person-specific lives in the
 **user-level config** (`~/.wizbar/config.json`, written as an annotated template on first
 run and hot-reloaded on save). Point `tokens.sources` at your own stores and enable the
@@ -186,8 +186,6 @@ pet module (Windows) with your own exe path if you want it.
   the cadences never align.
 - If you open new terminal windows near the very top of the screen, leave ~40px of
   headroom so the floating bar has room to appear above them.
-- The bar's bottom edge has a subtle 1px pink divider (hardcoded in `renderer/bar.css`).
-
 
 - GPU % comes from the Windows `GPU Engine` performance counters (same as Task Manager,
   summed across engines, capped at 100). English counter names — on a non-English Windows
