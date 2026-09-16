@@ -1,31 +1,32 @@
 'use strict';
-// System metrics collector. Each module polls at its own cadence; a 1s ticker
-// emits a combined snapshot for the bar renderer.
+// System metrics collector. Each module polls at its own cadence into a
+// dirty-tracked snapshot; the main process pushes it to the bar renderer,
+// at most every 250ms and only when a poll changed a value.
 const os = require('os');
 const fs = require('fs');
-const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 const native = require('./native');
 
 // Windows implements AF_UNIX sockets on top of the named-pipe filesystem: a
-// socket bound at C:\dir\file.sock is reachable as \\.\pipe\C:\dir\file.sock,
-// which is how the herdr agents connection below works from plain Node.
-const pipePrefix = '\\\\.\\pipe\\';
+// socket bound at C:\dir\file.sock is reachable as \\.\pipe\C:\dir\file.sock.
+// No current module dials a socket here; the named-pipe prefix convention
+// stays documented for future socket work.
+const IS_WIN = process.platform === 'win32';
 
 class MetricsEngine extends require('events') {
   constructor(config) {
     super();
     this.cfg = config;
+    this._dirty = false;   // set by every poll that changed state; stats push reads-and-clears
     this.state = {
       cpu: null,          // %
-      cpuTemp: null,      // { c, label } from HWiNFO shared memory, or null
+      cpuTemp: null,      // { c, label }: HWiNFO shm (Windows) or sysfs, or null
       ram: null,          // { pct, usedGB, totalGB }
       gpu: null,          // { sum, max } or null
       battery: null,      // { percent, ac, charging }
       volume: null,       // { level, muted }
       bluetooth: [],      // [{ name, level }]
-      agents: null,       // { state: working|idle|unknown, count, note } from the fleet status file
       volumeError: null
     };
     this._cpuPrev = os.cpus().map((c) => c.times);
@@ -36,13 +37,16 @@ class MetricsEngine extends require('events') {
     // killed child's exit event only fires after setConfig reset _stopping.
     this._wk = { gpu: { proc: null, gen: 0 }, bt: { proc: null, gen: 0 } };
     this._respawnTimers = [];
-    this._agentsFileTimer = null;
-    this._agentsLive = false;
-    this._agentsSock = null;
-    this._agentsMap = new Map();
-    this._agentsBackoff = 0;
     this._gpuBuf = '';
     this._btBuf = '';
+  }
+
+  // True at most once since the last consume — the stats push loop sends only
+  // when a poll actually changed a value instead of on a fixed heartbeat.
+  consumeDirty() {
+    const d = this._dirty;
+    this._dirty = false;
+    return d;
   }
 
   start() {
@@ -67,17 +71,19 @@ class MetricsEngine extends require('events') {
       this._timers.push(setInterval(() => this._pollBattery(), Math.max(500, m.battery.intervalMs)));
       setTimeout(() => { if (!this._stopping) this._pollBattery(); }, 240);
     }
-    if (m.volume.enabled) {
+    if (m.volume.enabled && IS_WIN) {
       if (!native.initVolume(m.volume.role)) {
         this.state.volumeError = native.volumeState.error;
         console.error('[wizbar] volume init failed:', this.state.volumeError);
       }
       this._timers.push(setInterval(() => this._pollVolume(), Math.max(250, m.volume.intervalMs)));
       setTimeout(() => { if (!this._stopping) this._pollVolume(); }, 160);
+    } else if (m.volume.enabled) {
+      this.state.volume = null; // Core Audio is Windows-only; the chip shows "—"
     }
-    if (m.gpu.enabled) this._startGpuWorker(m.gpu);
-    if (m.bluetooth.enabled) this._startBtWorker(m.bluetooth);
-    if (m.agents && m.agents.enabled) this._startAgentsLive();
+    // PowerShell workers cannot exist off Windows; the modules stay "—" there.
+    if (m.gpu.enabled && IS_WIN) this._startGpuWorker(m.gpu);
+    if (m.bluetooth.enabled && IS_WIN) this._startBtWorker(m.bluetooth);
   }
 
   stop() {
@@ -86,10 +92,6 @@ class MetricsEngine extends require('events') {
     this._timers = [];
     for (const t of this._respawnTimers) clearTimeout(t);
     this._respawnTimers = [];
-    if (this._agentsFileTimer) { clearInterval(this._agentsFileTimer); this._agentsFileTimer = null; }
-    if (this._agentsRefresh) { clearInterval(this._agentsRefresh); this._agentsRefresh = null; }
-    if (this._agentsReconnect) { clearTimeout(this._agentsReconnect); this._agentsReconnect = null; }
-    if (this._agentsSock) { try { this._agentsSock.destroy(); } catch (_) {} this._agentsSock = null; }
     for (const k of Object.keys(this._wk)) {
       const w = this._wk[k];
       w.gen++; // any exit event from a killed worker is now stale - never respawn it
@@ -122,11 +124,17 @@ class MetricsEngine extends require('events') {
       idle += didle; total += dtotal + didle;
     }
     this._cpuPrev = next;
-    if (total > 0) this.state.cpu = Math.round((1 - idle / total) * 100);
+    if (total > 0) {
+      const cpu = Math.round((1 - idle / total) * 100);
+      if (cpu !== this.state.cpu) this._dirty = true;
+      this.state.cpu = cpu;
+    }
   }
 
   _pollCpuTemp() {
-    this.state.cpuTemp = native.getHwinfoTemp();
+    const t = native.getHwinfoTemp();
+    if (JSON.stringify(t) !== JSON.stringify(this.state.cpuTemp)) this._dirty = true;
+    this.state.cpuTemp = t;
   }
 
   // --- RAM -------------------------------------------------------------------
@@ -134,214 +142,29 @@ class MetricsEngine extends require('events') {
     const total = os.totalmem();
     const free = os.freemem(); // ullAvailPhys - matches Task Manager "available"
     const used = total - free;
-    this.state.ram = {
+    const ram = {
       pct: Math.round((used / total) * 100),
       usedGB: +(used / 1024 ** 3).toFixed(1),
       totalGB: +(total / 1024 ** 3).toFixed(1)
     };
+    if (JSON.stringify(ram) !== JSON.stringify(this.state.ram)) this._dirty = true;
+    this.state.ram = ram;
   }
 
   // --- battery -----------------------------------------------------------------
   _pollBattery() {
-    this.state.battery = native.getBattery();
+    const b = native.getBattery();
+    if (JSON.stringify(b) !== JSON.stringify(this.state.battery)) this._dirty = true;
+    this.state.battery = b;
   }
 
   // --- volume ------------------------------------------------------------------
   _pollVolume() {
-    this.state.volume = native.getVolume();
+    const v = native.getVolume();
+    if (JSON.stringify(v) !== JSON.stringify(this.state.volume)) this._dirty = true;
+    this.state.volume = v;
     if (!this.state.volume && !this.state.volumeError) {
       this.state.volumeError = native.volumeState.error;
-    }
-  }
-
-  // --- agent fleet activity -----------------------------------------------------
-  // Live source: the herdr server socket. On Windows an AF_UNIX socket bound at
-  // <path> is reachable as the named pipe \\.\pipe\<path>, so the main process
-  // connects directly - no worker process, no polling. The server answers a
-  // session.snapshot by CLOSING the connection, so state comes from one-shot
-  // snapshot connections while one persistent connection carries push events
-  // (per-pane agent status changes). Real time, no orchestrator middleman.
-  // While herdr is unavailable the chip falls back to the status file.
-  _startAgentsLive() {
-    this._agentsMap = new Map(); // pane_id -> agent_status
-    this._agentsSubbed = new Set(); // pane_ids with per-pane subscriptions
-    this._agentsSnapBusy = false;
-    this._agentsConnectEvents();
-    this._agentsSnapshotOnce();
-    // Slow refresh heals anything a missed event could leave stale.
-    this._agentsRefresh = setInterval(() => this._agentsSnapshotOnce(), 60000);
-  }
-
-  _agentsConnectEvents() {
-    if (this._stopping || this._agentsSock) return;
-    const s = net.connect({ path: pipePrefix + this._agentsSockPath() });
-    this._agentsSock = s;
-    s.setEncoding('utf8');
-    let buf = '';
-    s.on('connect', () => {
-      this._agentsBackoff = 0;
-      this._agentsSubbed = new Set();
-      const subs = [
-        { type: 'pane.agent_detected' },
-        { type: 'pane.created' }
-      ];
-      for (const p of this._agentsMap.keys()) subs.push(...this._agentsPaneSubs(p));
-      this._agentsSockWrite(s, { id: 'sub', method: 'events.subscribe', params: { subscriptions: subs } });
-    });
-    s.on('data', (chunk) => {
-      buf += chunk;
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim();
-        buf = buf.slice(i + 1);
-        if (!line) continue;
-        this._agentsOnEvent(line);
-      }
-    });
-    const retry = (err) => {
-      if (this._agentsSock !== s) return;
-      this._agentsSock = null;
-      if (this._stopping) return;
-      if (err && err.code) console.error(`[wizbar] agents: herdr events connect failed (${err.code}), retrying`);
-      this._agentsUseFile(); // legacy source armed while herdr is unreachable
-      this._agentsBackoff = Math.min((this._agentsBackoff || 0) + 4000, 30000);
-      this._agentsReconnect = setTimeout(() => this._agentsConnectEvents(), this._agentsBackoff);
-    };
-    s.on('error', retry);
-    s.on('close', retry);
-  }
-
-  _agentsPaneSubs(paneId) {
-    return [
-      { type: 'pane.agent_status_changed', pane_id: paneId },
-      { type: 'pane.exited', pane_id: paneId },
-      { type: 'pane.closed', pane_id: paneId }
-    ];
-  }
-
-  _agentsSockPath() {
-    return path.join(process.env.APPDATA, 'herdr', 'herdr.sock');
-  }
-
-  // One-shot state fetch: connect, ask, read one line. The server closes the
-  // connection after answering - that is its normal CLI flow, not an error.
-  _agentsSnapshotOnce() {
-    if (this._stopping || this._agentsSnapBusy) return;
-    this._agentsSnapBusy = true;
-    const s = net.connect({ path: pipePrefix + this._agentsSockPath() });
-    s.setEncoding('utf8');
-    let buf = '';
-    let got = false;
-    s.setTimeout(5000);
-    s.on('connect', () => {
-      this._agentsBackoff = 0;
-      this._agentsSockWrite(s, { id: 'snap', method: 'session.snapshot', params: {} });
-    });
-    s.on('data', (chunk) => {
-      buf += chunk;
-      const i = buf.indexOf('\n');
-      if (i < 0 || got) return;
-      got = true;
-      this._agentsApplySnapshot(buf.slice(0, i));
-      s.destroy();
-    });
-    s.on('timeout', () => s.destroy());
-    s.on('error', (err) => {
-      if (err.code) console.error(`[wizbar] agents: herdr snapshot failed (${err.code})`);
-      this._agentsUseFile(); // legacy source armed while herdr is unreachable
-    });
-    s.on('close', () => { this._agentsSnapBusy = false; });
-  }
-
-  _agentsSockWrite(s, obj) {
-    try { s.write(JSON.stringify(obj) + '\n'); } catch (_) {}
-  }
-
-  _agentsApplySnapshot(line) {
-    try {
-      const d = JSON.parse(line);
-      const ag = (d.result && d.result.snapshot && d.result.snapshot.agents) || [];
-      this._agentsMap = new Map(ag.map((a) => [a.pane_id, a.agent_status || 'unknown']));
-      this._agentsEmit();
-      // Subscribe per-pane on the event channel for panes we have not subbed.
-      if (this._agentsSock) {
-        const fresh = [...this._agentsMap.keys()].filter((p) => !this._agentsSubbed.has(p));
-        if (fresh.length) {
-          for (const p of fresh) this._agentsSubbed.add(p);
-          const subs = fresh.flatMap((p) => this._agentsPaneSubs(p));
-          this._agentsSockWrite(this._agentsSock, { id: 'sub-panes', method: 'events.subscribe', params: { subscriptions: subs } });
-        }
-      }
-    } catch (_) {}
-  }
-
-  _agentsOnEvent(line) {
-    try {
-      const d = JSON.parse(line);
-      const ev = d.type || '';
-      if (ev === 'pane.agent_status_changed') {
-        if (d.agent_status) this._agentsMap.set(d.pane_id, d.agent_status);
-        else this._agentsMap.delete(d.pane_id);
-        this._agentsEmit();
-      } else if (ev === 'pane.agent_detected' || ev === 'pane.created' || ev === 'pane.closed' || ev === 'pane.exited') {
-        if (ev === 'pane.closed' || ev === 'pane.exited') this._agentsMap.delete(d.pane_id);
-        // New agent: its current status is unknown to us - refresh from a
-        // snapshot (which also subscribes the new pane's status changes).
-        this._agentsSnapshotOnce();
-      }
-    } catch (_) {}
-  }
-
-  _agentsEmit() {
-    const entries = [...this._agentsMap.values()];
-    // blocked still means the agent needs its captain - count it as live.
-    const working = entries.filter((st) => st === 'working' || st === 'blocked').length;
-    const total = entries.length;
-    const note = total === 0 ? 'herdr reachable, no agent panes' : `${working}/${total} working`;
-    const line = JSON.stringify({ state: working > 0 ? 'working' : 'idle', count: total, working, note });
-    if (line === this._agentsLastLine) return;
-    this._agentsLastLine = line;
-    this._agentsLive = true;
-    this._agentsStopFile();
-    this.state.agents = JSON.parse(line);
-  }
-
-  // Legacy source: the orchestrator's hand-written fleet-status.json. Only used
-  // when the live herdr path is unavailable (herdr not running).
-  _agentsUseFile() {
-    if (this._agentsFileTimer) return;
-    console.error('[wizbar] agents: herdr live source unavailable, falling back to status file');
-    const m = this.cfg.modules.agents;
-    this._agentsFileTimer = setInterval(() => this._pollAgents(), Math.max(2000, (m && m.intervalMs) || 5000));
-    this._pollAgents();
-  }
-
-  _agentsStopFile() {
-    if (this._agentsFileTimer) { clearInterval(this._agentsFileTimer); this._agentsFileTimer = null; }
-  }
-
-  // The main firstmate keeps a tiny status file updated; JSON preferred,
-  // {"state":"working"|"idle","agents":N,"note":"..."}, but a bare first line
-  // containing "working"/"idle" is accepted too. Missing file = null (dim dash).
-  _pollAgents() {
-    const cfgFile = this.cfg.modules.agents && this.cfg.modules.agents.file;
-    if (!cfgFile) { this.state.agents = null; return; }
-    try {
-      const raw = fs.readFileSync(cfgFile.replace(/^~/, os.homedir()), 'utf8');
-      let d = null;
-      try { d = JSON.parse(raw); } catch (_) {}
-      let out;
-      if (d && typeof d === 'object') {
-        out = { state: String(d.state || 'unknown').toLowerCase(), count: d.agents, note: d.note };
-      } else {
-        out = { state: raw.split(/\r?\n/)[0].trim().toLowerCase() || 'unknown' };
-      }
-      if (out.state !== 'working' && out.state !== 'idle') {
-        out.state = /work|busy|active/.test(out.state) ? 'working' : /idle|free/.test(out.state) ? 'idle' : 'unknown';
-      }
-      this.state.agents = out;
-    } catch (_) {
-      this.state.agents = null; // no file yet
     }
   }
 
@@ -368,11 +191,13 @@ class MetricsEngine extends require('events') {
       try {
         const d = JSON.parse(line);
         if (d.err) { if (!this.state.gpu) this.state.gpu = { error: 'counter' }; return; }
-        this.state.gpu = {
+        const gpu = {
           [mode]: Math.min(100, Math.round(d[mode])),
           sum: Math.min(100, Math.round(d.sum)),
           max: Math.min(100, Math.round(d.max))
         };
+        if (JSON.stringify(gpu) !== JSON.stringify(this.state.gpu)) this._dirty = true;
+        this.state.gpu = gpu;
       } catch (_) {}
     }, buf, (l) => l.startsWith('{'));
   }
@@ -403,6 +228,7 @@ class MetricsEngine extends require('events') {
           .filter((x) => x && typeof x.level === 'number' && x.level >= 0 && x.level <= 100)
           .filter((x) => !filter || (x.name || '').toLowerCase().includes(filter));
         devs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        if (JSON.stringify(devs.slice(0, maxDev)) !== JSON.stringify(this.state.bluetooth)) this._dirty = true;
         this.state.bluetooth = devs.slice(0, maxDev);
       } catch (_) {}
     }, buf, (l) => l.startsWith('[') || l.startsWith('{'));
@@ -454,7 +280,7 @@ class MetricsEngine extends require('events') {
   }
 
   snapshot() {
-    return { ...this.state, now: new Date().toISOString() };
+    return { ...this.state };
   }
 }
 

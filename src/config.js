@@ -34,16 +34,20 @@ const DEFAULTS = {
   bar: {
     height: 24,            // DIP, slim
     gap: 16,               // DIP of air between the bar and the terminal's top edge
-    radius: 8,
-    roundCorners: true,    // all four corners (adds the subtle floating shadow)
+    radius: 8,             // corner rounding, painted by the page (CSS border-radius)
     insetX: 2,             // DIP shaved per side so the bar doesn't overhang the terminal frame
     fontSize: 11,
     fontFamily: "'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace",
     align: 'right',        // right | left | center
     position: 'above',     // above | below
-    backdrop: 'acrylic',   // acrylic | solid | none
+    // Non-Windows only, static bar: 'content' (default) = small pill hugging
+    // the chips at the top-right corner, out of the way of everything;
+    // 'workarea' = full-width strip pinned to the top of the screen (matches
+    // the bar above a maximized terminal, but covers that 24px band).
+    staticWidth: 'content',
+    backdrop: 'acrylic',   // translucent tint over the desktop | 'solid' = opaque
     backgroundTint: '#FBF2E2',   // pale yellow/pink blend to match terminal acrylic
-    backgroundAlpha: 110,        // 0-255 — ACTUAL fill opacity over the blur (0 = clear)
+    backgroundAlpha: 110,        // 0-255 — fill opacity (0 = clear, 255 = solid)
     segmentSpacing: 14
   },
   theme: {
@@ -61,15 +65,14 @@ const DEFAULTS = {
   modules: {
     gpu:      { enabled: true, mode: 'sum', intervalMs: 1200 },
     cpu:      { enabled: true, intervalMs: 800, warnAt: 85 },
-    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // via HWiNFO shared memory
+    cputemp:  { enabled: true, intervalMs: 2000, warnAt: 85 },  // HWiNFO shm (Windows), sysfs sensors elsewhere
     ram:      { enabled: true, intervalMs: 800, warnAt: 90 },
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
-    agents:   { enabled: true, intervalMs: 5000, file: '~/work/harness/firstmate/state/fleet-status.json' },
-    // Little Remielle desktop pet: a bow chip pinned next to the token chip;
-    // click = start the exe, click again = kill it.
-    remielle: { enabled: true, exePath: 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe' },
+    // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
+    // public build: set enabled + exePath in your own config to use it.
+    remielle: { enabled: false, exePath: '' },
     clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
   },
   terminal: {
@@ -77,17 +80,21 @@ const DEFAULTS = {
     reattachToExisting: false   // after followed window closes, wait for a NEW window
   },
   tokens: {
-    enabled: true,
+    enabled: false,        // master switch: off = no scans, no dashboard data, no chip
     showOnBar: true,
     rescanMinutes: 1,
     heatmapWeeks: 26,
+    // Usage sources — all opt-in, all local read-only. Enable the ones you use
+    // and point them at your own stores; with none enabled the bar and the
+    // dashboard stay empty.
     sources: {
-      zcode:    { enabled: true, dbPath: '~/.zcode/cli/db/db.sqlite' },
-      zai:      { enabled: true, sessionsDir: '~/.zai/agent/sessions' },
-      opencode: { enabled: true, storageDir: '~/.local/share/opencode/storage/message' },
+      zcode:    { enabled: false, dbPath: '' },   // e.g. ~/.zcode/cli/db/db.sqlite
+      zai:      { enabled: false, sessionsDir: '' }, // e.g. ~/.zai/agent/sessions
+      pi:       { enabled: false, sessionsDir: '' }, // e.g. ~/.pi/agent/sessions
+      opencode: { enabled: false, storageDir: '' },   // e.g. ~/.local/share/opencode/storage/message
       // Xiaomi MiMo AI desktop: reads the app's local HTTP API while it runs
-      // (nothing to configure — port+token come from the app's desktop-api.json).
-      mimo:     { enabled: true }
+      // (port + token auto-discovered from the app's own desktop-api.json).
+      mimo:     { enabled: false }
     }
   },
   general: {
@@ -109,8 +116,8 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "gap": 16,
     // trim per side so the bar doesn't overhang the terminal frame (0 to disable)
     "insetX": 2,
-    // rounded corners (Win11); also adds a subtle floating shadow
-    "roundCorners": true,
+    // corner rounding of the bar box (the page paints it; no window shadow)
+    "radius": 8,
     // text size + font (must be an installed font)
     "fontSize": 11,
     "fontFamily": "'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace",
@@ -118,11 +125,15 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "align": "right",
     // bar above or below the terminal window
     "position": "above",
-    // "acrylic" = blurred see-through, "solid" = opaque, "none" = clear
+    // non-Windows only: "content" = corner pill (default, out of the way);
+    // "workarea" = full-width strip at the top of the screen (like above a
+    // maximized terminal)
+    "staticWidth": "content",
+    // "acrylic" = translucent tint over the desktop, "solid" = opaque
     "backdrop": "acrylic",
     // the tint color of the box
     "backgroundTint": "#FBF2E2",
-    // box fill opacity over the blur: 0 = fully clear, 255 = solid color.
+    // box fill opacity: 0 = fully clear, 255 = solid color.
     // lower = more transparent. ~110 is airy, ~180 is creamy.
     "backgroundAlpha": 110,
     // spacing between the modules (tokens, cpu, ...)
@@ -144,8 +155,9 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // GPU %: mode "sum" adds all engines (Task-Manager-like), "max" takes the busiest
     "gpu":       { "enabled": true, "mode": "sum", "intervalMs": 1200 },
     "cpu":       { "enabled": true, "intervalMs": 800, "warnAt": 85 },
-    // CPU temperature from HWiNFO's shared memory ("Shared Memory Support" in HWiNFO's
-    // settings). Shows "—" while HWiNFO is not publishing sensors.
+    // CPU temperature: Windows reads HWiNFO's shared memory (enable "Shared Memory
+    // Support" in HWiNFO's settings); Linux reads sysfs sensors (hwmon / thermal
+    // zones). Shows "—" when no sensor is publishing.
     "cputemp":   { "enabled": true, "intervalMs": 2000, "warnAt": 85 },
     "ram":       { "enabled": true, "intervalMs": 800, "warnAt": 90 },
     "volume":    { "enabled": true, "intervalMs": 500, "role": "multimedia" },
@@ -153,13 +165,10 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // earbud/BT battery; shows "—" unless a device reports via Windows' standard
     // battery property (many earbuds only report to their vendor app)
     "bluetooth": { "enabled": true, "intervalMs": 30000, "filter": "", "maxDevices": 2 },
-    // firstmate fleet activity chip; the file is a tiny JSON the main firstmate
-    // keeps updated: {"state":"working"|"idle","agents":2,"note":"optional"} —
-    // a bare first line saying working/idle also works. Missing file shows "—".
-    "agents":    { "enabled": true, "intervalMs": 5000, "file": "~/work/harness/firstmate/state/fleet-status.json" },
-    // Little Remielle desktop pet: a bow chip pinned next to the token chip.
-    // Click to launch the exe, click again to stop it ("on"/"off").
-    "remielle":  { "enabled": true, "exePath": "C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe" },
+    // Desktop-pet toggle chip (WINDOWS-ONLY, private module, off by default).
+    // Set enabled + exePath here to show the bow chip: click launches the exe,
+    // click again stops it ("on"/"off").
+    "remielle":  { "enabled": false, "exePath": "" },
     // {MMM} month, {dd} day, {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
   },
@@ -171,18 +180,24 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "reattachToExisting": false
   },
   "tokens": {
-    "enabled": true,
+    // master switch: off = no scans, no dashboard data, no usage chip;
+    // on = the per-source flags below decide which stores are read
+    "enabled": false,
     "showOnBar": true,
     // minutes between usage scans (drives the dashboard's live refresh)
     "rescanMinutes": 1,
     "heatmapWeeks": 26,
+    // usage sources — all opt-in, all local read-only. Enable the ones you use
+    // and point them at your own stores; the typical locations are shown in
+    // the comments. With none enabled, bar + dashboard stay empty.
     "sources": {
-      "zcode":    { "enabled": true, "dbPath": "~/.zcode/cli/db/db.sqlite" },
-      "zai":      { "enabled": true, "sessionsDir": "~/.zai/agent/sessions" },
-      "opencode": { "enabled": true, "storageDir": "~/.local/share/opencode/storage/message" },
+      "zcode":    { "enabled": false, "dbPath": "" },       // e.g. "~/.zcode/cli/db/db.sqlite"
+      "zai":      { "enabled": false, "sessionsDir": "" },  // e.g. "~/.zai/agent/sessions"
+      "pi":       { "enabled": false, "sessionsDir": "" },  // e.g. "~/.pi/agent/sessions"
+      "opencode": { "enabled": false, "storageDir": "" },   // e.g. "~/.local/share/opencode/storage/message"
       // Xiaomi MiMo AI desktop app token usage, read live from its local API
       // while the app runs (auto-discovered; nothing to configure).
-      "mimo":     { "enabled": true }
+      "mimo":     { "enabled": false }
     }
   },
   "general": {

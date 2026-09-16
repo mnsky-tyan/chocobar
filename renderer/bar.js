@@ -43,6 +43,7 @@ let stats = null;
 let tokensAgg = null;
 let remielleState = null;
 let segEls = {};
+let sizeReportTimer = null;
 
 function el(id) { return document.getElementById(id); }
 
@@ -65,6 +66,11 @@ function applyTheme(t) {
     bar.classList.remove('align-left', 'align-center');
     if (t.bar.align === 'left') bar.classList.add('align-left');
     else if (t.bar.align === 'center') bar.classList.add('align-center');
+    // Static mode (non-Windows): full-width strip ('workarea', like the bar
+    // above a maximized terminal) or corner pill ('content').
+    const isStatic = t.bar.mode === 'static-top';
+    bar.classList.toggle('static', isStatic);
+    bar.classList.toggle('static-content', isStatic && t.bar.staticWidth === 'content');
   }
   rebuildSegments();
 }
@@ -94,7 +100,7 @@ function rebuildSegments() {
   const m = theme.modules || {};
   const pinned = (theme.bar.align || 'right') === 'right';
 
-  // Captain’s chip order: bowtie leftmost, token dashboard second. With the
+  // Chip order: bowtie leftmost, token dashboard second. With the
   // right-aligned group both chips pin left of #segments as direct children
   // of #bar, and the auto margin that pushes the module group right sits on
   // the LAST pinned chip.
@@ -123,7 +129,7 @@ function rebuildSegments() {
       }
     } else c.appendChild(s);
   }
-  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
+  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
   for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['clock', ICONS.clock]]) {
     if (m[id] && m[id].enabled) {
       const s = seg(id, icon);
@@ -183,6 +189,23 @@ function render() {
   if (!theme) return;
   const m = theme.modules || {};
 
+  // Static mode: keep the main process informed of the pill's natural width
+  // so the window can shrink to it (corner-pill mode only; see
+  // 'bar-content-size' in main.js — full-strip mode ignores this).
+  if (theme.bar && theme.bar.mode === 'static-top' &&
+      theme.bar.staticWidth === 'content') {
+    if (sizeReportTimer == null) {
+      sizeReportTimer = setInterval(() => {
+        const b = el('bar');
+        if (b) window.wizbar.reportSize(b.offsetWidth);
+      }, 1000);
+    }
+  } else if (sizeReportTimer != null) {
+    // No longer corner-pill mode: the main process ignores these reports.
+    clearInterval(sizeReportTimer);
+    sizeReportTimer = null;
+  }
+
   if (segEls.tokens) setVal('tokens', fmtTokens(tokensAgg ? tokensAgg.today.total : null), 'dim');
 
   if (segEls.remielle) {
@@ -215,9 +238,14 @@ function render() {
       segEls.cputemp.root.title = t.label ? `CPU temperature — ${t.label}` : 'CPU temperature';
     } else {
       setVal('cputemp', '—', 'dim');
+      // Source-aware hint: 'no-temp' only exists on Windows (HWiNFO shm live but
+      // no CPU reading); the generic failure differs per platform.
+      const staticTop = theme && theme.bar && theme.bar.mode === 'static-top';
       segEls.cputemp.root.title = t && t.state === 'no-temp'
         ? 'CPU temperature — HWiNFO sensors are live but report no CPU temperature'
-        : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
+        : staticTop
+          ? 'CPU temperature — no sensor readable via sysfs'
+          : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
     }
   }
   if (segEls.ram) {
@@ -235,7 +263,9 @@ function render() {
     const b = stats && stats.battery;
     if (b && b.percent != null && !b.noBattery) {
       // One proportional icon: fill volume = charge, red below 10%, bolt while
-      // charging. "Plugged at 100%" simply renders full with no bolt.
+      // charging. Since the 100%-on-AC fix, native reports charging=true at
+      // full charge on AC, so "plugged in at 100%" shows a full body, bolt and
+      // the green 'good' class.
       setIcon('battery', ICONS.batBody(b.percent, b.charging));
       setVal('battery', b.percent + '%', b.percent <= 20 && !b.ac ? 'warn' : (b.charging ? 'good' : ''));
     } else if (b && (b.ac || b.noBattery)) {

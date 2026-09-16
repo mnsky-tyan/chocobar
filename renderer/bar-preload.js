@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld('wizbar', {
   getTheme: () => ipcRenderer.invoke('get-theme'),
   openDash: () => ipcRenderer.send('open-dash'),
   contextMenu: () => ipcRenderer.send('bar-context'),
-  toggleRemielle: () => ipcRenderer.invoke('toggle-remielle')
+  toggleRemielle: () => ipcRenderer.invoke('toggle-remielle'),
+  reportSize: (w) => ipcRenderer.send('bar-content-size', w)
 });

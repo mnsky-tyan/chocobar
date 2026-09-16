@@ -10,6 +10,9 @@
 //            pi-based engine (2026-09-10) keeps transcripts named <utc-ts>_<uuid>.jsonl
 //            whose ids never reach the zcode DB; their assistant messages carry a
 //            `usage` object, which we scan directly.
+//  - pi:     ~/.pi/agent/sessions/<project-slug>/*.jsonl — the standalone pi
+//            coding agent's transcripts, nested under per-project subfolders;
+//            same per-message `usage` shape, scanned by the same reader as zai.
 //  - opencode: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 //            assistant messages carry a `tokens` object.
 //  - mimo:  Xiaomi MiMo AI desktop exposes a localhost HTTP API while it runs
@@ -56,11 +59,14 @@ class TokenTracker extends require('events') {
     this.records = new Map();   // key -> { app, ts, model, input, output, cacheRead, cacheWrite, reasoning }
     this.lastScan = null;
     this._timer = null;
-    this._loadCache();
+    this._pythonCmd = 'python'; // may be re-probed to python3 on Linux
+    if (this.cfg.enabled) this._loadCache(); // master off: nothing is read at all
   }
 
   start() {
     clearInterval(this._timer);
+    this._timer = null;
+    if (!this.cfg.enabled) return; // master off: no scan timer, zero scans
     this._timer = setInterval(() => this.rescan(), Math.max(1, this.cfg.rescanMinutes) * 60000);
     this.rescan();
   }
@@ -71,6 +77,7 @@ class TokenTracker extends require('events') {
   // record-key dedup makes that safe, and it recovers anything a stale cursor
   // skipped.
   rescan({ full = false } = {}) {
+    if (!this.cfg.enabled) return Promise.resolve(this.aggregate()); // master off: no scan
     if (!this._scanPromise) {
       this._scanPromise = this._runScan(full).finally(() => { this._scanPromise = null; });
     }
@@ -80,12 +87,14 @@ class TokenTracker extends require('events') {
   async _runScan(full) {
     if (full) {
       this._zaiMtimeFloor = 0; this._zaiMtimeHigh = 0;
+      this._piMtimeFloor = 0; this._piMtimeHigh = 0;
       this._ocMtimeFloor = 0; this._ocMtimeHigh = 0;
     }
     const t0 = Date.now();
     let added = 0;
     try { added += await this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
     try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
+    try { added += this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
     try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
     this.lastScan = new Date().toISOString();
@@ -114,19 +123,31 @@ class TokenTracker extends require('events') {
 
   // Async spawn: at a 1-minute scan cadence a synchronous execFileSync would
   // freeze the main process (bar follow loop included) for the length of the
-  // python run every scan.
+  // python run every scan. Interpreter name is platform-dependent: Windows
+  // installs usually provide `python`, Debian/Ubuntu often only `python3`.
   async _scanZcode() {
     const src = this.cfg.sources.zcode;
     if (!src.enabled || !src.dbPath || !fs.existsSync(src.dbPath)) return 0;
     const zaiIds = this._zaiSessionIds(this.cfg.sources.zai.sessionsDir);
     const script = path.join(__dirname, '..', 'scripts', 'zcode_query.py');
-    const stdout = await new Promise((resolve, reject) => {
-      execFile('python', [script, src.dbPath], {
+    const run = (py) => new Promise((resolve, reject) => {
+      execFile(py, [script, src.dbPath], {
         windowsHide: true,
         maxBuffer: 64 * 1024 * 1024,
         encoding: 'utf8'
       }, (err, out) => (err ? reject(err) : resolve(out)));
     });
+    let stdout;
+    try {
+      stdout = await run(this._pythonCmd);
+    } catch (e) {
+      if (e && e.code === 'ENOENT' && this._pythonCmd !== 'python3') {
+        this._pythonCmd = 'python3'; // remember the working interpreter
+        stdout = await run('python3');
+      } else {
+        throw e;
+      }
+    }
     const rows = JSON.parse(stdout);
     let added = 0;
     for (const r of rows) {
@@ -148,24 +169,43 @@ class TokenTracker extends require('events') {
     return added;
   }
 
-  // --- zai (pi agent sessions) ---------------------------------------------------
-  // Legacy ZCODE_* files are skipped: those sessions are DB-backed (turn_usage), so
-  // counting the files too would double them. New-format files are the only store
-  // for post-rebuild zai usage.
-  _scanZaiSessions() {
-    const src = this.cfg.sources.zai;
-    if (!src.enabled || !src.sessionsDir) return 0;
-    let files;
-    try { files = fs.readdirSync(src.sessionsDir); } catch (_) { return 0; }
-    const cutoff = (this._zaiMtimeFloor || 0);
-    let added = 0, high = (this._zaiMtimeHigh || 0);
-    for (const fn of files) {
-      if (!fn.endsWith('.jsonl') || fn.startsWith('ZCODE_')) continue;
-      const full = path.join(src.sessionsDir, fn);
+  // --- pi-format session stores (zai + pi) ------------------------------------
+  // Both the rebuilt zai engine and the standalone pi coding agent persist
+  // JSONL transcripts whose assistant messages carry a `usage` object:
+  //   {type:"message", message:{role:"assistant", usage:{input,output,
+  //    cacheRead,cacheWrite}, model, timestamp}}
+  // zai keeps them FLAT in one folder; pi nests them under per-project
+  // subfolders of ~/.pi/agent/sessions. One scanner serves both.
+  // Legacy ZCODE_* files are skipped: those sessions are DB-backed (turn_usage),
+  // so counting the files too would double them.
+  _listSessionFiles(rootDir, depth) {
+    const files = [];
+    let entries;
+    try { entries = fs.readdirSync(rootDir, { withFileTypes: true }); } catch (_) { return files; }
+    for (const e of entries) {
+      const full = path.join(rootDir, e.name);
+      if (e.isDirectory()) {
+        if (depth > 0) files.push(...this._listSessionFiles(full, depth - 1));
+      } else if (e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('ZCODE_')) {
+        files.push(full);
+      }
+    }
+    return files;
+  }
+
+  _scanPiSessions(source, app, keyPrefix, floorKey, highKey) {
+    if (!source || !source.enabled || !source.sessionsDir) return 0;
+    const files = this._listSessionFiles(source.sessionsDir, 2);
+    const cutoff = (this[floorKey] || 0);
+    let added = 0, high = (this[highKey] || 0);
+    for (const full of files) {
       let st;
       try { st = fs.statSync(full); } catch (_) { continue; }
       if (st.mtimeMs < cutoff) continue;
       if (st.mtimeMs > high) high = st.mtimeMs;
+      // Key on the path relative to the store root: stable across rescans,
+      // unique across nested project folders.
+      const rel = path.relative(source.sessionsDir, full);
       let lines;
       try { lines = fs.readFileSync(full, 'utf8').split('\n'); } catch (_) { continue; }
       for (let i = 0; i < lines.length; i++) {
@@ -178,10 +218,10 @@ class TokenTracker extends require('events') {
         const input = u.input || 0, output = u.output || 0;
         const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
         if (!(input || output || cacheRead || cacheWrite)) continue;
-        const key = `zf:${fn}:${(d.message && d.message.id) || 'l' + i}`;
+        const key = `${keyPrefix}:${rel}:${(d.message && d.message.id) || 'l' + i}`;
         if (this.records.has(key)) continue;
         this.records.set(key, {
-          app: 'zai',
+          app,
           ts: Number(d.message.timestamp) || st.mtimeMs,
           model: d.message.model || 'unknown',
           // pi reports cache beside input (its input EXCLUDES cache, unlike the
@@ -192,9 +232,17 @@ class TokenTracker extends require('events') {
         added++;
       }
     }
-    if (high) this._zaiMtimeHigh = high;
-    if (this._zaiMtimeHigh) this._zaiMtimeFloor = this._zaiMtimeHigh - 60000; // 1min slack for in-flight writes
+    if (high) this[highKey] = high;
+    if (this[highKey]) this[floorKey] = this[highKey] - 60000; // 1min slack for in-flight writes
     return added;
+  }
+
+  _scanZaiSessions() {
+    return this._scanPiSessions(this.cfg.sources.zai, 'zai', 'zf', '_zaiMtimeFloor', '_zaiMtimeHigh');
+  }
+
+  _scanPiAgentSessions() {
+    return this._scanPiSessions(this.cfg.sources.pi, 'pi', 'pf', '_piMtimeFloor', '_piMtimeHigh');
   }
 
   // --- opencode ----------------------------------------------------------------
@@ -308,8 +356,9 @@ class TokenTracker extends require('events') {
       if (arr) for (const [k, r] of arr) this.records.set(k, r);
       else console.log('[wizbar] token cache: stale pre-normalization cache discarded; full rescan');
       if (parsed.mimoSigs) this._mimoSigs = parsed.mimoSigs;
-      if (arr) this._ocMtimeFloor = Math.max(...arr.map(([, r]) => r.ts || 0));
+      if (arr) this._ocMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('o:')).map(([, r]) => r.ts || 0)) - 60000;
       if (arr) this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
+      if (arr) this._piMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('pf:')).map(([, r]) => r.ts || 0));
       console.log(`[wizbar] token cache: ${this.records.size} records`);
     } catch (_) {}
   }
@@ -330,6 +379,17 @@ class TokenTracker extends require('events') {
   // input+output is the provider total for every source. Adding the cache
   // columns to the total would double-count them; they stay as detail only.
   aggregate() {
+    if (!this.cfg.enabled) {
+      // Master off: no sources are running, so the only honest dashboard state
+      // is all zeros with nothing enabled.
+      return {
+        generatedAt: new Date().toISOString(), lastScan: null,
+        today: { total: 0, apps: {} },
+        week: 0, month: 0, allTime: 0,
+        byDay: {}, byApp: {}, byModel: {},
+        recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0, masterEnabled: false
+      };
+    }
     const rowTotal = (r) => (r.input || 0) + (r.output || 0);
     const byDay = new Map();     // dateKey -> { total, apps: { app: agg } }
     const byApp = new Map();     // app -> agg
@@ -390,7 +450,11 @@ class TokenTracker extends require('events') {
       byApp: Object.fromEntries(byApp),
       byModel: Object.fromEntries(byModel),
       recordCount: this.records.size,
-      heatmapWeeks: this.cfg.heatmapWeeks
+      heatmapWeeks: this.cfg.heatmapWeeks,
+      // How many usage sources are switched on — lets the dashboard explain an
+      // empty state ("no sources configured") instead of just showing zeros.
+      sourcesEnabled: Object.values(this.cfg.sources || {}).filter((s) => s && s.enabled).length,
+      masterEnabled: true
     };
   }
 }

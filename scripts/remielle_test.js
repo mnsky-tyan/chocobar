@@ -1,12 +1,13 @@
 // E2E test of the Remielle toggle path: spawn exactly like toggleRemielle(),
-// check detection with the same tasklist probe pollRemielle() uses, then kill
-// with the same taskkill and confirm it's gone. The bar's poll (3s) should
-// flip the chip to "on" in between.
+// check detection with tasklist, then kill with the same taskkill and confirm
+// it's gone. (The live bar poll no longer uses tasklist: pollRemielle() detects
+// the pet in-process via native.findProcessIdByName, a Toolhelp32 snapshot.)
+// The bar's poll (3s) should flip the chip to "on" in between.
 const { spawn, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const exe = 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe';
+const exe = ''; // point at your own pet executable (modules.remielle.exePath)
 const img = path.basename(exe);
 
 const probe = () => new Promise((res) => {

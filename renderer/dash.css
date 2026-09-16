@@ -184,3 +184,12 @@ table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
   font-size: 9px; color: var(--fg-dim);
   text-align: right; padding-top: 6px;
 }
+
+.empty-note {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}

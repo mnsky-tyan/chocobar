@@ -20,6 +20,16 @@
 
     <div id="statcards"></div>
 
+    <div id="no-sources" class="hidden empty-note">
+      No usage source is configured — enable the ones you use under
+      <b>tokens.sources</b> in the config file (zcode · zai · pi · opencode · mimo).
+    </div>
+
+    <div id="usage-off" class="hidden empty-note">
+      Usage is off. Set <b>tokens.enabled</b> to true in the config file, then
+      enable the sources you use under <b>tokens.sources</b>.
+    </div>
+
     <div class="section">
       <div class="section-head">
         <span>Daily usage</span>
@@ -43,7 +53,7 @@
       </div>
     </div>
 
-    <div id="footer">sources: zcode · zai · opencode · mimo — <span id="scan-info"></span></div>
+    <div id="footer">sources: zcode · zai · pi · opencode · mimo — <span id="scan-info"></span></div>
   </div>
   <script src="dash.js"></script>
 </body>

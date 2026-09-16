@@ -19,6 +19,7 @@ const fs = require('fs');
 const { TokenTracker } = require('../src/tokens');
 
 const cfg = { tokens: {
+  enabled: true,
   rescanMinutes: 5,
   heatmapWeeks: 26,
   sources: {
@@ -100,6 +101,7 @@ async function liveSmoke() {
   const sessionsDir = path.join(home, '.zai', 'agent', 'sessions');
   if (!fs.existsSync(sessionsDir)) { console.log('skip: no zai sessions dir on this machine'); return; }
   const liveCfg = { tokens: {
+    enabled: true,
     rescanMinutes: 5,
     heatmapWeeks: 26,
     sources: {
