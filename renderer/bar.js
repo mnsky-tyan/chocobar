@@ -129,7 +129,7 @@ function rebuildSegments() {
       }
     } else c.appendChild(s);
   }
-  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature (HWiNFO)', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
+  const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
   for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['clock', ICONS.clock]]) {
     if (m[id] && m[id].enabled) {
       const s = seg(id, icon);
@@ -238,9 +238,14 @@ function render() {
       segEls.cputemp.root.title = t.label ? `CPU temperature — ${t.label}` : 'CPU temperature';
     } else {
       setVal('cputemp', '—', 'dim');
+      // Source-aware hint: 'no-temp' only exists on Windows (HWiNFO shm live but
+      // no CPU reading); the generic failure differs per platform.
+      const staticTop = theme && theme.bar && theme.bar.mode === 'static-top';
       segEls.cputemp.root.title = t && t.state === 'no-temp'
         ? 'CPU temperature — HWiNFO sensors are live but report no CPU temperature'
-        : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
+        : staticTop
+          ? 'CPU temperature — no sensor readable via sysfs'
+          : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
     }
   }
   if (segEls.ram) {

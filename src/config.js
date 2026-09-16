@@ -34,8 +34,7 @@ const DEFAULTS = {
   bar: {
     height: 24,            // DIP, slim
     gap: 16,               // DIP of air between the bar and the terminal's top edge
-    radius: 8,
-    roundCorners: true,    // all four corners (adds the subtle floating shadow)
+    radius: 8,             // corner rounding, painted by the page (CSS border-radius)
     insetX: 2,             // DIP shaved per side so the bar doesn't overhang the terminal frame
     fontSize: 11,
     fontFamily: "'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace",
@@ -48,7 +47,7 @@ const DEFAULTS = {
     staticWidth: 'content',
     backdrop: 'acrylic',   // acrylic | solid | none
     backgroundTint: '#FBF2E2',   // pale yellow/pink blend to match terminal acrylic
-    backgroundAlpha: 110,        // 0-255 — ACTUAL fill opacity over the blur (0 = clear)
+    backgroundAlpha: 110,        // 0-255 — fill opacity (0 = clear, 255 = solid)
     segmentSpacing: 14
   },
   theme: {
@@ -117,8 +116,8 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "gap": 16,
     // trim per side so the bar doesn't overhang the terminal frame (0 to disable)
     "insetX": 2,
-    // rounded corners (Win11); also adds a subtle floating shadow
-    "roundCorners": true,
+    // corner rounding of the bar box (the page paints it; no window shadow)
+    "radius": 8,
     // text size + font (must be an installed font)
     "fontSize": 11,
     "fontFamily": "'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace",
@@ -130,11 +129,11 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     // "workarea" = full-width strip at the top of the screen (like above a
     // maximized terminal)
     "staticWidth": "content",
-    // "acrylic" = blurred see-through, "solid" = opaque, "none" = clear
+    // "acrylic" = translucent tint over the desktop, "solid" = opaque
     "backdrop": "acrylic",
     // the tint color of the box
     "backgroundTint": "#FBF2E2",
-    // box fill opacity over the blur: 0 = fully clear, 255 = solid color.
+    // box fill opacity: 0 = fully clear, 255 = solid color.
     // lower = more transparent. ~110 is airy, ~180 is creamy.
     "backgroundAlpha": 110,
     // spacing between the modules (tokens, cpu, ...)

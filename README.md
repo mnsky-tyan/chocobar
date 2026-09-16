@@ -133,14 +133,14 @@ no restart needed. The main dials, all under `"bar"`:
 
 | Key | What it does |
 |---|---|
-| `backdrop` | `"acrylic"` (blurred see-through) · `"solid"` (opaque) · `"none"` (fully clear) |
+| `backdrop` | `"acrylic"` (translucent tint over the desktop) · `"solid"` (opaque) |
 | `backgroundTint` | the box color, e.g. `"#FBF2E2"` |
-| `backgroundAlpha` | **fill opacity over the blur, 0–255** — 0 = fully clear, 110 = airy, 180 = creamy, 255 = solid |
+| `backgroundAlpha` | **fill opacity, 0–255** — 0 = fully clear, 110 = airy (default), 180 = creamy, 255 = solid |
 | `gap` | floating air between the bar and the terminal's top edge |
 | `height` | bar thickness — **don't go below 36**: Windows silently clamps frameless acrylic windows to a ~35.5 DIP minimum, and the clipped remainder renders as a grey band |
 | `fontSize` / `fontFamily` / `segmentSpacing` | typography |
 | `insetX` | per-side trim so the bar doesn't overhang the terminal frame |
-| `roundCorners` | rounded corners (+ the subtle floating shadow) |
+| `radius` | corner rounding of the bar box (painted by the page, px) |
 | `align` | `right` · `left` · `center` |
 | `position` | `above` · `below` |
 
@@ -164,13 +164,14 @@ pet module (Windows) with your own exe path if you want it.
 
 ## Notes & limits
 
-- The bar's acrylic is the **smooth system backdrop forced to light mode** (`backgroundMaterial`
-  + `DWMWA_USE_IMMERSIVE_DARK_MODE=false`), tinted with your color by the CSS overlay
-  (`backgroundAlpha`, default 180). The legacy `SetWindowCompositionAttribute` accent API was
-  tried and rejected — it renders mosaic/blocky on Win11. Rounding was also rejected — it
-  renders blocky AND dark on some builds.
-- `roundCorners: true` (default) rounds all four corners; on Windows this re-enables a subtle
-  DWM shadow (Electron's `hasShadow` is ignored there) which reads as part of the floating look.
+- The bar's backdrop is **per-pixel translucency, not blur**: the window is created with
+  `transparent: true` and the page paints your tint as `rgba(..., backgroundAlpha/255)`
+  (default 110) — 0 is fully clear, 255 is solid. DWM `backgroundMaterial` composites its
+  window opaquely (the alpha byte is ignored), which is why it was rejected: the bar never
+  went see-through under it. On Linux/macOS the tint renders solid — compositing alpha over
+  arbitrary wallpapers reads dark/murky there.
+- Corners are the page's CSS `border-radius` (`bar.radius`, default 8). The window itself
+  carries no DWM rounding, border, or shadow (`hasShadow: false`).
 - The dark edge you may see in the gap is the **terminal's own drop shadow** — part of Windows
   Terminal, not the bar.
 - `bar.insetX` (default 2 DIP per side) trims the bar so it doesn't overhang the terminal frame.
