@@ -7,7 +7,7 @@ const c = JSON.parse(fs.readFileSync(p, 'utf8'));
 c.general.showTray = false;
 c.modules.remielle = {
   enabled: true,
-  exePath: 'C:\\Users\\tyanw\\Downloads\\Little-Remielle-win\\└┘├╫╫└│Φ\\小蕾米.exe'
+  exePath: '' // point at your own pet executable
 };
 c.tokens.sources.mimo = { enabled: true };
 fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');

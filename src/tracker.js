@@ -9,34 +9,96 @@
 const { screen } = require('electron');
 const native = require('./native');
 
-const FOLLOW_INTERVAL_MS = 8;    // ~120Hz follow while attached
+const FOLLOW_INTERVAL_MS = 16;   // 60Hz follow while attached (matches display refresh;
+                                 // 120Hz doubled tracker cost for sub-DWM-pixel gains)
 const SCAN_INTERVAL_MS = 400;   // look for new terminal windows while unattached
+
+// Window-class tracking is a Win32 capability. On other platforms there is no
+// EnumWindows, so the tracker runs in STATIC mode instead: the bar pins to the
+// top edge of the primary display's work area and tracks display changes only.
+// No polling timer exists in static mode (nothing to follow).
+const STATIC_MODE = process.platform !== 'win32';
 
 class TerminalTracker extends require('events') {
   constructor(config) {
     super();
     this.className = config.terminal.className;
     this.reattachToExisting = !!config.terminal.reattachToExisting;
+    this.cfgBar = config.bar;   // bar sizing for static mode
     this.hwnd = null;          // numeric hwnd of followed terminal window
     this.seen = new Set();     // hwnds observed while unattached (only NEW ones retrigger)
     this._timer = null;
     this._hidden = false;
+    this._screenListeners = null;
   }
 
   start() {
+    if (STATIC_MODE) return this._startStatic();
     this._ensureScan();
   }
+
+  // --- static mode (non-Windows): top strip of the primary work area ----------
+  _startStatic() {
+    if (this.hwnd !== null) return; // already static-attached
+    this.hwnd = 0;                  // no terminal handle exists; 0 = synthetic
+    this.emit('attached', 0);
+    this._emitStaticGeometry();
+    this._screenListeners = [
+      ['display-metrics-changed', () => this._emitStaticGeometry()],
+      ['display-removed', () => this._emitStaticGeometry()],
+      ['display-added', () => this._emitStaticGeometry()]
+    ];
+    for (const [ev, fn] of this._screenListeners) screen.on(ev, fn);
+  }
+
+  _emitStaticGeometry() {
+    if (this.hwnd === null) return; // stopped
+    try {
+      this.emit('static-geometry', this.computeStaticBarBounds(this.cfgBar || null));
+    } catch (_) {}
+  }
+
+  // Re-deliver the current static bounds outside the display/config events
+  // that normally emit them. The bar window can be rebuilt after an external
+  // destroy at any moment, and in static mode the fresh window has no other
+  // source for its geometry (no follow loop exists here). No-op on Windows,
+  // where the follow loop re-delivers geometry on its own.
+  reemitStatic() {
+    if (!STATIC_MODE) return;
+    this._emitStaticGeometry();
+  }
+
+  // Bar bounds pinned to the top of the primary work area, full width.
+  computeStaticBarBounds(cfgBar) {
+    const bar = cfgBar || { height: 24 };
+    const display = screen.getPrimaryDisplay();
+    const s = display.scaleFactor || 1;
+    const wa = display.workArea;
+    return {
+      x: wa.x, y: wa.y, width: wa.width, height: bar.height,
+      scale: s, mode: 'static-top'
+    };
+  }
+
+  setCfgBar(config) { this.cfgBar = config.bar; }
 
   stop() {
     clearInterval(this._timer);
     this._timer = null;
     this.hwnd = null;
+    if (this._screenListeners) {
+      for (const [ev, fn] of this._screenListeners) {
+        try { screen.removeListener(ev, fn); } catch (_) {}
+      }
+      this._screenListeners = null;
+    }
   }
 
   setConfig(config) {
     const classChanged = this.className !== config.terminal.className;
     this.className = config.terminal.className;
     this.reattachToExisting = !!config.terminal.reattachToExisting;
+    if (STATIC_MODE) { this.setCfgBar(config); this._emitStaticGeometry(); return; }
     if (classChanged) {
       this.seen.clear();
       this.hwnd = null;

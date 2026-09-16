@@ -1,3 +1,7 @@
+import os
+# WizBar checkout to launch (set WIZBAR_HOME if not the default location)
+WIZBAR = os.environ.get('WIZBAR_HOME', r'C:\path\to\wizbar')
+ELECTRON = os.path.join(WIZBAR, 'node_modules', 'electron', 'dist', 'electron.exe')
 # Repro + assert for the dashboard z-order bug:
 #   summon dash -> foreground another app -> minimize it (the storm) -> the dash
 #   must stay ABOVE the terminal and near the top of the z-stack.
@@ -85,8 +89,8 @@ def find_foreground_app():
     return out
 
 def second_instance_summon():
-    subprocess.run([r'C:\Users\tyanw\work\general\wizbar\node_modules\electron\dist\electron.exe', '.'],
-                   cwd=r'C:\Users\tyanw\work\general\wizbar', capture_output=True, timeout=15)
+    subprocess.run([ELECTRON, '.'],
+                   cwd=WIZBAR, capture_output=True, timeout=15)
 
 terms = find_terminals()
 print("terminals:", [(hex(t), info(t)) for t in terms])

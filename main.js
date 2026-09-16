@@ -41,31 +41,48 @@ function themePayload(cfg) {
   const { theme, bar } = cfg;
   const a = (bar.backgroundAlpha ?? 110) / 255; // direct: 0 = clear, 255 = solid tint
   const tint = hexToRgb(bar.backgroundTint || '#FBF2E2');
+  const staticTop = process.platform !== 'win32';
   return {
     ...theme,
     bar: {
       height: bar.height, fontSize: bar.fontSize, fontFamily: bar.fontFamily,
       align: bar.align, radius: bar.radius, segmentSpacing: bar.segmentSpacing,
       backdrop: bar.backdrop,
-      // The page paints the ONLY tint layer (the window is transparent:true),
-      // so backgroundAlpha maps 1:1 to real opacity: 0 = invisible, 255 = solid.
+      // Off-Windows the acrylic translucency is not honored: composing the
+      // config alpha over an arbitrary wallpaper reads dark/murky there. The
+      // closest honest match to the Windows look is the tint itself, solid.
+      // Windows rendering is untouched.
       bgCss: bar.backdrop === 'solid'
         ? `rgb(${tint.r},${tint.g},${tint.b})`
-        : `rgba(${tint.r},${tint.g},${tint.b},${a.toFixed(3)})`,
+        : staticTop
+          ? `rgb(${tint.r},${tint.g},${tint.b})`
+          : `rgba(${tint.r},${tint.g},${tint.b},${a.toFixed(3)})`,
       // Opaque version for opaque surfaces (dashboard card follows the bar tint)
-      tintOpaque: `rgb(${tint.r},${tint.g},${tint.b})`
+      tintOpaque: `rgb(${tint.r},${tint.g},${tint.b})`,
+      // Static mode (non-Windows): full workarea strip or corner pill.
+      mode: staticTop ? 'static-top' : null,
+      staticWidth: staticTop ? (bar.staticWidth === 'content' ? 'content' : 'workarea') : null
     },
     modules: cfg.modules,
-    tokens: { showOnBar: cfg.tokens.showOnBar }
+    tokens: { showOnBar: cfg.tokens.showOnBar && !!cfg.tokens.enabled }
   };
 }
 
 function statsLoop() {
+  // Push only when a poll actually changed a value (consumeDirty), and send at
+  // most every 250ms. The old 100ms heartbeat serialized + IPC'd the full
+  // snapshot ten times a second whether or not anything moved, making the
+  // renderer the highest-CPU process in the app. The bar gates are checked
+  // BEFORE consuming the dirty flag: a change observed while the bar is
+  // hidden or destroyed must stay pending and flush on restore — consuming
+  // it first would drop the send and leave stale chip values until some
+  // later poll changed a value again.
   setInterval(() => {
-    if (!bar || !bar.win || bar.win.isDestroyed()) return;
+    if (!metrics || !bar || !bar.win || bar.win.isDestroyed()) return;
     if (!bar.win.isVisible()) return;
+    if (!metrics.consumeDirty()) return;
     bar.send('stats', metrics.snapshot());
-  }, 100);
+  }, 250);
 }
 
 function raiseDash() {
@@ -162,12 +179,15 @@ function buildTray() {
   tray.on('double-click', () => openDashboard());
 }
 
-// --- Little Remielle desktop-pet toggle ------------------------------------------
-// The bow chip on the bar: click = launch the exe (detached), click again =
-// kill it. Truth comes from a tasklist poll (not the child handle) so a pet
-// started or stopped outside WizBar is reflected too. The poll only checks for
-// a CSV data row in tasklist's output — the image name itself comes back in
-// the console codepage, so comparing decoded text would be unreliable.
+// --- Little Remielle desktop-pet toggle (WINDOWS-ONLY) --------------------------
+// The pet is a Windows exe managed through taskkill and Win32 window placement;
+// there is no portable equivalent, so the module reports "exists: false" (chip
+// renders "—") on other platforms. Private/local module: disabled by default in
+// the shipped config template, enabled from a user config.
+// Truth comes from an in-process Toolhelp32 snapshot (native.findProcessIdByName,
+// ~5ms) rather than spawning tasklist.exe every 3s (~164ms of CPU per spawn,
+// measured on this machine — it dominated wizbar's CPU budget). Unlike the child
+// handle, a snapshot also sees a pet started or stopped outside WizBar.
 let remielleState = { running: false, exists: false };
 let remiellePid = null;          // pet process id from the last live poll
 let remielleRestorePending = false; // set on launch, consumed by the poll
@@ -184,7 +204,7 @@ function remiellePosFile() { return path.join(APP_DIR, 'remielle-position.json')
  // restores it on every launch - that file, not WizBar, was what put the
  // figure back at the wrong spot on every toggle. Make WizBar the authority:
  // before launching, write the saved position into the pet’s own settings so
- // the pet places itself where the captain left it. Coordinates are physical
+ // the pet places itself where the user left it. Coordinates are physical
  // pixels, same space as GetWindowRect; the sprite scale field is preserved.
 function remielleSyncPetConfig(x, y) {
   const cfg = remielleCfg();
@@ -199,13 +219,13 @@ function remielleSyncPetConfig(x, y) {
 
 // Remember where the figure is: its window rect, written while it runs and
 // right before we kill it, so the next toggle and the next app restart can
-// put it back exactly where the captain left it.
+// put it back exactly where the user left it.
 function remielleSavePosition() {
   if (!remiellePid) return;
   // A poll must never record the pet’s transient states: while a restore is
   // pending/running the window is being placed by us, and the built-in default
   // spot is exactly what the restore exists to move it away from. Saving
-  // either would clobber the captain’s position and poison every later
+  // either would clobber the user’s position and poison every later
   // toggle (the works-once-or-twice-then-fails bug).
   if (remielleRestorePending || remielleRestoreActive) return;
   try {
@@ -249,7 +269,7 @@ function remielleRestorePosition(pid) {
     const sig = rc.left + ',' + rc.top;
     if (!moved) {
       // where the pet placed itself is its built-in default: remember it so
-      // poll-time saves can never record it (that clobbered the captain's
+      // poll-time saves can never record it (that clobbered the user's
       // position and broke every toggle after the first couple)
       remielleDefaultSig = sig;
       native.moveWindow(hwnds[0], pos.x, pos.y);
@@ -259,8 +279,8 @@ function remielleRestorePosition(pid) {
     }
     // The pet’s own startup init can re-snap the window to its default after
     // our move; re-assert for a bounded window. The moment the rect is
-    // neither the default nor the saved spot, the captain is dragging it -
-    // stand down immediately and never fight the captain.
+    // neither the default nor the saved spot, the user is dragging it -
+    // stand down immediately and never fight the user.
     if (sig === remielleDefaultSig && reasserts < 30) {
       native.moveWindow(hwnds[0], pos.x, pos.y);
       reasserts++;
@@ -279,6 +299,13 @@ function pushRemielle() {
 }
 
 function pollRemielle() {
+  if (process.platform !== 'win32') { // pet exe + tasklist/taskkill are Windows-only
+    if (remielleState.exists !== false) {
+      remielleState = { running: false, exists: false };
+      pushRemielle();
+    }
+    return;
+  }
   const cfg = remielleCfg();
   if (!cfg.enabled) return;
   const exe = cfg.exePath;
@@ -287,29 +314,25 @@ function pollRemielle() {
     pushRemielle();
     return;
   }
-  execFile('tasklist', ['/FI', 'IMAGENAME eq ' + path.basename(exe), '/FO', 'CSV', '/NH'],
-    { windowsHide: true }, (err, stdout) => {
-      const running = !err && /","/.test(stdout || '');
-      let pid = null;
-      if (running) {
-        const m = String(stdout || '').match(/",\s*"(\d+)"/);
-        if (m) pid = Number(m[1]);
-      }
-      remiellePid = running ? pid : null;
-      if (running) remielleSavePosition();
-      if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
-      if (remielleState.exists !== true || remielleState.running !== running) {
-        DBG('remielle poll:', JSON.stringify({ err: err && err.message, running, out: String(stdout).slice(0, 120) }));
-      }
-      remielleState = { running, exists: true };
-      pushRemielle();
-    });
+  // In-process Toolhelp32 snapshot: no child process, ~5ms instead of a
+  // ~164ms tasklist spawn every 3s.
+  const pid = native.findProcessIdByName(path.basename(exe));
+  const running = pid != null;
+  remiellePid = running ? pid : null;
+  if (running) remielleSavePosition();
+  if (running && remielleRestorePending && pid) { remielleRestorePending = false; remielleRestorePosition(pid); }
+  if (remielleState.exists !== true || remielleState.running !== running) {
+    DBG('remielle poll:', JSON.stringify({ running, pid }));
+  }
+  remielleState = { running, exists: true };
+  pushRemielle();
 }
 
 function toggleRemielle() {
+  if (process.platform !== 'win32') return remielleState; // Windows-only module
   const cfg = remielleCfg();
   const exe = cfg.exePath;
-  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return;
+  if (!cfg.enabled || !exe || !fs.existsSync(exe)) return remielleState;
   if (remielleState.running) {
     remielleSavePosition(); // capture the last spot before the process dies
     execFile('taskkill', ['/IM', path.basename(exe), '/F', '/T'], { windowsHide: true },
@@ -339,7 +362,13 @@ function spawnBar() {
   // throwing on a dangling window. Skipped while the app is quitting.
   bar.win.on('closed', () => {
     setTimeout(() => {
-      if (!shuttingDown && bar && (!bar.win || bar.win.isDestroyed())) spawnBar();
+      if (!shuttingDown && bar && (!bar.win || bar.win.isDestroyed())) {
+        spawnBar();
+        // The rebuilt window starts hidden with no geometry; in static mode
+        // nothing else re-delivers it (no follow loop, and static-geometry
+        // only fires on start/display/config events).
+        tracker.reemitStatic();
+      }
     }, 250);
   });
 }
@@ -357,25 +386,36 @@ function wireBar() {
     bar.syncZ(hwnd);
   };
 
-  tracker.on('geometry', (rect) => {
-    const bounds = tracker.computeBarBounds(rect, configManager.config.bar);
-    if (!bounds) { bar.hide(); return; }
-    if (configManager.config.general.debug) DBG('geometry', JSON.stringify(rect), '->', JSON.stringify(bounds));
-    bar.applyGeometry(bounds);
-    syncZ(tracker.hwnd); // keep bar directly above the terminal's z-position
-  });
-  tracker.on('visibility', (v) => {
-    if (configManager.config.general.debug) DBG('visibility', v);
-    if (v) {
-      syncZ(tracker.hwnd, true); // re-insert above terminal on restore
-    } else {
-      bar.hide();
-    }
-  });
-  tracker.on('detached', (h) => { DBG('detached', h); bar.hide(); });
+  if (process.platform !== 'win32') {
+    // Non-Windows: the tracker has no Win32 window classes to follow; it emits
+    // a static bar position (top of the primary work area) on display changes.
+    // staticWidth must be read from configManager.config, not bar.cfg: the
+    // config-changed handler calls tracker.setConfig (emitting synchronously)
+    // BEFORE bar.cfg is reassigned, so bar.cfg would carry the previous mode
+    // and a content->workarea hot reload would skip the re-expand.
+    tracker.on('static-geometry', (bounds) =>
+      bar.applyGeometry(bounds, configManager.config.bar.staticWidth));
+  } else {
+    tracker.on('geometry', (rect) => {
+      const bounds = tracker.computeBarBounds(rect, configManager.config.bar);
+      if (!bounds) { bar.hide(); return; }
+      if (configManager.config.general.debug) DBG('geometry', JSON.stringify(rect), '->', JSON.stringify(bounds));
+      bar.applyGeometry(bounds);
+      syncZ(tracker.hwnd); // keep bar directly above the terminal's z-position
+    });
+    tracker.on('visibility', (v) => {
+      if (configManager.config.general.debug) DBG('visibility', v);
+      if (v) {
+        syncZ(tracker.hwnd, true); // re-insert above terminal on restore
+      } else {
+        bar.hide();
+      }
+    });
+    tracker.on('detached', (h) => { DBG('detached', h); bar.hide(); });
+  }
   tracker.on('attached', (h) => {
     DBG('attached', h);
-    syncZ(h, true);
+    if (process.platform === 'win32') syncZ(h, true);
     bar.send('theme', themePayload(configManager.config));
   });
 
@@ -386,6 +426,17 @@ function wireBar() {
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
   ipcMain.handle('toggle-remielle', () => { toggleRemielle(); return remielleState; });
   ipcMain.on('open-dash', () => openDashboard());
+  // Static mode (non-Windows, bar.staticWidth === 'content'): the renderer
+  // reports the pill's natural width; shrink the window to it, anchored
+  // top-right of the work area, so the bar floats as a corner pill (an
+  // invisible wider strip would swallow clicks along the top edge).
+  ipcMain.on('bar-content-size', (_e, w) => {
+    if (process.platform === 'win32' || !bar || !bar.win || bar.win.isDestroyed()) return;
+    if ((bar.cfg.bar.staticWidth || 'workarea') !== 'content') return; // full strip: no shrinking
+    const width = Math.max(60, Math.ceil(Number(w) || 0));
+    if (!width || bar._lastPillW === width) return;
+    bar.setPillWidth(width, bar.cfg.bar);
+  });
   ipcMain.on('bar-context', () => {
     Menu.buildFromTemplate([
       { label: 'Token dashboard', click: () => openDashboard() },
@@ -434,7 +485,8 @@ function wireBar() {
 }
 
 function applyAutostart(enable) {
-  // HKCU\...\Run pointing at the silent launcher.
+  // Windows only: HKCU\...\Run pointing at the silent launcher.
+  if (process.platform !== 'win32') return;
   const { exec } = require('child_process');
   const launcher = path.join(__dirname, 'scripts', 'start-wizbar.vbs');
   const cmd = enable

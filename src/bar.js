@@ -1,8 +1,8 @@
 'use strict';
-// The status bar window: frameless acrylic strip positioned by the tracker.
-// No per-pixel transparency (that composites black with backgroundMaterial) —
-// the window is an opaque DWM surface; the renderer paints a translucent tint
-// over the acrylic blur, and corners are rounded by DWM.
+// The status bar window: frameless floating strip positioned by the tracker.
+// Translucency is real per-pixel alpha (transparent:true + the page's rgba
+// tint); corners are the page's CSS border-radius. See create() for why
+// DWM backgroundMaterial/rounding/shadow are not used.
 const path = require('path');
 const { BrowserWindow } = require('electron');
 const native = require('./native');
@@ -13,6 +13,7 @@ class BarWindow {
     this.win = null;
     this.hwnd = null;          // numeric hwnd of the bar itself (for z-order sync)
     this._lastBoundsKey = '';
+    this._staticContent = false; // last applied staticWidth mode was 'content'
   }
 
   create() {
@@ -71,6 +72,10 @@ class BarWindow {
     this.win.on('closed', () => {
       this.win = null;
       this._shouldShow = false;
+      // The heal interval must not outlive its window: main.js rebuilds the bar
+      // as a NEW BarWindow on 'closed', and without this each rebuild would
+      // leak another 400ms timer doing no-op work forever.
+      if (this._healTimer) { clearInterval(this._healTimer); this._healTimer = null; }
     });
 
     // Periodic size guard (see healSize) — heals any OS-side growth of the window.
@@ -85,18 +90,24 @@ class BarWindow {
   // All bar visuals (tint, alpha, backdrop) are painted by the renderer and
   // arrive via the theme push — there is no native color layer to re-apply.
 
-  applyGeometry(bounds) {
+  applyGeometry(bounds, staticWidth) {
     if (!this.win || this.win.isDestroyed()) return;
     this._shouldShow = true; // bounds exist → the bar belongs on screen
+    const content = staticWidth === 'content';
     const key = `${bounds.x.toFixed(1)},${bounds.y.toFixed(1)},${bounds.width.toFixed(1)},${bounds.height}`;
     this._sizeTarget = { w: Math.round(bounds.width), h: Math.round(bounds.height), scale: bounds.scale || 1 };
-    if (key === this._lastBoundsKey) {
-      // Bounds unchanged, but the window can still have been hidden behind our
-      // back (shell minimize-all, DWM churn). Re-assert visibility anyway.
-      if (!this.win.isVisible()) this.win.showInactive();
-      this.assertNoTaskbar();
-      return;
-    }
+    // Unchanged bounds re-applies (config saves, spurious display events) must
+    // touch nothing: in pill mode the shrunk window IS the correct size, and
+    // re-expanding would flash a full-width click-swallowing strip until the
+    // next renderer report. Exception: leaving pill mode — the window may
+    // still sit at the shrunk pill size while the bounds already say full
+    // strip (staticWidth hot-reload re-emits identical geometry), so re-apply
+    // to expand it back. _staticContent records the last SEEN mode (updated
+    // before this gate): a mode flip with identical bounds must still register,
+    // or the return flip to 'workarea' would not re-expand the shrunk window.
+    const leavingPill = this._staticContent && !content;
+    this._staticContent = content;
+    if (key === this._lastBoundsKey && !leavingPill) return;
     this._lastBoundsKey = key;
     this.win.setBounds({
       x: Math.round(bounds.x), y: Math.round(bounds.y),
@@ -110,6 +121,32 @@ class BarWindow {
     }
     if (!this.win.isVisible()) this.win.showInactive();
     this.assertNoTaskbar();
+    // The window was just resized out of pill mode (static-geometry re-apply,
+    // display change, staticWidth hot-reload): forget the last reported pill
+    // width so the next 'bar-content-size' report re-shrinks the window.
+    this._lastPillW = 0;
+  }
+
+  // Static corner-pill mode: shrink to the renderer-reported content width,
+  // anchored top-right of the work area (an invisible wider strip would
+  // swallow clicks along the top edge). Only reachable while the static
+  // width mode is 'content'; applyGeometry expands the window again when
+  // the mode leaves 'content' (a staticWidth hot-reload re-emits identical
+  // geometry, so the transition cannot be seen from the bounds alone).
+  setPillWidth(width, barCfg) {
+    if (!this.win || this.win.isDestroyed()) return;
+    this._lastPillW = width;
+    try {
+      const { screen } = require('electron');
+      const wa = screen.getPrimaryDisplay().workArea;
+      const margin = 6;
+      this.win.setBounds({
+        x: wa.x + wa.width - width - margin,
+        y: wa.y + margin,
+        width,
+        height: barCfg.height
+      });
+    } catch (_) {}
   }
 
   // Both layers of taskbar exclusion, re-asserted. setSkipTaskbar is Electron's
@@ -118,8 +155,14 @@ class BarWindow {
   // still let the icon return after long uptime. setToolWindow is the
   // structural half (WS_EX_TOOLWINDOW re-read on every enumeration); each
   // call is a cheap no-op unless something cleared the state.
+  // A 2s floor keeps the periodic re-assert from turning into constant shell
+  // COM chatter (DeleteTab is not free); anything that genuinely clears the
+  // state is re-asserted within 2s, which no shell rebuild outlasts.
   assertNoTaskbar() {
     if (!this.win || this.win.isDestroyed() || !this.hwnd) return;
+    const now = Date.now();
+    if (this._taskbarAssertedAt && now - this._taskbarAssertedAt < 2000) return;
+    this._taskbarAssertedAt = now;
     native.setToolWindow(this.hwnd, true);
     this.win.setSkipTaskbar(true);
   }
@@ -162,6 +205,8 @@ class BarWindow {
     this._shouldShow = false; // healSize must NOT resurrect a deliberate hide
     if (this.win && this.win.isVisible()) this.win.hide();
     this._lastBoundsKey = '';
+    this._taskbarAssertedAt = 0; // next show re-asserts immediately
+    this._lastPillW = 0;
   }
 
   send(channel, payload) {
@@ -171,9 +216,11 @@ class BarWindow {
   }
 
   destroy() {
+    if (this._healTimer) { clearInterval(this._healTimer); this._healTimer = null; }
     if (this.win && !this.win.isDestroyed()) this.win.destroy();
     this.win = null;
     this.hwnd = null;
+    this._lastPillW = 0;
   }
 }
 

@@ -55,7 +55,7 @@ app.whenReady().then(async () => {
   // --- pet guardian: the case a topmost-bit check alone misses ---------------
   // Two topmost windows z-fight and the one raised last is in front. The pet
   // keeps WS_EX_TOPMOST the whole time, so isTopmost() reports "fine" while she
-  // sits behind the other window - the captain's "she hides until I click her".
+  // sits behind the other window - the reported "she hides until I click her".
   const petWin = new BrowserWindow({ width: 420, height: 300, x: 60, y: 60, frame: false, skipTaskbar: true, show: false });
   const otherWin = new BrowserWindow({ width: 260, height: 180, x: 560, y: 60, frame: false, skipTaskbar: true, show: false });
   petWin.showInactive();

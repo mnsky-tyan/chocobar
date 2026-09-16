@@ -1,3 +1,7 @@
+import os
+# WizBar checkout to launch (set WIZBAR_HOME if not the default location)
+WIZBAR = os.environ.get('WIZBAR_HOME', r'C:\path\to\wizbar')
+ELECTRON = os.path.join(WIZBAR, 'node_modules', 'electron', 'dist', 'electron.exe')
 import ctypes, subprocess, time, ctypes.wintypes
 u32 = ctypes.windll.user32
 u32.FindWindowW.restype = ctypes.c_void_p
@@ -22,8 +26,8 @@ def dash_windows():
     return find(lambda c, h, r: c == 'Chrome_WidgetWin_1' and (r.right - r.left) == 840 and (r.bottom - r.top) == 580)
 
 def second_instance_summon():
-    subprocess.run([r'C:\Users\tyanw\work\general\wizbar\node_modules\electron\dist\electron.exe', '.'],
-                   cwd=r'C:\Users\tyanw\work\general\wizbar',
+    subprocess.run([ELECTRON, '.'],
+                   cwd=WIZBAR,
                    capture_output=True, timeout=15)
 
 print('step 1: summon dashboard')

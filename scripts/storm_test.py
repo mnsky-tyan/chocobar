@@ -1,3 +1,7 @@
+import os
+# WizBar checkout to launch (set WIZBAR_HOME if not the default location)
+WIZBAR = os.environ.get('WIZBAR_HOME', r'C:\path\to\wizbar')
+ELECTRON = os.path.join(WIZBAR, 'node_modules', 'electron', 'dist', 'electron.exe')
 # Full storm experiment: summon dash, snapshot state, notepad storm (real
 # SC_MINIMIZE), snapshot at intervals. State = iconic/visible/z-index.
 import ctypes, ctypes.wintypes, subprocess, time
@@ -55,8 +59,8 @@ def snap(label, dash, term):
     print(f'  [{label}] dash {st(dash)} | term {st(term)}')
 
 def summon():
-    subprocess.Popen([r'C:\Users\tyanw\work\general\wizbar\node_modules\electron\dist\electron.exe', '.'],
-                     cwd=r'C:\Users\tyanw\work\general\wizbar',
+    subprocess.Popen([ELECTRON, '.'],
+                     cwd=WIZBAR,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 term = find_term()
