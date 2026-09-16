@@ -137,7 +137,7 @@ no restart needed. The main dials, all under `"bar"`:
 | `backgroundTint` | the box color, e.g. `"#FBF2E2"` |
 | `backgroundAlpha` | **fill opacity, 0–255** — 0 = fully clear, 110 = airy (default), 180 = creamy, 255 = solid |
 | `gap` | floating air between the bar and the terminal's top edge |
-| `height` | bar thickness — **don't go below 36**: Windows silently clamps frameless acrylic windows to a ~35.5 DIP minimum, and the clipped remainder renders as a grey band |
+| `height` | bar thickness in DIP (default 24 — applied as-is on current Electron; only very old Electron builds clamped frameless windows toward ~36) |
 | `fontSize` / `fontFamily` / `segmentSpacing` | typography |
 | `insetX` | per-side trim so the bar doesn't overhang the terminal frame |
 | `radius` | corner rounding of the bar box (painted by the page, px) |
