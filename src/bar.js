@@ -1,8 +1,8 @@
 'use strict';
-// The status bar window: frameless acrylic strip positioned by the tracker.
-// No per-pixel transparency (that composites black with backgroundMaterial) —
-// the window is an opaque DWM surface; the renderer paints a translucent tint
-// over the acrylic blur, and corners are rounded by DWM.
+// The status bar window: frameless floating strip positioned by the tracker.
+// Translucency is real per-pixel alpha (transparent:true + the page's rgba
+// tint); corners are the page's CSS border-radius. See create() for why
+// DWM backgroundMaterial/rounding/shadow are not used.
 const path = require('path');
 const { BrowserWindow } = require('electron');
 const native = require('./native');

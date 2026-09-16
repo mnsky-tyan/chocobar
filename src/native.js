@@ -663,7 +663,7 @@ function getHwinfoTemp(mapName) {
 
 // --- process lookup by image name (Toolhelp32 snapshot) ------------------------
 // pollRemielle used to spawn tasklist.exe every 3s just to learn whether the pet
-// process is alive (~290ms of CPU per spawn here); an in-process snapshot costs
+// process is alive (~164ms of CPU per spawn here); an in-process snapshot costs
 // ~5ms. Returns the matching pid, or null when no process carries that image name.
 const TH32CS_SNAPPROCESS = 0x2;
 const PROCESSENTRY32W = kstruct('PROCESSENTRY32W', {
