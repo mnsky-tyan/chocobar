@@ -67,8 +67,8 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
 ## Public release (de-personalized)
 
 Shipped defaults are neutral: `tokens.enabled=false` with all sources off and empty paths,
-pet + agents chips off, no personal identifiers in repo code/config/docs (a portable test
-guards this). Personal stores/pet/fleet wiring belongs only in the user-level
+pet chip off, no personal identifiers in repo code/config/docs (a portable test
+guards this). Personal stores/pet wiring belongs only in the user-level
 `~/.wizbar/config.json` (outside the repo). Dashboard shows an explanatory empty state
 (`sourcesEnabled`) when nothing is configured. `tokens.enabled` is a true master switch:
 off = zero scans, zero dashboard data, no chip (the dashboard says so via
