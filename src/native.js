@@ -600,8 +600,12 @@ function getCpuTempLinux(hwmonDir, tzDir) {
       const pkg = labeled.find((t) => /package/i.test(t.label));
       if (pkg) return { state: 'ok', c: pkg.c, label: pkg.label };
       const cpu = labeled.filter((t) => t.cpu);
-      if (cpu.length) return { state: 'ok', c: Math.max(...cpu.map((t) => t.c)), label: cpu[0].label };
-      return { state: 'ok', c: Math.max(...labeled.map((t) => t.c)), label: labeled[0].label };
+      if (cpu.length) {
+        const hot = cpu.reduce((a, b) => (b.c > a.c ? b : a));
+        return { state: 'ok', c: hot.c, label: hot.label };
+      }
+      const hot = labeled.reduce((a, b) => (b.c > a.c ? b : a));
+      return { state: 'ok', c: hot.c, label: hot.label };
     }
     const zones = fs.readdirSync(tzDir);
     const temps = [];
