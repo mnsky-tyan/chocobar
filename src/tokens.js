@@ -64,6 +64,7 @@ class TokenTracker extends require('events') {
     this.cfg = config.tokens;
     this.records = new Map();   // key -> { app, ts, model, input, output, cacheRead, cacheWrite, reasoning }
     this.subscriptionPlans = null; // parsed tokens.sources.subscription file, null = off/unreadable
+    this._sigsDirty = false;      // mimo cursors changed since the last cache save
     this.lastScan = null;
     this._timer = null;
     this._pythonCmd = 'python'; // may be re-probed to python3 on Linux
@@ -96,6 +97,7 @@ class TokenTracker extends require('events') {
       this._zaiMtimeFloor = 0; this._zaiMtimeHigh = 0;
       this._piMtimeFloor = 0; this._piMtimeHigh = 0;
       this._ocMtimeFloor = 0; this._ocMtimeHigh = 0;
+      this._fileProgress = new Map(); // byte cursors too: re-read everything (dedup keeps totals)
     }
     const t0 = Date.now();
     let added = 0;
@@ -104,9 +106,16 @@ class TokenTracker extends require('events') {
     try { added += this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
     try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
-    try { this._scanSubscription(); } catch (e) { console.error('[wizbar] subscription scan:', e.message); }
+    let plansChanged = false;
+    try { plansChanged = this._scanSubscription(); } catch (e) { console.error('[wizbar] subscription scan:', e.message); }
     this.lastScan = new Date().toISOString();
-    this._saveCache();
+    // The cache is a rewrite of up to 50k records; doing that synchronously on
+    // every scan (even with zero new records) was both wasteful and a main-
+    // process stall. Write only when something actually changed.
+    if (added > 0 || this._sigsDirty || plansChanged) {
+      this._sigsDirty = false;
+      this._saveCache();
+    }
     this.emit('updated', this.aggregate());
     if (added) console.log(`[wizbar] tokens: +${added} records (${Date.now() - t0}ms)`);
     return this.aggregate();
@@ -203,6 +212,7 @@ class TokenTracker extends require('events') {
 
   _scanPiSessions(source, app, keyPrefix, floorKey, highKey) {
     if (!source || !source.enabled || !source.sessionsDir) return 0;
+    if (!this._fileProgress) this._fileProgress = new Map();
     const files = this._listSessionFiles(source.sessionsDir, 2);
     const cutoff = (this[floorKey] || 0);
     let added = 0, high = (this[highKey] || 0);
@@ -214,34 +224,92 @@ class TokenTracker extends require('events') {
       // Key on the path relative to the store root: stable across rescans,
       // unique across nested project folders.
       const rel = path.relative(source.sessionsDir, full);
-      let lines;
-      try { lines = fs.readFileSync(full, 'utf8').split('\n'); } catch (_) { continue; }
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line.includes('"usage"')) continue;
-        let d;
-        try { d = JSON.parse(line); } catch (_) { continue; } // partial tail line while appending
-        if (d.type !== 'message' || !d.message || d.message.role !== 'assistant') continue;
-        const u = d.message.usage || {};
-        const input = u.input || 0, output = u.output || 0;
-        const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
-        if (!(input || output || cacheRead || cacheWrite)) continue;
-        const key = `${keyPrefix}:${rel}:${(d.message && d.message.id) || 'l' + i}`;
-        if (this.records.has(key)) continue;
-        this.records.set(key, {
-          app,
-          ts: Number(d.message.timestamp) || st.mtimeMs,
-          model: d.message.model || 'unknown',
-          // pi reports cache beside input (its input EXCLUDES cache, unlike the
-          // zcode DB) and its own totalTokens = input+output+cacheRead+cacheWrite;
-          // folding cache into input makes the record cache-inclusive like DB rows.
-          input: input + cacheRead + cacheWrite, output, cacheRead, cacheWrite, reasoning: 0
-        });
-        added++;
-      }
+      try { added += this._readSessionTail(full, st, rel, app, keyPrefix); } catch (_) {}
     }
     if (high) this[highKey] = high;
     if (this[highKey]) this[floorKey] = this[highKey] - 60000; // 1min slack for in-flight writes
+    return added;
+  }
+
+  // Read only what changed in one session JSONL since the last scan. Session
+  // files are APPEND-ONLY and the active one grows huge (hundreds of MB), so
+  // re-reading whole files on the main process every scan was a periodic
+  // multi-second UI freeze (the bar and the dashboard share this process).
+  // We keep a per-file byte cursor (key -> { offset, mtimeMs }): an append is
+  // read from the cursor, an unchanged file is not read at all, and a shrunk
+  // or same-length-rewritten file is re-read from zero. Keys embed the record
+  // id or the absolute byte offset, so re-reads after a restart dedup against
+  // the persisted cache exactly like the old line-index keys did. Cursors are
+  // persisted in the cache so even a cold start reads only the fresh tail.
+  _readSessionTail(full, st, rel, app, keyPrefix) {
+    if (!this._fileProgress) this._fileProgress = new Map();
+    const prog = this._fileProgress.get(keyPrefix + ':' + rel);
+    let start = 0;
+    if (prog) {
+      if (st.size === prog.offset) {
+        if (st.mtimeMs === prog.mtimeMs) return 0;      // nothing appended
+        start = 0;                                       // same length, new mtime: rewritten in place
+      } else if (st.size > prog.offset) {
+        start = prog.offset;                             // normal append
+      } // else shrunk/rotated: re-read from zero
+    }
+    const fd = fs.openSync(full, 'r');
+    let buf, read = 0;
+    try {
+      const len = st.size - start;
+      buf = Buffer.allocUnsafe(len);
+      while (read < len) {
+        const n = fs.readSync(fd, buf, read, len - read, start + read);
+        if (n <= 0) break;
+        read += n;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    // Only consume COMPLETE lines: a writer may hold a half-written tail.
+    // Everything from the last newline on stays unconsumed for the next scan.
+    let usable = read;
+    while (usable > 0 && buf[usable - 1] !== 10) usable--;   // trailing partial line
+    if (usable === 0 && read > 0) { // one huge partial line only: keep cursor, retry next scan
+      this._fileProgress.set(keyPrefix + ':' + rel, { offset: start, mtimeMs: st.mtimeMs });
+      return 0;
+    }
+    let added = 0;
+    let lineStart = 0;
+    for (let i = 0; i <= usable; i++) {
+      if (i !== usable && buf[i] !== 10) continue;
+      if (i > lineStart) {
+        const line = buf.toString('utf8', lineStart, i).trim();
+        if (line.includes('"usage"')) {
+          let d;
+          try { d = JSON.parse(line); } catch (_) {} // partial/corrupt line: skip
+          if (d && d.type === 'message' && d.message && d.message.role === 'assistant') {
+            const u = d.message.usage || {};
+            const input = u.input || 0, output = u.output || 0;
+            const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
+            if (input || output || cacheRead || cacheWrite) {
+              const key = d.message.id
+                ? `${keyPrefix}:${rel}:${d.message.id}`
+                : `${keyPrefix}:${rel}:b${start + lineStart}`;
+              if (!this.records.has(key)) {
+                this.records.set(key, {
+                  app,
+                  ts: Number(d.message.timestamp) || st.mtimeMs,
+                  model: d.message.model || 'unknown',
+                  // pi reports cache beside input (its input EXCLUDES cache, unlike the
+                  // zcode DB) and its own totalTokens = input+output+cacheRead+cacheWrite;
+                  // folding cache into input makes the record cache-inclusive like DB rows.
+                  input: input + cacheRead + cacheWrite, output, cacheRead, cacheWrite, reasoning: 0
+                });
+                added++;
+              }
+            }
+          }
+        }
+      }
+      lineStart = i + 1;
+    }
+    this._fileProgress.set(keyPrefix + ':' + rel, { offset: start + usable, mtimeMs: st.mtimeMs });
     return added;
   }
 
@@ -343,7 +411,7 @@ class TokenTracker extends require('events') {
           added++;
         }
       }
-      if (sig != null) this._mimoSigs[s.id] = sig;
+      if (sig != null) { this._mimoSigs[s.id] = sig; this._sigsDirty = true; }
     }
     return added;
   }
@@ -361,10 +429,11 @@ class TokenTracker extends require('events') {
   // token scan: unreadable/invalid plans are skipped, not fatal.
   _scanSubscription() {
     const src = this.cfg.sources.subscription;
+    const before = this.subscriptionPlans;
     this.subscriptionPlans = null;
-    if (!src || !src.enabled || !src.usagePath) return;
+    if (!src || !src.enabled || !src.usagePath) return false;
     let parsed;
-    try { parsed = JSON.parse(fs.readFileSync(src.usagePath, 'utf8')); } catch (_) { return; }
+    try { parsed = JSON.parse(fs.readFileSync(src.usagePath, 'utf8')); } catch (_) { return false; }
     const plans = Array.isArray(parsed && parsed.plans) ? parsed.plans : [];
     const out = [];
     for (const p of plans) {
@@ -379,6 +448,7 @@ class TokenTracker extends require('events') {
       });
     }
     this.subscriptionPlans = out.length ? out : null;
+    return JSON.stringify(this.subscriptionPlans) !== JSON.stringify(before);
   }
 
   // --- cache ---------------------------------------------------------------------
@@ -386,11 +456,23 @@ class TokenTracker extends require('events') {
     try {
       if (!fs.existsSync(CACHE_PATH)) return;
       const parsed = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
-      // v2 wraps entries as {entries}; a bare array is a pre-normalization cache
-      // whose records lack the folded input - discard it so the next scan is full.
-      const arr = Array.isArray(parsed) ? null : parsed.entries;
+      // v3 = byte-offset record keys (see _readSessionTail). Older shapes (bare
+      // arrays, v2 line-index keys) lack the folded/offset-stable keys - discard
+      // them so the next scan rebuilds everything under the new keys.
+      const arr = (!Array.isArray(parsed) && parsed.v === 3 && Array.isArray(parsed.entries))
+        ? parsed.entries : null;
       if (arr) for (const [k, r] of arr) this.records.set(k, r);
-      else console.log('[wizbar] token cache: stale pre-normalization cache discarded; full rescan');
+      else console.log('[wizbar] token cache: stale pre-offset cache discarded; full rescan');
+      // Restore the per-file byte cursors (see _readSessionTail) so a cold
+      // start resumes from the last scan instead of re-reading the stores.
+      if (arr && parsed.progress && typeof parsed.progress === 'object') {
+        this._fileProgress = new Map();
+        for (const [k, p] of Object.entries(parsed.progress)) {
+          if (p && Number.isFinite(p.offset) && p.offset >= 0) {
+            this._fileProgress.set(k, { offset: p.offset, mtimeMs: p.mtimeMs || 0 });
+          }
+        }
+      }
       if (parsed.mimoSigs) this._mimoSigs = parsed.mimoSigs;
       if (arr) this._ocMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('o:')).map(([, r]) => r.ts || 0)) - 60000;
       if (arr) this._zaiMtimeFloor = Math.max(0, ...arr.filter(([k]) => k.startsWith('zf:')).map(([, r]) => r.ts || 0));
@@ -399,12 +481,52 @@ class TokenTracker extends require('events') {
     } catch (_) {}
   }
 
+  // Cache write is ASYNC and coalesced. It serializes up to 50k records; on
+  // the scan cadence (every rescanMinutes with fresh records) a synchronous
+  // write would hand the main process a periodic tens-of-ms stall, and the
+  // bar's 60Hz follow loop lives in this process. tmp+rename keeps the file
+  // atomically valid for the next cold start even if a write is interrupted.
   _saveCache() {
+    if (this._saving) { this._savePending = true; return; } // one write in flight: rerun after it lands
+    this._saving = true;
     try {
       const arr = [...this.records.entries()].slice(-50000);
-      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 2, entries: arr, mimoSigs: this._mimoSigs || {} }), 'utf8');
+      const progress = {};
+      if (this._fileProgress) for (const [k, p] of this._fileProgress) progress[k] = p;
+      const payload = JSON.stringify({ v: 3, entries: arr, mimoSigs: this._mimoSigs || {}, progress });
+      // Unique tmp per write: two savers must never truncate each other's
+      // staging file between write and rename.
+      const tmp = `${CACHE_PATH}.${Date.now()}-${(this._tmpSeq = (this._tmpSeq || 0) + 1)}.tmp`;
+      fs.writeFile(tmp, payload, 'utf8', (e) => {
+        if (e) {
+          this._saving = false;
+          console.error('[wizbar] token cache write failed:', e.message);
+          return;
+        }
+        fs.rename(tmp, CACHE_PATH, (e2) => {
+          this._saving = false;
+          if (e2) console.error('[wizbar] token cache swap failed:', e2.message);
+          if (this._savePending) { this._savePending = false; this._saveCache(); }
+        });
+      });
     } catch (e) {
+      this._saving = false;
       console.error('[wizbar] token cache write failed:', e.message);
+    }
+  }
+
+  // Best-effort final write at quit: async saves may still be in flight when
+  // the app closes, and the cache cursors are what keep the next cold start
+  // from re-reading the whole store (a one-time multi-second scan).
+  flushCacheSync() {
+    if (!this.cfg.enabled || !this.records.size) return;
+    try {
+      const arr = [...this.records.entries()].slice(-50000);
+      const progress = {};
+      if (this._fileProgress) for (const [k, p] of this._fileProgress) progress[k] = p;
+      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 3, entries: arr, mimoSigs: this._mimoSigs || {}, progress }), 'utf8');
+    } catch (e) {
+      console.error('[wizbar] token cache flush failed:', e.message);
     }
   }
 
