@@ -39,6 +39,8 @@ function applyTheme(t) {
     document.body.style.background = t.pinkBg;
   }
   $('btn-subs').classList.toggle('hidden', !(t.subs && t.subs.enabled));
+  // Section toggles apply on first open, pushed themes, and hot reload alike.
+  applyVisibility();
 }
 
 // Harness display name: the config's tokens.labels override wins, else the

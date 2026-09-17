@@ -270,9 +270,34 @@ class TokenTracker extends require('events') {
     // Everything from the last newline on stays unconsumed for the next scan.
     let usable = read;
     while (usable > 0 && buf[usable - 1] !== 10) usable--;   // trailing partial line
-    if (usable === 0 && read > 0) { // one huge partial line only: keep cursor, retry next scan
-      this._fileProgress.set(keyPrefix + ':' + rel, { offset: start, mtimeMs: st.mtimeMs });
-      return 0;
+    const partial = usable < read;
+    const tailKey = keyPrefix + ':' + rel;
+    if (!this._pendingTails) this._pendingTails = new Map();
+    const prevTail = this._pendingTails.get(tailKey);
+    // A trailing unterminated line is normally a WRITER mid-line: retry next
+    // scan. But a FINALIZED file whose last line lacks the trailing newline
+    // never grows again - detect it by the tail being unchanged since the
+    // previous scan (same start, size and mtime) and count it exactly once.
+    const tailSettled = prevTail && prevTail.size === st.size && prevTail.mtimeMs === st.mtimeMs;
+    if (usable === 0 && read > 0) {
+      if (tailSettled) {
+        usable = read; // whole region is one final unterminated line
+        this._pendingTails.delete(tailKey);
+      } else {
+        this._pendingTails.set(tailKey, { offset: start, size: st.size, mtimeMs: st.mtimeMs });
+        this._fileProgress.set(tailKey, { offset: start, mtimeMs: st.mtimeMs });
+        return 0;
+      }
+    } else if (partial) {
+      if (tailSettled && prevTail.offset === start + usable) {
+        usable = read; // the tail is final: consume it fully this time
+        this._pendingTails.delete(tailKey);
+      } else {
+        this._pendingTails.set(tailKey, { offset: start + usable, size: st.size, mtimeMs: st.mtimeMs });
+        // complete lines above still process; the cursor stops before the tail
+      }
+    } else if (prevTail) {
+      this._pendingTails.delete(tailKey); // file ended cleanly or grew past it
     }
     let added = 0;
     let lineStart = 0;
