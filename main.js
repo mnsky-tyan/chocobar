@@ -8,6 +8,7 @@ const { ConfigManager, CONFIG_PATH, APP_DIR } = require('./src/config');
 const { TerminalTracker } = require('./src/tracker');
 const { MetricsEngine } = require('./src/metrics');
 const { TokenTracker } = require('./src/tokens');
+const { SubsTracker } = require('./src/subs');
 const { BarWindow } = require('./src/bar');
 const native = require('./src/native');
 
@@ -21,7 +22,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-let configManager, tracker, metrics, tokens, bar, dashWin = null, tray = null;
+let configManager, tracker, metrics, tokens, subs, bar, dashWin = null, subsWin = null, tray = null;
 
 const DBG = (...a) => {
   if (!configManager || !configManager.config.general.debug) return;
@@ -64,7 +65,16 @@ function themePayload(cfg) {
       staticWidth: staticTop ? (bar.staticWidth === 'content' ? 'content' : 'workarea') : null
     },
     modules: cfg.modules,
-    tokens: { showOnBar: cfg.tokens.showOnBar && !!cfg.tokens.enabled }
+    tokens: {
+      showOnBar: cfg.tokens.showOnBar && !!cfg.tokens.enabled,
+      // Dashboard section visibility (tokens.dashboard), read by the dash.
+      dashboard: (cfg.tokens && cfg.tokens.dashboard) || {}
+    },
+    // Dashboard extras the renderers read: harness display-name overrides and
+    // whether the subscription board is wired (hides its launch button).
+    labels: (cfg.tokens && cfg.tokens.labels) || {},
+    heatmap: (theme && theme.heatmap) || null,
+    subs: { enabled: !!(cfg.subs && cfg.subs.enabled) }
   };
 }
 
@@ -85,17 +95,18 @@ function statsLoop() {
   }, 250);
 }
 
-function raiseDash() {
-  if (!dashWin || dashWin.isDestroyed()) return;
-  if (dashWin.isMinimized()) dashWin.restore();
-  dashWin.show();
+function raiseDash(win) {
+  win = win || dashWin;
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
   // Act like a normal window being launched: to the front of the normal band
   // AND focused. The synthetic-ALT trick makes Windows grant the foreground
   // switch even though the click came from a non-activated bar window.
   try {
-    native.bringToFront(native.hwndNumberFromBuffer(dashWin.getNativeWindowHandle()));
+    native.bringToFront(native.hwndNumberFromBuffer(win.getNativeWindowHandle()));
   } catch (_) {}
-  dashWin.focus();
+  win.focus();
 }
 
 // No z-watchdog for the dashboard, on purpose. The dash is a NORMAL window
@@ -103,6 +114,46 @@ function raiseDash() {
 // activates it instead of skipping it, so it can't be demoted the way the old
 // toolwindow dash was. Re-raising from a watchdog would also fight deliberate
 // clicks — a user who clicks the terminal wants the terminal in front.
+
+// The subscription board: same panel look as the dash, one donut per plan
+// window. Non-resizable on purpose: the layout is a fixed grid, not a doc.
+function openSubs() {
+  if (subsWin && !subsWin.isDestroyed()) {
+    raiseDash(subsWin);
+    return;
+  }
+  subsWin = new (require('electron').BrowserWindow)({
+    width: Math.max(360, (configManager.config.subs && configManager.config.subs.width) || 820),
+    height: Math.max(240, (configManager.config.subs && configManager.config.subs.height) || 480),
+    show: false,
+    frame: false,
+    transparent: false,
+    resizable: false,
+    backgroundColor: '#FBF2E2',
+    skipTaskbar: false,
+    icon: path.join(__dirname, 'assets', 'tray.png'),
+    title: 'Chocobar subscriptions',
+    webPreferences: {
+      preload: path.join(__dirname, 'renderer', 'subs-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  subsWin.loadFile(path.join(__dirname, 'renderer', 'subs.html'));
+  subsWin.once('ready-to-show', () => raiseDash(subsWin));
+  subsWin.webContents.on('did-finish-load', () => {
+    if (subsWin && !subsWin.isDestroyed()) {
+      subsWin.send('theme', themePayload(configManager.config));
+      subsWin.send('subs', subs.snapshot());
+    }
+  });
+  setTimeout(() => {
+    try {
+      if (subsWin && !subsWin.isDestroyed() && !subsWin.isVisible()) subsWin.showInactive();
+    } catch (_) {}
+  }, 1500);
+  subsWin.on('closed', () => { subsWin = null; });
+}
 
 function openDashboard() {
   if (dashWin && !dashWin.isDestroyed()) {
@@ -116,7 +167,7 @@ function openDashboard() {
     frame: false,
     // Opaque panel: no see-through ring, no murky tint compositing.
     transparent: false,
-    resizable: true,
+    resizable: false,
     backgroundColor: '#FBF2E2',
     // A NORMAL window, deliberately. The old toolwindow styling (skipTaskbar +
     // type:'toolbar') made Windows skip the dash when choosing the next window
@@ -167,6 +218,7 @@ function reloadChocobar() {
   try {
     if (bar && bar.win && !bar.win.isDestroyed()) bar.win.webContents.reload();
     if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.reload();
+    if (subsWin && !subsWin.isDestroyed()) subsWin.webContents.reload();
   } catch (e) { DBG('reload failed:', e.message); }
 }
 
@@ -176,6 +228,7 @@ function reloadChocobar() {
 function buildChocobarMenu(isTray) {
   const items = [
     { label: 'Token dashboard', click: () => openDashboard() },
+    { label: 'Subscription dashboard', click: () => openSubs() },
     { type: 'separator' },
     { label: 'Reload chocobar', click: () => reloadChocobar() },
     { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) }
@@ -454,8 +507,21 @@ function wireBar() {
   ipcMain.handle('get-theme', () => themePayload(configManager.config));
   ipcMain.handle('get-tokens', () => tokens ? tokens.aggregate() : null);
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
+  ipcMain.handle('get-subs', () => subs ? subs.snapshot() : null);
+  ipcMain.handle('rescan-subs', () => subs ? subs.rescan() : null);
   ipcMain.handle('toggle-pet', () => { togglePet(); return petState; });
   ipcMain.on('open-dash', () => openDashboard());
+  ipcMain.on('open-subs', () => openSubs());
+  ipcMain.on('close-subs', () => { if (subsWin) subsWin.close(); });
+  // Leftmost shortcut chip: run the user's configured command detached so a
+  // GUI app launch or long script never ties up (or crashes) the bar process.
+  ipcMain.on('run-shortcut', () => {
+    const sc = (configManager.config.modules || {}).shortcut || {};
+    if (!sc.enabled || !sc.command) return;
+    try {
+      spawn(sc.command, { shell: true, detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    } catch (e) { DBG('shortcut failed:', e.message); }
+  });
   // Static mode (non-Windows, bar.staticWidth === 'content'): the renderer
   // reports the pill's natural width; shrink the window to it, anchored
   // top-right of the work area, so the bar floats as a corner pill (an
@@ -475,6 +541,10 @@ function wireBar() {
   tokens.on('updated', (agg) => {
     bar.send('tokens', agg);
     if (dashWin && !dashWin.isDestroyed()) dashWin.send('tokens', agg);
+  });
+
+  subs.on('updated', (snap) => {
+    if (subsWin && !subsWin.isDestroyed()) subsWin.send('subs', snap);
   });
 
   // Push theme + first stats once renderer is ready
@@ -498,9 +568,13 @@ function wireBar() {
     tracker.setConfig(cfg);
     metrics.setConfig(cfg);
     tokens.setConfig(cfg);
+    if (subs) subs.setConfig(cfg);
     bar.cfg = cfg;
     bar.send('theme', themePayload(cfg));
     bar.send('tokens', tokens.aggregate());
+    // Open dashboards follow the new theme/subs wiring live.
+    try { if (dashWin && !dashWin.isDestroyed()) dashWin.send('theme', themePayload(cfg)); } catch (_) {}
+    try { if (subsWin && !subsWin.isDestroyed()) subsWin.send('theme', themePayload(cfg)); } catch (_) {}
     applyAutostart(cfg.general.autostart);
     // Tray follows showTray live (no restart needed to add/remove it).
     if (tray && !cfg.general.showTray) { tray.destroy(); tray = null; }
@@ -529,6 +603,7 @@ app.whenReady().then(() => {
     tracker = new TerminalTracker(cfg);
     metrics = new MetricsEngine(cfg);
     tokens = new TokenTracker(cfg);
+    subs = new SubsTracker(cfg);
 
     wireBar();
     DBG('bar wired');
@@ -537,6 +612,7 @@ app.whenReady().then(() => {
 
     metrics.start();
     tokens.start();
+    subs.start();
     tracker.start();
     pollPet();
     setInterval(pollPet, 3000);
@@ -565,6 +641,8 @@ app.on('will-quit', () => {
   petSavePosition(); // the pet survives the quit; remember where it sits
   try { globalShortcut.unregisterAll(); } catch (_) {}
   try { if (metrics) metrics.stop(); } catch (_) {} // stop the PowerShell workers now, not "eventually"
+  try { if (tokens) tokens.flushCacheSync(); } catch (_) {} // land cache + cursors before exit
+  try { if (subs) subs.stop(); } catch (_) {}
 });
 app.on('window-all-closed', (e) => {
   // Bar/dash closing must not quit the app; only tray Quit does.

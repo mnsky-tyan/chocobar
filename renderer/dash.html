@@ -10,9 +10,9 @@
     <div id="titlebar">
       <div id="title">
         <span class="logo">◇</span> Token Usage
-        <span id="subtitle">all CLIs · user total</span>
       </div>
       <div id="titlebar-right">
+        <button id="btn-subs" class="hidden" title="Open the subscription board">plans</button>
         <button id="btn-refresh" title="Rescan sources">refresh</button>
         <button id="btn-close" title="Close">✕</button>
       </div>
@@ -35,7 +35,7 @@
       enable the sources you use under <b>tokens.sources</b>.
     </div>
 
-    <div class="section">
+    <div class="section" id="daily-sec">
       <div class="section-head">
         <span>Daily usage</span>
         <span id="heat-legend" class="legend"></span>
@@ -48,17 +48,20 @@
     </div>
 
     <div id="tables">
-      <div class="section table-sec">
+      <div class="section table-sec" id="app-sec">
         <div class="section-head"><span>By app</span></div>
         <div id="app-table"></div>
       </div>
-      <div class="section table-sec">
+      <div class="section table-sec" id="model-sec">
         <div class="section-head"><span>By model</span></div>
         <div id="model-table"></div>
       </div>
     </div>
 
-    <div id="footer">sources: zcode · zai · pi · opencode · mimo · subscription — <span id="scan-info"></span></div>
+    <div id="footer">
+      <span id="calc-note" title="Totals are input + output. The input column already includes cached tokens (prompt-cache reads and writes are folded in by the scanner), so cache R/W are informational breakdowns, never added on top. Per-source references: see the README 'Token accounting' section.">totals = input + output — cache columns are breakdowns, never added on top</span>
+      <span id="scan-info"></span>
+    </div>
   </div>
   <script src="dash.js"></script>
 </body>

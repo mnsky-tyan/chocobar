@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('wizbar', {
   getTheme: () => ipcRenderer.invoke('get-theme'),
   getTokens: () => ipcRenderer.invoke('get-tokens'),
   rescanTokens: () => ipcRenderer.invoke('rescan-tokens'),
+  openSubs: () => ipcRenderer.send('open-subs'),
   close: () => ipcRenderer.send('close-dash')
 });
