@@ -293,6 +293,36 @@ function listWindowsByClass(className) {
   return found;
 }
 
+// Every visible top-level window right now, frontmost (top of the z-order)
+// first, carrying its window class and owning pid. One walk, one set of
+// real-window filters (the same listWindowsByClass applies), so callers that
+// match by class and callers that match by process get identical screening
+// and identical ordering. The tracker needs this: listWindowsByClass is
+// z-ordered and strict while findPidWindows is area-sorted and lax, which
+// could hand it a minimized or largest window of a process-matched terminal
+// instead of the frontmost real one.
+function listWindows() {
+  const hwnds = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  const out = [];
+  for (const hwnd of hwnds) {
+    try {
+      if (!IsWindowVisible(hwnd)) continue;
+      if (isCloaked(hwnd)) continue;
+      if (!GetWindowTextLengthW(hwnd)) continue;
+      if (IsIconic(hwnd)) continue;
+      const rc = getWindowRect(hwnd);
+      if (!rc) continue;
+      if (rc.left <= -16000 || rc.top <= -16000) continue;
+      if (rc.right - rc.left < 100 || rc.bottom - rc.top < 100) continue;
+      const pid = [0];
+      GetWindowThreadProcessId(hwnd, pid);
+      out.push({ hwnd, cls: getClassName(hwnd), pid: Number(pid[0]) });
+    } catch (_) {}
+  }
+  return out;
+}
+
 // --- battery -------------------------------------------------------------------
 // Windows: GetSystemPowerStatus. Linux: /sys/class/power_supply (AC + battery).
 
@@ -797,7 +827,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 }
 
 module.exports = {
-  getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
+  getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
   setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,

@@ -170,6 +170,27 @@ function reloadChocobar() {
   } catch (e) { DBG('reload failed:', e.message); }
 }
 
+// One source of truth for the tray menu and the bar context menu. Only the
+// tray gets "Open config folder"; every label and action is otherwise
+// identical, so the two menus cannot drift apart.
+function buildChocobarMenu(isTray) {
+  const items = [
+    { label: 'Token dashboard', click: () => openDashboard() },
+    { type: 'separator' },
+    { label: 'Reload chocobar', click: () => reloadChocobar() },
+    { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) }
+  ];
+  if (isTray) {
+    items.push({ label: 'Open config folder', click: () => shell.showItemInFolder(CONFIG_PATH) });
+  }
+  items.push(
+    { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
+    { type: 'separator' },
+    { label: 'Quit chocobar', click: () => { app.quit(); } }
+  );
+  return Menu.buildFromTemplate(items);
+}
+
 function buildTray() {
   if (!configManager.config.general.showTray) return;
   const iconPath = path.join(__dirname, 'assets', 'tray.png');
@@ -178,19 +199,7 @@ function buildTray() {
   if (!img || img.isEmpty()) img = nativeImage.createEmpty();
   tray = new Tray(img);
   tray.setToolTip('Chocobar');
-  const updateMenu = () => {
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Token dashboard', click: () => openDashboard() },
-      { type: 'separator' },
-      { label: 'Reload chocobar', click: () => reloadChocobar() },
-      { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) },
-      { label: 'Open config folder', click: () => shell.showItemInFolder(CONFIG_PATH) },
-      { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
-      { type: 'separator' },
-      { label: 'Quit chocobar', click: () => { app.quit(); } }
-    ]));
-  };
-  updateMenu();
+  tray.setContextMenu(buildChocobarMenu(true));
   // Left-click on the tray icon summons the dashboard too — the tray is the
   // one summon that always works, even when other windows cover the bar chip.
   tray.on('click', () => openDashboard());
@@ -459,15 +468,7 @@ function wireBar() {
     bar.setPillWidth(width, bar.cfg.bar);
   });
   ipcMain.on('bar-context', () => {
-    Menu.buildFromTemplate([
-      { label: 'Token dashboard', click: () => openDashboard() },
-      { type: 'separator' },
-      { label: 'Reload chocobar', click: () => reloadChocobar() },
-      { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) },
-      { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
-      { type: 'separator' },
-      { label: 'Quit chocobar', click: () => app.quit() }
-    ]).popup({});
+    buildChocobarMenu(false).popup({});
   });
   ipcMain.on('close-dash', () => { if (dashWin) dashWin.close(); });
 
