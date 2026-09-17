@@ -89,7 +89,7 @@ Keep the file local and do not place secrets in the repository.
 - Click the usage chip or use `Ctrl+Alt+D` to open the dashboard.
 - Double-launch Chocobar to open the dashboard when it is already running.
 - Right-click the bar or tray icon for dashboard, reload, config, and quit actions.
-- On Windows, the bar follows the first matching terminal window. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
+- On Windows, the bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
 
 ## Defaults and privacy

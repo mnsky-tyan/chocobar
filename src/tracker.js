@@ -2,7 +2,9 @@
 // Terminal window tracker.
 // Behavior (per spec):
 //  - The bar attaches to the FIRST terminal window that appears while it is unattached.
-//    (At app start with terminals already open, the frontmost one counts as "first".)
+//    (At app start with terminals already open: the foreground terminal wins when
+//    it is a supported one, else the frontmost of the first probe with windows.
+//    See _listCandidates.)
 //  - While attached it follows that window only: move, resize (width), minimize (hide), restore (show).
 //  - When the followed window closes, the bar detaches and hides. The surviving terminal windows
 //    are marked as "old" and do NOT retrigger it; only a NEW terminal window will.

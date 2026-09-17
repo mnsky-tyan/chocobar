@@ -301,8 +301,8 @@ function listWindows() {
   return out;
 }
 
-// Class-filtered view of listWindows, same frontmost-first order: the legacy
-// single-class tracker path and the smoke/probe scripts go through it.
+// Class-filtered view of listWindows, same frontmost-first order: kept for
+// the smoke/probe scripts and the portable-regression stub check.
 function listWindowsByClass(className) {
   return listWindows().filter((w) => w.cls === className).map((w) => w.hwnd);
 }
