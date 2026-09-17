@@ -172,8 +172,10 @@ class TerminalTracker extends require('events') {
     const probeOfPid = new Map();
     const firstProcessProbe = this.probe.classes.length;
     this.probe.processes.forEach((exe, i) => {
-      const pid = native.findProcessIdByName(exe);
-      if (pid != null) probeOfPid.set(pid, firstProcessProbe + i);
+      // WezTerm and Alacritty run one GUI process per window, so a probe can
+      // match several pids; every one of them must bucket for the foreground
+      // promotion below to reach the window the user is actually in.
+      for (const pid of native.findPidsByName(exe)) probeOfPid.set(pid, firstProcessProbe + i);
     });
     const buckets = this.probe.classes.concat(this.probe.processes).map(() => []);
     for (const w of wins) {
