@@ -115,6 +115,19 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 - opencode: cache BESIDE input; mimo: input EXCLUDES cache. All scans fold cache into
   stored input so aggregate() totals stay input+output (zcode DB input already includes
   cache). Contract checks: `npm test` + `scripts/token_regression.js`.
+- Session JSONL scans use per-file BYTE cursors (`_readSessionTail`, cache `v:3` with
+  `progress`): warm scans read only appends (ms, not the old multi-second whole-file
+  re-read that froze the bar every rescan). Cursor shape, key stability (message id or
+  absolute byte offset), and the v3 cache version are one contract - change them together
+  or a cold start re-reads everything. Cache writes are async+coalesced; `flushCacheSync`
+  at quit lands the final cursors.
+- Subscription board (`src/subs.js`, `subs.providers` in config): every provider fetch is
+  bounded by `subs.fetchTimeoutMs` (clamped 3-60s; per-provider `timeoutMs` overrides),
+  and a failed cycle keeps the provider's last good windows marked stale instead of
+  wiping the board. Tests inject a fake fetch (portable_regression section 10).
+- Dashboard surface: `tokens.labels` (harness display names), `tokens.dashboard`
+  (section visibility toggles), `theme.heatmap` (5-shade ramp) are user config; the
+  renderers treat absent keys as defaults-on. Nothing may pin a vendor name in UI.
 - The experimental herdr agents-chip wiring was removed (no renderer ever drew it);
   `modules.agents` no longer exists in the config. History: commit b9c9f8d removed the
   chip, the 2026-09 public-release pass removed the polling/socket wiring.
