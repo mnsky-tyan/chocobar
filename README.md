@@ -1,4 +1,4 @@
-# WizBar
+# ChocoBar
 
 A slim acrylic system-status bar that floats **above your Windows Terminal window**, plus a
 cross-CLI **token usage tracker** (zcode · zai · opencode · Xiaomi MiMo AI) with a GitHub-style
