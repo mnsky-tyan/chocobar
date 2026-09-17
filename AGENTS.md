@@ -16,7 +16,9 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
   public-release default guarantees; headless, any platform) + `scripts/pi_source_regression.js`
   (pi session-log source; synthetic fixture + raw-sum cross-check when a real
-  `~/.pi/agent/sessions` exists).
+  `~/.pi/agent/sessions` exists). The real-store cross-check takes a stable
+  snapshot (two agreeing raw walks around the scan) because a live pi session
+  appends usage records while the test runs; it SKIPs if the store never quiets.
 - Windows-side: `scripts/token_regression.js` (zcode+zai attribution; needs those stores),
   `scripts/cputemp_regression.js` (HWiNFO shm reader, Windows only).
 
@@ -35,6 +37,28 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
   desktop pet + registry autostart are Windows-only (guarded in `src/metrics.js` /
   `main.js`); `src/tokens.js` probes `python3` when `python` is missing.
 - Non-Windows acryl­ic does not exist: `themePayload` sends the tint SOLID off-Windows.
+
+## Chocobar naming split (since the menu/dashboard pass)
+
+User-visible strings (tray/context menu entries, window titles, error dialogs,
+config template comments, README product name) say **Chocobar**; internal
+identifiers stay `wizbar` on purpose (npm/package name, `~/.wizbar` APP_DIR,
+`start-wizbar.vbs/.cmd` file names, the `[wizbar]` console log prefix, the
+registry Run value, `window.wizbar` bridge). A portable test guards the
+depersonalized defaults; don't "fix" the remaining wizbar strings.
+
+## Terminal follow + subscription source
+
+- Terminal targeting is terminal-agnostic: `terminal.className: ""` (default)
+  probes Windows Terminal / conhost / ConEmu / mintty by Win32 class, then
+  WezTerm / Alacritty / Hyper by owning process (their class is the generic
+  winit/Electron one). Authoritative list + order: `resolveProbe` and the
+  AUTO_PROBE_* constants in `src/tracker.js`.
+- The subscription plan-usage source is a file snapshot, not a session store:
+  `tokens.sources.subscription.usagePath` points at user JSON
+  (`{plans:[{name,total,used,resetsAt}]}`); re-read per rescan, invalid entries
+  skipped, and the payload rides `tokens.aggregate().subscription` (null = hide
+  the dashboard card). Gated by the tokens master switch like every source.
 
 ## Running on Linux (WSLg) — recipe
 
