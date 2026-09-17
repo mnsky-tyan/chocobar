@@ -134,9 +134,10 @@ const DEFAULTS = {
   subs: {
     enabled: false,
     intervalMinutes: 2,
-    // Per-provider request deadline in ms (clamped 3s..60s). A provider that
-    // answers slower is skipped for that cycle with an error note; the board
-    // keeps showing its last good windows marked stale.
+    // Per-provider request deadline in ms (clamped 3s..60s, same as the
+    // global fetchTimeoutMs). A provider that answers slower is skipped for
+    // that cycle with an error note; the board keeps showing its last good
+    // windows marked stale.
     fetchTimeoutMs: 20000,
     // Board window size (fixed; the board is not resizable).
     width: 820,

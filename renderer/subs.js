@@ -103,7 +103,6 @@ function panelHtml(key, p, i) {
     <div class="panel-body">
       <div class="pies" data-pies></div>
       <div class="panel-foot">
-        <span data-meta></span>
         <span data-detail></span>
       </div>
     </div>
@@ -111,7 +110,10 @@ function panelHtml(key, p, i) {
 }
 
 function renderProvider(key, p, idx) {
-  const panel = document.getElementById('panel-' + CSS.escape(key));
+  // getElementById is an EXACT attribute match: the id is emitted verbatim as
+  // 'panel-' + key (provider ids contain colons), so no CSS escaping here -
+  // CSS.escape would produce a different string that never matches.
+  const panel = document.getElementById('panel-' + key);
   if (!panel || !p) return;
   panel.querySelector('[data-plan]').textContent = p.plan ? p.plan : '—';
   const pill = panel.querySelector('[data-pill]');
@@ -151,7 +153,6 @@ function renderProvider(key, p, idx) {
     }).join('');
   }
 
-  panel.querySelector('[data-meta]').textContent = '';
   panel.querySelector('[data-detail]').textContent =
     p.fetchedAt ? new Date(p.fetchedAt).toLocaleTimeString() : '';
 }

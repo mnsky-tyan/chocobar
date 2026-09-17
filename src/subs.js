@@ -80,13 +80,12 @@ class SubsTracker extends EventEmitter {
 
   // Per-attempt request deadline. Clamped so a bad config can neither make
   // the board hammer the endpoint (too low) nor hang a scan for minutes (too
-  // high). A provider entry may override it with its own timeoutMs.
+  // high). A provider entry may override it with its own timeoutMs, subject
+  // to the same clamp.
   _timeoutFor(p) {
-    const raw = (p && typeof p.timeoutMs === 'number' && p.timeoutMs > 0)
-      ? p.timeoutMs
-      : this.cfg.fetchTimeoutMs;
-    const t = Number(raw);
-    if (p && typeof p.timeoutMs === 'number' && p.timeoutMs > 0) return t; // explicit per-provider: honored as set
+    const t = Number(
+      (p && typeof p.timeoutMs === 'number' && p.timeoutMs > 0) ? p.timeoutMs : this.cfg.fetchTimeoutMs
+    );
     return Number.isFinite(t) ? Math.min(60000, Math.max(3000, t)) : 20000;
   }
 
@@ -150,15 +149,20 @@ class SubsTracker extends EventEmitter {
     }
     // Reliability contract: a failed cycle never blanks the board. Keep the
     // last windows that actually came back from this provider and mark them
-    // stale so the numbers are never mistaken for fresh ones.
+    // stale so the numbers are never mistaken for fresh ones. A DISABLED
+    // provider shows its disabled state instead - stale windows are for
+    // failed fetches, not for entries the user switched off.
     if (snap.ok && snap.windows && snap.windows.length) {
       this._lastGood.set(id, { windows: snap.windows, plan: snap.plan, fetchedAt: snap.fetchedAt });
     } else if (!snap.ok && this._lastGood.has(id)) {
-      const good = this._lastGood.get(id);
-      snap.windows = good.windows;
-      snap.plan = snap.plan || good.plan;
-      snap.staleSince = good.fetchedAt;
-      snap.notes = [...(snap.notes || []), 'showing last good windows (stale)'];
+      if (p.enabled === false) {
+        this._lastGood.delete(id);
+      } else {
+        const good = this._lastGood.get(id);
+        snap.windows = good.windows;
+        snap.plan = snap.plan || good.plan;
+        snap.notes = [...(snap.notes || []), 'showing last good windows (stale)'];
+      }
     }
     return snap;
   }
@@ -210,8 +214,7 @@ class SubsTracker extends EventEmitter {
           used: null,
           total: null,
           remaining: null,
-          resetAt: w.reset_at ? Number(w.reset_at) * 1000 : null,
-          windowSeconds: w.limit_window_seconds ?? null
+          resetAt: w.reset_at ? Number(w.reset_at) * 1000 : null
         });
       };
       pushWin('primary', '5h', rl.primary_window);
@@ -225,8 +228,7 @@ class SubsTracker extends EventEmitter {
         windows,
         notes: [],
         errors: [],
-        fetchedAt: Date.now(),
-        email: body.email || null
+        fetchedAt: Date.now()
       };
     } catch (e) {
       const err = emptyProvider(label, [e.message || String(e)]);
@@ -299,12 +301,13 @@ class SubsTracker extends EventEmitter {
       const t0 = Date.now();
       for (let attempt = 0; attempt < 2; attempt++) {
         const left = budget - (Date.now() - t0);
-        if (attempt > 0 && left < 1000) break; // no time for a meaningful retry
-        if (attempt) await new Promise((r) => setTimeout(r, Math.min(600, left)));
+        if (attempt > 0 && left < 500) break; // no time for a meaningful retry
+        if (attempt) await new Promise((r) => setTimeout(r, Math.min(500, left)));
         try {
           const r = await this._fetch('https://api.z.ai/api/monitor/usage/quota/limit', {
             headers: this._zaiIdentityHeaders(p, key),
-            signal: AbortSignal.timeout(Math.max(1000, budget - (Date.now() - t0)))
+            // Never exceed the budget: the floor is itself capped by what's left.
+            signal: AbortSignal.timeout(Math.min(budget, Math.max(250, budget - (Date.now() - t0))))
           });
           const parsed = await r.json().catch(() => null);
           if (r.ok && parsed && parsed.success !== false && (!parsed.code || parsed.code === 200)) {
@@ -338,8 +341,7 @@ class SubsTracker extends EventEmitter {
           used,
           total,
           remaining: lim.remaining ?? null,
-          resetAt: typeof lim.nextResetTime === 'number' ? lim.nextResetTime : null,
-          windowSeconds: null
+          resetAt: typeof lim.nextResetTime === 'number' ? lim.nextResetTime : null
         };
       });
       const status = statusFromWindows(windows);
