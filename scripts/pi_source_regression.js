@@ -102,35 +102,53 @@ if (fs.existsSync(realDir)) {
     opencode: { enabled: false, storageDir: '' },
     mimo: { enabled: false }
   }}};
-  const tr = new TokenTracker(realCfg); // fresh records, no cache write
-  tr._scanPiAgentSessions();
-  // independent raw sum (no scanner code involved)
-  let rawIn = 0, rawOut = 0, rawCacheR = 0, rawCacheW = 0, n = 0;
-  const walk = (dir, depth) => {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory() && depth > 0) walk(full, depth - 1);
-      else if (e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('ZCODE_')) {
-        for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
-          if (!line.includes('"usage"')) continue;
-          let d; try { d = JSON.parse(line); } catch (_) { continue; }
-          if (d.type !== 'message' || !d.message || d.message.role !== 'assistant') continue;
-          const u = d.message.usage || {};
-          if (!(u.input || u.output || u.cacheRead || u.cacheWrite)) continue;
-          n++; rawIn += (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
-          rawOut += u.output || 0; rawCacheR += u.cacheRead || 0; rawCacheW += u.cacheWrite || 0;
+  // Independent raw sum (no scanner code involved).
+  const walkOnce = () => {
+    let rawIn = 0, rawOut = 0, rawCacheR = 0, rawCacheW = 0, n = 0;
+    const walk = (dir, depth) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory() && depth > 0) walk(full, depth - 1);
+        else if (e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('ZCODE_')) {
+          for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
+            if (!line.includes('"usage"')) continue;
+            let d; try { d = JSON.parse(line); } catch (_) { continue; }
+            if (d.type !== 'message' || !d.message || d.message.role !== 'assistant') continue;
+            const u = d.message.usage || {};
+            if (!(u.input || u.output || u.cacheRead || u.cacheWrite)) continue;
+            n++; rawIn += (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+            rawOut += u.output || 0; rawCacheR += u.cacheRead || 0; rawCacheW += u.cacheWrite || 0;
+          }
         }
       }
-    }
+    };
+    walk(realDir, 2);
+    return JSON.stringify([n, rawIn, rawOut, rawCacheR, rawCacheW]);
   };
-  walk(realDir, 2);
-  const ragg = tr.aggregate();
-  const pin = Object.values(ragg.byApp.pi || {}).length ? ragg.byApp.pi : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 };
-  check('real store: record count matches raw sum', ragg.recordCount === n, `scanner ${ragg.recordCount} vs raw ${n}`);
-  check('real store: input matches raw sum', pin.input === rawIn, `scanner ${pin.input} vs raw ${rawIn}`);
-  check('real store: output matches raw sum', pin.output === rawOut, `scanner ${pin.output} vs raw ${rawOut}`);
-  check('real store: cacheRead matches raw sum', pin.cacheRead === rawCacheR, `scanner ${pin.cacheRead} vs raw ${rawCacheR}`);
-  check('real store: cacheWrite matches raw sum', pin.cacheWrite === rawCacheW, `scanner ${pin.cacheWrite} vs raw ${rawCacheW}`);
+  // The real store is LIVE: a running pi session appends usage records while
+  // this test runs, so a naive scan-then-walk comparison races the writer
+  // (scan reads N records, the walk a moment later reads N+1). Only compare
+  // when the store is QUIET around the scan: two raw walks must agree, then
+  // the scanner runs, then a third walk must still agree with them. If the
+  // store never quiets down, skip instead of reporting a phantom failure.
+  let compared = false;
+  for (let tries = 0; tries < 6 && !compared; tries++) {
+    const before = walkOnce();
+    if (before !== walkOnce()) continue; // still being written
+    const tr = new TokenTracker(realCfg); // fresh records, no cache write
+    tr._scanPiAgentSessions();
+    if (walkOnce() !== before) continue; // appended mid-check; retry
+    const ragg = tr.aggregate();
+    const raw = JSON.parse(before);
+    const pin = Object.values(ragg.byApp.pi || {}).length ? ragg.byApp.pi : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 };
+    check('real store: record count matches raw sum', ragg.recordCount === raw[0], `scanner ${ragg.recordCount} vs raw ${raw[0]}`);
+    check('real store: input matches raw sum', pin.input === raw[1], `scanner ${pin.input} vs raw ${raw[1]}`);
+    check('real store: output matches raw sum', pin.output === raw[2], `scanner ${pin.output} vs raw ${raw[2]}`);
+    check('real store: cacheRead matches raw sum', pin.cacheRead === raw[3], `scanner ${pin.cacheRead} vs raw ${raw[3]}`);
+    check('real store: cacheWrite matches raw sum', pin.cacheWrite === raw[4], `scanner ${pin.cacheWrite} vs raw ${raw[4]}`);
+    compared = true;
+  }
+  if (!compared) console.log('SKIP: real store keeps changing (a live pi session is writing); raw-sum cross-check skipped this run');
 } else {
   console.log('SKIP: no real ~/.pi/agent/sessions on this machine (synthetic checks still ran)');
 }
