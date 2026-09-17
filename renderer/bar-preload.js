@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('wizbar', {
   onPet: (cb) => ipcRenderer.on('pet', (_e, v) => cb(v)),
   getTheme: () => ipcRenderer.invoke('get-theme'),
   openDash: () => ipcRenderer.send('open-dash'),
+  runShortcut: () => ipcRenderer.send('run-shortcut'),
   contextMenu: () => ipcRenderer.send('bar-context'),
   togglePet: () => ipcRenderer.invoke('toggle-pet'),
   reportSize: (w) => ipcRenderer.send('bar-content-size', w)

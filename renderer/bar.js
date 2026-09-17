@@ -2,6 +2,7 @@
 // Bar renderer: builds segments right-aligned, updates on pushed stats.
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const ICONS = {
   cpu: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>`,
@@ -35,7 +36,9 @@ const ICONS = {
   clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>`,
   diamond: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3 21 12 12 21 3 12z"/></svg>`,
   // Pet bow icon: two loops per side around a small knot.
-  bow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 11C8.5 7.5 5.5 6.5 4.5 8s.5 4 6.5 3"/><path d="M13 11c2.5-3.5 5.5-4.5 6.5-3s-.5 4-6.5 3"/><path d="M11 13c-2.5 3.5-5.5 4.5-6.5 3s.5-4 6.5-3"/><path d="M13 13c2.5 3.5 5.5 4.5 6.5 3s-.5-4-6.5-3"/><circle cx="12" cy="12" r="1.1"/></svg>`
+  bow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 11C8.5 7.5 5.5 6.5 4.5 8s.5 4 6.5 3"/><path d="M13 11c2.5-3.5 5.5-4.5 6.5-3s-.5 4-6.5 3"/><path d="M11 13c-2.5 3.5-5.5 4.5-6.5 3s.5-4 6.5-3"/><path d="M13 13c2.5 3.5 5.5 4.5 6.5 3s-.5-4-6.5-3"/><circle cx="12" cy="12" r="1.1"/></svg>`,
+  // Shortcut chip: a lightning bolt for "runs whatever you wired up".
+  bolt: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg>`
 };
 
 let theme = null;
@@ -91,43 +94,48 @@ function seg(id, iconSvg, clickable) {
 
 function rebuildSegments() {
   const c = el('segments');
-  // Pinned token/pet chips are direct children of #bar — remove stale ones
-  // from earlier rebuilds before appending fresh chips.
-  for (const n of [...el('bar').querySelectorAll(':scope > #seg-tokens, :scope > #seg-pet')]) n.remove();
+  // Pinned chips (shortcut/pet/tokens) are direct children of #bar — remove
+  // stale ones from earlier rebuilds before appending fresh chips.
+  for (const n of [...el('bar').querySelectorAll(':scope > #seg-shortcut, :scope > #seg-tokens, :scope > #seg-pet')]) n.remove();
   c.innerHTML = '';
   segEls = {};
   if (!theme) return;
   const m = theme.modules || {};
   const pinned = (theme.bar.align || 'right') === 'right';
 
-  // Chip order: bowtie leftmost, token dashboard second. With the
-  // right-aligned group both chips pin left of #segments as direct children
-  // of #bar, and the auto margin that pushes the module group right sits on
-  // the LAST pinned chip.
+  // Chip order: shortcut leftmost, then the pet, then the token dashboard.
+  // With the right-aligned group these pin left of #segments as direct
+  // children of #bar, and the auto margin that pushes the module group right
+  // sits on the LAST pinned chip.
+  const chips = [];
+  if (m.shortcut && m.shortcut.enabled) {
+    const s = seg('shortcut', ICONS.bolt, true);
+    s.title = m.shortcut.command ? `Run: ${m.shortcut.command}` : 'Shortcut (set modules.shortcut.command in the config)';
+    s.addEventListener('click', () => window.wizbar.runShortcut());
+    chips.push(s);
+  }
   if (m.pet && m.pet.enabled) {
     const s = seg('pet', ICONS.bow, true);
     s.addEventListener('click', () => window.wizbar.togglePet());
-    if (pinned) el('bar').insertBefore(s, el('segments'));
-    else c.appendChild(s);
+    chips.push(s);
   }
   if (theme.tokens && theme.tokens.showOnBar) {
     const s = seg('tokens', ICONS.diamond, true);
     s.title = 'Token usage today — click to open dashboard';
     s.addEventListener('click', () => window.wizbar.openDash());
-    if (pinned) {
-      const bow = document.getElementById('seg-pet');
-      if (bow && bow.parentElement === el('bar')) {
-        s.style.marginRight = 'auto'; // last pinned chip carries the group push
-        // .seg.clickable pulls neighbours 5px into its own hover box with a
-        // negative margin - give the two buttons real clearance so a hover
-        // highlight can only ever cover the chip under the cursor.
-        s.style.marginLeft = '8px';
-        el('bar').insertBefore(s, bow.nextSibling);
-      } else {
-        s.style.marginRight = 'auto';
-        el('bar').insertBefore(s, el('segments'));
-      }
-    } else c.appendChild(s);
+    chips.push(s);
+  }
+  if (pinned) {
+    chips.forEach((s, i) => {
+      // .seg.clickable pulls neighbours 5px into its own hover box with a
+      // negative margin - give the buttons real clearance so a hover
+      // highlight can only ever cover the chip under the cursor.
+      s.style.marginLeft = i === 0 ? '8px' : '4px';
+      if (i === chips.length - 1) s.style.marginRight = 'auto'; // group push
+      el('bar').insertBefore(s, el('segments'));
+    });
+  } else {
+    for (const s of chips) c.appendChild(s);
   }
   const titles = { gpu: 'GPU usage', cpu: 'CPU usage', cputemp: 'CPU temperature', ram: 'Memory usage', volume: 'Volume', battery: 'Battery', bluetooth: 'Bluetooth device battery', clock: 'Local time' };
   for (const [id, icon] of [['gpu', ICONS.gpu], ['cpu', ICONS.cpu], ['cputemp', ICONS.temp], ['ram', ICONS.ram], ['volume', ICONS.vol], ['battery', ICONS.bat], ['bluetooth', ICONS.buds], ['clock', ICONS.clock]]) {
@@ -173,9 +181,11 @@ function fmtTokens(n) {
 
 function fmtClock(fmt, d) {
   const p2 = (x) => String(x).padStart(2, '0');
-  return (fmt || '{MMM} {dd}  {HH}:{mm}')
+  return (fmt || '{MMM} {dd} ({Wkk}) {HH}:{mm}')
     .replace('{MMM}', MONTHS[d.getMonth()])
     .replace('{mmmm}', MONTHS[d.getMonth()].toUpperCase())
+    .replace('{Wkk}', WEEKDAYS[d.getDay()])
+    .replace('{Wkkk}', WEEKDAYS[d.getDay()].toUpperCase())
     .replace('{dd}', p2(d.getDate()))
     .replace('{d}', String(d.getDate()))
     .replace('{HH}', p2(d.getHours()))
@@ -207,6 +217,11 @@ function render() {
   }
 
   if (segEls.tokens) setVal('tokens', fmtTokens(tokensAgg ? tokensAgg.today.total : null), 'dim');
+
+  if (segEls.shortcut) {
+    const sc = (m.shortcut || {});
+    setVal('shortcut', sc.label || 'run', 'dim');
+  }
 
   if (segEls.pet) {
     if (petState && petState.exists) {

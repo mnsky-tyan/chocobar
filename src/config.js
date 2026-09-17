@@ -60,7 +60,10 @@ const DEFAULTS = {
     yellowBg: '#F5F0D8',
     warn: '#A00000',
     good: '#006400',
-    divider: '#D9CCB2'
+    divider: '#D9CCB2',
+    // Dashboard surfaces (token dashboard + subscription board) follow the
+    // colors above; the five daily-heatmap shades are their own ramp:
+    heatmap: ['#F1ECD8', '#F6D8E0', '#EFB7C7', '#E28FB0', '#C95E8F']
   },
   modules: {
     gpu:      { enabled: true, mode: 'sum', intervalMs: 1200 },
@@ -73,7 +76,12 @@ const DEFAULTS = {
     // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
     // public build: set enabled + exePath in your own config to use it.
     pet:      { enabled: false, exePath: '' },
-    clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
+    // Leftmost shortcut chip: a button that runs any command you put here
+    // (launch an app, open a URL with the default handler, run a script).
+    // The label is the chip text; empty shows just the bolt icon.
+    // OFF in the public build.
+    shortcut: { enabled: false, label: '', command: '' },
+    clock:    { enabled: true, format: '{MMM} {dd} ({Wkk}) {HH}:{mm}' }
   },
   terminal: {
     // Win32 window class to follow. '' (default) = auto-detect the terminal:
@@ -88,6 +96,19 @@ const DEFAULTS = {
     showOnBar: true,
     rescanMinutes: 1,
     heatmapWeeks: 26,
+    // Display names for the harnesses on the dashboard, keyed by source id.
+    // Empty = the built-in name. Example: { "opencode": "opencode(wsl)" }.
+    labels: { zcode: '', zai: '', pi: '', opencode: '', mimo: '' },
+    // Which sections of the token dashboard are visible. Every section can be
+    // switched off; the window always keeps its fixed size either way.
+    dashboard: {
+      stats: true,      // Today / last 7 days / last 30 days / all time cards
+      heatmap: true,    // per-day usage heatmap (with the weekday ruler)
+      dayDetail: true,  // per-harness breakdown shown when you click a day
+      apps: true,       // "By app" table
+      models: true,     // "By model" table
+      plans: true       // plan-usage card (needs sources.subscription enabled)
+    },
     // Usage sources — all opt-in, all local read-only. Enable the ones you use
     // and point them at your own stores; with none enabled the bar and the
     // dashboard stay empty.
@@ -106,6 +127,27 @@ const DEFAULTS = {
       // and shows each plan's credit usage on the dashboard.
       subscription: { enabled: false, usagePath: '' }
     }
+  },
+  // Subscription board: live plan-quota windows (rate limits / credits) for
+  // whatever subscriptions you wire up. Each provider entry names an adapter
+  // type and where its credential lives; both ship disabled.
+  subs: {
+    enabled: false,
+    intervalMinutes: 2,
+    // Per-provider request deadline in ms (clamped 3s..60s). A provider that
+    // answers slower is skipped for that cycle with an error note; the board
+    // keeps showing its last good windows marked stale.
+    fetchTimeoutMs: 20000,
+    // Board window size (fixed; the board is not resizable).
+    width: 820,
+    height: 480,
+    providers: [
+      // ChatGPT plan via a Codex CLI login (rate-limit windows, no numbers):
+      { type: 'chatgpt', enabled: false, label: 'ChatGPT', authPath: '~/.codex/auth.json' },
+      // Z.ai coding plan via the zcode credential (5h + weekly quota windows):
+      { type: 'zai', enabled: false, label: 'Z.ai', configPath: '~/.zcode/v2/config.json',
+        provider: 'builtin:zai-coding-plan' }
+    ]
   },
   general: {
     showTray: false,
@@ -159,7 +201,9 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     "yellowBg": "#F5F0D8",
     "warn": "#A00000",
     "good": "#006400",
-    "divider": "#D9CCB2"
+    "divider": "#D9CCB2",
+    // the five daily-heatmap shades on the token dashboard, light to dark
+    "heatmap": ["#F1ECD8", "#F6D8E0", "#EFB7C7", "#E28FB0", "#C95E8F"]
   },
   "modules": {
     // GPU %: mode "sum" adds all engines (Task-Manager-like), "max" takes the busiest
@@ -179,8 +223,12 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     // Set enabled + exePath here to show the bow chip: click launches the exe,
     // click again stops it ("on"/"off").
     "pet":       { "enabled": false, "exePath": "" },
-    // {MMM} month, {dd} day, {HH} {mm} {ss} time (24h)
-    "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
+    // Shortcut chip, leftmost in the bar: a bolt button that runs "command"
+    // (any program, script or URL your shell can launch). "label" is the chip
+    // text; empty shows just the bolt icon.
+    "shortcut":  { "enabled": false, "label": "", "command": "" },
+    // {MMM} month, {dd} day, {Wkk} weekday (Mon..Sun), {HH} {mm} {ss} time (24h)
+    "clock":     { "enabled": true, "format": "{MMM} {dd} ({Wkk}) {HH}:{mm}" }
   },
   "terminal": {
     // which terminal to follow. "" (default) auto-detects: Windows Terminal,
@@ -200,6 +248,18 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     // minutes between usage scans (drives the dashboard's live refresh)
     "rescanMinutes": 1,
     "heatmapWeeks": 26,
+    // display names for the harnesses on the dashboard, keyed by source id;
+    // empty = built-in name (e.g. { "opencode": "opencode(wsl)" })
+    "labels": { "zcode": "", "zai": "", "pi": "", "opencode": "", "mimo": "" },
+    // which dashboard sections are visible (true/false each)
+    "dashboard": {
+      "stats": true,      // Today / 7d / 30d / all-time cards
+      "heatmap": true,    // per-day usage heatmap
+      "dayDetail": true,  // breakdown shown when you click a day
+      "apps": true,       // "By app" table
+      "models": true,     // "By model" table
+      "plans": true       // plan-usage card (needs sources.subscription on)
+    },
     // usage sources — all opt-in, all local read-only. Enable the ones you use
     // and point them at your own stores; the typical locations are shown in
     // the comments. With none enabled, bar + dashboard stay empty.
@@ -216,6 +276,26 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
       //                  "resetsAt": "2026-10-14" } ] }
       "subscription": { "enabled": false, "usagePath": "" }   // e.g. "~/.chocobar/plan-usage.json"
     }
+  },
+  // Subscription board: live plan-quota windows for whatever subscriptions
+  // you wire up. Each entry names an adapter "type" (chatgpt | zai), a display
+  // label and where its credential lives. Both examples ship disabled.
+  "subs": {
+    "enabled": false,
+    "intervalMinutes": 2,
+    // per-provider request deadline in ms (3s..60s); on timeout the board
+    // keeps the provider's last good windows and marks them stale
+    "fetchTimeoutMs": 20000,
+    // board window size (fixed, not resizable)
+    "width": 820,
+    "height": 480,
+    "providers": [
+      // ChatGPT plan via a Codex CLI login (rate-limit windows)
+      { "type": "chatgpt", "enabled": false, "label": "ChatGPT", "authPath": "~/.codex/auth.json" },
+      // Z.ai coding plan via the zcode credential (5h + weekly windows)
+      { "type": "zai", "enabled": false, "label": "Z.ai", "configPath": "~/.zcode/v2/config.json",
+        "provider": "builtin:zai-coding-plan" }
+    ]
   },
   "general": {
     "showTray": false,
@@ -246,6 +326,20 @@ function deepMerge(base, over) {
   return out;
 }
 
+function expandConfigPaths(cfg) {
+  for (const s of Object.values(cfg.tokens.sources)) {
+    if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
+    if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
+    if (s.storageDir) s.storageDir = expandTilde(s.storageDir);
+    if (s.usagePath) s.usagePath = expandTilde(s.usagePath);
+  }
+  for (const p of (cfg.subs && cfg.subs.providers) || []) {
+    if (p.authPath) p.authPath = expandTilde(p.authPath);
+    if (p.configPath) p.configPath = expandTilde(p.configPath);
+  }
+  return cfg;
+}
+
 class ConfigManager extends EventEmitter {
   constructor() {
     super();
@@ -267,14 +361,7 @@ class ConfigManager extends EventEmitter {
       // First run: write the annotated template out so the user can customize.
       try { fs.writeFileSync(CONFIG_PATH, TEMPLATE, 'utf8'); } catch (_) {}
     }
-    const merged = deepMerge(DEFAULTS, user);
-    // resolve tilde paths
-    for (const s of Object.values(merged.tokens.sources)) {
-      if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
-      if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
-      if (s.storageDir) s.storageDir = expandTilde(s.storageDir);
-      if (s.usagePath) s.usagePath = expandTilde(s.usagePath);
-    }
+    const merged = expandConfigPaths(deepMerge(DEFAULTS, user));
     this.config = merged;
     this._watch();
     return merged;
@@ -289,14 +376,7 @@ class ConfigManager extends EventEmitter {
         this._debounce = setTimeout(() => {
           try {
             const user = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, 'utf8')));
-            const merged = deepMerge(DEFAULTS, user);
-            for (const s of Object.values(merged.tokens.sources)) {
-              if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
-              if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
-              if (s.storageDir) s.storageDir = expandTilde(s.storageDir);
-              if (s.usagePath) s.usagePath = expandTilde(s.usagePath);
-            }
-            this.config = merged;
+            this.config = expandConfigPaths(deepMerge(DEFAULTS, user));
             this.emit('changed', this.config);
           } catch (e) {
             console.error('[wizbar] hot reload failed:', e.message);

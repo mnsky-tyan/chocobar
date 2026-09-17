@@ -3,7 +3,7 @@
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const LEVELS = ['var(--l0)', 'var(--l1)', 'var(--l2)', 'var(--l3)', 'var(--l4)'];
+let LEVELS = ['var(--l0)', 'var(--l1)', 'var(--l2)', 'var(--l3)', 'var(--l4)'];
 
 let agg = null;
 let theme = null;
@@ -28,12 +28,39 @@ function applyTheme(t) {
   const r = document.documentElement.style;
   const map = { '--fg': t.fg, '--fg-dim': t.fgDim, '--pink': t.pink, '--pink-deep': t.pinkDeep, '--pink-bg': t.pinkBg, '--yellow': t.yellow, '--warn': t.warn, '--divider': t.divider };
   for (const [k, v] of Object.entries(map)) if (v) r.setProperty(k, v);
+  // Heatmap ramp is user-configurable (theme.heatmap, light to dark).
+  if (t.heatmap && t.heatmap.length === 5) {
+    t.heatmap.forEach((c, i) => r.setProperty(`--l${i}`, c));
+  }
   // Card is PINK: follow the theme's pinkBg for the dashboard background and
   // body. (The old translucent card composited over the desktop = murky.)
   if (t.pinkBg) {
     r.setProperty('--bg', t.pinkBg);
     document.body.style.background = t.pinkBg;
   }
+  $('btn-subs').classList.toggle('hidden', !(t.subs && t.subs.enabled));
+}
+
+// Harness display name: the config's tokens.labels override wins, else the
+// built-in source id. Keeps the product harness-agnostic — nothing in the UI
+// is pinned to one vendor's naming.
+function appLabel(app) {
+  const labels = (theme && theme.labels) || {};
+  return labels[app] || app;
+}
+
+// Section visibility (tokens.dashboard in the config). Absent key = shown,
+// so older payloads and hand-rolled configs keep the full dashboard.
+function secOn(k) {
+  const d = (theme && theme.tokens && theme.tokens.dashboard) || {};
+  return d[k] !== false;
+}
+
+function applyVisibility() {
+  $('statcards').classList.toggle('hidden', !secOn('stats'));
+  $('daily-sec').classList.toggle('hidden', !secOn('heatmap'));
+  $('app-sec').classList.toggle('hidden', !secOn('apps'));
+  $('model-sec').classList.toggle('hidden', !secOn('models'));
 }
 
 function statCard(label, value, sub) {
@@ -58,12 +85,11 @@ function render() {
   $('usage-off').classList.toggle('hidden', !usageOff);
 
   // --- stat cards
-  const todayReq = Object.values(agg.today.apps || {}).reduce((n, a) => n + a.requests, 0);
   $('statcards').innerHTML =
-    statCard('Today', fmt(agg.today.total), `${todayReq} calls`) +
-    statCard('Last 7 days', fmt(agg.week), '') +
-    statCard('Last 30 days', fmt(agg.month), '') +
-    statCard('All time', fmt(agg.allTime), `${agg.recordCount} records`);
+    statCard('Today', fmt(agg.today.total)) +
+    statCard('Last 7 days', fmt(agg.week)) +
+    statCard('Last 30 days', fmt(agg.month)) +
+    statCard('All time', fmt(agg.allTime));
 
   renderSubscription();
   renderHeatmap();
@@ -74,7 +100,7 @@ function render() {
 function renderSubscription() {
   const sec = $('sub-sec');
   const plans = agg.subscription && agg.subscription.plans;
-  if (!plans || !plans.length) { sec.classList.add('hidden'); return; }
+  if (!plans || !plans.length || !secOn('plans')) { sec.classList.add('hidden'); return; }
   sec.classList.remove('hidden');
   const fmtReset = (iso) => {
     const d = new Date(iso.length === 10 ? iso + 'T12:00:00' : iso);
@@ -147,10 +173,12 @@ function renderHeatmap() {
     return `<div class="hm-col">${mlabel}${cells}</div>`;
   }).join('');
 
-  // row labels: sparse Mon/Wed/Fri
-  const rowLabels = `<div class="hm-col"><span class="hm-row-label" style="height:14px"></span>` +
+  // row labels: sparse Sun/Fri; every label row is exactly one cell pitch
+  // (11px cell + 3px column gap) so the text sits level with its row — the
+  // old Mon/Wed/Fri labels drifted because their line-height didn't match.
+  const rowLabels = `<div class="hm-col">` +
     [0, 1, 2, 3, 4, 5, 6].map((dow) =>
-      `<span class="hm-row-label">${(dow === 1 || dow === 3 || dow === 5) ? WEEKDAYS[dow] : ''}</span>`
+      `<span class="hm-row-label">${(dow === 0 || dow === 5) ? WEEKDAYS[dow] : ''}</span>`
     ).join('') + `</div>`;
 
   $('heatmap').innerHTML = rowLabels + colHtml;
@@ -209,19 +237,26 @@ function selectDay(key) {
   selectedDay = (selectedDay === key) ? null : key;
   renderHeatmap();
   renderDayDetail();
+  applyVisibility();
 }
 
 function renderDayDetail() {
   const dd = $('day-detail');
-  if (!selectedDay) { dd.classList.add('hidden'); dd.innerHTML = ''; return; }
+  if (!selectedDay || !secOn('dayDetail')) { dd.classList.add('hidden'); dd.innerHTML = ''; return; }
   const info = (agg.byDay || {})[selectedDay];
   const d = new Date(selectedDay + 'T12:00:00');
   let html = `<div class="d-title">${WEEKDAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} — ${info ? fmt(info.total) + ' tokens' : 'no usage'}</div>`;
   if (info) {
+    const aggs = Object.values(info.apps);
+    const cache = hasCacheData(aggs);
     html += `<table>`;
-    html += `<tr><td>app</td><td class="num">input</td><td class="num">output</td><td class="num">cache R</td><td class="num">cache W</td><td class="num">calls</td></tr>`;
+    html += '<tr>' + detailHeaders(cache).map((h) => `<td>${h}</td>`).join('') + '</tr>';
     for (const [app, a] of Object.entries(info.apps)) {
-      html += `<tr><td><span class="app-dot app-${esc(app)}"></span>${esc(app)}</td><td class="num">${fmt(a.input)}</td><td class="num">${fmt(a.output)}</td><td class="num">${fmt(a.cacheRead)}</td><td class="num">${fmt(a.cacheWrite)}</td><td class="num">${a.requests}</td></tr>`;
+      const cells = [`<td class="num">${fmt(a.input)}</td>`, `<td class="num">${fmt(a.output)}</td>`];
+      if (cache) cells.push(`<td class="num">${fmt(a.cacheRead)}</td>`, `<td class="num">${fmt(a.cacheWrite)}</td>`);
+      cells.push(`<td class="num">${a.requests}</td>`);
+      html += `<tr><td><span class="app-dot app-${esc(app)}" title="${esc(app)}"></span>${esc(appLabel(app))}</td>` +
+        cells.join('') + '</tr>';
     }
     html += `</table>`;
   }
@@ -229,15 +264,36 @@ function renderDayDetail() {
   dd.classList.remove('hidden');
 }
 
+// Cache columns exist only while some record actually carries cache data; a
+// store where nothing ever writes the prompt cache shows no dead columns.
+function hasCacheData(aggs) {
+  return aggs.some((a) => a && (((a.cacheRead || 0) + (a.cacheWrite || 0)) > 0));
+}
+
+const TH_INPUT = '<span title="Prompt tokens. The scanner folds cache reads and writes into this column per source (see the footer note), so input+output is the provider-reported total.">input</span>';
+const TH_CACHE_R = '<span title="Prompt-cache READ tokens: cached prefix tokens reported beside the input by the provider.">cache R</span>';
+const TH_CACHE_W = '<span title="Prompt-cache WRITE tokens: tokens the provider wrote to the cache on this request (reported as cache_creation / cache.write). Zero when the provider or model does not attribute cache creation.">cache W</span>';
+
+function detailHeaders(cache) {
+  return ['app', TH_INPUT, 'output', ...(cache ? [TH_CACHE_R, TH_CACHE_W] : []), 'calls'];
+}
+
 function renderTables() {
   // by app
   const apps = Object.entries(agg.byApp || {}).sort((a, b) => totalOfAgg(b[1]) - totalOfAgg(a[1]));
   const appMax = Math.max(1, ...apps.map(([, a]) => totalOfAgg(a)));
-  $('app-table').innerHTML = tableHtml(['app', 'input', 'output', 'cache R', 'cache W', 'calls'],
-    apps.map(([app, a]) => [
-      `<span class="app-dot app-${esc(app)}"></span>${esc(app)}`,
-      fmt(a.input), fmt(a.output), fmt(a.cacheRead), fmt(a.cacheWrite), String(a.requests)
-    ]),
+  const appCache = hasCacheData(apps.map(([, a]) => a));
+  $('app-table').innerHTML = tableHtml(
+    ['app', TH_INPUT, 'output', ...(appCache ? [TH_CACHE_R, TH_CACHE_W] : []), 'calls'],
+    apps.map(([app, a]) => {
+      const cells = [
+        `<span class="app-dot app-${esc(app)}" title="${esc(app)}"></span>${esc(appLabel(app))}`,
+        fmt(a.input), fmt(a.output)
+      ];
+      if (appCache) cells.push(fmt(a.cacheRead), fmt(a.cacheWrite));
+      cells.push(String(a.requests));
+      return cells;
+    }),
     apps.map(([, a]) => totalOfAgg(a) / appMax)
   );
 
@@ -246,14 +302,21 @@ function renderTables() {
     .sort((a, b) => totalOfAgg(b[1]) - totalOfAgg(a[1]))
     .slice(0, 7);
   const modelMax = Math.max(1, ...models.map(([, a]) => totalOfAgg(a)));
-  $('model-table').innerHTML = tableHtml(['model', 'input', 'output', 'cache R', 'cache W', 'calls'],
+  const modelCache = hasCacheData(models.map(([, a]) => a));
+  $('model-table').innerHTML = tableHtml(
+    ['model', TH_INPUT, 'output', ...(modelCache ? [TH_CACHE_R, TH_CACHE_W] : []), 'calls'],
     models.map(([mk, a]) => {
       const [app, ...rest] = mk.split('|');
       // modelLabel is the tracker's canonical casing for the merged group;
       // fall back to the (lowercased) key for older aggregates.
       const model = a.modelLabel || rest.join('|');
-      return [`<span class="app-dot app-${esc(app)}" title="${esc(app)}"></span>${esc(model)}`,
-        fmt(a.input), fmt(a.output), fmt(a.cacheRead), fmt(a.cacheWrite), String(a.requests)];
+      const cells = [
+        `<span class="app-dot app-${esc(app)}" title="${esc(app)}"></span>${esc(model)}`,
+        fmt(a.input), fmt(a.output)
+      ];
+      if (modelCache) cells.push(fmt(a.cacheRead), fmt(a.cacheWrite));
+      cells.push(String(a.requests));
+      return cells;
     }),
     models.map(([, a]) => totalOfAgg(a) / modelMax)
   );
@@ -272,6 +335,7 @@ function tableHtml(headers, rows, shares) {
 }
 
 $('btn-close').addEventListener('click', () => window.wizbar.close());
+$('btn-subs').addEventListener('click', () => window.wizbar.openSubs());
 $('btn-refresh').addEventListener('click', async () => {
   const btn = $('btn-refresh');
   if (btn.disabled) return;
