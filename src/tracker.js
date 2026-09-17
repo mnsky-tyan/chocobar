@@ -35,10 +35,14 @@ const STATIC_MODE = process.platform !== 'win32';
 //   6. alacritty.exe                  Alacritty   (by owning PROCESS)
 //   7. Hyper.exe                      Hyper       (by owning PROCESS)
 //
-// The first candidate with a live, visible, real window wins. WezTerm,
-// Alacritty and Hyper are matched by process image name instead of window
-// class because they register the generic winit/Electron class shared with
-// unrelated apps, so a class probe would false-positive.
+// Target selection (see _listCandidates): the currently FOREGROUND window wins
+// when it is a supported terminal, so a console sitting on the desktop never
+// shadows the WezTerm the user is actually in. With no supported foreground
+// window the lists above are walked in order and the first list with a live,
+// visible, real window decides. WezTerm, Alacritty and Hyper are matched by
+// process image name instead of window class because they register the
+// generic winit/Electron class shared with unrelated apps, so a class probe
+// would false-positive.
 const AUTO_PROBE_CLASSES = [
   'CASCADIA_HOSTING_WINDOW_CLASS',
   'ConsoleWindowClass',
@@ -149,21 +153,37 @@ class TerminalTracker extends require('events') {
     this._scanTick();
   }
 
-  // All candidate terminal windows right now, best target first: the probe
-  // lists above are walked in order and the first list that yields a window
-  // wins (class probes first, then process-image probes).
+  // All candidate terminal windows right now, best target first. Every
+  // candidate comes from ONE native walk with ONE set of real-window filters,
+  // so a process-matched terminal (WezTerm/Alacritty/Hyper) is screened and
+  // ordered exactly like a class-matched one - no minimized, cloaked, untitled
+  // or offscreen window, and frontmost-before-largest.
+  //
+  // Ranking: the foreground window wins when it is a supported terminal (the
+  // user is in WezTerm while a build console also sits on the desktop; a raw
+  // probe-order walk would attach the bar to that console). Otherwise the
+  // probe lists are walked in their documented order and the frontmost window
+  // of the first yielding list wins.
   _listCandidates() {
-    for (const cls of this.probe.classes) {
-      const wins = native.listWindowsByClass(cls);
-      if (wins.length) return wins;
-    }
-    for (const exe of this.probe.processes) {
+    const wins = native.listWindows();            // frontmost first
+    const fg = Number(native.getForegroundWindow()) || 0;
+    const probeOfClass = new Map();
+    this.probe.classes.forEach((cls, i) => probeOfClass.set(cls, i));
+    const probeOfPid = new Map();
+    const firstProcessProbe = this.probe.classes.length;
+    this.probe.processes.forEach((exe, i) => {
       const pid = native.findProcessIdByName(exe);
-      if (pid == null) continue;
-      const wins = native.findPidWindows(pid);
-      if (wins.length) return wins;
+      if (pid != null) probeOfPid.set(pid, firstProcessProbe + i);
+    });
+    const buckets = this.probe.classes.concat(this.probe.processes).map(() => []);
+    for (const w of wins) {
+      const probe = probeOfClass.has(w.cls) ? probeOfClass.get(w.cls) : probeOfPid.get(w.pid);
+      if (probe !== undefined && !buckets[probe].includes(w.hwnd)) buckets[probe].push(w.hwnd);
     }
-    return [];
+    const ordered = buckets.reduce((all, b) => all.concat(b), []);
+    const fgIdx = ordered.indexOf(fg);
+    if (fgIdx > 0) { ordered.splice(fgIdx, 1); ordered.unshift(fg); }
+    return ordered;
   }
 
   _scanTick() {

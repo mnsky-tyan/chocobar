@@ -66,7 +66,7 @@ The file is hot-reloaded after saving. The generated comments document every ava
 
 ### Subscription usage
 
-Enable the master switch and the subscription source, then point `usagePath` at a local JSON file:
+Enable the master switch and the subscription source, then point `usagePath` at a local JSON file of plan snapshots. The generated config documents the snapshot shape, and Chocobar re-reads it on each usage rescan.
 
 ```json
 {
@@ -82,22 +82,7 @@ Enable the master switch and the subscription source, then point `usagePath` at 
 }
 ```
 
-The file contains current plan snapshots. Invalid entries are ignored safely:
-
-```json
-{
-  "plans": [
-    {
-      "name": "Pro Plan",
-      "total": 1500,
-      "used": 430,
-      "resetsAt": "2026-10-14"
-    }
-  ]
-}
-```
-
-`total` and `used` are credits for the plan, not transcript token counts. Chocobar re-reads the snapshot on each usage rescan. Keep the file local and do not place secrets in the repository.
+Keep the file local and do not place secrets in the repository.
 
 ## Use the bar and dashboard
 
