@@ -267,14 +267,20 @@ function isCloaked(hwnd) {
   return hr === 0 && out[0] !== 0;
 }
 
-function listWindowsByClass(className) {
+// Every visible top-level window right now, frontmost (top of the z-order)
+// first, carrying its window class and owning pid. This is the module's
+// single real-window walk, so class-matched and process-matched callers get
+// identical screening and identical ordering. (findPidWindows, which the
+// desktop pet uses, is a separate area-sorted, lax walk and never a terminal
+// target.)
+function listWindows() {
   const hwnds = [];
-  EnumWindows((hwnd) => { hwnds.push(Number(hwnd)); return 1; }, null);
-  const found = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  const out = [];
   for (const hwnd of hwnds) {
     try {
       if (!IsWindowVisible(hwnd)) continue;
-      if (getClassName(hwnd) !== className || isCloaked(hwnd)) continue;
+      if (isCloaked(hwnd)) continue;
       // Windows Terminal keeps ghost clones (no title, stale on-screen rect,
       // invisible yet "visible" to every DWM check) that hijack the tracker —
       // following one hides the bar forever. A real terminal always has a
@@ -287,40 +293,18 @@ function listWindowsByClass(className) {
       if (!rc) continue;
       if (rc.left <= -16000 || rc.top <= -16000) continue;
       if (rc.right - rc.left < 100 || rc.bottom - rc.top < 100) continue;
-      found.push(hwnd);
-    } catch (_) {}
-  }
-  return found;
-}
-
-// Every visible top-level window right now, frontmost (top of the z-order)
-// first, carrying its window class and owning pid. One walk, one set of
-// real-window filters (the same listWindowsByClass applies), so callers that
-// match by class and callers that match by process get identical screening
-// and identical ordering. The tracker needs this: listWindowsByClass is
-// z-ordered and strict while findPidWindows is area-sorted and lax, which
-// could hand it a minimized or largest window of a process-matched terminal
-// instead of the frontmost real one.
-function listWindows() {
-  const hwnds = [];
-  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
-  const out = [];
-  for (const hwnd of hwnds) {
-    try {
-      if (!IsWindowVisible(hwnd)) continue;
-      if (isCloaked(hwnd)) continue;
-      if (!GetWindowTextLengthW(hwnd)) continue;
-      if (IsIconic(hwnd)) continue;
-      const rc = getWindowRect(hwnd);
-      if (!rc) continue;
-      if (rc.left <= -16000 || rc.top <= -16000) continue;
-      if (rc.right - rc.left < 100 || rc.bottom - rc.top < 100) continue;
       const pid = [0];
       GetWindowThreadProcessId(hwnd, pid);
       out.push({ hwnd, cls: getClassName(hwnd), pid: Number(pid[0]) });
     } catch (_) {}
   }
   return out;
+}
+
+// Class-filtered view of listWindows, same frontmost-first order: the legacy
+// single-class tracker path and the smoke/probe scripts go through it.
+function listWindowsByClass(className) {
+  return listWindows().filter((w) => w.cls === className).map((w) => w.hwnd);
 }
 
 // --- battery -------------------------------------------------------------------
