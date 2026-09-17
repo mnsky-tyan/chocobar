@@ -2,7 +2,9 @@
 // Terminal window tracker.
 // Behavior (per spec):
 //  - The bar attaches to the FIRST terminal window that appears while it is unattached.
-//    (At app start with terminals already open, the frontmost one counts as "first".)
+//    (At app start with terminals already open: the foreground terminal wins when
+//    it is a supported one, else the frontmost of the first probe with windows.
+//    See _listCandidates.)
 //  - While attached it follows that window only: move, resize (width), minimize (hide), restore (show).
 //  - When the followed window closes, the bar detaches and hides. The surviving terminal windows
 //    are marked as "old" and do NOT retrigger it; only a NEW terminal window will.
@@ -19,10 +21,48 @@ const SCAN_INTERVAL_MS = 400;   // look for new terminal windows while unattache
 // No polling timer exists in static mode (nothing to follow).
 const STATIC_MODE = process.platform !== 'win32';
 
+// Terminal-agnostic target detection. The bar follows whatever terminal the
+// user actually runs, not a hard-coded Windows Terminal class.
+//
+// config.terminal.className overrides everything:
+//   - string: probe exactly that Win32 window class (legacy single-class
+//     configs keep working untouched)
+//   - '' / missing (the default): AUTO mode, candidates probed in this order:
+//
+//   1. CASCADIA_HOSTING_WINDOW_CLASS  Windows Terminal (stable + Preview)
+//   2. ConsoleWindowClass             classic conhost (cmd.exe / powershell.exe)
+//   3. VirtualConsoleClass            ConEmu
+//   4. mintty                         mintty (Git Bash / Cygwin)
+//   5. wezterm-gui.exe                WezTerm     (by owning PROCESS, see below)
+//   6. alacritty.exe                  Alacritty   (by owning PROCESS)
+//   7. Hyper.exe                      Hyper       (by owning PROCESS)
+//
+// Target selection (see _listCandidates): the currently FOREGROUND window wins
+// when it is a supported terminal, so a console sitting on the desktop never
+// shadows the WezTerm the user is actually in. With no supported foreground
+// window the lists above are walked in order and the first list with a live,
+// visible, real window decides. WezTerm, Alacritty and Hyper are matched by
+// process image name instead of window class because they register the
+// generic winit/Electron class shared with unrelated apps, so a class probe
+// would false-positive.
+const AUTO_PROBE_CLASSES = [
+  'CASCADIA_HOSTING_WINDOW_CLASS',
+  'ConsoleWindowClass',
+  'VirtualConsoleClass',
+  'mintty'
+];
+const AUTO_PROBE_PROCESSES = ['wezterm-gui.exe', 'alacritty.exe', 'Hyper.exe'];
+
+// Resolve config.terminal.className into { classes, processes } probe lists.
+function resolveProbe(className) {
+  if (typeof className === 'string' && className) return { classes: [className], processes: [] };
+  return { classes: AUTO_PROBE_CLASSES.slice(), processes: AUTO_PROBE_PROCESSES.slice() };
+}
+
 class TerminalTracker extends require('events') {
   constructor(config) {
     super();
-    this.className = config.terminal.className;
+    this.probe = resolveProbe(config.terminal.className);
     this.reattachToExisting = !!config.terminal.reattachToExisting;
     this.cfgBar = config.bar;   // bar sizing for static mode
     this.hwnd = null;          // numeric hwnd of followed terminal window
@@ -95,11 +135,12 @@ class TerminalTracker extends require('events') {
   }
 
   setConfig(config) {
-    const classChanged = this.className !== config.terminal.className;
-    this.className = config.terminal.className;
+    const probe = resolveProbe(config.terminal.className);
+    const probeChanged = JSON.stringify(probe) !== JSON.stringify(this.probe);
+    this.probe = probe;
     this.reattachToExisting = !!config.terminal.reattachToExisting;
     if (STATIC_MODE) { this.setCfgBar(config); this._emitStaticGeometry(); return; }
-    if (classChanged) {
+    if (probeChanged) {
       this.seen.clear();
       this.hwnd = null;
       clearInterval(this._timer);
@@ -114,9 +155,44 @@ class TerminalTracker extends require('events') {
     this._scanTick();
   }
 
+  // All candidate terminal windows right now, best target first. Every
+  // candidate comes from ONE native walk with ONE set of real-window filters,
+  // so a process-matched terminal (WezTerm/Alacritty/Hyper) is screened and
+  // ordered exactly like a class-matched one - no minimized, cloaked, untitled
+  // or offscreen window, and frontmost-before-largest.
+  //
+  // Ranking: the foreground window wins when it is a supported terminal (the
+  // user is in WezTerm while a build console also sits on the desktop; a raw
+  // probe-order walk would attach the bar to that console). Otherwise the
+  // probe lists are walked in their documented order and the frontmost window
+  // of the first yielding list wins.
+  _listCandidates() {
+    const wins = native.listWindows();            // frontmost first
+    const fg = Number(native.getForegroundWindow()) || 0;
+    const probeOfClass = new Map();
+    this.probe.classes.forEach((cls, i) => probeOfClass.set(cls, i));
+    const probeOfPid = new Map();
+    const firstProcessProbe = this.probe.classes.length;
+    this.probe.processes.forEach((exe, i) => {
+      // WezTerm and Alacritty run one GUI process per window, so a probe can
+      // match several pids; every one of them must bucket for the foreground
+      // promotion below to reach the window the user is actually in.
+      for (const pid of native.findPidsByName(exe)) probeOfPid.set(pid, firstProcessProbe + i);
+    });
+    const buckets = this.probe.classes.concat(this.probe.processes).map(() => []);
+    for (const w of wins) {
+      const probe = probeOfClass.has(w.cls) ? probeOfClass.get(w.cls) : probeOfPid.get(w.pid);
+      if (probe !== undefined && !buckets[probe].includes(w.hwnd)) buckets[probe].push(w.hwnd);
+    }
+    const ordered = buckets.reduce((all, b) => all.concat(b), []);
+    const fgIdx = ordered.indexOf(fg);
+    if (fgIdx > 0) { ordered.splice(fgIdx, 1); ordered.unshift(fg); }
+    return ordered;
+  }
+
   _scanTick() {
     if (this.hwnd) return;
-    const wins = native.listWindowsByClass(this.className);
+    const wins = this._listCandidates();
     const fresh = this.reattachToExisting
       ? (wins.length ? [wins[0]] : [])
       : wins.filter((w) => !this.seen.has(w));
@@ -142,7 +218,7 @@ class TerminalTracker extends require('events') {
     this.emit('detached', wasHwnd);
     // Everything that currently exists is now "old" - only a NEW window retriggers.
     // (Drop the closed hwnd itself so a reused handle value still counts as new.)
-    const wins = native.listWindowsByClass(this.className);
+    const wins = this._listCandidates();
     this.seen = new Set(wins.filter((w) => w !== wasHwnd));
     this._ensureScan();
   }
@@ -214,4 +290,4 @@ class TerminalTracker extends require('events') {
   }
 }
 
-module.exports = { TerminalTracker };
+module.exports = { TerminalTracker, resolveProbe };

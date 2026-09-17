@@ -76,7 +76,11 @@ const DEFAULTS = {
     clock:    { enabled: true, format: '{MMM} {dd}  {HH}:{mm}' }
   },
   terminal: {
-    className: 'CASCADIA_HOSTING_WINDOW_CLASS',
+    // Win32 window class to follow. '' (default) = auto-detect the terminal:
+    // Windows Terminal, classic conhost, ConEmu, mintty by window class, then
+    // WezTerm / Alacritty / Hyper by owning process (see src/tracker.js for
+    // the probe order). A string pins one class.
+    className: '',
     reattachToExisting: false   // after followed window closes, wait for a NEW window
   },
   tokens: {
@@ -94,7 +98,13 @@ const DEFAULTS = {
       opencode: { enabled: false, storageDir: '' },   // e.g. ~/.local/share/opencode/storage/message
       // Xiaomi MiMo AI desktop: reads the app's local HTTP API while it runs
       // (port + token auto-discovered from the app's own desktop-api.json).
-      mimo:     { enabled: false }
+      mimo:     { enabled: false },
+      // Subscription plan usage: reads a small JSON file you keep anywhere
+      // (e.g. exported from your provider's plan page):
+      //   { "plans": [ { "name": "Pro Plan", "total": 1500, "used": 430,
+      //                  "resetsAt": "2026-10-14" } ] }
+      // and shows each plan's credit usage on the dashboard.
+      subscription: { enabled: false, usagePath: '' }
     }
   },
   general: {
@@ -106,7 +116,7 @@ const DEFAULTS = {
 
 // The config file users edit — same as DEFAULTS but with inline explanations.
 // Save the file and the bar hot-reloads within a second; no restart needed.
-const TEMPLATE = `// WizBar config — edit any value and save; changes apply live.
+const TEMPLATE = `// Chocobar config — edit any value and save; changes apply live.
 // Colors are CSS hex (#RRGGBB). Sizes are DIP (CSS pixels).
 {
   "bar": {
@@ -173,8 +183,11 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
     "clock":     { "enabled": true, "format": "{MMM} {dd}  {HH}:{mm}" }
   },
   "terminal": {
-    // Win32 class of the window to follow
-    "className": "CASCADIA_HOSTING_WINDOW_CLASS",
+    // which terminal to follow. "" (default) auto-detects: Windows Terminal,
+    // classic conhost (cmd/PowerShell console), ConEmu and mintty by window
+    // class, then WezTerm / Alacritty / Hyper by process. Set a Win32 class
+    // here to pin one specific window class instead.
+    "className": "",
     // false: after the followed window closes, only a NEW terminal re-triggers the bar.
     // true: the bar grabs whatever terminal already exists instead.
     "reattachToExisting": false
@@ -197,12 +210,16 @@ const TEMPLATE = `// WizBar config — edit any value and save; changes apply li
       "opencode": { "enabled": false, "storageDir": "" },   // e.g. "~/.local/share/opencode/storage/message"
       // Xiaomi MiMo AI desktop app token usage, read live from its local API
       // while the app runs (auto-discovered; nothing to configure).
-      "mimo":     { "enabled": false }
+      "mimo":     { "enabled": false },
+      // subscription plan credit usage, read from a JSON file you point at:
+      //   { "plans": [ { "name": "Pro Plan", "total": 1500, "used": 430,
+      //                  "resetsAt": "2026-10-14" } ] }
+      "subscription": { "enabled": false, "usagePath": "" }   // e.g. "~/.chocobar/plan-usage.json"
     }
   },
   "general": {
     "showTray": false,
-    // start WizBar at login (writes an HKCU Run entry)
+    // start Chocobar at login (writes an HKCU Run entry)
     "autostart": false,
     "debug": false
   }
@@ -256,6 +273,7 @@ class ConfigManager extends EventEmitter {
       if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
       if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
       if (s.storageDir) s.storageDir = expandTilde(s.storageDir);
+      if (s.usagePath) s.usagePath = expandTilde(s.usagePath);
     }
     this.config = merged;
     this._watch();
@@ -276,6 +294,7 @@ class ConfigManager extends EventEmitter {
               if (s.dbPath) s.dbPath = expandTilde(s.dbPath);
               if (s.sessionsDir) s.sessionsDir = expandTilde(s.sessionsDir);
               if (s.storageDir) s.storageDir = expandTilde(s.storageDir);
+              if (s.usagePath) s.usagePath = expandTilde(s.usagePath);
             }
             this.config = merged;
             this.emit('changed', this.config);

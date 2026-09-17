@@ -26,7 +26,7 @@ function fmt(n) {
 function applyTheme(t) {
   theme = t;
   const r = document.documentElement.style;
-  const map = { '--fg': t.fg, '--fg-dim': t.fgDim, '--pink': t.pink, '--pink-deep': t.pinkDeep, '--pink-bg': t.pinkBg, '--yellow': t.yellow, '--divider': t.divider };
+  const map = { '--fg': t.fg, '--fg-dim': t.fgDim, '--pink': t.pink, '--pink-deep': t.pinkDeep, '--pink-bg': t.pinkBg, '--yellow': t.yellow, '--warn': t.warn, '--divider': t.divider };
   for (const [k, v] of Object.entries(map)) if (v) r.setProperty(k, v);
   // Card is PINK: follow the theme's pinkBg for the dashboard background and
   // body. (The old translucent card composited over the desktop = murky.)
@@ -65,9 +65,32 @@ function render() {
     statCard('Last 30 days', fmt(agg.month), '') +
     statCard('All time', fmt(agg.allTime), `${agg.recordCount} records`);
 
+  renderSubscription();
   renderHeatmap();
   renderTables();
   $('scan-info').textContent = `last scan ${agg.lastScan ? new Date(agg.lastScan).toLocaleTimeString() : '—'}`;
+}
+
+function renderSubscription() {
+  const sec = $('sub-sec');
+  const plans = agg.subscription && agg.subscription.plans;
+  if (!plans || !plans.length) { sec.classList.add('hidden'); return; }
+  sec.classList.remove('hidden');
+  const fmtReset = (iso) => {
+    const d = new Date(iso.length === 10 ? iso + 'T12:00:00' : iso);
+    return isNaN(d) ? null : `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  };
+  $('plans').innerHTML = plans.map((p) => {
+    // Clamp the shown percent to the bar; over-spend still reads via used/total.
+    const pct = Math.max(0, Math.min(100, Math.round((p.used / p.total) * 100)));
+    const reset = p.resetsAt ? fmtReset(p.resetsAt) : null;
+    return `<div class="plan-row">` +
+      `<div class="plan-top"><span class="plan-name">${esc(p.name)}</span>` +
+      `<span class="plan-nums">${fmt(p.used)} / ${fmt(p.total)} · ${pct}%</span></div>` +
+      `<div class="plan-bar"><i class="${pct >= 90 ? 'high' : ''}" style="width:${pct}%"></i></div>` +
+      (reset ? `<div class="plan-meta">resets ${esc(reset)}</div>` : '') +
+      `</div>`;
+  }).join('');
 }
 
 function dayLevel(total, thresholds) {

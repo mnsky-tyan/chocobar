@@ -1,5 +1,5 @@
 'use strict';
-// WizBar — slim acrylic status bar floating above Windows Terminal + token tracker.
+// WizBar — slim acrylic status bar floating above the terminal + token tracker.
 const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -128,7 +128,7 @@ function openDashboard() {
     // no Electron glyph); the tray stays empty either way.
     skipTaskbar: false,
     icon: path.join(__dirname, 'assets', 'tray.png'),
-    title: 'WizBar dashboard',
+    title: 'Chocobar dashboard',
     webPreferences: {
       preload: path.join(__dirname, 'renderer', 'dash-preload.js'),
       contextIsolation: true,
@@ -136,10 +136,14 @@ function openDashboard() {
     }
   });
   dashWin.loadFile(path.join(__dirname, 'renderer', 'dash.html'));
-  dashWin.once('ready-to-show', () => {
-    raiseDash();
-    dashWin.send('tokens', tokens.aggregate());
-    dashWin.send('theme', themePayload(configManager.config));
+  dashWin.once('ready-to-show', () => raiseDash());
+  // Data rides on did-finish-load (not ready-to-show, which only fires once
+  // per window): a Reload chocobar re-fires this and re-seeds the fresh page.
+  dashWin.webContents.on('did-finish-load', () => {
+    if (dashWin && !dashWin.isDestroyed()) {
+      dashWin.send('theme', themePayload(configManager.config));
+      dashWin.send('tokens', tokens.aggregate());
+    }
   });
   // ready-to-show can be missed on recreation — never leave the window invisible.
   setTimeout(() => {
@@ -153,6 +157,40 @@ function openDashboard() {
   }
 }
 
+// "Reload chocobar": a clean in-place reload. The renderer windows start
+// fresh; the main process, its single-instance lock, the tray, the tracker
+// and the metrics/token loops all survive untouched, no second instance is
+// spawned, and the pet companion process is never touched (we do not own it).
+// The bar re-pushes theme/stats/tokens on its own did-finish-load; the dash
+// is re-seeded by the handler installed in openDashboard.
+function reloadChocobar() {
+  try {
+    if (bar && bar.win && !bar.win.isDestroyed()) bar.win.webContents.reload();
+    if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.reload();
+  } catch (e) { DBG('reload failed:', e.message); }
+}
+
+// One source of truth for the tray menu and the bar context menu. Only the
+// tray gets "Open config folder"; every label and action is otherwise
+// identical, so the two menus cannot drift apart.
+function buildChocobarMenu(isTray) {
+  const items = [
+    { label: 'Token dashboard', click: () => openDashboard() },
+    { type: 'separator' },
+    { label: 'Reload chocobar', click: () => reloadChocobar() },
+    { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) }
+  ];
+  if (isTray) {
+    items.push({ label: 'Open config folder', click: () => shell.showItemInFolder(CONFIG_PATH) });
+  }
+  items.push(
+    { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
+    { type: 'separator' },
+    { label: 'Quit chocobar', click: () => { app.quit(); } }
+  );
+  return Menu.buildFromTemplate(items);
+}
+
 function buildTray() {
   if (!configManager.config.general.showTray) return;
   const iconPath = path.join(__dirname, 'assets', 'tray.png');
@@ -160,19 +198,8 @@ function buildTray() {
   try { img = nativeImage.createFromPath(iconPath); } catch (_) {}
   if (!img || img.isEmpty()) img = nativeImage.createEmpty();
   tray = new Tray(img);
-  tray.setToolTip('WizBar');
-  const updateMenu = () => {
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Token dashboard', click: () => openDashboard() },
-      { type: 'separator' },
-      { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) },
-      { label: 'Open config folder', click: () => shell.showItemInFolder(CONFIG_PATH) },
-      { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
-      { type: 'separator' },
-      { label: 'Quit WizBar', click: () => { app.quit(); } }
-    ]));
-  };
-  updateMenu();
+  tray.setToolTip('Chocobar');
+  tray.setContextMenu(buildChocobarMenu(true));
   // Left-click on the tray icon summons the dashboard too — the tray is the
   // one summon that always works, even when other windows cover the bar chip.
   tray.on('click', () => openDashboard());
@@ -441,14 +468,7 @@ function wireBar() {
     bar.setPillWidth(width, bar.cfg.bar);
   });
   ipcMain.on('bar-context', () => {
-    Menu.buildFromTemplate([
-      { label: 'Token dashboard', click: () => openDashboard() },
-      { type: 'separator' },
-      { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) },
-      { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
-      { type: 'separator' },
-      { label: 'Quit WizBar', click: () => app.quit() }
-    ]).popup({});
+    buildChocobarMenu(false).popup({});
   });
   ipcMain.on('close-dash', () => { if (dashWin) dashWin.close(); });
 
@@ -469,6 +489,7 @@ function wireBar() {
     bar.send('theme', themePayload(configManager.config));
     bar.send('stats', metrics.snapshot());
     bar.send('tokens', tokens.aggregate());
+    bar.send('pet', petState);
   });
 
   // config hot reload
@@ -535,7 +556,7 @@ app.whenReady().then(() => {
   } catch (e) {
     DBG('FATAL', e.stack || e.message);
     console.error('FATAL', e);
-    dialog.showErrorBox('WizBar failed to start', String(e && e.stack || e));
+    dialog.showErrorBox('Chocobar failed to start', String(e && e.stack || e));
     app.quit();
   }
 });

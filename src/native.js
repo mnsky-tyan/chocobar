@@ -267,14 +267,20 @@ function isCloaked(hwnd) {
   return hr === 0 && out[0] !== 0;
 }
 
-function listWindowsByClass(className) {
+// Every visible top-level window right now, frontmost (top of the z-order)
+// first, carrying its window class and owning pid. This is the module's
+// single real-window walk, so class-matched and process-matched callers get
+// identical screening and identical ordering. (findPidWindows, which the
+// desktop pet uses, is a separate area-sorted, lax walk and never a terminal
+// target.)
+function listWindows() {
   const hwnds = [];
-  EnumWindows((hwnd) => { hwnds.push(Number(hwnd)); return 1; }, null);
-  const found = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  const out = [];
   for (const hwnd of hwnds) {
     try {
       if (!IsWindowVisible(hwnd)) continue;
-      if (getClassName(hwnd) !== className || isCloaked(hwnd)) continue;
+      if (isCloaked(hwnd)) continue;
       // Windows Terminal keeps ghost clones (no title, stale on-screen rect,
       // invisible yet "visible" to every DWM check) that hijack the tracker —
       // following one hides the bar forever. A real terminal always has a
@@ -287,10 +293,18 @@ function listWindowsByClass(className) {
       if (!rc) continue;
       if (rc.left <= -16000 || rc.top <= -16000) continue;
       if (rc.right - rc.left < 100 || rc.bottom - rc.top < 100) continue;
-      found.push(hwnd);
+      const pid = [0];
+      GetWindowThreadProcessId(hwnd, pid);
+      out.push({ hwnd, cls: getClassName(hwnd), pid: Number(pid[0]) });
     } catch (_) {}
   }
-  return found;
+  return out;
+}
+
+// Class-filtered view of listWindows, same frontmost-first order: kept for
+// the smoke/probe scripts and the portable-regression stub check.
+function listWindowsByClass(className) {
+  return listWindows().filter((w) => w.cls === className).map((w) => w.hwnd);
 }
 
 // --- battery -------------------------------------------------------------------
@@ -668,7 +682,10 @@ function getHwinfoTemp(mapName) {
 // --- process lookup by image name (Toolhelp32 snapshot) ------------------------
 // pollPet used to spawn tasklist.exe every 3s just to learn whether the pet
 // process is alive (~164ms of CPU per spawn here); an in-process snapshot costs
-// ~5ms. Returns the matching pid, or null when no process carries that image name.
+// ~5ms. WezTerm and Alacritty run one GUI process per window, so an image name
+// can legitimately match several pids; the plural walk is the source of truth
+// and the singular lookup is a view over it.
+// Returns every pid carrying that image name (empty array when none match).
 const TH32CS_SNAPPROCESS = 0x2;
 const PROCESSENTRY32W = kstruct('PROCESSENTRY32W', {
   dwSize: 'uint32', cntUsage: 'uint32', th32ProcessID: 'uint32',
@@ -682,25 +699,30 @@ const CreateToolhelp32Snapshot = bind(kernel32, 'uintptr_t __stdcall CreateToolh
 const Process32FirstW = bind(kernel32, 'int __stdcall Process32FirstW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
 const Process32NextW = bind(kernel32, 'int __stdcall Process32NextW(uintptr_t h, _Inout_ PROCESSENTRY32W *entry)');
 
-function findProcessIdByName(imageName) {
+function findPidsByName(imageName) {
   const needle = String(imageName || '').toLowerCase();
-  if (!needle) return null;
+  if (!needle) return [];
   const h = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (!h || h === -1 || h === -1n) return null;
+  if (!h || h === -1 || h === -1n) return [];
+  const pids = [];
   try {
     const entry = { dwSize: ksize(PROCESSENTRY32W) };
     for (let ok = Process32FirstW(h, entry); ok; ok = Process32NextW(h, entry)) {
       const chars = entry.szExeFile;
       let name = '';
       for (let i = 0; i < chars.length && chars[i]; i++) name += String.fromCharCode(chars[i]);
-      if (name.toLowerCase() === needle) return entry.th32ProcessID;
+      if (name.toLowerCase() === needle) pids.push(entry.th32ProcessID);
     }
   } catch (_) {
-    return null;
+    return pids;
   } finally {
     try { CloseHandle(h); } catch (_) {}
   }
-  return null;
+  return pids;
+}
+
+function findProcessIdByName(imageName) {
+  return findPidsByName(imageName)[0] || null;
 }
 
 // --- window discovery by pid + monitor geometry (desktop pet) ----------
@@ -797,10 +819,10 @@ function rectOnAnyMonitor(x, y, w, h) {
 }
 
 module.exports = {
-  getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass,
+  getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
   setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
-  findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName,
+  findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
   getForegroundWindow: () => GetForegroundWindow()
 };
