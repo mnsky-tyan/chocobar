@@ -1,13 +1,13 @@
 {
   "name": "wizbar",
   "productName": "WizBar",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Slim acrylic system status bar floating above the terminal, with cross-CLI token usage tracking",
   "main": "main.js",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js",
+    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js && node scripts/model_case_regression.js",
     "postinstall": "electron --version || true"
   },
   "devDependencies": {

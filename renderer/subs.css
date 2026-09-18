@@ -53,6 +53,7 @@ body {
 
 #title { font-size: 15px; font-weight: 700; display: flex; align-items: baseline; gap: 10px; }
 #title .logo { color: var(--pink-deep); font-size: 16px; }
+#title .logo svg { width: 14px; height: 14px; vertical-align: -2px; }
 
 #titlebar-right { -webkit-app-region: no-drag; display: flex; gap: 6px; }
 
