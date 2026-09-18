@@ -280,13 +280,23 @@ const EVENT_SYSTEM_FOREGROUND = 0x0003;
 const WINEVENT_OUTOFCONTEXT = 0x0;
 let _fgCallback = null;
 const _fgHook = (koffi && user32) ? koffi.register((hHook, event, hwnd, idObject, idChild, idThread, time) => {
-  try { if (event === EVENT_SYSTEM_FOREGROUND && _fgCallback) _fgCallback(); } catch (_) {}
+  try {
+    if (event === EVENT_SYSTEM_FOREGROUND && _fgCallback) {
+      console.log('[wizbar] fg event');
+      _fgCallback();
+    }
+  } catch (e) { console.error('[wizbar] fg hook cb failed:', e.message); }
 }, 'WINEVENTPROC *') : null;
 function hookForegroundChange(cb) {
   _fgCallback = cb || null;
   if (!cb) return true;
-  if (!SetWinEventHook || _fgHook === null) return false;
-  return !!SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, _fgHook, 0, 0, WINEVENT_OUTOFCONTEXT);
+  if (!SetWinEventHook || _fgHook === null) {
+    console.error('[wizbar] fg hook unavailable:', !SetWinEventHook ? 'no bind' : 'no cb');
+    return false;
+  }
+  const ok = !!SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, _fgHook, 0, 0, WINEVENT_OUTOFCONTEXT);
+  if (!ok) console.error('[wizbar] SetWinEventHook failed');
+  return ok;
 }
 
 function bringToFront(hwnd) {
