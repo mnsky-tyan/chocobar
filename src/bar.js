@@ -61,8 +61,10 @@ class BarWindow {
     // bar. Applied while the window is still unshown. Alt-Tab exclusion is a
     // welcome side effect - the bar is a passive strip, never a switch target.
     native.setToolWindow(this.hwnd, true);
-    // Rounded corners are painted by the page (CSS border-radius) since the
-    // window itself is translucent; DWM rounding/borders don't apply here.
+    // Never activate on click: activation raises the bar above every app
+    // (a flicker over foreground apps) and steals foreground from the
+    // terminal the click serves. Mouse events still deliver to the page.
+    native.setNoActivate(this.hwnd);
 
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'bar.html'));
 
