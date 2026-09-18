@@ -117,6 +117,7 @@ const SetWindowLongPtrW = bind(user32, 'uintptr_t __stdcall SetWindowLongPtrW(ui
 const GWLP_WNDPROC = -4;
 const WM_MOUSEACTIVATE = 0x0021;
 const MA_NOACTIVATE = 3;
+const BARWNDPROC = kproto('uintptr_t __stdcall BARWNDPROC(uintptr_t hwnd, uint32_t msg, uintptr_t wp, int64 lp)');
 let _barPrevProc = 0;
 const _barProcCb = (koffi && user32) ? koffi.register((hwnd, msg, wp, lp) => {
   if (msg === WM_MOUSEACTIVATE) return MA_NOACTIVATE;
