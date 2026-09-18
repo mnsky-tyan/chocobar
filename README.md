@@ -58,10 +58,11 @@ The file is hot-reloaded after saving. The generated comments document every ava
 | Group | Controls |
 |---|---|
 | `bar` | Height, gap, position, alignment, font, spacing, tint, opacity, backdrop, and static width |
-| `theme` | Text, pastel accents, warning, success, and divider colors |
+| `theme` | Text, pastel accents, warning, success, and divider colors; dashboard surfaces; the five daily-heatmap shades |
 | `modules` | System chip switches, polling intervals, thresholds, clock format, and optional companion |
 | `terminal` | Auto-detection, class pinning, and whether existing windows may be selected after a close |
-| `tokens` | Master switch, dashboard chip, rescan interval, heatmap range, and local usage adapters |
+| `tokens` | Master switch, dashboard chip, rescan interval, heatmap range, harness display names, dashboard section toggles, and local usage adapters |
+| `subs` | Live subscription board: provider adapters, poll interval, request deadline, and window size |
 | `general` | Tray, autostart, and debug logging |
 
 ### Subscription usage
@@ -84,11 +85,86 @@ Enable the master switch and the subscription source, then point `usagePath` at 
 
 Keep the file local and do not place secrets in the repository.
 
+### Subscription plans board (live quotas)
+
+Separately from the plan-usage file above, the subscription board shows live
+rate-limit / quota windows for plans you wire up under `subs.providers`. Each
+entry picks an adapter `type` (`chatgpt` reads a Codex CLI login, `zai` reads
+a Z.ai coding-plan credential), a display `label`, and where the credential
+lives. All entries ship disabled; nothing is pre-wired to any vendor. The
+poll interval (`intervalMinutes`), per-provider request deadline
+(`fetchTimeoutMs`), and board window size are configurable. A provider whose
+request fails or times out keeps its last good windows on the board, marked
+stale, until the next successful poll.
+
+### Harness names and dashboard sections
+
+The dashboard is harness-agnostic: source ids (`zcode`, `zai`, `pi`,
+`opencode`, `mimo`) are display names by default, and `tokens.labels` maps
+any of them to your own name (for example `{ "opencode": "opencode(wsl)" }`).
+`tokens.dashboard` switches individual dashboard sections (stat cards,
+heatmap, day detail, by-app, by-model, plan usage) on or off.
+
+## Token accounting
+
+Every total in the bar and dashboard is:
+
+```
+total = input + output
+```
+
+Both columns are cache-EXCLUSIVE raw token counts - the common billing
+convention (base prompt + completion; cache tracked separately at its own
+rate). The `cache R` / `cache W` dashboard columns are per-request breakdowns
+the providers report beside the totals; they are NEVER added to any total
+(adding them would double the provider's own reported numbers). Reasoning
+tokens, where a store reports them separately, are also breakdown-only.
+
+Per source, the raw numbers come from the provider's own usage records:
+
+| Source | Record read | Provider-reported semantics | Stored input (raw) |
+|---|---|---|---|
+| `zcode` (+ legacy `zai` DB turns) | `turn_usage` row in the zcode SQLite DB | `computed_total_tokens == input_tokens + output_tokens + reasoning_tokens` on every row (verified on the live DB), so `input_tokens` already INCLUDES the cache columns `cache_creation_input_tokens` / `cache_read_input_tokens` | `input_tokens - cacheWrite - cacheRead` |
+| `zai` / `pi` sessions | assistant `message.usage` in the session JSONL | `usage.totalTokens == input + output + cacheRead + cacheWrite` (verified on real transcripts), so `input` EXCLUDES cache | `usage.input` as stored |
+| `opencode` | assistant message `tokens` in the SQLite `message.data` JSON (or the legacy `msg_*.json` tree) | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
+| `mimo` | assistant message `tokens` from the local desktop API | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
+| `subscription` | your plan-usage JSON (`used` / `total` per plan) | n/a (credits, not tokens) | never mixed into token totals |
+
+Exact read sites, for reference:
+
+- zcode: `scripts/zcode_query.py` (the SQL) and `_scanZcode` in `src/tokens.js`
+- zai/pi sessions: `_readSessionTail` in `src/tokens.js`
+- opencode: `_scanOpencodeDb` / `_scanOpencodeFiles` in `src/tokens.js`
+- mimo: `_scanMimo` in `src/tokens.js`
+- aggregation: `aggregate()` in `src/tokens.js` (`rowTotal = input + output`)
+
+`npm test` cross-checks the scanner against a raw walk of a real session
+store: record counts and per-column sums must match exactly, and the
+portable suite pins the aggregation contract (totals = input + output,
+cache as breakdown only).
+
 ## Use the bar and dashboard
 
 - Click the usage chip or use `Ctrl+Alt+D` to open the dashboard.
 - Double-launch Chocobar to open the dashboard when it is already running.
 - Right-click the bar or tray icon for dashboard, reload, config, and quit actions.
+- Optional leftmost shortcut chip: set `modules.shortcut` (`enabled`, `label`,
+  `command`) in the config and the bar shows a bolt button that runs any
+  command you put there.
+- Pet toggle chip: set `modules.pet` (`enabled`, `exePath`, optional `label`)
+  and the bar shows a bow button leftmost that launches/stops the exe, reading
+  on/off from the live process (Windows). The label prefixes the chip text.
+- Subscription chip: with `subs.enabled` the bar shows a gauge chip exactly
+  right of the usage chip, rotating once a minute through every enabled
+  provider's week-window remaining percentage; click opens the plan board.
+- Launch with a specific config file: `chocobar --config <path>` (or the
+  `WIZBAR_CONFIG` environment variable). The shipped default
+  (`~/.wizbar/config.json`) is created as an annotated, all-neutral template
+  on first run; an explicit `--config` file is never auto-created, so a plain
+  launch always shows the neutral product and personal wiring stays in
+  personal files.
+- The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example
+  `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
 - On Windows, the bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
 

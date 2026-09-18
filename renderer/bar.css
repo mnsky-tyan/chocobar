@@ -109,4 +109,7 @@ body {
 #seg-pet .ico { color: var(--pink-deep); }
 #seg-pet:hover .ico { color: var(--pink-deep); }
 
+#seg-subs .ico { color: var(--pink-deep); }
+#seg-subs:hover .ico { color: var(--pink-deep); }
+
 body.rtl-shadow #bar { box-shadow: none; }

@@ -1,0 +1,215 @@
+/* Subscription Board — donut pies per plan window.
+   Pale surface matching the token dashboard; every color follows the shared
+   theme config (fg/pink/yellow/warn/good/divider), so the board is fully
+   user-themable. Geometry is pies, not meters. */
+:root {
+  --bg: #FDEFF2;
+  --fg: #080808;
+  --fg-dim: #5a5245;
+  --pink: #F0DEE4;
+  --pink-deep: #D493AA;
+  --pink-bg: #FEF7F9;
+  --yellow: #B8A96A;
+  --yellow-bg: #F5F0D8;
+  --warn: #A00000;
+  --good: #006400;
+  --divider: #D9CCB2;
+  --font: 'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace;
+  --track: rgba(90, 82, 69, 0.12);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { background: var(--pink-bg, #FEF7F9); }
+
+body {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg);
+  height: 100vh;
+  user-select: none;
+}
+
+#board {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px 12px;
+  gap: 14px;
+  background: var(--bg);
+}
+
+#titlebar {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--divider);
+}
+
+#title { font-size: 15px; font-weight: 700; display: flex; align-items: baseline; gap: 10px; }
+#title .logo { color: var(--pink-deep); font-size: 16px; }
+
+#titlebar-right { -webkit-app-region: no-drag; display: flex; gap: 6px; }
+
+#titlebar-right button {
+  font-family: var(--font);
+  font-size: 11px;
+  background: transparent;
+  color: var(--fg-dim);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+#titlebar-right button:hover { background: var(--pink-bg); color: var(--pink-deep); border-color: var(--pink); }
+#titlebar-right button:disabled { opacity: 0.45; cursor: default; }
+
+#panels {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 12px;
+  overflow: auto;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px dashed var(--divider);
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.panel-id { display: flex; align-items: center; gap: 8px; }
+.panel-name { font-size: 13px; font-weight: 700; }
+.panel-plan { font-size: 10px; color: var(--fg-dim); }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+.pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--track);
+  color: var(--fg-dim);
+}
+.pill.ok { color: var(--good); border-color: rgba(0, 100, 0, 0.25); background: rgba(0, 100, 0, 0.08); }
+.pill.warn { color: #8a6d00; border-color: rgba(184, 169, 106, 0.55); background: rgba(216, 199, 122, 0.25); }
+.pill.critical, .pill.blocked { color: var(--warn); border-color: rgba(160, 0, 0, 0.3); background: rgba(160, 0, 0, 0.08); }
+.pill.no-auth, .pill.auth-expired, .pill.error, .pill.unknown { color: var(--fg-dim); }
+.pill.stale { color: var(--yellow); border-color: rgba(184, 169, 106, 0.4); background: rgba(184, 169, 106, 0.12); }
+
+.panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pies {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+  justify-content: center;
+}
+
+.pie-card {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 14px;
+  align-items: center;
+}
+
+.pie-wrap { position: relative; width: 96px; height: 96px; }
+
+.pie { width: 96px; height: 96px; transform: rotate(-90deg); }
+.pie-track {
+  fill: none;
+  stroke: var(--track);
+  stroke-width: 5.5;
+}
+.pie-arc {
+  fill: none;
+  stroke-width: 5.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray 280ms ease, stroke 280ms ease;
+}
+
+.pie-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.pie-pct {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.pie-pct.ok { color: var(--good); }
+.pie-pct.mid { color: var(--yellow); }
+.pie-pct.crit { color: var(--warn); }
+.pie-pct small { font-size: 10px; font-weight: 600; margin-left: 1px; }
+.pie-cap { font-size: 9px; color: var(--fg-dim); margin-top: 2px; }
+
+.pie-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pie-label {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.pie-sub { font-size: 10px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+
+.pie-empty {
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding: 12px 0;
+}
+
+.panel-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px dashed var(--divider);
+  display: flex;
+  justify-content: flex-end;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+#footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--fg-dim);
+  padding-top: 2px;
+}
+
+.hidden { display: none !important; }
