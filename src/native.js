@@ -107,32 +107,16 @@ function setNoActivate(hwnd) {
   } catch (_) { return false; }
 }
 
-// NOACTIVATE alone still lets Electron's WM_MOUSEACTIVATE handler raise the
-// window to the top of the band on click (a visible flicker above foreground
-// apps before the terminal raise lands). Subclass the bar's wndproc to answer
-// WM_MOUSEACTIVATE with MA_NOACTIVATE: mouse messages still deliver to the
-// page (chips work), but the window never rises on click.
-const CallWindowProcW = bind(user32, 'uintptr_t __stdcall CallWindowProcW(uintptr_t prev, uintptr_t hwnd, uint32_t msg, uintptr_t wp, int64 lp)');
-const SetWindowLongPtrWCb = bind(user32, 'uintptr_t __stdcall SetWindowLongPtrW(uintptr_t hwnd, int nIndex, BARWNDPROC *cb)');
-const GetWindowLongPtrW = bind(user32, 'uintptr_t __stdcall GetWindowLongPtrW(uintptr_t hwnd, int nIndex)');
-const GWLP_WNDPROC = -4;
-const WM_MOUSEACTIVATE = 0x0021;
-const MA_NOACTIVATE = 3;
-const BARWNDPROC = kproto('uintptr_t __stdcall BARWNDPROC(uintptr_t hwnd, uint32_t msg, uintptr_t wp, int64 lp)');
-let _barPrevProc = 0;
-const _barProcCb = (koffi && user32) ? koffi.register((hwnd, msg, wp, lp) => {
-  if (msg === WM_MOUSEACTIVATE) return MA_NOACTIVATE;
-  try { return CallWindowProcW(_barPrevProc, hwnd, msg, wp, lp); }
-  catch (_) { return 0; }
-}, 'BARWNDPROC *') : null;
-function noActivateProc(hwnd) {
-  if (_barProcCb === null) return false;
+// The bar must never activate on click: activation raises it to the top of
+// the band (a flicker above every app) and steals foreground from the very
+// terminal the click serves. WS_EX_NOACTIVATE keeps mouse events delivering
+// to the page while the window refuses focus and z-rising. Idempotent.
+function setNoActivate(hwnd) {
   try {
-    const prev = SetWindowLongPtrWCb(hwnd, GWLP_WNDPROC, _barProcCb);
-    if (prev) { _barPrevProc = prev; console.log('[wizbar] bar wndproc subclassed, prev=', prev); return true; }
-    console.error('[wizbar] bar wndproc subclass failed');
-    return false;
-  } catch (e) { console.error('[wizbar] bar wndproc subclass threw:', e.message); return false; }
+    const ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (ex & WS_EX_NOACTIVATE) return true;
+    return !!SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+  } catch (_) { return false; }
 }
 
 function isTopmost(hwnd) {
@@ -308,12 +292,8 @@ const EVENT_SYSTEM_FOREGROUND = 0x0003;
 const WINEVENT_OUTOFCONTEXT = 0x0;
 let _fgCallback = null;
 const _fgHook = (koffi && user32) ? koffi.register((hHook, event, hwnd, idObject, idChild, idThread, time) => {
-  try {
-    if (event === EVENT_SYSTEM_FOREGROUND && _fgCallback) {
-      console.log('[wizbar] fg event');
-      _fgCallback();
-    }
-  } catch (e) { console.error('[wizbar] fg hook cb failed:', e.message); }
+  try { if (event === EVENT_SYSTEM_FOREGROUND && _fgCallback) _fgCallback(); }
+  catch (e) { console.error('[wizbar] fg hook cb failed:', e.message); }
 }, 'WINEVENTPROC *') : null;
 function hookForegroundChange(cb) {
   _fgCallback = cb || null;
@@ -944,7 +924,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate, noActivateProc, hookForegroundChange,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate, hookForegroundChange,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
