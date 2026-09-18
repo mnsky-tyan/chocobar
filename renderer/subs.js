@@ -24,17 +24,6 @@ function fmtReset(ms) {
   return `reset in ${m}m`;
 }
 
-/** Remaining available: >70 green, >30 yellow, else red (all theme colors). */
-function remClass(rem) {
-  if (rem > 70) return 'ok';
-  if (rem > 30) return 'mid';
-  return 'crit';
-}
-
-function remColor(rem) {
-  return rem > 70 ? 'var(--pie-ok)' : rem > 30 ? 'var(--pie-mid)' : 'var(--pie-crit)';
-}
-
 function statusLabel(s) {
   return ({
     ok: 'ok',
@@ -64,15 +53,15 @@ function applyTheme(t) {
   }
 }
 
-// Donut: remaining arc (countdown) over a pale used track.
+// Donut: remaining arc (countdown) over a pale used track. Always pale pink -
+// status still reads from the number and the status pill.
 function pieSvg(remaining) {
   const rem = Math.min(100, Math.max(0, remaining));
   const dash = rem.toFixed(1);
-  const color = remColor(rem);
   return `<svg class="pie" viewBox="0 0 42 42" aria-hidden="true">
     <circle class="pie-track" cx="21" cy="21" r="15.9155" />
     <circle class="pie-arc" cx="21" cy="21" r="15.9155"
-      stroke="${color}"
+      stroke="var(--pie-pink)"
       stroke-dasharray="${dash} ${(100 - rem).toFixed(1)}"
       stroke-dashoffset="25" />
   </svg>`;
@@ -140,7 +129,7 @@ function renderProvider(key, p, idx) {
         <div class="pie-wrap">
           ${pieSvg(rem)}
           <div class="pie-center">
-            <span class="pie-pct ${remClass(rem)}">${shown}<small>%</small></span>
+            <span class="pie-pct">${shown}<small>%</small></span>
             <span class="pie-cap">left</span>
           </div>
         </div>
