@@ -281,7 +281,7 @@ const WINEVENT_OUTOFCONTEXT = 0x0;
 let _fgCallback = null;
 const _fgHook = (koffi && user32) ? koffi.register((hHook, event, hwnd, idObject, idChild, idThread, time) => {
   try { if (event === EVENT_SYSTEM_FOREGROUND && _fgCallback) _fgCallback(); } catch (_) {}
-}, _winEventProto) : null;
+}, 'WINEVENTPROC *') : null;
 function hookForegroundChange(cb) {
   _fgCallback = cb || null;
   if (!cb) return true;
