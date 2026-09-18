@@ -116,10 +116,20 @@ const native = require('../src/native');
 // --- 4. config defaults sanity (public-release neutrality) --------------------
 {
   const { DEFAULTS } = require('../src/config');
-  check('config: token sources off, no paths',
-    DEFAULTS.tokens.enabled === false &&
+  // Neutrality = nothing is READ: every source off, every path empty. The
+  // token master switch and the three chips ship VISIBLE so a fresh install
+  // shows the toggles; with no sources wired they render "–"/"–" and scan
+  // nothing.
+  check('config: token sources off, no paths, master on with nothing to scan',
+    DEFAULTS.tokens.enabled === true &&
     Object.values(DEFAULTS.tokens.sources).every((s) => !s.enabled) &&
-    Object.values(DEFAULTS.tokens.sources).every((s) => !s.dbPath && !s.sessionsDir && !s.storageDir));
+    Object.values(DEFAULTS.tokens.sources).every((s) => !s.dbPath && !s.sessionsDir && !s.storageDir) &&
+    DEFAULTS.tokens.sources.subscription.enabled === false &&
+    DEFAULTS.tokens.sources.subscription.usagePath === '');
+  check('config: the three bar toggles ship visible (shortcut/tokens/subs)',
+    DEFAULTS.modules.shortcut.enabled === true &&
+    DEFAULTS.tokens.showOnBar === true &&
+    DEFAULTS.subs.enabled === true);
   check('config: pet off, empty path; agents module fully removed',
     DEFAULTS.modules.pet.enabled === false && DEFAULTS.modules.pet.exePath === '' &&
     !('agents' in DEFAULTS.modules));
@@ -363,8 +373,8 @@ const native = require('../src/native');
   const { SubsTracker } = require('../src/subs');
   const { DEFAULTS } = require('../src/config');
 
-  check('subs: defaults ship everything off with sane bounds',
-    DEFAULTS.subs.enabled === false && DEFAULTS.subs.fetchTimeoutMs === 20000 &&
+  check('subs: board visible by default, provider examples off, sane bounds',
+    DEFAULTS.subs.enabled === true && DEFAULTS.subs.fetchTimeoutMs === 20000 &&
     Array.isArray(DEFAULTS.subs.providers) && DEFAULTS.subs.providers.every((p) => p.enabled === false));
 
   const baseCfg = (over) => ({ ...DEFAULTS, subs: {

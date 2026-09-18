@@ -4,7 +4,7 @@ const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } =
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
-const { ConfigManager, CONFIG_PATH, APP_DIR, resolveConfigPath } = require('./src/config');
+const { ConfigManager, CONFIG_PATH, APP_DIR, TEMPLATE, resolveConfigPath } = require('./src/config');
 const { TerminalTracker } = require('./src/tracker');
 const { MetricsEngine } = require('./src/metrics');
 const { TokenTracker } = require('./src/tokens');
@@ -227,6 +227,17 @@ function reloadChocobar() {
   app.quit();
 }
 
+// "Edit config" must never hit the user with a Windows "cannot find" dialog:
+// if the resolved config file vanished (or was launched against a path that
+// was later cleaned up), regenerate the annotated template first, then open it.
+function openConfigFile() {
+  const p = (configManager && configManager.path) || CONFIG_PATH;
+  try {
+    if (!fs.existsSync(p)) fs.writeFileSync(p, TEMPLATE, 'utf8');
+  } catch (e) { DBG('config template restore failed:', e.message); }
+  shell.openPath(p);
+}
+
 // One source of truth for the tray menu and the bar context menu. Only the
 // tray gets "Open config folder"; every label and action is otherwise
 // identical, so the two menus cannot drift apart.
@@ -236,7 +247,7 @@ function buildChocobarMenu(isTray) {
     { label: 'Subscription dashboard', click: () => openSubs() },
     { type: 'separator' },
     { label: 'Reload chocobar', click: () => reloadChocobar() },
-    { label: 'Edit config', click: () => shell.openPath((configManager && configManager.path) || CONFIG_PATH) }
+    { label: 'Edit config', click: () => openConfigFile() }
   ];
   if (isTray) {
     items.push({ label: 'Open config folder', click: () => shell.showItemInFolder((configManager && configManager.path) || CONFIG_PATH) });
