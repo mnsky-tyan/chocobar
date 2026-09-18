@@ -166,6 +166,14 @@ document.body.addEventListener('contextmenu', (e) => {
   window.wizbar.contextMenu();
 });
 
+// Clicking the strip (not a chip) raises the followed terminal - the bar is
+// the terminal's title-strip substitute, so activating it activates the
+// terminal. Chips handle their own clicks and stop here via the .seg check.
+document.body.addEventListener('click', (e) => {
+  if (e.target.closest('.seg, .clickable, button')) return;
+  window.wizbar.raiseTerminal();
+});
+
 function setVal(id, text, cls) {
   const s = segEls[id];
   if (!s) return;
