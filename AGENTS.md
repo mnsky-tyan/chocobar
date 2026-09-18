@@ -16,9 +16,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
   public-release default guarantees; headless, any platform) + `scripts/pi_source_regression.js`
   (pi session-log source; synthetic fixture + raw-sum cross-check when a real
-  `~/.pi/agent/sessions` exists). The real-store cross-check takes a stable
+  `~/.pi/agent/sessions` exists) + `scripts/model_case_regression.js` (case-variant
+  model grouping in aggregate(); synthetic, self-skips its optional live-store half).
+  The real-store cross-check takes a stable
   snapshot (two agreeing raw walks around the scan) because a live pi session
   appends usage records while the test runs; it SKIPs if the store never quiets.
+  pet_test.js (old tasklist-path E2E) was stripped in the v1.0.0 pass.
 - Windows-side: `scripts/token_regression.js` (zcode+zai attribution; needs those stores),
   `scripts/cputemp_regression.js` (HWiNFO shm reader, Windows only).
 
