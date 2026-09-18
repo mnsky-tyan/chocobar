@@ -172,6 +172,7 @@ class BarWindow {
   // renders as a raw grey acrylic strip along the bar's bottom edge.
   healSize(targetW, targetH, scale) {
     if (!this.win || this.win.isDestroyed() || !this.hwnd) return;
+    if (native.inMoveSize()) return; // never fight a live drag
     // Self-heal visibility — but ONLY when the bar belongs on screen. Without
     // this guard the heal loop fights hide() on minimize/detach (flicker).
     if (!this.win.isVisible() && this._shouldShow && this._sizeTarget) {
