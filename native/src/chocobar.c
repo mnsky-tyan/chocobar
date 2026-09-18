@@ -1,0 +1,271 @@
+// chocobar.c - native Win32 Chocobar bar (v1.0 native rewrite, phase 1)
+//
+// One translation unit, zero runtime dependencies beyond Windows itself.
+// Reads the SAME config file as the Electron build (%USERPROFILE%\.wizbar\
+// config.json or --config <path>); keys it does not implement are ignored.
+//
+// Phase 1 scope: acrylic bar (DWM system backdrop + Direct2D), terminal
+// follow with z-glue and move/size hands-off, chips (cpu/cputemp/ram/
+// volume/battery/clock + shortcut/pet/custom), tray, hot-reload, template
+// materialization, single instance, no-activate click behavior.
+// Phase 2 (not here): token analytics + dashboards, subscription board,
+// bluetooth battery, autostart writing.
+
+#define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
+#define UNICODE
+#define _UNICODE
+#define INITGUID
+
+#include <initguid.h>
+#include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
+#include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
+#include <dxgi.h>
+#include <dxgi1_2.h>
+#include <dwrite.h>
+#include <pdh.h>
+#include <shellapi.h>
+#include <mmdeviceapi.h>
+#include <endpointvolume.h>
+#include <tlhelp32.h>
+#include <stdio.h>
+#include <wctype.h>
+#include <stdint.h>
+#include "jsmn.h"
+
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "pdh.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
+
+#define APP_CLASS   L"ChocobarBar"
+#define APP_MUTEX   L"ChocobarSingleInstanceMutex"
+#define WM_TRAY     (WM_APP + 1)
+#define TIMER_METRICS 1
+#define TIMER_FOLLOW  2
+#define TIMER_CONFIG  3
+#define MAX_CUSTOM 16
+
+// ---------------------------------------------------------------- util ----
+static void dbg(const char *fmt, ...) {
+    (void)fmt;
+}
+
+
+// --------------------------------------------------------------- config ----
+typedef struct {
+    int enabled;
+    wchar_t *icon, *label, *color, *title, *command;
+    int toggle;
+} CustomChip;
+
+typedef struct {
+    int height, gap, fontSize, backgroundAlpha, align;
+    wchar_t *tint, *backdrop, *fontFamily;
+
+    wchar_t *fg, *pinkDeep, *divider, *warn, *pinkBg;
+
+    int mGpu, mCpu, mCpuTemp, mRam, mVolume, mBattery, mClock;
+    int cpuWarnAt, ramWarnAt, tempWarnAt;
+
+    int shortcutEnabled;
+    wchar_t *shortcutLabel, *shortcutCommand;
+
+    int petEnabled;
+    wchar_t *petLabel, *petExePath;
+
+    CustomChip custom[MAX_CUSTOM];
+    int customCount;
+
+    wchar_t *terminalClassName;
+    wchar_t *clockFormat;
+    int showTray;
+} Config;
+
+static Config g_cfg;
+static FILETIME g_cfgMtime;
+static int g_cfgLoaded = 0;
+
+static wchar_t *jdup(const char *js, const jsmntok_t *t) {
+    return utf8ToWide(js + t->start, t->end - t->start);
+}
+
+// find key `key` (len `kl`) among the children of object token `obj`
+static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key) {
+    if (t[obj].type != JSMN_OBJECT) return -1;
+    int kids = t[obj].size;
+    int kl = (int)strlen(key);
+    int k = obj + 1;
+    for (int j = 0; j < kids; j++) {
+        jsmntok_t *kt = &t[k];
+        if (kt->type == JSMN_STRING && kt->end - kt->start == kl &&
+            memcmp(js + kt->start, key, kl) == 0) return k + 1;
+        jsmntok_t *v = &t[k + 1];
+        if (v->type == JSMN_OBJECT || v->type == JSMN_ARRAY) {
+            // object children are key+value PAIRS (2N tokens); array children are N
+            int end = k + 2, stack = v->size * (v->type == JSMN_OBJECT ? 2 : 1);
+            while (stack > 0) {
+                jsmntok_t *e = &t[end];
+                if (e->type == JSMN_OBJECT || e->type == JSMN_ARRAY) stack += e->size - 1; else stack--;
+                end++;
+            }
+            k = end;
+        } else k += 2;
+    }
+    return -1;
+}
+
+static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
+    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return def;
+    char b[32]; int len = t[i].end - t[i].start;
+    if (len <= 0 || len >= (int)sizeof(b)) return def;
+    memcpy(b, js + t[i].start, len); b[len] = 0;
+    return atoi(b);
+}
+
+static wchar_t *jstrTok(const char *js, const jsmntok_t *t, int i, const wchar_t *def) {
+    if (i >= 0 && t[i].type == JSMN_STRING) {
+        wchar_t *w = jdup(js, &t[i]);
+        if (w) return w;
+    }
+    return def ? wideDup(def) : NULL;
+}
+
+static int jboolDefault(const char *js, const jsmntok_t *t, int i, int def) {
+    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return def;
+    int len = t[i].end - t[i].start;
+    if (len == 4 && memcmp(js + t[i].start, "true", 4) == 0) return 1;
+    if (len == 5 && memcmp(js + t[i].start, "false", 5) == 0) return 0;
+    return def;
+}
+
+static void freeConfig(Config *c) {
+    wideFree(&c->tint); wideFree(&c->backdrop); wideFree(&c->fontFamily);
+    wideFree(&c->fg); wideFree(&c->pinkDeep); wideFree(&c->divider);
+    wideFree(&c->warn); wideFree(&c->pinkBg);
+    wideFree(&c->shortcutLabel); wideFree(&c->shortcutCommand);
+    wideFree(&c->petLabel); wideFree(&c->petExePath);
+    wideFree(&c->terminalClassName);
+    wideFree(&c->clockFormat);
+    for (int i = 0; i < c->customCount; i++) {
+        wideFree(&c->custom[i].icon); wideFree(&c->custom[i].label);
+        wideFree(&c->custom[i].color); wideFree(&c->custom[i].title);
+        wideFree(&c->custom[i].command);
+    }
+    c->customCount = 0;
+}
+
+static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
+    memset(c, 0, sizeof(*c));
+    c->height = 24; c->gap = 8; c->fontSize = 12; c->backgroundAlpha = 110;
+    c->tint = wideDup(L"#FBF2E2"); c->backdrop = wideDup(L"acrylic");
+    c->fontFamily = wideDup(L"Cascadia Mono");
+    c->fg = wideDup(L"#080808"); c->pinkDeep = wideDup(L"#D493AA");
+    c->divider = wideDup(L"#D9CCB2"); c->warn = wideDup(L"#A00000");
+    c->pinkBg = wideDup(L"#FEF7F9");
+    c->mGpu = c->mCpu = c->mCpuTemp = c->mRam = c->mVolume = c->mBattery = c->mClock = 1;
+    c->cpuWarnAt = 85; c->ramWarnAt = 90; c->tempWarnAt = 85;
+    c->showTray = 1;
+    c->clockFormat = wideDup(L"{MMM} {dd} ({Wkk}) {HH}:{mm}");
+
+    if (root < 0 || t[root].type != JSMN_OBJECT) return;
+    int bar = jobjGet(js, t, root, "bar");
+    if (bar >= 0) {
+        c->height     = jintTok(js, t, jobjGet(js, t, bar, "height"), c->height);
+        c->gap        = jintTok(js, t, jobjGet(js, t, bar, "gap"), c->gap);
+        c->fontSize   = jintTok(js, t, jobjGet(js, t, bar, "fontSize"), c->fontSize);
+        c->backgroundAlpha = jintTok(js, t, jobjGet(js, t, bar, "backgroundAlpha"), c->backgroundAlpha);
+        wideFree(&c->tint);
+        c->tint  = jstrTok(js, t, jobjGet(js, t, bar, "backgroundTint"), c->tint);
+        wideFree(&c->backdrop);
+        c->backdrop = jstrTok(js, t, jobjGet(js, t, bar, "backdrop"), c->backdrop);
+        wideFree(&c->fontFamily);
+        c->fontFamily = jstrTok(js, t, jobjGet(js, t, bar, "fontFamily"), c->fontFamily);
+        c->align      = jintTok(js, t, jobjGet(js, t, bar, "align"), 0) == 2 ? 2 : 1; // 1=right 2=left
+    }
+    int theme = jobjGet(js, t, root, "theme");
+    if (theme >= 0) {
+        wideFree(&c->fg);       c->fg       = jstrTok(js, t, jobjGet(js, t, theme, "fg"), c->fg);
+        wideFree(&c->pinkDeep); c->pinkDeep = jstrTok(js, t, jobjGet(js, t, theme, "pinkDeep"), c->pinkDeep);
+        wideFree(&c->divider);  c->divider  = jstrTok(js, t, jobjGet(js, t, theme, "divider"), c->divider);
+        wideFree(&c->warn);     c->warn     = jstrTok(js, t, jobjGet(js, t, theme, "warn"), c->warn);
+        wideFree(&c->pinkBg);   c->pinkBg   = jstrTok(js, t, jobjGet(js, t, theme, "pinkBg"), c->pinkBg);
+    }
+    int modules = jobjGet(js, t, root, "modules");
+    if (modules >= 0) {
+        int m;
+        m = jobjGet(js, t, modules, "gpu");      c->mGpu     = m < 0 ? 1 : jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+        m = jobjGet(js, t, modules, "cpu");      c->mCpu     = m < 0 ? 1 : jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+        if (m >= 0) c->cpuWarnAt = jintTok(js, t, jobjGet(js, t, m, "warnAt"), c->cpuWarnAt);
+        m = jobjGet(js, t, modules, "cputemp");  c->mCpuTemp = m < 0 ? 1 : jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+        if (m >= 0) c->tempWarnAt = jintTok(js, t, jobjGet(js, t, m, "warnAt"), c->tempWarnAt);
+        m = jobjGet(js, t, modules, "ram");      c->mRam     = m < 0 ? 1 : jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+        if (m >= 0) c->ramWarnAt = jintTok(js, t, jobjGet(js, t, m, "warnAt"), c->ramWarnAt);
+        m = jobjGet(js, t, modules, "volume");   c->mVolume  = m < 0 ? 1 : jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+        m = jobjGet(js, t, modules, "battery");  c->mBattery = m < 0 ? 1 : jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+        m = jobjGet(js, t, modules, "clock");
+        if (m >= 0) {
+            c->mClock = jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
+            int f = jobjGet(js, t, m, "format");
+            if (f >= 0) { wideFree(&c->clockFormat); c->clockFormat = jstrTok(js, t, f, c->clockFormat); }
+        }
+        m = jobjGet(js, t, modules, "shortcut");
+        if (m >= 0) {
+            c->shortcutEnabled = jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 0);
+            c->shortcutLabel   = jstrTok(js, t, jobjGet(js, t, m, "label"), L"");
+            c->shortcutCommand = jstrTok(js, t, jobjGet(js, t, m, "command"), L"");
+        }
+        m = jobjGet(js, t, modules, "pet");
+        if (m >= 0) {
+            c->petEnabled = jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 0);
+            c->petLabel   = jstrTok(js, t, jobjGet(js, t, m, "label"), L"");
+            c->petExePath = jstrTok(js, t, jobjGet(js, t, m, "exePath"), L"");
+        }
+        int arr = jobjGet(js, t, modules, "custom");
+        if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
+            int n = t[arr].size;
+            if (n > MAX_CUSTOM) n = MAX_CUSTOM;
+            int k = arr + 1;
+            for (int j = 0; j < n; j++) {
+                jsmntok_t *e = &t[k];
+                int en = -1;
+                if (e->type == JSMN_OBJECT) {
+                    CustomChip *cc = &c->custom[c->customCount];
+                    memset(cc, 0, sizeof(*cc));
+                    cc->enabled = 1; cc->toggle = 0;
+                    en = jobjGet(js, t, k, "enabled");   cc->enabled = jintTok(js, t, en, 1);
+                    en = jobjGet(js, t, k, "toggle");    cc->toggle  = jintTok(js, t, en, 0);
+                    cc->icon    = jstrTok(js, t, jobjGet(js, t, k, "icon"), L"");
+                    cc->label   = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
+                    cc->color   = jstrTok(js, t, jobjGet(js, t, k, "color"), L"");
+                    cc->title   = jstrTok(js, t, jobjGet(js, t, k, "title"), NULL);
+                    cc->command = jstrTok(js, t, jobjGet(js, t, k, "command"), L"");
+                    c->customCount++;
+                }
+                // advance k past this element (object elements own 2N child tokens)
+                if (e->type == JSMN_OBJECT || e->type == JSMN_ARRAY) {
+                    int end = k + 1, stack = e->size * (e->type == JSMN_OBJECT ? 2 : 1);
+                    while (stack > 0) {
+                        jsmntok_t *x = &t[end];
+                        if (x->type == JSMN_OBJECT || x->type == JSMN_ARRAY) stack += x->size - 1; else stack--;
+                        end++;
+                    }
+                    k = end;
+                } else k += 2;
+            }
+        }
+    }
+    int term = jobjGet(js, t, root, "terminal");
+    if (term >= 0) c->terminalClassName = jstrTok(js, t, jobjGet(js, t, term, "className"), L"");
+    int general = jobjGet(js, t, root, "general");
+    if (general >= 0) c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
+}
