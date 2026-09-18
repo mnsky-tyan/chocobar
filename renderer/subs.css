@@ -16,11 +16,9 @@
   --divider: #D9CCB2;
   --font: 'MesloLGLDZ Nerd Font', 'Cascadia Mono', Consolas, monospace;
   --track: rgba(90, 82, 69, 0.12);
-  /* Pie palette: paler, less vigorous cousins of the theme's good/yellow/
-     warn so the big donuts stay airy on the pastel board. */
-  --pie-ok: #93AF8E;
-  --pie-mid: #C9BD8E;
-  --pie-crit: #CE8F8F;
+  /* Pie palette: the donuts are always pale pink, regardless of remaining
+     percent - status still reads from the number and the status pill. */
+  --pie-pink: #D493AA;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -177,10 +175,8 @@ body {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  color: var(--pink-deep);
 }
-.pie-pct.ok { color: var(--pie-ok); }
-.pie-pct.mid { color: var(--pie-mid); }
-.pie-pct.crit { color: var(--pie-crit); }
 .pie-pct small { font-size: 10px; font-weight: 600; margin-left: 1px; }
 .pie-cap { font-size: 9px; color: var(--fg-dim); margin-top: 2px; }
 
