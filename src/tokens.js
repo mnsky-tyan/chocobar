@@ -775,11 +775,13 @@ class TokenTracker extends require('events') {
   }
 
   // --- aggregation -----------------------------------------------------------------
-  // Totals count input + output only, and both columns are cache-EXCLUSIVE
-  // (see the file header). Cache read/write are detail columns that a table
-  // may show beside the total; adding them would double the provider's own
-  // reported numbers.
+  // TOTAL convention (the common one - ccusage & co): a record's total counts
+  // EVERY token the provider processed: input + output + cacheRead + cacheWrite.
+  // The stored input/output stay cache-EXCLUSIVE raw counts (see the file
+  // header) and the cache columns are the breakdown that explains the total;
+  // no doubling because the total is defined as their sum.
   aggregate() {
+    const rowTotal = (r) => (r.input || 0) + (r.output || 0) + (r.cacheRead || 0) + (r.cacheWrite || 0);
     if (!this.cfg.enabled) {
       // Master off: no sources are running, so the only honest dashboard state
       // is all zeros with nothing enabled.
@@ -792,7 +794,6 @@ class TokenTracker extends require('events') {
         subscription: null
       };
     }
-    const rowTotal = (r) => (r.input || 0) + (r.output || 0);
     const byDay = new Map();     // dateKey -> { total, apps: { app: agg } }
     const byApp = new Map();     // app -> agg
     const byModel = new Map();   // "app|lowercased model" -> agg
