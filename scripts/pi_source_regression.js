@@ -76,11 +76,11 @@ const t = new TokenTracker(cfg);
 t._scanPiAgentSessions();
 
 // expected: m1 + m3 (projA) + m4 (projB) + m6 (corrupt) = 4 records
-// totals are cache-EXCLUSIVE (raw input, raw output; cache is detail only):
-// U1 -> 100 in / 10 out, U2 -> 200 in / 20 out
+// totals are cache-INCLUSIVE (the total convention: input+output+cache):
+// U1 -> 165, U2 -> 220; the input/output columns stay raw
 const agg = t.aggregate();
 check('record count', agg.recordCount === 4, `got ${agg.recordCount}`);
-const expectAllTime = (100 + 10) + (200 + 20) + (200 + 20) + (100 + 10);
+const expectAllTime = 165 + 220 + 220 + 165;
 check('all-time total = input+output', agg.allTime === expectAllTime, `got ${agg.allTime}, want ${expectAllTime}`);
 check('app attribution', !!agg.byApp.pi, JSON.stringify(agg.byApp));
 

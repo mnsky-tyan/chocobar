@@ -83,9 +83,9 @@ function cacheSum(daysBack) {
 
 function totalOfAgg(a) {
   if (!a) return 0;
-  // Raw convention: input and output are cache-exclusive, so input+output is
-  // the provider's billed total. Cache columns are detail only.
-  return (a.input || 0) + (a.output || 0);
+  // TOTAL convention: every token processed - input + output + cache (the
+  // cache columns are the breakdown of this total, not extras).
+  return (a.input || 0) + (a.output || 0) + (a.cacheRead || 0) + (a.cacheWrite || 0);
 }
 
 function render() {
@@ -285,9 +285,9 @@ function hasCacheData(aggs) {
   return aggs.some((a) => a && (((a.cacheRead || 0) + (a.cacheWrite || 0)) > 0));
 }
 
-const TH_INPUT = '<span title="Raw prompt tokens, cache-exclusive. The cache R/W columns are counted separately and are never added to this number or to any total.">input</span>';
-const TH_CACHE_R = '<span title="Prompt-cache READ tokens reported beside the input by the provider: cached prefix tokens reused on this request. Detail only, never added to a total.">cache R</span>';
-const TH_CACHE_W = '<span title="Prompt-cache WRITE tokens the provider wrote to the cache on this request (cache_creation / cache.write). Zero when the provider does not attribute it. Detail only, never added to a total.">cache W</span>';
+const TH_INPUT = '<span title="Raw prompt tokens, cache-exclusive. The total column adds cache on top, ccusage-style: total = input + output + cache.">input</span>';
+const TH_CACHE_R = '<span title="Prompt-cache READ tokens reported beside the input by the provider: cached prefix tokens reused on this request. Part of the total, shown as its own breakdown.">cache R</span>';
+const TH_CACHE_W = '<span title="Prompt-cache WRITE tokens the provider wrote to the cache on this request (cache_creation / cache.write). Zero when the provider does not attribute it. Part of the total, shown as its own breakdown.">cache W</span>';
 
 function detailHeaders(cache) {
   return ['app', TH_INPUT, 'output', ...(cache ? [TH_CACHE_R, TH_CACHE_W] : []), 'calls'];

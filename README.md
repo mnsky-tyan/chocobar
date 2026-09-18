@@ -107,18 +107,19 @@ heatmap, day detail, by-app, by-model, plan usage) on or off.
 
 ## Token accounting
 
-Every total in the bar and dashboard is:
+Every total in the bar and dashboard follows the common usage-dashboard
+convention (ccusage & co):
 
 ```
-total = input + output
+total = input + output + cache read + cache write
 ```
 
-Both columns are cache-EXCLUSIVE raw token counts - the common billing
-convention (base prompt + completion; cache tracked separately at its own
-rate). The `cache R` / `cache W` dashboard columns are per-request breakdowns
-the providers report beside the totals; they are NEVER added to any total
-(adding them would double the provider's own reported numbers). Reasoning
-tokens, where a store reports them separately, are also breakdown-only.
+The total counts every token the provider processed. The `input` and
+`output` columns are the raw, cache-EXCLUSIVE counts, and the `cache R` /
+`cache W` columns break the rest of the total down - together they sum to
+the total, with nothing hidden and nothing doubled. Reasoning tokens,
+where a store reports them separately, are stored as a breakdown only and
+never added (providers include them in their own totals).
 
 Per source, the raw numbers come from the provider's own usage records:
 
@@ -136,12 +137,13 @@ Exact read sites, for reference:
 - zai/pi sessions: `_readSessionTail` in `src/tokens.js`
 - opencode: `_scanOpencodeDb` / `_scanOpencodeFiles` in `src/tokens.js`
 - mimo: `_scanMimo` in `src/tokens.js`
-- aggregation: `aggregate()` in `src/tokens.js` (`rowTotal = input + output`)
+- aggregation: `aggregate()` in `src/tokens.js` (`rowTotal = input + output
+  + cacheRead + cacheWrite`)
 
 `npm test` cross-checks the scanner against a raw walk of a real session
 store: record counts and per-column sums must match exactly, and the
-portable suite pins the aggregation contract (totals = input + output,
-cache as breakdown only).
+portable suite pins the aggregation contract (totals include cache;
+input/output columns stay raw).
 
 ## Use the bar and dashboard
 
