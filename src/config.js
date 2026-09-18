@@ -100,9 +100,10 @@ const DEFAULTS = {
     pet:      { enabled: false, exePath: '', label: '' },
     // Leftmost shortcut chip: a button that runs any command you put here
     // (launch an app, open a URL with the default handler, run a script).
-    // The label is the chip text; empty shows just the bolt icon.
-    // OFF in the public build.
-    shortcut: { enabled: false, label: '', command: '' },
+    // The label is the chip text; empty shows just the bolt icon. Shipped
+    // visible: with no command set it does nothing until you wire one up —
+    // set enabled:false to hide the chip.
+    shortcut: { enabled: true, label: '', command: '' },
     clock:    { enabled: true, format: '{MMM} {dd} ({Wkk}) {HH}:{mm}' }
   },
   terminal: {
@@ -114,8 +115,8 @@ const DEFAULTS = {
     reattachToExisting: false   // after followed window closes, wait for a NEW window
   },
   tokens: {
-    enabled: false,        // master switch: off = no scans, no dashboard data, no chip
-    showOnBar: true,
+    enabled: true,         // master switch: off = no scans, no dashboard data, no chip
+    showOnBar: true,       // chip on the bar; with no sources it shows "–"
     rescanMinutes: 1,
     heatmapWeeks: 26,
     // Display names for the harnesses on the dashboard, keyed by source id.
@@ -152,9 +153,10 @@ const DEFAULTS = {
   },
   // Subscription board: live plan-quota windows (rate limits / credits) for
   // whatever subscriptions you wire up. Each provider entry names an adapter
-  // type and where its credential lives; both ship disabled.
+  // type and where its credential lives; the two examples ship disabled. The
+  // gauge chip ships visible: it reads "—" until you enable a provider.
   subs: {
-    enabled: false,
+    enabled: true,
     intervalMinutes: 2,
     // Per-provider request deadline in ms (clamped 3s..60s, same as the
     // global fetchTimeoutMs). A provider that answers slower is skipped for
@@ -249,8 +251,9 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     "pet":       { "enabled": false, "exePath": "", "label": "" },
     // Shortcut chip, leftmost in the bar: a bolt button that runs "command"
     // (any program, script or URL your shell can launch). "label" is the chip
-    // text; empty shows just the bolt icon.
-    "shortcut":  { "enabled": false, "label": "", "command": "" },
+    // text; empty shows just the bolt icon. Visible by default; set false to
+    // hide it.
+    "shortcut":  { "enabled": true, "label": "", "command": "" },
     // {MMM} month, {dd} day, {Wkk} weekday (Mon..Sun), {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd} ({Wkk}) {HH}:{mm}" }
   },
@@ -267,7 +270,7 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
   "tokens": {
     // master switch: off = no scans, no dashboard data, no usage chip;
     // on = the per-source flags below decide which stores are read
-    "enabled": false,
+    "enabled": true,
     "showOnBar": true,
     // minutes between usage scans (drives the dashboard's live refresh)
     "rescanMinutes": 1,
@@ -303,9 +306,10 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
   },
   // Subscription board: live plan-quota windows for whatever subscriptions
   // you wire up. Each entry names an adapter "type" (chatgpt | zai), a display
-  // label and where its credential lives. Both examples ship disabled.
+  // label and where its credential lives. The board ships on with both
+  // examples disabled: the gauge chip reads "—" until you enable one.
   "subs": {
-    "enabled": false,
+    "enabled": true,
     "intervalMinutes": 2,
     // per-provider request deadline in ms (3s..60s); on timeout the board
     // keeps the provider's last good windows and marks them stale
@@ -383,10 +387,10 @@ class ConfigManager extends EventEmitter {
       } catch (e) {
         console.error('[wizbar] config parse error, using defaults:', e.message);
       }
-    } else if (this.path === CONFIG_PATH) {
-      // First run on the default path: write the annotated template so the
-      // user can customize. An explicit --config file is never created here —
-      // a missing one means "nothing personal wired up".
+    } else {
+      // First use of this config path: write the annotated template so there
+      // is always a file to open with "Edit config" — on the default path and
+      // on an explicit --config path alike.
       try { fs.writeFileSync(this.path, TEMPLATE, 'utf8'); } catch (_) {}
     }
     const merged = expandConfigPaths(deepMerge(DEFAULTS, user));

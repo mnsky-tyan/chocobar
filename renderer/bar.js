@@ -127,13 +127,13 @@ function rebuildSegments() {
   }
   if (theme.tokens && theme.tokens.showOnBar) {
     const s = seg('tokens', ICONS.diamond, true);
-    s.title = 'Token usage today — click to open dashboard';
+    s.title = 'Token usage today';
     s.addEventListener('click', () => window.wizbar.openDash());
     chips.push(s);
   }
   if (theme.subs && theme.subs.enabled) {
     const s = seg('subs', ICONS.gauge, true);
-    s.title = 'Subscription plan remaining — click to open board';
+    s.title = 'Subscription plan remaining';
     s.addEventListener('click', () => window.wizbar.openSubs());
     chips.push(s);
   }
@@ -249,9 +249,7 @@ function render() {
     if (petState && petState.exists) {
       const on = petState.running;
       setVal('pet', pl ? `${pl} ${on ? 'on' : 'off'}` : (on ? 'on' : 'off'), on ? 'good' : 'dim');
-      segEls.pet.root.title = on
-        ? 'Pet is out — click to send it away'
-        : 'Pet — click to summon it';
+      segEls.pet.root.title = on ? 'Pet is out' : 'Pet';
     } else {
       setVal('pet', pl, 'dim');
       segEls.pet.root.title = 'Pet — exe not found (modules.pet.exePath in config)';
@@ -283,7 +281,7 @@ function render() {
     segEls.subs.root.title = pages.length
       ? pages.map((pg) => `${pg.label}${pg.snap && pg.snap.plan ? ' ' + pg.snap.plan : ''} week: ${
           pg.win && pg.win.remainingPercent != null ? Math.round(pg.win.remainingPercent) + '% left' : '—'}`
-        ).join('\n') + '\nclick for plan board'
+        ).join('\n')
       : 'Subscription board — enable subs.providers in the config';
   }
 
@@ -302,17 +300,12 @@ function render() {
     if (t && t.state === 'ok' && t.c != null) {
       setVal('cputemp', (t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)) + '°C',
         m.cputemp && m.cputemp.warnAt && t.c >= m.cputemp.warnAt ? 'warn' : '');
-      segEls.cputemp.root.title = t.label ? `CPU temperature — ${t.label}` : 'CPU temperature';
+      // Plain label on hover regardless of which sensor layer answered
+      // (HWiNFO shm, sysfs, ...): the source lives in stats, not in the UI.
+      segEls.cputemp.root.title = 'CPU temperature';
     } else {
       setVal('cputemp', '—', 'dim');
-      // Source-aware hint: 'no-temp' only exists on Windows (HWiNFO shm live but
-      // no CPU reading); the generic failure differs per platform.
-      const staticTop = theme && theme.bar && theme.bar.mode === 'static-top';
-      segEls.cputemp.root.title = t && t.state === 'no-temp'
-        ? 'CPU temperature — HWiNFO sensors are live but report no CPU temperature'
-        : staticTop
-          ? 'CPU temperature — no sensor readable via sysfs'
-          : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
+      segEls.cputemp.root.title = 'CPU temperature';
     }
   }
   if (segEls.ram) {
