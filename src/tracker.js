@@ -140,6 +140,11 @@ class TerminalTracker extends require('events') {
     this.probe = probe;
     this.reattachToExisting = !!config.terminal.reattachToExisting;
     if (STATIC_MODE) { this.setCfgBar(config); this._emitStaticGeometry(); return; }
+    // Bar sizing comes from config at emit time, so a config change must
+    // force the next follow tick to re-emit geometry even if the terminal
+    // itself has not moved (the dedup would otherwise sit on its hands).
+    this._lastRectKey = '';
+    this._wasDrag = false;
     if (probeChanged) {
       this.seen.clear();
       this.hwnd = null;
