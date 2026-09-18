@@ -113,7 +113,8 @@ function setNoActivate(hwnd) {
 // WM_MOUSEACTIVATE with MA_NOACTIVATE: mouse messages still deliver to the
 // page (chips work), but the window never rises on click.
 const CallWindowProcW = bind(user32, 'uintptr_t __stdcall CallWindowProcW(uintptr_t prev, uintptr_t hwnd, uint32_t msg, uintptr_t wp, int64 lp)');
-const SetWindowLongPtrW = bind(user32, 'uintptr_t __stdcall SetWindowLongPtrW(uintptr_t hwnd, int nIndex, uintptr_t dwNewLong)');
+const SetWindowLongPtrWCb = bind(user32, 'uintptr_t __stdcall SetWindowLongPtrW(uintptr_t hwnd, int nIndex, BARWNDPROC *cb)');
+const GetWindowLongPtrW = bind(user32, 'uintptr_t __stdcall GetWindowLongPtrW(uintptr_t hwnd, int nIndex)');
 const GWLP_WNDPROC = -4;
 const WM_MOUSEACTIVATE = 0x0021;
 const MA_NOACTIVATE = 3;
@@ -127,10 +128,11 @@ const _barProcCb = (koffi && user32) ? koffi.register((hwnd, msg, wp, lp) => {
 function noActivateProc(hwnd) {
   if (_barProcCb === null) return false;
   try {
-    const prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, _barProcCb);
-    if (prev) _barPrevProc = prev;
-    return !!prev;
-  } catch (_) { return false; }
+    const prev = SetWindowLongPtrWCb(hwnd, GWLP_WNDPROC, _barProcCb);
+    if (prev) { _barPrevProc = prev; console.log('[wizbar] bar wndproc subclassed, prev=', prev); return true; }
+    console.error('[wizbar] bar wndproc subclass failed');
+    return false;
+  } catch (e) { console.error('[wizbar] bar wndproc subclass threw:', e.message); return false; }
 }
 
 function isTopmost(hwnd) {
