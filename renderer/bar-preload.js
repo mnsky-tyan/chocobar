@@ -10,7 +10,9 @@ contextBridge.exposeInMainWorld('wizbar', {
   openDash: () => ipcRenderer.send('open-dash'),
   openSubs: () => ipcRenderer.send('open-subs'),
   runShortcut: () => ipcRenderer.send('run-shortcut'),
-  contextMenu: () => ipcRenderer.send('bar-context'),
+  runCustom: (id) => ipcRenderer.send('run-custom', id),
+  onCustom: (cb) => ipcRenderer.on('custom', (_e, v) => cb(v)),
+  contextMenu: (x, y) => ipcRenderer.send('bar-context', { x, y }),
   raiseTerminal: () => ipcRenderer.send('raise-terminal'),
   togglePet: () => ipcRenderer.invoke('toggle-pet'),
   reportSize: (w) => ipcRenderer.send('bar-content-size', w)

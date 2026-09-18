@@ -43,8 +43,8 @@ This includes an explicit `--config <path>` launch: the file is created with the
 | Group | Controls |
 |---|---|
 | `bar` | Height, gap, position, alignment, font, spacing, tint, opacity, and backdrop |
-| `theme` | Text, pastel accents, warning, success, and divider colors; dashboard surfaces; the five daily-heatmap shades |
-| `modules` | System chip switches, polling intervals, thresholds, clock format, shortcut chip, and optional companion |
+| `theme` | Text, pastel accents, warning, success, and divider colors; the five daily-heatmap shades; per-surface backgrounds (`surfaces`) for the dashboards and the context menu |
+| `modules` | System chip switches, polling intervals, thresholds, clock format, shortcut chip, user-defined chips, and optional companion |
 | `terminal` | Auto-detection, class pinning, and whether existing windows may be selected after a close |
 | `tokens` | Master switch, dashboard chip, rescan interval, heatmap range, harness display names, dashboard section toggles, and local usage adapters |
 | `subs` | Live subscription board: provider adapters, poll interval, request deadline, and window size |
@@ -61,6 +61,24 @@ The bar ships with three toggle chips visible, leftmost. Each is a button; hide 
 | Gauge (subs) | Subscription plan board | Live rate-limit / quota windows for plans you wire under `subs.providers` (ChatGPT via a Codex CLI login, Z.ai coding plan via the zcode credential - both ship disabled). The chip reads `—` until one is enabled | `subs.enabled: false` |
 
 A fourth chip, the bow (pet), is opt-in: set `modules.pet` (`enabled`, `exePath`, optional `label`) and it launches/stops a Windows companion exe, reading on/off from the live process.
+
+### Your own chips (`modules.custom`)
+
+Anything the built-in toggles don't cover, you add yourself - each entry in `modules.custom` renders one more chip on the bar, with your design and your function:
+
+```json
+{ "enabled": true, "icon": "\uf011", "label": "Focus", "color": "",
+  "title": "Toggle the focus script", "toggle": true,
+  "command": "C:\\tools\\focus.bat" }
+```
+
+- **Design**: `icon` (a nerd-font glyph or emoji), `label` (chip text; icon-only if empty), `color` (chip color; empty = theme default), `title` (hover tooltip).
+- **Function**: a click runs `command` - any program, script, or URL your shell can launch. With `toggle: true` the chip keeps an on/off state and runs `command on` / `command off` so your script can react; the state is per-run, like the pet's.
+- Chips appear right of the built-in toggles; remove an entry (or set `enabled: false`) and the chip is gone.
+
+### Surface colors (`theme.surfaces`)
+
+The three popup windows take their own background, independent of the shared palette: `theme.surfaces.dashboard`, `theme.surfaces.subs`, and `theme.surfaces.menu` each accept `followBar` (reuse the bar's tint + alpha + backdrop exactly - the context menu's default, so it looks like the bar it came from) or an explicit `backgroundTint` (empty = each surface's built-in pink). The dashboards are opaque windows by design, so there the tint sets the color only; the menu window is transparent and also honors `backgroundAlpha` (0 = clear, 255 = solid).
 
 ### Subscription usage file
 
@@ -130,7 +148,7 @@ Exact read sites, for reference:
 
 - Click the diamond (tokens) chip or use `Ctrl+Alt+D` to open the dashboard.
 - Double-launch Chocobar to open the dashboard when it is already running.
-- Right-click the bar or tray icon for dashboards, reload, config, and quit actions.
+- Right-click the bar for the themed context menu (it wears the bar's color and opacity) and the tray icon for the same actions natively; both close on Esc or an outside click. Saving the config hot-reloads, so there is no reload-config entry.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
 - The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
