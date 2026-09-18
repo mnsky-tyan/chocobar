@@ -49,6 +49,7 @@ let stats = null;
 let tokensAgg = null;
 let petState = null;
 let subsAgg = null;
+let customState = {};   // user-chip toggle states pushed from main (id -> on)
 let subsPage = 0;           // which provider the subs chip shows; flips every minute
 let segEls = {};
 let sizeReportTimer = null;
@@ -89,9 +90,10 @@ function seg(id, iconSvg, clickable) {
   s.id = 'seg-' + id;
   const ico = document.createElement('span');
   ico.className = 'ico';
-  ico.innerHTML = iconSvg;
+  if (iconSvg != null) ico.innerHTML = iconSvg;
   const val = document.createElement('span');
   val.className = 'val';
+  if (iconSvg == null) ico.remove();
   s.append(ico, val);
   segEls[id] = { root: s, ico, val };
   return s;
@@ -99,8 +101,9 @@ function seg(id, iconSvg, clickable) {
 
 function rebuildSegments() {
   const c = el('segments');
-  // Pinned chips (shortcut/pet/tokens/subs) are direct children of #bar —
-  // remove stale ones from earlier rebuilds before appending fresh chips.
+  // Pinned chips (shortcut/pet/tokens/subs/custom) are direct children of
+  // #bar — remove stale ones from earlier rebuilds before appending fresh.
+  for (const n of [...el('bar').querySelectorAll(':scope > [id^="seg-custom-"]')]) n.remove();
   for (const n of [...el('bar').querySelectorAll(':scope > #seg-shortcut, :scope > #seg-pet, :scope > #seg-tokens, :scope > #seg-subs')]) n.remove();
   c.innerHTML = '';
   segEls = {};
@@ -137,6 +140,27 @@ function rebuildSegments() {
     s.addEventListener('click', () => window.wizbar.openSubs());
     chips.push(s);
   }
+  // User-defined chips (modules.custom): the user's own toggles. Design =
+  // icon/label/color; function = the command a click runs (toggle chips run
+  // "command on" / "command off" and show their state).
+  for (const cu of (m.custom || [])) {
+    if (!cu || cu.enabled === false) continue;
+    const cid = String(cu.id || cu.label || cu.command || '').slice(0, 64);
+    if (!cid) continue;
+    const s = seg('custom-' + cid.replace(/[^\w.-]/g, '_'), null, true);
+    if (cu.icon) {
+      const ico = document.createElement('span');
+      ico.className = 'ico';
+      ico.textContent = cu.icon;
+      s.prepend(ico);
+    }
+    const on = !!(cu.toggle && customState[cid]);
+    s.querySelector('.val').textContent = (cu.label || '') + (cu.toggle ? (on ? ' on' : ' off') : '');
+    if (cu.color) s.style.color = cu.color;
+    s.title = cu.title || cu.label || 'Custom chip';
+    s.addEventListener('click', () => window.wizbar.runCustom(cid));
+    chips.push(s);
+  }
   if (pinned) {
     chips.forEach((s, i) => {
       // .seg.clickable pulls neighbours 5px into its own hover box with a
@@ -163,7 +187,7 @@ function rebuildSegments() {
 
 document.body.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  window.wizbar.contextMenu();
+  window.wizbar.contextMenu(e.clientX, e.clientY);
 });
 
 // Clicking the strip (not a chip) raises the followed terminal - the bar is
@@ -354,6 +378,7 @@ window.wizbar.onTheme(applyTheme);
 window.wizbar.onStats((s) => { stats = s; render(); });
 window.wizbar.onTokens((t) => { tokensAgg = t; render(); });
 window.wizbar.onPet((r) => { petState = r; render(); });
+window.wizbar.onCustom((v) => { customState = v || {}; render(); });
 window.wizbar.onSubs((s) => { subsAgg = s; render(); });
 
 window.wizbar.getTheme().then(applyTheme);
