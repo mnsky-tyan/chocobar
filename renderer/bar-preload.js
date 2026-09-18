@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('wizbar', {
   openSubs: () => ipcRenderer.send('open-subs'),
   runShortcut: () => ipcRenderer.send('run-shortcut'),
   contextMenu: () => ipcRenderer.send('bar-context'),
+  raiseTerminal: () => ipcRenderer.send('raise-terminal'),
   togglePet: () => ipcRenderer.invoke('toggle-pet'),
   reportSize: (w) => ipcRenderer.send('bar-content-size', w)
 });
