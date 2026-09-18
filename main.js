@@ -474,6 +474,18 @@ const syncZ = (hwnd, force) => {
   if (bar) bar.syncZ(hwnd);
 };
 
+// Keep the pair glued: raising/activating the terminal moves it above the bar
+// WITHOUT any geometry change, so geometry-driven syncZ alone lets the two
+// drift apart (the bar sinks below its terminal - a different layer). Re-check
+// the actual z relation cheaply on a fixed cadence and re-insert only when it
+// drifted; during an interactive drag the hands-off rule applies.
+setInterval(() => {
+  if (process.platform !== 'win32') return;
+  if (!tracker.hwnd || !bar || !bar.hwnd || !bar.win || bar.win.isDestroyed()) return;
+  if (native.inMoveSize()) return;
+  if (!native.isBelowInZOrder(tracker.hwnd, bar.hwnd)) syncZ(tracker.hwnd, true);
+}, 400);
+
 function wireBar() {
   spawnBar();
 
