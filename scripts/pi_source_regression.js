@@ -73,11 +73,12 @@ const cfg = { tokens: { enabled: true, rescanMinutes: 5, heatmapWeeks: 26, sourc
   mimo: { enabled: false }
 }}};
 const t = new TokenTracker(cfg);
-t._scanPiAgentSessions();
 
 // expected: m1 + m3 (projA) + m4 (projB) + m6 (corrupt) = 4 records
 // totals are cache-INCLUSIVE (the total convention: input+output+cache):
 // U1 -> 165, U2 -> 220; the input/output columns stay raw
+(async () => {
+await t._scanPiAgentSessions();
 const agg = t.aggregate();
 check('record count', agg.recordCount === 4, `got ${agg.recordCount}`);
 const expectAllTime = 165 + 220 + 220 + 165;
@@ -85,12 +86,12 @@ check('all-time total = input+output', agg.allTime === expectAllTime, `got ${agg
 check('app attribution', !!agg.byApp.pi, JSON.stringify(agg.byApp));
 
 // dedup: second scan must add nothing
-const again = t._scanPiAgentSessions();
+const again = await t._scanPiAgentSessions();
 check('rescan adds nothing (dedup)', t.aggregate().recordCount === 4 && again === 0, `added ${again}`);
 
 // cursor: unchanged store skipped even after cursor reset of record map is NOT done —
 // rescan with warm cursors must be a no-op
-t._scanPiAgentSessions();
+await t._scanPiAgentSessions();
 check('warm cursor skips files', t.records.size === 4, `size ${t.records.size}`);
 
 // --- 2. real store cross-check -----------------------------------------------
@@ -137,7 +138,7 @@ if (fs.existsSync(realDir)) {
     const before = walkOnce();
     if (before !== walkOnce()) continue; // still being written
     const tr = new TokenTracker(realCfg); // fresh records, no cache write
-    tr._scanPiAgentSessions();
+    await tr._scanPiAgentSessions();
     if (walkOnce() !== before) continue; // appended mid-check; retry
     const ragg = tr.aggregate();
     const raw = JSON.parse(before);
@@ -157,3 +158,4 @@ if (fs.existsSync(realDir)) {
 fs.rmSync(tmp, { recursive: true, force: true });
 if (failures) { console.error(`\n${failures} FAILURE(S)`); process.exit(1); }
 console.log('\nAll pi source checks passed.');
+})().catch((e) => { console.error(e); process.exit(1); });
