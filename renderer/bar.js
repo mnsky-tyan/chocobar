@@ -302,17 +302,12 @@ function render() {
     if (t && t.state === 'ok' && t.c != null) {
       setVal('cputemp', (t.c % 1 ? t.c.toFixed(1) : t.c.toFixed(0)) + '°C',
         m.cputemp && m.cputemp.warnAt && t.c >= m.cputemp.warnAt ? 'warn' : '');
-      segEls.cputemp.root.title = t.label ? `CPU temperature — ${t.label}` : 'CPU temperature';
+      // Plain label on hover regardless of which sensor layer answered
+      // (HWiNFO shm, sysfs, ...): the source lives in stats, not in the UI.
+      segEls.cputemp.root.title = 'CPU temperature';
     } else {
       setVal('cputemp', '—', 'dim');
-      // Source-aware hint: 'no-temp' only exists on Windows (HWiNFO shm live but
-      // no CPU reading); the generic failure differs per platform.
-      const staticTop = theme && theme.bar && theme.bar.mode === 'static-top';
-      segEls.cputemp.root.title = t && t.state === 'no-temp'
-        ? 'CPU temperature — HWiNFO sensors are live but report no CPU temperature'
-        : staticTop
-          ? 'CPU temperature — no sensor readable via sysfs'
-          : 'CPU temperature — HWiNFO not running (or Shared Memory Support off)';
+      segEls.cputemp.root.title = 'CPU temperature';
     }
   }
   if (segEls.ram) {
