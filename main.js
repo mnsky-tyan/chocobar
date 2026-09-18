@@ -65,27 +65,20 @@ function themePayload(cfg) {
       staticWidth: staticTop ? (bar.staticWidth === 'content' ? 'content' : 'workarea') : null
     },
     modules: cfg.modules,
-    // Per-surface backgrounds for the popup windows: each entry carries the
-    // bg to wear, or null = keep the built-in pink. followBar copies the
-    // bar's own color + opacity (the default for the context menu); an
-    // explicit theme.surfaces.<name>.backgroundTint overrides. Opaque
-    // surfaces (the two dashboards) only take the color; the transparent
-    // menu window also honors backgroundAlpha.
+    // Per-surface backgrounds for the dashboard windows: each entry carries
+    // the bg to wear, or null = keep the built-in pink. followBar copies the
+    // bar's own tint; an explicit theme.surfaces.<name>.backgroundTint
+    // overrides (dashboards are opaque, so color only).
     surfaces: (() => {
       const out = {};
-      for (const name of ['dashboard', 'subs', 'menu']) {
+      for (const name of ['dashboard', 'subs']) {
         const s = (theme && theme.surfaces && theme.surfaces[name]) || {};
         const hex = s.backgroundTint || '';
         if (s.followBar) {
           out[name] = { bgCss: bar.bgCss };
         } else if (/^#?[0-9a-fA-F]{6}$/.test(hex)) {
           const h = hexToRgb(hex);
-          if (name === 'menu') {
-            const sa = Math.max(0, Math.min(255, Number(s.backgroundAlpha) || 0)) / 255;
-            out[name] = { bgCss: `rgba(${h.r},${h.g},${h.b},${sa.toFixed(3)})` };
-          } else {
-            out[name] = { bgCss: `rgb(${h.r},${h.g},${h.b})` };
-          }
+          out[name] = { bgCss: `rgb(${h.r},${h.g},${h.b})` };
         } else {
           out[name] = null;
         }
@@ -265,53 +258,8 @@ function openConfigFile() {
   shell.openPath(p);
 }
 
-// Themed right-click menu for the bar: a small transparent popup window so
-// it can wear the bar's own color + opacity (theme.surfaces.menu), unlike
-// native Win32 menus. Dismisses on outside click (blur), Esc, or action.
-let menuWin = null;
-function hideContextMenu() {
-  if (menuWin && !menuWin.isDestroyed() && menuWin.isVisible()) menuWin.hide();
-}
-function positionContextMenu(x, y) {
-  const screen = require('electron').screen;
-  const { workArea } = screen.getDisplayNearestPoint({ x, y });
-  const b = menuWin.getBounds();
-  menuWin.setPosition(
-    Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - b.width - 4)),
-    Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - b.height - 4)), false);
-}
-function openContextMenu(x, y) {
-  if (menuWin && !menuWin.isDestroyed()) {
-    positionContextMenu(x, y);
-    menuWin.send('theme', themePayload(configManager.config));
-    menuWin.show();
-    return;
-  }
-  menuWin = new (require('electron').BrowserWindow)({
-    width: 232, height: 226, show: false, frame: false, transparent: true,
-    resizable: false, movable: false, minimizable: false, maximizable: false,
-    skipTaskbar: true, backgroundColor: '#00000000',
-    webPreferences: {
-      preload: path.join(__dirname, 'renderer', 'menu-preload.js'),
-      contextIsolation: true, nodeIntegration: false
-    }
-  });
-  menuWin.setAlwaysOnTop(true, 'screen-saver');
-  menuWin.loadFile(path.join(__dirname, 'renderer', 'menu.html'));
-  menuWin.webContents.on('did-finish-load', () => {
-    if (menuWin && !menuWin.isDestroyed()) menuWin.send('theme', themePayload(configManager.config));
-  });
-  // Outside click = blur = hide (the native-menu behavior the popup replaces
-  // never had, and the one thing a context menu must do).
-  menuWin.on('blur', hideContextMenu);
-  menuWin.on('closed', () => { menuWin = null; });
-  positionContextMenu(x, y);
-  menuWin.once('ready-to-show', () => menuWin.show());
-}
-
-// One source of truth for every menu action: the tray's native menu, the
-// bar's themed context-menu window, and its renderer's ipc calls all route
-// through this map.
+// One source of truth for every menu action: the tray's native menu and the
+// bar's right-click menu both route through this map.
 const MENU_ACTIONS = {
   dash: () => openDashboard(),
   subs: () => openSubs(),
@@ -321,10 +269,9 @@ const MENU_ACTIONS = {
   quit: () => app.quit()
 };
 
-// The tray gets the native menu (plus "Open config folder"); Win32 popups
-// cannot be themed. The BAR right-click uses the themed HTML window instead
-// (openContextMenu below) so it can match the bar's color + opacity. The old
-// "Reload config" entry is gone: saving the file hot-reloads already.
+// The tray gets the native menu (plus "Open config folder"); the bar's
+// right-click uses the same items without it. The old "Reload config" entry
+// is gone: saving the file hot-reloads already.
 function buildChocobarMenu(isTray) {
   const items = [
     { label: 'Token dashboard', click: () => MENU_ACTIONS.dash() },
@@ -674,20 +621,11 @@ function wireBar() {
     if (!width || bar._lastPillW === width) return;
     bar.setPillWidth(width, bar.cfg.bar);
   });
-  ipcMain.on('bar-context', (_e, pos) => {
-    let x = Number(pos && pos.x) || null, y = Number(pos && pos.y) || null;
-    try {
-      const gb = bar.win.getBounds();
-      if (x == null) ({ x, y } = require('electron').screen.getCursorScreenPoint());
-      openContextMenu(gb.x + x, gb.y + y);
-    } catch (_) { openContextMenu(x || 100, y || 100); }
+  ipcMain.on('bar-context', () => {
+    // Native menu, bound to the bar window so outside clicks dismiss it.
+    try { buildChocobarMenu(false).popup({ window: bar.win }); }
+    catch (_) { buildChocobarMenu(false).popup({}); }
   });
-  ipcMain.on('menu-action', (_e, id) => {
-    hideContextMenu();
-    const fn = MENU_ACTIONS[id];
-    if (fn) fn();
-  });
-  ipcMain.on('menu-hide', () => hideContextMenu());
   // Clicking the bar strip raises the followed terminal: the bar acts as the
   // terminal's title strip. bringToFront carries the synthetic-ALT foreground
   // grant (the click came from a non-activating bar window).
