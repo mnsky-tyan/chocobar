@@ -93,6 +93,20 @@ const SetWindowLongW = bind(user32, 'long __stdcall SetWindowLongW(uintptr_t hwn
 const GWL_EXSTYLE = -20;
 const WS_EX_TOPMOST = 0x8;
 const WS_EX_TOOLWINDOW = 0x80;
+const WS_EX_NOACTIVATE = 0x08000000;
+
+// The bar must never activate on click: activation raises it to the top of
+// the band (a flicker above every app) and steals foreground from the very
+// terminal the click serves. WS_EX_NOACTIVATE keeps mouse events delivering
+// to the page while the window refuses focus and z-rising. Idempotent.
+function setNoActivate(hwnd) {
+  try {
+    const ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (ex & WS_EX_NOACTIVATE) return true;
+    return !!SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+  } catch (_) { return false; }
+}
+
 function isTopmost(hwnd) {
   try { return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) !== 0; } catch (_) { return false; }
 }
@@ -873,7 +887,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
