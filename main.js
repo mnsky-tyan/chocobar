@@ -476,19 +476,23 @@ const syncZ = (hwnd, force) => {
 
 // Keep the pair glued: raising/activating the terminal moves it relative to
 // the bar WITHOUT any geometry change, so geometry-driven syncZ alone lets
-// the two drift apart. The relation only breaks on an activation, so the
-// authoritative correction is the foreground hook (sub-frame; a poll leaves
-// a visible flash while the correction waits for its tick). A slow sweep is
-// the safety net for anything the hook misses. Glued = the bar's visible
-// z-neighbor above is exactly the terminal's insert target (terminal or
-// drag-bar overlay). Hands-off during interactive drags.
+// the two drift apart. The foreground hook is the earliest possible signal
+// of that (it fires inside the activation), so it re-inserts immediately
+// and unconditionally - one SetWindowPos, no enumeration on the hot path.
+// A slow zGluedTo sweep is the safety net for anything the hook misses.
+// Hands-off during interactive drags.
 const zDriftCheck = () => {
   if (process.platform !== 'win32') return;
   if (!tracker.hwnd || !bar || !bar.hwnd || !bar.win || bar.win.isDestroyed()) return;
   if (native.inMoveSize()) return;
   if (!native.zGluedTo(bar.hwnd, tracker.hwnd)) syncZ(tracker.hwnd, true);
 };
-native.hookForegroundChange(zDriftCheck);
+native.hookForegroundChange(() => {
+  if (process.platform !== 'win32') return;
+  if (!tracker.hwnd || !bar || !bar.hwnd || !bar.win || bar.win.isDestroyed()) return;
+  if (native.inMoveSize()) return;
+  bar.syncZ(tracker.hwnd);
+});
 setInterval(zDriftCheck, 2000);
 
 function wireBar() {
