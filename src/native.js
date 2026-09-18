@@ -270,6 +270,25 @@ const keybd_event = bind(user32, 'void __stdcall keybd_event(uint8_t key, uint8_
 const SetForegroundWindow = bind(user32, 'int __stdcall SetForegroundWindow(uintptr_t hwnd)');
 const GetForegroundWindow = bind(user32, 'uintptr_t __stdcall GetForegroundWindow()');
 const HWND_TOP = 0;
+// --- foreground-change hook: re-glue the bar within the activation --------
+// A poll shows a visible flash: the correction lands frames after the
+// activation, so the strip visibly flashes. EVENT_SYSTEM_FOREGROUND fires
+// inside the activation itself; the correction from the hook is sub-frame.
+const _winEventProto = kproto('void __stdcall WINEVENTPROC(uintptr_t hHook, uint32_t event, uintptr_t hwnd, int32_t idObject, int32_t idChild, uint32_t idThread, uint32_t time)');
+const SetWinEventHook = bind(user32, 'uintptr_t __stdcall SetWinEventHook(uint32_t eventMin, uint32_t eventMax, uintptr_t hmod, WINEVENTPROC *cb, uint32_t idProcess, uint32_t idThread, uint32_t dwFlags)');
+const EVENT_SYSTEM_FOREGROUND = 0x0003;
+const WINEVENT_OUTOFCONTEXT = 0x0;
+let _fgCallback = null;
+const _fgHook = (koffi && user32) ? koffi.register((hHook, event, hwnd, idObject, idChild, idThread, time) => {
+  try { if (event === EVENT_SYSTEM_FOREGROUND && _fgCallback) _fgCallback(); } catch (_) {}
+}, _winEventProto) : null;
+function hookForegroundChange(cb) {
+  _fgCallback = cb || null;
+  if (!cb) return true;
+  if (!SetWinEventHook || _fgHook === null) return false;
+  return !!SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, _fgHook, 0, 0, WINEVENT_OUTOFCONTEXT);
+}
+
 function bringToFront(hwnd) {
   try {
     keybd_event(0x12, 0, 0, 0);   // ALT down
@@ -887,7 +906,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate, hookForegroundChange,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
