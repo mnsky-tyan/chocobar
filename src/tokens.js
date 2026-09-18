@@ -42,6 +42,7 @@
 // The sources themselves are the durable store; we keep an in-memory record map
 // keyed by a stable source id (dedup) and a small cache file for fast restarts.
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
@@ -121,8 +122,8 @@ class TokenTracker extends require('events') {
     const t0 = Date.now();
     let added = 0;
     try { added += await this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
-    try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
-    try { added += this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
+    try { added += await this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
+    try { added += await this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
     try { added += await this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
     let plansChanged = false;
@@ -217,14 +218,14 @@ class TokenTracker extends require('events') {
   // subfolders of ~/.pi/agent/sessions. One scanner serves both.
   // Legacy ZCODE_* files are skipped: those sessions are DB-backed (turn_usage),
   // so counting the files too would double them.
-  _listSessionFiles(rootDir, depth) {
+  async _listSessionFiles(rootDir, depth) {
     const files = [];
     let entries;
-    try { entries = fs.readdirSync(rootDir, { withFileTypes: true }); } catch (_) { return files; }
+    try { entries = await fsp.readdir(rootDir, { withFileTypes: true }); } catch (_) { return files; }
     for (const e of entries) {
       const full = path.join(rootDir, e.name);
       if (e.isDirectory()) {
-        if (depth > 0) files.push(...this._listSessionFiles(full, depth - 1));
+        if (depth > 0) files.push(...(await this._listSessionFiles(full, depth - 1)));
       } else if (e.isFile() && e.name.endsWith('.jsonl') && !e.name.startsWith('ZCODE_')) {
         files.push(full);
       }
@@ -232,15 +233,20 @@ class TokenTracker extends require('events') {
     return files;
   }
 
-  _scanPiSessions(source, app, keyPrefix, floorKey, highKey) {
+  // The per-file walk is ASYNC on purpose: a store on a slow filesystem (the
+  // WSL store read from Windows via \\wsl.localhost) costs a network round
+  // trip per stat, and a synchronous stat storm there froze the whole app -
+  // bar and dashboards share this process, and Windows shows the busy
+  // cursor while it stops pumping messages.
+  async _scanPiSessions(source, app, keyPrefix, floorKey, highKey) {
     if (!source || !source.enabled || !source.sessionsDir) return 0;
     if (!this._fileProgress) this._fileProgress = new Map();
-    const files = this._listSessionFiles(source.sessionsDir, 2);
+    const files = await this._listSessionFiles(source.sessionsDir, 2);
     const cutoff = (this[floorKey] || 0);
     let added = 0, high = (this[highKey] || 0);
     for (const full of files) {
       let st;
-      try { st = fs.statSync(full); } catch (_) { continue; }
+      try { st = await fsp.stat(full); } catch (_) { continue; }
       if (st.mtimeMs < cutoff) continue;
       if (st.mtimeMs > high) high = st.mtimeMs;
       // Key on the path relative to the store root: stable across rescans,
@@ -360,11 +366,11 @@ class TokenTracker extends require('events') {
     return added;
   }
 
-  _scanZaiSessions() {
+  async _scanZaiSessions() {
     return this._scanPiSessions(this.cfg.sources.zai, 'zai', 'zf', '_zaiMtimeFloor', '_zaiMtimeHigh');
   }
 
-  _scanPiAgentSessions() {
+  async _scanPiAgentSessions() {
     return this._scanPiSessions(this.cfg.sources.pi, 'pi', 'pf', '_piMtimeFloor', '_piMtimeHigh');
   }
 
@@ -373,23 +379,25 @@ class TokenTracker extends require('events') {
   // message-file tree. A second WSL-distro store may be copied in read-only
   // and is counted as its own app ("opencode-wsl") so its numbers never merge
   // into the host store.
-  _scanOpencode() {
+  async _scanOpencode() {
     const src = this.cfg.sources.opencode;
-    if (!src || !src.enabled) return Promise.resolve(0);
+    if (!src || !src.enabled) return 0;
     let added = 0;
     const dbPath = expandHome(src.dbPath || '~/.local/share/opencode/opencode.db');
-    let result = Promise.resolve(0);
+    let result = 0;
     if (dbPath && fs.existsSync(dbPath)) {
-      result = Promise.resolve(this._scanOpencodeDb(dbPath, 'o'));
+      result = await this._scanOpencodeDb(dbPath, 'o');
     } else if (src.storageDir && fs.existsSync(expandHome(src.storageDir))) {
       added += this._scanOpencodeFiles();
     }
     // WSL Ubuntu store (same schema, separate machine identity in the key).
+    // The copy is awaited, never blocking: execFileSync here froze the whole
+    // app for the length of a multi-hundred-MB snapshot copy.
     if (src.wsl && src.wsl.enabled !== false) {
-      const copy = this._copyWslOpencodeDb(src.wsl);
-      if (copy) result = result.then(async (n) => n + (await this._scanOpencodeDb(copy, 'ow')));
+      const copy = await this._copyWslOpencodeDb(src.wsl);
+      if (copy) result += await this._scanOpencodeDb(copy, 'ow');
     }
-    return result.then((n) => added + n);
+    return added + result;
   }
 
   _scanOpencodeFiles() {
@@ -572,40 +580,51 @@ class TokenTracker extends require('events') {
 
   /**
    * Copy the WSL Ubuntu opencode.db so we can open it read-only (SQLite
-   * cannot open a live store across the 9p boundary safely). Windows-only:
-   * on any other host there is no WSL to call, so nothing is copied.
+   * cannot open a live store across the 9p boundary safely). ASYNC and
+   * THROTTLED: the snapshot is hundreds of MB, and a synchronous copy here
+   * froze the whole app on every rescan; if the previous copy is younger
+   * than 10 minutes it is reused as-is (the scan's byte-cursor dedup keeps
+   * totals correct, and the next rescan picks up anything the stale copy
+   * missed). Windows-only: on any other host there is no WSL to call.
    */
-  _copyWslOpencodeDb(wslCfg) {
+  async _copyWslOpencodeDb(wslCfg) {
     if (process.platform !== 'win32') return null;
-    const { execFileSync } = require('child_process');
+    const { execFile } = require('child_process');
     const dest = path.join(os.tmpdir(), 'wizbar-oc-copy.db');
     const distro = (wslCfg && wslCfg.distro) || 'Ubuntu';
+    try {
+      const st = fs.statSync(dest);
+      if (Date.now() - st.mtimeMs < 10 * 60000) return dest; // fresh enough
+    } catch (_) {}
     // bash inside WSL cannot open a "C:\..." path: hand it the /mnt/<drive>/
     // form of this repo's scripts directory instead.
     const repoWin = path.join(__dirname, '..', 'scripts');
     const scriptWsl = repoWin.replace(/^([A-Za-z]):[\\/]/, (_m, d) => `/mnt/${d.toLowerCase()}/`).replace(/\\/g, '/');
-    const before = (() => { try { return fs.statSync(dest).mtimeMs; } catch (_) { return 0; } })();
-    try {
-      execFileSync('wsl.exe', ['-d', distro, '--exec', 'bash', `${scriptWsl}/wsl-opencode-copy.sh`],
-        { windowsHide: true, timeout: 120000, encoding: 'utf8',
-          env: { ...process.env, WIN_TEMP: path.dirname(dest) } });
-      this._ocWslWarned = null;
-    } catch (e) {
-      if (this._ocWslWarned !== e.message) {
-        console.error('[wizbar] wsl opencode copy:', e.message);
-        this._ocWslWarned = e.message;
+    const run = () => new Promise((resolve) => {
+      execFile('wsl.exe', ['-d', distro, '--exec', 'bash', `${scriptWsl}/wsl-opencode-copy.sh`],
+        { windowsHide: true, timeout: 180000, encoding: 'utf8',
+          env: { ...process.env, WIN_TEMP: path.dirname(dest) } },
+        (err) => resolve(err));
+    });
+    const err = await run();
+    if (err) {
+      if (this._ocWslWarned !== err.message) {
+        console.error('[wizbar] wsl opencode copy:', err.message);
+        this._ocWslWarned = err.message;
       }
       // A stale copy still beats nothing — WSL is often idle/sleeping.
       if (fs.existsSync(dest)) return dest;
       return null;
     }
+    this._ocWslWarned = null;
     let after = 0;
     try { after = fs.statSync(dest).mtimeMs; } catch (_) {}
     if (!after) return null;
-    if (after <= before) {
-      // Copy succeeded but the store did not move: force a full re-read next time.
+    if (after <= (this._ocWslCopyAt || 0)) {
+      // Copy ran but the store did not move: force a full re-read next time.
       this._ocWslHigh = 0;
     }
+    this._ocWslCopyAt = after;
     return dest;
   }
 
