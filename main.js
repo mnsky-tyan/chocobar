@@ -559,6 +559,13 @@ function wireBar() {
   ipcMain.on('bar-context', () => {
     buildChocobarMenu(false).popup({});
   });
+  // Clicking the bar strip raises the followed terminal: the bar acts as the
+  // terminal's title strip. bringToFront carries the synthetic-ALT foreground
+  // grant (the click came from a non-activating bar window).
+  ipcMain.on('raise-terminal', () => {
+    if (process.platform !== 'win32' || !tracker.hwnd) return;
+    native.bringToFront(tracker.hwnd);
+  });
   ipcMain.on('close-dash', () => { if (dashWin) dashWin.close(); });
 
   tokens.on('updated', (agg) => {
