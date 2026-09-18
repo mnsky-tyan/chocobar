@@ -76,6 +76,18 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Sustained RAM/CPU method: sample `/proc/<pid>/stat` utime+stime + `status` VmRSS per
   electron process (main/renderer/gpu/utility) every 5s over minutes; compare like-for-like.
 
+## Native rewrite (native/, phase 1)
+
+- Native Win32 port of the bar lives in `native/` (PR #49). Build = `native/build.sh`
+  (assembles 4 parts into `src/chocobar_full.c`, then nix mingw cross-compiles).
+  Edit the parts, never the assembled file. Run notes + COM/DXGI sharp edges
+  (mingw dcomp.h is C-broken, hand-vtbl slot numbers, DXGI usage 0x20,
+  GetBuffer-via-IUNKNOWN, TARGET-only bitmap options, rebindVisual after resize)
+  are in `native/README.md` - read it before touching the render path.
+- Electron stays the daily driver until native phase 2 (token dashboards, subs).
+- Screenshot verification of Windows windows only works while the session is
+  UNLOCKED; when locked, captures show the lock screen for every window.
+
 ## Perf invariants (do not reintroduce)
 
 - Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);
