@@ -109,14 +109,6 @@ class BarWindow {
     this._staticContent = content;
     if (key === this._lastBoundsKey && !leavingPill) return;
     this._lastBoundsKey = key;
-    // Electron clamps Win32 size changes of non-resizable frameless windows:
-    // moves apply, sizes silently drop (a hot-reloaded bar height never
-    // landed while its position did - the bar crept toward the terminal).
-    // Toggle resizability around the resize; it lasts microseconds and no
-    // user interaction can land in between.
-    const [curW, curH] = this.win.getContentSize();
-    const needSize = Math.round(bounds.width) !== curW || Math.round(bounds.height) !== curH;
-    if (needSize) this.win.setResizable(true);
     this.win.setBounds({
       x: Math.round(bounds.x), y: Math.round(bounds.y),
       width: Math.round(bounds.width), height: Math.round(bounds.height)
@@ -127,7 +119,6 @@ class BarWindow {
     if (Math.abs(ch - Math.round(bounds.height)) > 1) {
       this.win.setContentSize(Math.round(bounds.width), Math.round(bounds.height));
     }
-    if (needSize) this.win.setResizable(false);
     if (!this.win.isVisible()) this.win.showInactive();
     this.assertNoTaskbar();
     // The window was just resized out of pill mode (static-geometry re-apply,
