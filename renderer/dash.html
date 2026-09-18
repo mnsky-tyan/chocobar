@@ -12,7 +12,6 @@
         <span class="logo">◇</span> Token Usage
       </div>
       <div id="titlebar-right">
-        <button id="btn-subs" class="hidden" title="Open the subscription board">plans</button>
         <button id="btn-refresh" title="Rescan sources">refresh</button>
         <button id="btn-close" title="Close">✕</button>
       </div>
@@ -21,7 +20,7 @@
     <div id="statcards"></div>
 
     <div id="sub-sec" class="section hidden">
-      <div class="section-head"><span>Plan usage</span><span id="sub-note" class="legend"></span></div>
+      <div class="section-head"><span>Plan usage</span></div>
       <div id="plans"></div>
     </div>
 
@@ -59,7 +58,6 @@
     </div>
 
     <div id="footer">
-      <span id="calc-note" title="Totals are input + output. The input column already includes cached tokens (prompt-cache reads and writes are folded in by the scanner), so cache R/W are informational breakdowns, never added on top. Per-source references: see the README 'Token accounting' section.">totals = input + output — cache columns are breakdowns, never added on top</span>
       <span id="scan-info"></span>
     </div>
   </div>

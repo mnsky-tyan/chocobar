@@ -8,6 +8,26 @@ const { EventEmitter } = require('events');
 const APP_DIR = path.join(os.homedir(), '.wizbar');
 const CONFIG_PATH = path.join(APP_DIR, 'config.json');
 
+// Launch with a specific config file: `chocobar --config <path>` (or
+// WIZBAR_CONFIG=...). The shipped product stays neutral this way — every
+// personal wiring lives in a file you point at, and a plain launch on a fresh
+// machine shows the empty defaults. Resolution happens before ConfigManager
+// is constructed (main.js passes the result in).
+function resolveConfigPath() {
+  const args = process.argv.slice(1);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--config' || a === '--config-path') {
+      const v = args[i + 1];
+      if (v) return expandTilde(v);
+    }
+    const m = a.match(/^--config(?:-path)?=(.+)$/);
+    if (m) return expandTilde(m[1]);
+  }
+  if (process.env.WIZBAR_CONFIG) return expandTilde(process.env.WIZBAR_CONFIG);
+  return CONFIG_PATH;
+}
+
 // Strip // comments (the config file is documented inline), respecting strings.
 function stripJsonComments(text) {
   let out = '';
@@ -73,9 +93,11 @@ const DEFAULTS = {
     volume:   { enabled: true, intervalMs: 500, role: 'multimedia' },
     battery:  { enabled: true, intervalMs: 1500 },
     bluetooth:{ enabled: true, intervalMs: 30000, filter: '', maxDevices: 2, hideWhenEmpty: false },
-    // Desktop-pet toggle chip. WINDOWS-ONLY, private/local module, OFF in the
-    // public build: set enabled + exePath in your own config to use it.
-    pet:      { enabled: false, exePath: '' },
+    // Desktop-pet toggle chip. WINDOWS-ONLY for the on/off state (the pet
+    // is a Windows exe tracked through the process list): off in the public
+    // build — set enabled + exePath in your own config to use it. Optional
+    // "label" replaces the chip's on/off text with "<label> on/off".
+    pet:      { enabled: false, exePath: '', label: '' },
     // Leftmost shortcut chip: a button that runs any command you put here
     // (launch an app, open a URL with the default handler, run a script).
     // The label is the chip text; empty shows just the bolt icon.
@@ -220,10 +242,11 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     // earbud/BT battery; shows "—" unless a device reports via Windows' standard
     // battery property (many earbuds only report to their vendor app)
     "bluetooth": { "enabled": true, "intervalMs": 30000, "filter": "", "maxDevices": 2 },
-    // Desktop-pet toggle chip (WINDOWS-ONLY, private module, off by default).
-    // Set enabled + exePath here to show the bow chip: click launches the exe,
-    // click again stops it ("on"/"off").
-    "pet":       { "enabled": false, "exePath": "" },
+    // Desktop-pet toggle chip (WINDOWS-ONLY for the on/off state, off by
+    // default). Set enabled + exePath here to show the bow chip: click launches
+    // the exe, click again stops it ("on"/"off"). Optional "label" prefixes the
+    // chip text with the pet's name.
+    "pet":       { "enabled": false, "exePath": "", "label": "" },
     // Shortcut chip, leftmost in the bar: a bolt button that runs "command"
     // (any program, script or URL your shell can launch). "label" is the chip
     // text; empty shows just the bolt icon.
@@ -342,25 +365,29 @@ function expandConfigPaths(cfg) {
 }
 
 class ConfigManager extends EventEmitter {
-  constructor() {
+  constructor(configPath) {
     super();
     this.config = null;
+    this.path = configPath || resolveConfigPath();
     this._watcher = null;
     this._debounce = null;
   }
 
   load() {
-    if (!fs.existsSync(APP_DIR)) fs.mkdirSync(APP_DIR, { recursive: true });
+    const dir = path.dirname(this.path);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     let user = {};
-    if (fs.existsSync(CONFIG_PATH)) {
+    if (fs.existsSync(this.path)) {
       try {
-        user = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, 'utf8')));
+        user = JSON.parse(stripJsonComments(fs.readFileSync(this.path, 'utf8')));
       } catch (e) {
         console.error('[wizbar] config parse error, using defaults:', e.message);
       }
-    } else {
-      // First run: write the annotated template out so the user can customize.
-      try { fs.writeFileSync(CONFIG_PATH, TEMPLATE, 'utf8'); } catch (_) {}
+    } else if (this.path === CONFIG_PATH) {
+      // First run on the default path: write the annotated template so the
+      // user can customize. An explicit --config file is never created here —
+      // a missing one means "nothing personal wired up".
+      try { fs.writeFileSync(this.path, TEMPLATE, 'utf8'); } catch (_) {}
     }
     const merged = expandConfigPaths(deepMerge(DEFAULTS, user));
     this.config = merged;
@@ -371,12 +398,12 @@ class ConfigManager extends EventEmitter {
   _watch() {
     if (this._watcher) return;
     try {
-      this._watcher = fs.watch(APP_DIR, (evt, name) => {
-        if (name !== 'config.json') return;
+      this._watcher = fs.watch(path.dirname(this.path), (evt, name) => {
+        if (name !== path.basename(this.path)) return;
         clearTimeout(this._debounce);
         this._debounce = setTimeout(() => {
           try {
-            const user = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, 'utf8')));
+            const user = JSON.parse(stripJsonComments(fs.readFileSync(this.path, 'utf8')));
             this.config = expandConfigPaths(deepMerge(DEFAULTS, user));
             this.emit('changed', this.config);
           } catch (e) {
@@ -390,4 +417,4 @@ class ConfigManager extends EventEmitter {
   }
 }
 
-module.exports = { ConfigManager, CONFIG_PATH, APP_DIR, DEFAULTS, TEMPLATE };
+module.exports = { ConfigManager, CONFIG_PATH, APP_DIR, DEFAULTS, TEMPLATE, resolveConfigPath };

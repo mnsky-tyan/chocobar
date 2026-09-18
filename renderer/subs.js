@@ -36,10 +36,9 @@ function remColor(rem) {
 }
 
 function statusLabel(s) {
-  // "warn" had no useful wording ("warm" was noise) — omit the pill text for it.
   return ({
     ok: 'ok',
-    warn: '',
+    stale: 'stale',
     critical: 'near cap',
     blocked: 'capped',
     'no-auth': 'no login',
@@ -157,32 +156,22 @@ function renderProvider(key, p, idx) {
     p.fetchedAt ? new Date(p.fetchedAt).toLocaleTimeString() : '';
 }
 
-function renderNotes() {
-  const box = $('notes');
-  const lines = [];
-  for (const p of Object.values((state && state.providers) || {})) {
-    if (!p) continue;
-    for (const e of p.errors || []) lines.push(`<span class="err">${esc(p.label)}: ${esc(e)}</span>`);
-    for (const n of p.notes || []) lines.push(esc(`${p.label}: ${n}`));
-  }
-  if (!lines.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
-  box.classList.remove('hidden');
-  box.innerHTML = lines.join('<br>');
-}
-
 function render() {
   if (!state) return;
   const panels = $('panels');
-  const entries = Object.entries(state.providers || {});
+  // Disabled providers (switched off in the config) are not rendered at all —
+  // a panel with no windows would only take space. No notes/warnings box:
+  // a stale fetch shows the 'stale' pill on the panel instead.
+  const entries = Object.entries(state.providers || {})
+    .filter(([, p]) => p && p.status !== 'disabled');
   // Rebuild panel shells only when the provider set changes; otherwise update
   // in place (keeps the refresh button from flickering the layout).
-  const sig = entries.map(([k, p]) => k + ':' + (p ? p.label : '')).join('|');
+  const sig = entries.map(([k, p]) => k + ':' + p.label).join('|');
   if (panels.dataset.sig !== sig) {
     panels.dataset.sig = sig;
     panels.innerHTML = entries.map(([k, p], i) => panelHtml(k, p || {}, i)).join('');
   }
   entries.forEach(([k, p], i) => renderProvider(k, p || {}, i));
-  renderNotes();
   $('scan-info').textContent = `last scan ${state.lastScan ? new Date(state.lastScan).toLocaleTimeString() : '—'}`;
 }
 

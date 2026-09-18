@@ -206,13 +206,12 @@ table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
 
 #footer {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: baseline;
   gap: 12px;
   font-size: 9px; color: var(--fg-dim);
   text-align: right; padding-top: 6px;
 }
-#calc-note { text-align: left; cursor: help; }
 
 .empty-note {
   margin: 0 0 14px;

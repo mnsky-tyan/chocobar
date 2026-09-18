@@ -113,35 +113,35 @@ Every total in the bar and dashboard is:
 total = input + output
 ```
 
-The `input` column is cache-INCLUSIVE: each scanner folds its provider's
-prompt-cache reads and writes into the stored input, so `input + output`
-equals the total the provider reported for that request. The cache columns
-on the dashboard are informational breakdowns and are never added on top
-(adding them would double-count). Reasoning tokens, where a store reports
-them separately, are stored as a breakdown only and never added.
+Both columns are cache-EXCLUSIVE raw token counts - the common billing
+convention (base prompt + completion; cache tracked separately at its own
+rate). The `cache R` / `cache W` dashboard columns are per-request breakdowns
+the providers report beside the totals; they are NEVER added to any total
+(adding them would double the provider's own reported numbers). Reasoning
+tokens, where a store reports them separately, are also breakdown-only.
 
-Per source, the numbers come from the provider's own usage records:
+Per source, the raw numbers come from the provider's own usage records:
 
-| Source | Record read | Provider-reported total | Stored input |
+| Source | Record read | Provider-reported semantics | Stored input (raw) |
 |---|---|---|---|
-| `zcode` (+ legacy `zai` DB turns) | `turn_usage` row in the zcode SQLite DB | `input_tokens + output_tokens` (the DB's `input_tokens` already includes cached tokens; `cache_*_input_tokens` columns are the breakdown) | `input_tokens` as stored |
-| `zai` / `pi` sessions | assistant `message.usage` in the session JSONL | `input + output + cacheRead + cacheWrite` (input excludes cache) | `input + cacheRead + cacheWrite` |
-| `opencode` | assistant message `tokens` in `msg_*.json` | `input + output + cache.read + cache.write` (input excludes cache) | `input + cache.read + cache.write` |
-| `mimo` | assistant message `tokens` from the local desktop API | `input + output + cache.read + cache.write` (input excludes cache) | same fold as opencode |
+| `zcode` (+ legacy `zai` DB turns) | `turn_usage` row in the zcode SQLite DB | `computed_total_tokens == input_tokens + output_tokens + reasoning_tokens` on every row (verified on the live DB), so `input_tokens` already INCLUDES the cache columns `cache_creation_input_tokens` / `cache_read_input_tokens` | `input_tokens - cacheWrite - cacheRead` |
+| `zai` / `pi` sessions | assistant `message.usage` in the session JSONL | `usage.totalTokens == input + output + cacheRead + cacheWrite` (verified on real transcripts), so `input` EXCLUDES cache | `usage.input` as stored |
+| `opencode` | assistant message `tokens` in the SQLite `message.data` JSON (or the legacy `msg_*.json` tree) | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
+| `mimo` | assistant message `tokens` from the local desktop API | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
 | `subscription` | your plan-usage JSON (`used` / `total` per plan) | n/a (credits, not tokens) | never mixed into token totals |
 
 Exact read sites, for reference:
 
 - zcode: `scripts/zcode_query.py` (the SQL) and `_scanZcode` in `src/tokens.js`
 - zai/pi sessions: `_readSessionTail` in `src/tokens.js`
-- opencode: `_scanOpencode` in `src/tokens.js`
+- opencode: `_scanOpencodeDb` / `_scanOpencodeFiles` in `src/tokens.js`
 - mimo: `_scanMimo` in `src/tokens.js`
 - aggregation: `aggregate()` in `src/tokens.js` (`rowTotal = input + output`)
 
 `npm test` cross-checks the scanner against a raw walk of a real session
 store: record counts and per-column sums must match exactly, and the
-portable suite pins the aggregation contract (totals = input + output, cache
-as breakdown).
+portable suite pins the aggregation contract (totals = input + output,
+cache as breakdown only).
 
 ## Use the bar and dashboard
 
@@ -151,6 +151,18 @@ as breakdown).
 - Optional leftmost shortcut chip: set `modules.shortcut` (`enabled`, `label`,
   `command`) in the config and the bar shows a bolt button that runs any
   command you put there.
+- Pet toggle chip: set `modules.pet` (`enabled`, `exePath`, optional `label`)
+  and the bar shows a bow button leftmost that launches/stops the exe, reading
+  on/off from the live process (Windows). The label prefixes the chip text.
+- Subscription chip: with `subs.enabled` the bar shows a gauge chip exactly
+  right of the usage chip, rotating once a minute through every enabled
+  provider's week-window remaining percentage; click opens the plan board.
+- Launch with a specific config file: `chocobar --config <path>` (or the
+  `WIZBAR_CONFIG` environment variable). The shipped default
+  (`~/.wizbar/config.json`) is created as an annotated, all-neutral template
+  on first run; an explicit `--config` file is never auto-created, so a plain
+  launch always shows the neutral product and personal wiring stays in
+  personal files.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example
   `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
 - On Windows, the bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
