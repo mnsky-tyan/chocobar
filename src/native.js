@@ -107,6 +107,31 @@ function setNoActivate(hwnd) {
   } catch (_) { return false; }
 }
 
+// NOACTIVATE alone still lets Electron's WM_MOUSEACTIVATE handler raise the
+// window to the top of the band on click (a visible flicker above foreground
+// apps before the terminal raise lands). Subclass the bar's wndproc to answer
+// WM_MOUSEACTIVATE with MA_NOACTIVATE: mouse messages still deliver to the
+// page (chips work), but the window never rises on click.
+const CallWindowProcW = bind(user32, 'uintptr_t __stdcall CallWindowProcW(uintptr_t prev, uintptr_t hwnd, uint32_t msg, uintptr_t wp, int64 lp)');
+const SetWindowLongPtrW = bind(user32, 'uintptr_t __stdcall SetWindowLongPtrW(uintptr_t hwnd, int nIndex, uintptr_t dwNewLong)');
+const GWLP_WNDPROC = -4;
+const WM_MOUSEACTIVATE = 0x0021;
+const MA_NOACTIVATE = 3;
+let _barPrevProc = 0;
+const _barProcCb = (koffi && user32) ? koffi.register((hwnd, msg, wp, lp) => {
+  if (msg === WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+  try { return CallWindowProcW(_barPrevProc, hwnd, msg, wp, lp); }
+  catch (_) { return 0; }
+}, 'BARWNDPROC *') : null;
+function noActivateProc(hwnd) {
+  if (_barProcCb === null) return false;
+  try {
+    const prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, _barProcCb);
+    if (prev) _barPrevProc = prev;
+    return !!prev;
+  } catch (_) { return false; }
+}
+
 function isTopmost(hwnd) {
   try { return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) !== 0; } catch (_) { return false; }
 }
@@ -916,7 +941,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate, hookForegroundChange,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove, setNoActivate, noActivateProc, hookForegroundChange,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
