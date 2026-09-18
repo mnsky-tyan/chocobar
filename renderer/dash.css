@@ -120,7 +120,9 @@ body {
 }
 .hm-cell.sel { outline: 1.5px solid var(--pink-deep); outline-offset: 0.5px; }
 .hm-month { position: absolute; top: -13px; left: 0; font-size: 9px; color: var(--fg-dim); white-space: nowrap; }
-.hm-row-label { font-size: 9px; color: var(--fg-dim); width: 16px; text-align: right; margin-right: 5px; line-height: 12px; }
+/* One label per cell pitch (11px cell + 3px gap): the text row aligns exactly
+   with the heatmap row it names instead of drifting a pixel per row. */
+.hm-row-label { font-size: 9px; color: var(--fg-dim); width: 16px; text-align: right; margin-right: 5px; height: 11px; line-height: 11px; }
 
 #heat-tip {
   position: fixed; /* viewport-anchored: never clipped by the card, never scrolls */
@@ -174,11 +176,12 @@ table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
 }
 .share span { position: relative; }
 
-.app-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: baseline; }
-.app-zcode { background: var(--pink-deep); }
-.app-zai { background: var(--yellow); }
-.app-opencode { background: #7FA8A0; }
-.app-mimo { background: #B79CE0; }
+.app-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: baseline; background: var(--fg-dim); opacity: 0.55; }
+.app-zcode { background: var(--pink-deep); opacity: 1; }
+.app-zai { background: var(--yellow); opacity: 1; }
+.app-opencode { background: #7FA8A0; opacity: 1; }
+.app-mimo { background: #B79CE0; opacity: 1; }
+.app-pi { background: #8FA8D4; opacity: 1; }
 
 /* subscription plan usage: soft-rounded rows with a calm pastel fill,
    same language as the stat cards (translucent white over the pink card) */
@@ -202,6 +205,10 @@ table.dt tr:nth-child(even) { background: rgba(254, 247, 249, 0.5); }
 .plan-meta { font-size: 9px; color: var(--fg-dim); margin-top: 4px; }
 
 #footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 12px;
   font-size: 9px; color: var(--fg-dim);
   text-align: right; padding-top: 6px;
 }

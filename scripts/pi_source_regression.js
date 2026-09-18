@@ -76,10 +76,11 @@ const t = new TokenTracker(cfg);
 t._scanPiAgentSessions();
 
 // expected: m1 + m3 (projA) + m4 (projB) + m6 (corrupt) = 4 records
-// totals (input already cache-folded by the scanner): U1 -> 155 in, U2 -> 200 in
+// totals are cache-EXCLUSIVE (raw input, raw output; cache is detail only):
+// U1 -> 100 in / 10 out, U2 -> 200 in / 20 out
 const agg = t.aggregate();
 check('record count', agg.recordCount === 4, `got ${agg.recordCount}`);
-const expectAllTime = (155 + 10) + (200 + 20) + (200 + 20) + (155 + 10);
+const expectAllTime = (100 + 10) + (200 + 20) + (200 + 20) + (100 + 10);
 check('all-time total = input+output', agg.allTime === expectAllTime, `got ${agg.allTime}, want ${expectAllTime}`);
 check('app attribution', !!agg.byApp.pi, JSON.stringify(agg.byApp));
 
@@ -116,7 +117,7 @@ if (fs.existsSync(realDir)) {
             if (d.type !== 'message' || !d.message || d.message.role !== 'assistant') continue;
             const u = d.message.usage || {};
             if (!(u.input || u.output || u.cacheRead || u.cacheWrite)) continue;
-            n++; rawIn += (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+            n++; rawIn += (u.input || 0);   // raw input: cache-EXCLUSIVE
             rawOut += u.output || 0; rawCacheR += u.cacheRead || 0; rawCacheW += u.cacheWrite || 0;
           }
         }

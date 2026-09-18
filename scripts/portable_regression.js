@@ -358,6 +358,225 @@ const native = require('../src/native');
   Module._load = origLoad;
 }
 
+// --- 10. subscription board tracker: bounded fetches + last-good retention ---
+{
+  const { SubsTracker } = require('../src/subs');
+  const { DEFAULTS } = require('../src/config');
+
+  check('subs: defaults ship everything off with sane bounds',
+    DEFAULTS.subs.enabled === false && DEFAULTS.subs.fetchTimeoutMs === 20000 &&
+    Array.isArray(DEFAULTS.subs.providers) && DEFAULTS.subs.providers.every((p) => p.enabled === false));
+
+  const baseCfg = (over) => ({ ...DEFAULTS, subs: {
+    enabled: true, intervalMinutes: 2, fetchTimeoutMs: 20000,
+    providers: [{ type: 'chatgpt', enabled: true, label: 'Test', authPath: '/none' }],
+    ...over
+  } });
+
+  // Fake fetch that hangs PAST any deadline but honors the abort signal, the
+  // way a real stalled endpoint behaves.
+  const hangingFetch = (u, o) => new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve({ ok: true, json: async () => ({}) }), 30000);
+    if (o && o.signal) o.signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('The operation was aborted')); });
+  });
+
+  // The chatgpt adapter reads its credential before fetching; give it a real
+  // fixture so the boundedness test exercises the fetch path.
+  const authFile = path.join(FAKE_HOME, 'codex-auth.json');
+  fs.writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-token' } }));
+  const chatgptProvider = (over) => ({ type: 'chatgpt', enabled: true, label: 'Test', authPath: authFile, ...over });
+
+  pendingAsync++;
+  (async () => {
+    // Bounded: a provider override under 100ms keeps the whole rescan fast
+    // even when the endpoint never answers.
+    const t = new SubsTracker(baseCfg(), hangingFetch);
+    t.cfg.providers = [chatgptProvider({ timeoutMs: 80 })]; // clamps to the 3s floor
+    const t0 = Date.now();
+    const snap = await t.rescan();
+    const took = Date.now() - t0;
+    const p = snap.providers['chatgpt:0'];
+    check('subs: hung endpoint cannot stall a rescan (bounded by deadline)',
+      took < 8000 && p && p.ok === false && p.status === 'error' && (p.errors[0] || '').length > 0,
+      `took ${took}ms, status ${p && p.status}`);
+
+    // Timeout clamp: config value is clamped into 3s..60s; garbage -> default;
+    // a per-provider override gets the SAME clamp.
+    const lo = new SubsTracker(baseCfg({ fetchTimeoutMs: 1 }));
+    const hi = new SubsTracker(baseCfg({ fetchTimeoutMs: 999999 }));
+    const bad = new SubsTracker(baseCfg({ fetchTimeoutMs: 'x' }));
+    const ov = new SubsTracker(baseCfg());
+    check('subs: fetchTimeoutMs clamps to 3s..60s, garbage -> 20s default',
+      lo._timeoutFor(null) === 3000 && hi._timeoutFor(null) === 60000 && bad._timeoutFor(null) === 20000 &&
+      ov._timeoutFor({ timeoutMs: 80 }) === 3000 && ov._timeoutFor({ timeoutMs: 9999999 }) === 60000);
+
+    // Last-good retention: a good cycle followed by a failing cycle keeps the
+    // windows on the board, marked stale, instead of wiping the provider.
+    const goodBody = { plan_type: 'pro', rate_limit: { primary_window: { used_percent: 20, reset_at: 1900000000 } } };
+    let fail = false;
+    const flaky = async (u, o) => {
+      if (fail) throw new Error('boom');
+      return { ok: true, json: async () => goodBody };
+    };
+    const f = new SubsTracker(baseCfg(), flaky);
+    f.cfg.providers = [chatgptProvider({ timeoutMs: 500 })];
+    const good = await f.rescan();
+    const goodP = good.providers['chatgpt:0'];
+    fail = true;
+    const after = await f.rescan();
+    const afterP = after.providers['chatgpt:0'];
+    check('subs: failed cycle keeps last good windows marked stale',
+      goodP.ok === true && goodP.windows.length === 1 &&
+      afterP.ok === false && afterP.windows.length === 1 &&
+      afterP.windows[0].percent === 20 &&
+      afterP.status === 'stale');
+
+    // A DISABLED provider must not keep stale windows on the board: switching
+    // an entry off shows its disabled state instead of frozen numbers.
+    fail = false;
+    const g = new SubsTracker(baseCfg(), flaky);
+    g.cfg.providers = [chatgptProvider({ timeoutMs: 500 })];
+    await g.rescan();
+    g.cfg.providers = [chatgptProvider({ enabled: false })];
+    const dis = await g.rescan();
+    const disP = dis.providers['chatgpt:0'];
+    check('subs: disabled provider shows disabled state, no stale windows',
+      disP.ok === false && disP.windows.length === 0 &&
+      disP.status === 'disabled');
+
+    // A disabled tracker never fetches at all (master off = zero requests).
+    let called = 0;
+    const counting = async () => { called++; throw new Error('should not be called'); };
+    const off = new SubsTracker({ ...DEFAULTS, subs: { ...baseCfg().subs, enabled: false } }, counting);
+    await off.rescan();
+    check('subs: master off -> no fetches, snapshot disabled', called === 0 && off.snapshot().enabled === false);
+  })().catch((e) => check('subs: block', false, e.message))
+    .finally(asyncFinished);
+}
+
+// --- 11. dashboard section toggles -------------------------------------------
+{
+  const { DEFAULTS } = require('../src/config');
+  const d = DEFAULTS.tokens.dashboard;
+  check('dash toggles: all six sections default visible',
+    d && d.stats === true && d.heatmap === true && d.dayDetail === true &&
+    d.apps === true && d.models === true && d.plans === true, JSON.stringify(d));
+  // Config round trip: a user file turning one toggle off must keep the rest
+  // on (deepMerge over DEFAULTS), and subs width/height survive the merge.
+  fs.mkdirSync(path.join(FAKE_HOME, '.wizbar'), { recursive: true });
+  fs.writeFileSync(path.join(FAKE_HOME, '.wizbar', 'config.json'), JSON.stringify({
+    tokens: { dashboard: { heatmap: false } },
+    subs: { width: 900, height: 500 }
+  }));
+  pendingAsync++;
+  (() => {
+    try {
+      const { ConfigManager } = require('../src/config');
+      const mgr = new ConfigManager();
+      const merged = mgr.load();
+      if (mgr._watcher) { try { mgr._watcher.close(); } catch (_) {} }
+      check('dash toggles: user override merges, unset sections stay visible',
+        merged.tokens.dashboard.heatmap === false && merged.tokens.dashboard.stats === true &&
+        merged.tokens.dashboard.models === true);
+      check('subs: board size overrides merge with defaults',
+        merged.subs.width === 900 && merged.subs.height === 500 && merged.subs.fetchTimeoutMs === 20000);
+    } catch (e) {
+      check('dash toggles: config round trip', false, e.message);
+    }
+    asyncFinished();
+  })();
+}
+
+// --- 12. subscription board renderer: emitted ids match the lookups ----------
+// Runs renderer/subs.js against a minimal DOM stub whose getElementById is an
+// EXACT id map (like the real DOM): an emitter/lookup mismatch (the CSS.escape
+// bug class) resolves to null and the population assertions fail.
+{
+  const vm = require('vm');
+  const byId = {};
+  const lookedUp = [];
+  function mkEl() {
+    const kids = {};
+    const el = {
+      textContent: '', className: '', style: {}, dataset: {},
+      classList: { toggle() {}, add() {}, remove() {} },
+      querySelector(sel) { return kids[sel] || (kids[sel] = mkEl()); },
+      querySelectorAll() { return []; },
+      addEventListener() {}
+    };
+    // innerHTML assignment materializes elements with ids, like a real DOM:
+    // this is what makes the exact-id lookup assertions meaningful.
+    let html = '';
+    Object.defineProperty(el, 'innerHTML', {
+      get: () => html,
+      set(v) {
+        html = v;
+        for (const m of String(v).matchAll(/id="([^"]+)"/g)) {
+          if (!byId[m[1]]) byId[m[1]] = mkEl();
+        }
+      }
+    });
+    return el;
+  }
+  for (const id of ['btn-close', 'btn-refresh', 'panels', 'notes', 'scan-info']) byId[id] = mkEl();
+  global.document = {
+    getElementById(id) { lookedUp.push(id); return byId[id] || null; },
+    addEventListener() {}
+  };
+  const realSetInterval = global.setInterval;
+  global.setInterval = () => 0; // renderer's refresh timer must not hold the process
+  global.window = { __hmRamp: ['#1', '#2', '#3', '#4', '#5'], wizbar: {
+    close() {}, rescanSubs: () => Promise.resolve(null),
+    onTheme() {}, onSubs() {},
+    getTheme: () => Promise.resolve(null), getSubs: () => Promise.resolve(null)
+  } };
+  pendingAsync++;
+  (() => {
+    try {
+      let api = null;
+      const src = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'subs.js'), 'utf8')
+        + '\n;__api = { panelHtml, renderProvider, render, setState: (s) => { state = s; } };';
+      global.__api = null;
+      vm.runInThisContext(src, { filename: 'renderer/subs.js' });
+      api = global.__api;
+      const provider = {
+        ok: true, label: 'Test', plan: 'pro', status: 'ok', errors: [], notes: [],
+        fetchedAt: Date.now(),
+        windows: [{ key: 'primary', label: '5h', percent: 20, remainingPercent: 80,
+          used: 100, total: 500, remaining: 400, resetAt: Date.now() + 3600000 }]
+      };
+      // panelHtml emits the panel markup; renderProvider must find it by the
+      // SAME id (provider ids contain a colon).
+      const html = api.panelHtml('chatgpt:0', provider, 0);
+      const emitted = [...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1])
+        .filter((id) => id.startsWith('panel-'));
+      global.state = { enabled: true, providers: { 'chatgpt:0': provider }, lastScan: new Date().toISOString() };
+      api.setState(global.state);
+      api.render();
+      const panelEl = byId[emitted[0]]; // exact id map, like the real DOM
+      check('subs board: panelHtml emits one panel per provider id',
+        emitted.length === 1 && emitted[0] === 'panel-chatgpt:0', JSON.stringify(emitted));
+      check('subs board: renderProvider populates the EMITTED panel (exact id lookup)',
+        !!panelEl && panelEl.querySelector('[data-plan]').textContent === 'pro' &&
+        panelEl.querySelector('[data-pill]').textContent === 'ok' &&
+        panelEl.querySelector('[data-pies]').innerHTML.includes('<svg'),
+        `looked up: ${JSON.stringify(lookedUp)}`);
+      // A status with no pill wording hides the capsule instead of an empty blob.
+      provider.status = 'unknown';
+      api.render();
+      check('subs board: unlabeled status renders an empty pill',
+        byId[emitted[0]].querySelector('[data-pill]').textContent === '');
+    } catch (e) {
+      check('subs board: renderer block', false, e.message);
+    } finally {
+      global.setInterval = realSetInterval;
+      delete global.__api;
+      delete global.state;
+      asyncFinished();
+    }
+  })();
+}
+
 function done() {
   if (failures) { console.error(`\n${failures} FAILURE(S)`); process.exit(1); }
   console.log('\nAll portable regression checks passed.');

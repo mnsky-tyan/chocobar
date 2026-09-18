@@ -10,7 +10,6 @@
     <div id="titlebar">
       <div id="title">
         <span class="logo">◇</span> Token Usage
-        <span id="subtitle">all CLIs · user total</span>
       </div>
       <div id="titlebar-right">
         <button id="btn-refresh" title="Rescan sources">refresh</button>
@@ -21,7 +20,7 @@
     <div id="statcards"></div>
 
     <div id="sub-sec" class="section hidden">
-      <div class="section-head"><span>Plan usage</span><span id="sub-note" class="legend"></span></div>
+      <div class="section-head"><span>Plan usage</span></div>
       <div id="plans"></div>
     </div>
 
@@ -35,7 +34,7 @@
       enable the sources you use under <b>tokens.sources</b>.
     </div>
 
-    <div class="section">
+    <div class="section" id="daily-sec">
       <div class="section-head">
         <span>Daily usage</span>
         <span id="heat-legend" class="legend"></span>
@@ -48,17 +47,19 @@
     </div>
 
     <div id="tables">
-      <div class="section table-sec">
+      <div class="section table-sec" id="app-sec">
         <div class="section-head"><span>By app</span></div>
         <div id="app-table"></div>
       </div>
-      <div class="section table-sec">
+      <div class="section table-sec" id="model-sec">
         <div class="section-head"><span>By model</span></div>
         <div id="model-table"></div>
       </div>
     </div>
 
-    <div id="footer">sources: zcode · zai · pi · opencode · mimo · subscription — <span id="scan-info"></span></div>
+    <div id="footer">
+      <span id="scan-info"></span>
+    </div>
   </div>
   <script src="dash.js"></script>
 </body>
