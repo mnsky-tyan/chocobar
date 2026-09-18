@@ -65,6 +65,8 @@ class BarWindow {
     // (a flicker over foreground apps) and steals foreground from the
     // terminal the click serves. Mouse events still deliver to the page.
     native.setNoActivate(this.hwnd);
+    // And never rise on click either (WM_MOUSEACTIVATE -> MA_NOACTIVATE).
+    native.noActivateProc(this.hwnd);
 
     this.win.loadFile(path.join(__dirname, '..', 'renderer', 'bar.html'));
 
