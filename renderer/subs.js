@@ -130,8 +130,9 @@ function renderProvider(key, p, idx) {
       const rem = w.remainingPercent != null
         ? w.remainingPercent
         : (100 - (w.percent || 0));
-      const remR = Math.round(rem * 10) / 10;
-      const shown = remR < 10 && remR % 1 ? remR.toFixed(1) : String(Math.round(remR));
+      // Same integer rounding as the bar chip - the two views render the
+      // same snapshot and must never appear to disagree by a rounding step.
+      const shown = String(Math.round(rem));
       const usedLine = w.used != null
         ? `${fmtNum(w.used)} / ${fmtNum(w.total)} used`
         : (w.percent != null ? `${Math.round(w.percent)}% used` : '');
