@@ -188,11 +188,19 @@ function debugZOrder(hwndA, hwndB) {
 // aimed at the bar's strip. Inserting the bar above the terminal alone is not
 // enough — the bar must go above the drag bar too, or chip clicks land on WT.
 function raiseAboveTerminalChrome(barHwnd, terminalHwnd) {
+  return !!SetWindowPos(barHwnd, zInsertTarget(terminalHwnd), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// The window the bar must sit directly under to be on its terminal's layer:
+// the terminal itself, or Windows Terminal's invisible drag-bar overlay when
+// one lies on this terminal's top edge (the overlay belongs to the terminal's
+// own chrome and must stay above the bar).
+function zInsertTarget(terminalHwnd) {
   const pidBuf = [0];
   GetWindowThreadProcessId(terminalHwnd, pidBuf);
   const wtPid = pidBuf[0];
   const fb = getFrameBounds(terminalHwnd);
-  if (!fb) return false;
+  if (!fb) return terminalHwnd;
 
   const hwnds = [];
   EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
@@ -212,7 +220,32 @@ function raiseAboveTerminalChrome(barHwnd, terminalHwnd) {
       }
     } catch (_) {}
   }
-  return !!SetWindowPos(barHwnd, target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  return target;
+}
+
+// The first visible, non-cloaked top-level window directly above `hwnd` in
+// the z-order (0 when hwnd is topmost or absent). Invisible windows are
+// skipped: they occupy z slots but never cover anything.
+function zNeighborAbove(hwnd) {
+  const hwnds = [];
+  EnumWindows((h) => { hwnds.push(Number(h)); return 1; }, null);
+  const idx = hwnds.indexOf(Number(hwnd));
+  if (idx <= 0) return 0;
+  for (let i = idx - 1; i >= 0; i--) {
+    try {
+      if (!IsWindowVisible(hwnds[i])) continue;
+      if (isCloaked(hwnds[i])) continue;
+      return hwnds[i];
+    } catch (_) { continue; }
+  }
+  return 0;
+}
+
+// True when the bar is glued: its visible z-neighbor above is exactly the
+// terminal's insert target. Anything else between (a raised app) means the
+// pair has drifted and the bar lost the terminal's layer.
+function zGluedTo(barHwnd, terminalHwnd) {
+  return barHwnd !== 0 && zNeighborAbove(barHwnd) === zInsertTarget(terminalHwnd);
 }
 
 // Bring a window to the very front AND give it focus, from a background
@@ -840,7 +873,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize, zGluedTo, zNeighborAbove,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
