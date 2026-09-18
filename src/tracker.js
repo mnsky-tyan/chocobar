@@ -245,6 +245,23 @@ class TerminalTracker extends require('events') {
       this._hidden = false;
       this.emit('visibility', true);
     }
+    // Hands-off during any interactive drag: a 60Hz SetWindowPos flood (bar
+    // reposition + z-order re-insert) starves the dragged window's modal
+    // move/size loop and border drags never engage. On drag end the next
+    // tick falls through and re-syncs the bar to wherever the window landed.
+    if (native.inMoveSize()) {
+      this._wasDrag = true;
+      return;
+    }
+    if (this._wasDrag) {
+      this._wasDrag = false;
+      this._lastRectKey = ''; // force one emit after the drag
+    }
+    // Only emit when the terminal actually moved or resized - identical
+    // rects must not touch the bar window 60 times a second.
+    const key = rect.left + ',' + rect.top + ',' + rect.right + ',' + rect.bottom;
+    if (key === this._lastRectKey) return;
+    this._lastRectKey = key;
     this.emit('geometry', {
       left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom
     });
