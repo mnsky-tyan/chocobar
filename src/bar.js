@@ -183,12 +183,16 @@ class BarWindow {
     const hPhys = Math.round(targetH * (scale || 1));
     const [, ch] = this.win.getContentSize();
     if (Math.abs(ch - targetH) > 1) {
-      console.log('[wizbar] heal: content', ch, '->', targetH);
+      // Log once per distinct fight, not every tick: an environment that
+      // keeps re-breaking the size otherwise spams megabytes per hour.
+      const msg = 'content ' + ch + ' -> ' + targetH;
+      if (this._lastHealMsg !== msg) { console.log('[wizbar] heal:', msg); this._lastHealMsg = msg; }
       this.win.setContentSize(Math.round(targetW), targetH);
     }
     const rc = native.getWindowRect(this.hwnd);
     if (rc && (Math.abs(rc.right - rc.left - wPhys) > 1 || Math.abs(rc.bottom - rc.top - hPhys) > 1)) {
-      console.log('[wizbar] heal: phys', (rc.right - rc.left) + 'x' + (rc.bottom - rc.top), '->', wPhys + 'x' + hPhys);
+      const msg = 'phys ' + (rc.right - rc.left) + 'x' + (rc.bottom - rc.top) + ' -> ' + wPhys + 'x' + hPhys;
+      if (this._lastHealMsg !== msg) { console.log('[wizbar] heal:', msg); this._lastHealMsg = msg; }
       native.forceSize(this.hwnd, wPhys, hPhys);
     }
   }
