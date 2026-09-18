@@ -119,7 +119,12 @@ class BarWindow {
     if (Math.abs(ch - Math.round(bounds.height)) > 1) {
       this.win.setContentSize(Math.round(bounds.width), Math.round(bounds.height));
     }
-    if (!this.win.isVisible()) this.win.showInactive();
+    if (!this.win.isVisible()) {
+      this.win.showInactive();
+      // Same as the heal re-show: a show lands the bar above every app; the
+      // terminal-layer insertion must follow immediately.
+      this.onShown && this.onShown();
+    }
     this.assertNoTaskbar();
     // The window was just resized out of pill mode (static-geometry re-apply,
     // display change, staticWidth hot-reload): forget the last reported pill
@@ -175,9 +180,11 @@ class BarWindow {
     if (native.inMoveSize()) return; // never fight a live drag
     // Self-heal visibility — but ONLY when the bar belongs on screen. Without
     // this guard the heal loop fights hide() on minimize/detach (flicker).
+    let shown = false;
     if (!this.win.isVisible() && this._shouldShow && this._sizeTarget) {
       console.log('[wizbar] heal: window was hidden, re-showing');
       this.win.showInactive();
+      shown = true;
     }
     this.assertNoTaskbar();
     const wPhys = Math.round(targetW * (scale || 1));
@@ -200,6 +207,11 @@ class BarWindow {
       healLog('phys ' + (rc.right - rc.left) + 'x' + (rc.bottom - rc.top) + ' -> ' + wPhys + 'x' + hPhys);
       native.forceSize(this.hwnd, wPhys, hPhys);
     }
+    // A show lands the window at the top of its z-band — above every other
+    // app. The bar belongs ON the followed terminal's layer (inserted directly
+    // above it), so re-assert the z-insertion right after any show; with the
+    // geometry dedup the next regular syncZ could be a long wait.
+    if (shown) this.onShown && this.onShown();
   }
 
   // Keep the bar hovering immediately above the followed terminal in z-order
