@@ -216,18 +216,15 @@ function openDashboard() {
   }
 }
 
-// "Reload chocobar": a clean in-place reload. The renderer windows start
-// fresh; the main process, its single-instance lock, the tray, the tracker
-// and the metrics/token loops all survive untouched, no second instance is
-// spawned, and the pet companion process is never touched (we do not own it).
-// The bar re-pushes theme/stats/tokens on its own did-finish-load; the dash
-// is re-seeded by the handler installed in openDashboard.
+// "Reload chocobar": a REAL restart. The old in-place webContents reload left
+// native state (HWiNFO shm probing, Core Audio, single-instance lock) stale,
+// so "I enabled HWiNFO sharing after start" needed a manual quit+start. Now:
+// a fresh process spawns with the same arguments (—config included), this one
+// quits, and the single-instance lock hands over cleanly.
 function reloadChocobar() {
-  try {
-    if (bar && bar.win && !bar.win.isDestroyed()) bar.win.webContents.reload();
-    if (dashWin && !dashWin.isDestroyed()) dashWin.webContents.reload();
-    if (subsWin && !subsWin.isDestroyed()) subsWin.webContents.reload();
-  } catch (e) { DBG('reload failed:', e.message); }
+  const args = process.argv.slice(1).filter((a) => a !== '--remote-debugging-port' && !a.startsWith('--remote-debugging-port='));
+  try { app.relaunch({ args }); } catch (e) { DBG('relaunch failed:', e.message); }
+  app.quit();
 }
 
 // One source of truth for the tray menu and the bar context menu. Only the
