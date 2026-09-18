@@ -171,6 +171,7 @@ class BarWindow {
     if (this._taskbarAssertedAt && now - this._taskbarAssertedAt < 2000) return;
     this._taskbarAssertedAt = now;
     native.setToolWindow(this.hwnd, true);
+    native.setNoActivate(this.hwnd); // re-asserted: anything may rewrite ex-styles
     this.win.setSkipTaskbar(true);
   }
 
