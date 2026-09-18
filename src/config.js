@@ -84,17 +84,15 @@ const DEFAULTS = {
     // Dashboard surfaces (token dashboard + subscription board) follow the
     // colors above; the five daily-heatmap shades are their own ramp:
     heatmap: ['#F1ECD8', '#F6D8E0', '#EFB7C7', '#E28FB0', '#C95E8F'],
-    // Per-surface appearance for the popup windows. followBar:true reuses
-    // the bar's tint/alpha/backdrop exactly (the menu default: the right-click
-    // menu looks like the bar). An explicit backgroundTint wins; empty keeps
-    // each surface's built-in pink. The dashboards are opaque windows by
+    // Per-surface appearance for the dashboard windows. followBar:true
+    // reuses the bar's tint/backdrop; an explicit backgroundTint wins; empty
+    // keeps the built-in pink. The dashboards are opaque windows by
     // design (translucent cards read murky over the desktop), so there the
     // tint overrides the color only; the menu is transparent and also honors
     // backgroundAlpha (0 = clear, 255 = solid).
     surfaces: {
       dashboard: { followBar: false, backgroundTint: '', backgroundAlpha: 255 },
-      subs: { followBar: false, backgroundTint: '', backgroundAlpha: 255 },
-      menu: { followBar: true, backgroundTint: '', backgroundAlpha: 110 }
+      subs: { followBar: false, backgroundTint: '', backgroundAlpha: 255 }
     }
   },
   modules: {
@@ -248,17 +246,14 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     "divider": "#D9CCB2",
     // the five daily-heatmap shades on the token dashboard, light to dark
     "heatmap": ["#F1ECD8", "#F6D8E0", "#EFB7C7", "#E28FB0", "#C95E8F"],
-    // Per-surface appearance for the popup windows. "followBar": true reuses
-    // the bar's tint + alpha + backdrop exactly (the context menu default:
-    // the menu looks like the bar). Otherwise "backgroundTint" wins, empty =
-    // each surface's built-in pink. The dashboards are opaque windows by
-    // design (translucent cards read murky over the desktop), so there the
-    // tint overrides the color only; the menu window is transparent and also
-    // honors backgroundAlpha (0 = clear, 255 = solid).
+    // Per-surface appearance for the dashboard windows. "followBar": true
+    // reuses the bar's tint + backdrop; otherwise "backgroundTint" wins,
+    // empty = the built-in pink. The dashboards are opaque windows by design
+    // (translucent cards read murky over the desktop), so the tint overrides
+    // the color only.
     "surfaces": {
       "dashboard": { "followBar": false, "backgroundTint": "", "backgroundAlpha": 255 },
-      "subs":      { "followBar": false, "backgroundTint": "", "backgroundAlpha": 255 },
-      "menu":      { "followBar": true,  "backgroundTint": "", "backgroundAlpha": 110 }
+      "subs":      { "followBar": false, "backgroundTint": "", "backgroundAlpha": 255 }
     }
   },
   "modules": {

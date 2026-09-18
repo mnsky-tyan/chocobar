@@ -38,7 +38,7 @@ On first use of a config path, Chocobar writes an annotated config template ther
 %USERPROFILE%\.wizbar\config.json
 ```
 
-This includes an explicit `--config <path>` launch: the file is created with the template on first use, so `Edit config` (bar or tray right-click) always has a file to open. The file is hot-reloaded after saving; the generated comments document every available key. Main groups:
+This includes an explicit `--config <path>` launch: the file is created with the template on first use, so `Edit config` (bar or tray right-click) always has a file to open. The file is hot-reloaded after saving - no restart needed. The generated comments document every available key; the groups:
 
 | Group | Controls |
 |---|---|
@@ -49,6 +49,51 @@ This includes an explicit `--config <path>` launch: the file is created with the
 | `tokens` | Master switch, dashboard chip, rescan interval, heatmap range, harness display names, dashboard section toggles, and local usage adapters |
 | `subs` | Live subscription board: provider adapters, poll interval, request deadline, and window size |
 | `general` | Tray, autostart, and debug logging |
+
+### A few things worth trying first
+
+Small edits, hot-reloaded the moment you save:
+
+**Make the bar yours** - position, tint, and translucency all live in `bar`. The tint is what you see through the acrylic; `backgroundAlpha` is how solid it is:
+
+```json
+"bar": { "height": 28, "align": "center", "gap": 8,
+         "backgroundTint": "#FBF2E2", "backgroundAlpha": 110, "backdrop": "acrylic" }
+```
+
+**Your clock, your format**:
+
+```json
+"clock": { "enabled": true, "format": "{MMM} {dd} ({Wkk}) {HH}:{mm}" }
+```
+
+**Only show the chips you use** - every module and toggle turns off the same way:
+
+```json
+"modules": { "battery": { "enabled": false }, "shortcut": { "enabled": false } }
+```
+
+**Add a chip that launches anything** - a URL, an app, a script; `toggle: true` makes it hold an on/off state and run `command on` / `command off`:
+
+```json
+"custom": [ { "enabled": true, "icon": "🎧", "label": "Music",
+              "command": "spotify.exe" } ]
+```
+
+**Feed the dashboard your own usage stores** - each source is one flag plus a path; nothing is read until you enable it:
+
+```json
+"tokens": { "enabled": true,
+            "sources": { "pi": { "enabled": true, "sessionsDir": "~/.pi/agent/sessions" } } }
+```
+
+**Warn colors when a machine runs hot** - thresholds per module:
+
+```json
+"modules": { "cpu": { "warnAt": 85 }, "cputemp": { "warnAt": 85 } }
+```
+
+Everything else - heatmap shades, harness display names, board providers, window sizes - follows the same pattern and is documented in the template itself.
 
 ### The three toggles on the left of the bar
 
@@ -78,7 +123,7 @@ Anything the built-in toggles don't cover, you add yourself - each entry in `mod
 
 ### Surface colors (`theme.surfaces`)
 
-The three popup windows take their own background, independent of the shared palette: `theme.surfaces.dashboard`, `theme.surfaces.subs`, and `theme.surfaces.menu` each accept `followBar` (reuse the bar's tint + alpha + backdrop exactly - the context menu's default, so it looks like the bar it came from) or an explicit `backgroundTint` (empty = each surface's built-in pink). The dashboards are opaque windows by design, so there the tint sets the color only; the menu window is transparent and also honors `backgroundAlpha` (0 = clear, 255 = solid).
+The two dashboard windows can take their own background, independent of the shared palette: `theme.surfaces.dashboard` and `theme.surfaces.subs` each accept `followBar: true` (reuse the bar's tint) or an explicit `backgroundTint` (empty = the built-in pink). The dashboards are opaque windows by design, so the tint sets the color only.
 
 ### Subscription usage file
 
@@ -148,7 +193,7 @@ Exact read sites, for reference:
 
 - Click the diamond (tokens) chip or use `Ctrl+Alt+D` to open the dashboard.
 - Double-launch Chocobar to open the dashboard when it is already running.
-- Right-click the bar for the themed context menu (it wears the bar's color and opacity) and the tray icon for the same actions natively; both close on Esc or an outside click. Saving the config hot-reloads, so there is no reload-config entry.
+- Right-click the bar or tray icon for dashboards, reload, config, and quit actions; the menu closes on an outside click or Esc.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
 - The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
