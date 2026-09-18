@@ -9,9 +9,12 @@ DEST_WSL=/tmp/wizbar-oc-copy.db
 # WIN_TEMP (Windows path of %TEMP%) is passed through the environment by
 # the Node side; there is no usable default on a stranger's machine.
 WIN_TEMP="${WIN_TEMP:?WIN_TEMP env var not set (pass %TEMP% as a Windows path)}"
-# Accept a native Windows path from the Node side.
+# Accept a native Windows path from the Node side: translate the drive
+# letter and normalize separators ("C:\Users\x" -> "/mnt/c/Users/x").
 case "$WIN_TEMP" in
-  [A-Za-z]:*) WIN_TEMP="/mnt/${WIN_TEMP:0:1,,}${WIN_TEMP:2}" ;;
+  [A-Za-z]:*)
+    drive=$(printf '%s' "${WIN_TEMP:0:1}" | tr '[:upper:]' '[:lower:]')
+    WIN_TEMP="/mnt/$drive${WIN_TEMP:2}" ;;
 esac
 WIN_TEMP="${WIN_TEMP//\\//}"
 DEST_WIN="$WIN_TEMP/wizbar-oc-copy.db"
