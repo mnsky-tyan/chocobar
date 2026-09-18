@@ -83,7 +83,19 @@ const DEFAULTS = {
     divider: '#D9CCB2',
     // Dashboard surfaces (token dashboard + subscription board) follow the
     // colors above; the five daily-heatmap shades are their own ramp:
-    heatmap: ['#F1ECD8', '#F6D8E0', '#EFB7C7', '#E28FB0', '#C95E8F']
+    heatmap: ['#F1ECD8', '#F6D8E0', '#EFB7C7', '#E28FB0', '#C95E8F'],
+    // Per-surface appearance for the popup windows. followBar:true reuses
+    // the bar's tint/alpha/backdrop exactly (the menu default: the right-click
+    // menu looks like the bar). An explicit backgroundTint wins; empty keeps
+    // each surface's built-in pink. The dashboards are opaque windows by
+    // design (translucent cards read murky over the desktop), so there the
+    // tint overrides the color only; the menu is transparent and also honors
+    // backgroundAlpha (0 = clear, 255 = solid).
+    surfaces: {
+      dashboard: { followBar: false, backgroundTint: '', backgroundAlpha: 255 },
+      subs: { followBar: false, backgroundTint: '', backgroundAlpha: 255 },
+      menu: { followBar: true, backgroundTint: '', backgroundAlpha: 110 }
+    }
   },
   modules: {
     gpu:      { enabled: true, mode: 'sum', intervalMs: 1200 },
@@ -104,6 +116,13 @@ const DEFAULTS = {
     // visible: with no command set it does nothing until you wire one up —
     // set enabled:false to hide the chip.
     shortcut: { enabled: true, label: '', command: '' },
+    // User-defined chips: each entry renders a toggle on the bar and runs
+    // "command" on click. Design = icon (nerd-font glyph or emoji), label,
+    // color; function = command (any shell command or URL). With toggle:true
+    // the chip keeps an on/off state and runs "command on" / "command off"
+    // (build a script that takes the argument; the state itself is per-run,
+    // like the pet's). See the template for a worked example.
+    custom: [],
     clock:    { enabled: true, format: '{MMM} {dd} ({Wkk}) {HH}:{mm}' }
   },
   terminal: {
@@ -228,7 +247,19 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     "good": "#006400",
     "divider": "#D9CCB2",
     // the five daily-heatmap shades on the token dashboard, light to dark
-    "heatmap": ["#F1ECD8", "#F6D8E0", "#EFB7C7", "#E28FB0", "#C95E8F"]
+    "heatmap": ["#F1ECD8", "#F6D8E0", "#EFB7C7", "#E28FB0", "#C95E8F"],
+    // Per-surface appearance for the popup windows. "followBar": true reuses
+    // the bar's tint + alpha + backdrop exactly (the context menu default:
+    // the menu looks like the bar). Otherwise "backgroundTint" wins, empty =
+    // each surface's built-in pink. The dashboards are opaque windows by
+    // design (translucent cards read murky over the desktop), so there the
+    // tint overrides the color only; the menu window is transparent and also
+    // honors backgroundAlpha (0 = clear, 255 = solid).
+    "surfaces": {
+      "dashboard": { "followBar": false, "backgroundTint": "", "backgroundAlpha": 255 },
+      "subs":      { "followBar": false, "backgroundTint": "", "backgroundAlpha": 255 },
+      "menu":      { "followBar": true,  "backgroundTint": "", "backgroundAlpha": 110 }
+    }
   },
   "modules": {
     // GPU %: mode "sum" adds all engines (Task-Manager-like), "max" takes the busiest
@@ -254,6 +285,21 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     // text; empty shows just the bolt icon. Visible by default; set false to
     // hide it.
     "shortcut":  { "enabled": true, "label": "", "command": "" },
+    // User-defined chips: add as many as you like, each is one object in the
+    // "custom" list. A click runs "command" (any program, script or URL your
+    // shell can launch).
+    //   icon    nerd-font glyph or emoji shown before the label (empty = none)
+    //   label   chip text (empty = icon-only chip)
+    //   color   chip text/icon color (empty = theme default)
+    //   title   hover tooltip (empty = label)
+    //   toggle  true = the chip holds an on/off state and runs
+    //           "command on" / "command off" so your script can react
+    // Example (ships disabled - flip enabled:true to try it):
+    "custom": [
+      { "enabled": false, "icon": "", "label": "Focus", "color": "",
+        "title": "Toggle the focus script", "toggle": true,
+        "command": "C:\\tools\\focus.bat" }
+    ],
     // {MMM} month, {dd} day, {Wkk} weekday (Mon..Sun), {HH} {mm} {ss} time (24h)
     "clock":     { "enabled": true, "format": "{MMM} {dd} ({Wkk}) {HH}:{mm}" }
   },

@@ -65,6 +65,33 @@ function themePayload(cfg) {
       staticWidth: staticTop ? (bar.staticWidth === 'content' ? 'content' : 'workarea') : null
     },
     modules: cfg.modules,
+    // Per-surface backgrounds for the popup windows: each entry carries the
+    // bg to wear, or null = keep the built-in pink. followBar copies the
+    // bar's own color + opacity (the default for the context menu); an
+    // explicit theme.surfaces.<name>.backgroundTint overrides. Opaque
+    // surfaces (the two dashboards) only take the color; the transparent
+    // menu window also honors backgroundAlpha.
+    surfaces: (() => {
+      const out = {};
+      for (const name of ['dashboard', 'subs', 'menu']) {
+        const s = (theme && theme.surfaces && theme.surfaces[name]) || {};
+        const hex = s.backgroundTint || '';
+        if (s.followBar) {
+          out[name] = { bgCss: bar.bgCss };
+        } else if (/^#?[0-9a-fA-F]{6}$/.test(hex)) {
+          const h = hexToRgb(hex);
+          if (name === 'menu') {
+            const sa = Math.max(0, Math.min(255, Number(s.backgroundAlpha) || 0)) / 255;
+            out[name] = { bgCss: `rgba(${h.r},${h.g},${h.b},${sa.toFixed(3)})` };
+          } else {
+            out[name] = { bgCss: `rgb(${h.r},${h.g},${h.b})` };
+          }
+        } else {
+          out[name] = null;
+        }
+      }
+      return out;
+    })(),
     tokens: {
       showOnBar: cfg.tokens.showOnBar && !!cfg.tokens.enabled,
       // Dashboard section visibility (tokens.dashboard), read by the dash.
@@ -238,24 +265,80 @@ function openConfigFile() {
   shell.openPath(p);
 }
 
-// One source of truth for the tray menu and the bar context menu. Only the
-// tray gets "Open config folder"; every label and action is otherwise
-// identical, so the two menus cannot drift apart.
+// Themed right-click menu for the bar: a small transparent popup window so
+// it can wear the bar's own color + opacity (theme.surfaces.menu), unlike
+// native Win32 menus. Dismisses on outside click (blur), Esc, or action.
+let menuWin = null;
+function hideContextMenu() {
+  if (menuWin && !menuWin.isDestroyed() && menuWin.isVisible()) menuWin.hide();
+}
+function positionContextMenu(x, y) {
+  const screen = require('electron').screen;
+  const { workArea } = screen.getDisplayNearestPoint({ x, y });
+  const b = menuWin.getBounds();
+  menuWin.setPosition(
+    Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - b.width - 4)),
+    Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - b.height - 4)), false);
+}
+function openContextMenu(x, y) {
+  if (menuWin && !menuWin.isDestroyed()) {
+    positionContextMenu(x, y);
+    menuWin.send('theme', themePayload(configManager.config));
+    menuWin.show();
+    return;
+  }
+  menuWin = new (require('electron').BrowserWindow)({
+    width: 232, height: 226, show: false, frame: false, transparent: true,
+    resizable: false, movable: false, minimizable: false, maximizable: false,
+    skipTaskbar: true, backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'renderer', 'menu-preload.js'),
+      contextIsolation: true, nodeIntegration: false
+    }
+  });
+  menuWin.setAlwaysOnTop(true, 'screen-saver');
+  menuWin.loadFile(path.join(__dirname, 'renderer', 'menu.html'));
+  menuWin.webContents.on('did-finish-load', () => {
+    if (menuWin && !menuWin.isDestroyed()) menuWin.send('theme', themePayload(configManager.config));
+  });
+  // Outside click = blur = hide (the native-menu behavior the popup replaces
+  // never had, and the one thing a context menu must do).
+  menuWin.on('blur', hideContextMenu);
+  menuWin.on('closed', () => { menuWin = null; });
+  positionContextMenu(x, y);
+  menuWin.once('ready-to-show', () => menuWin.show());
+}
+
+// One source of truth for every menu action: the tray's native menu, the
+// bar's themed context-menu window, and its renderer's ipc calls all route
+// through this map.
+const MENU_ACTIONS = {
+  dash: () => openDashboard(),
+  subs: () => openSubs(),
+  reload: () => reloadChocobar(),
+  'edit-config': () => openConfigFile(),
+  'open-config-folder': () => shell.showItemInFolder((configManager && configManager.path) || CONFIG_PATH),
+  quit: () => app.quit()
+};
+
+// The tray gets the native menu (plus "Open config folder"); Win32 popups
+// cannot be themed. The BAR right-click uses the themed HTML window instead
+// (openContextMenu below) so it can match the bar's color + opacity. The old
+// "Reload config" entry is gone: saving the file hot-reloads already.
 function buildChocobarMenu(isTray) {
   const items = [
-    { label: 'Token dashboard', click: () => openDashboard() },
-    { label: 'Subscription dashboard', click: () => openSubs() },
+    { label: 'Token dashboard', click: () => MENU_ACTIONS.dash() },
+    { label: 'Subscription dashboard', click: () => MENU_ACTIONS.subs() },
     { type: 'separator' },
-    { label: 'Reload chocobar', click: () => reloadChocobar() },
-    { label: 'Edit config', click: () => openConfigFile() }
+    { label: 'Reload chocobar', click: () => MENU_ACTIONS.reload() },
+    { label: 'Edit config', click: () => MENU_ACTIONS['edit-config']() }
   ];
   if (isTray) {
-    items.push({ label: 'Open config folder', click: () => shell.showItemInFolder((configManager && configManager.path) || CONFIG_PATH) });
+    items.push({ label: 'Open config folder', click: () => MENU_ACTIONS['open-config-folder']() });
   }
   items.push(
-    { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
     { type: 'separator' },
-    { label: 'Quit chocobar', click: () => { app.quit(); } }
+    { label: 'Quit chocobar', click: () => MENU_ACTIONS.quit() }
   );
   return Menu.buildFromTemplate(items);
 }
@@ -285,6 +368,8 @@ function buildTray() {
 // measured on this machine — it dominated wizbar's CPU budget). Unlike the child
 // handle, a snapshot also sees a pet started or stopped outside WizBar.
 let petState = { running: false, exists: false };
+// Toggle state of user-defined chips (modules.custom), per run like the pet's.
+let customChipState = {};
 let petPid = null;               // pet process id from the last live poll
 let petRestorePending = false;   // set on launch, consumed by the poll
 let petRestoreActive = false;    // true while the restore watcher runs
@@ -555,6 +640,22 @@ function wireBar() {
   ipcMain.on('close-subs', () => { if (subsWin) subsWin.close(); });
   // Leftmost shortcut chip: run the user's configured command detached so a
   // GUI app launch or long script never ties up (or crashes) the bar process.
+  ipcMain.on('run-custom', (_e, id) => {
+    const list = ((configManager.config.modules || {}).custom) || [];
+    const cu = list.find((c) => c && String(c.id || c.label || c.command || '').slice(0, 64) === id);
+    if (!cu || !cu.command) return;
+    const sid = id;
+    let cmd = cu.command;
+    if (cu.toggle) {
+      const on = !customChipState[sid];
+      customChipState[sid] = on;
+      cmd += on ? ' on' : ' off';
+      if (bar && bar.win && !bar.win.isDestroyed()) bar.send('custom', customChipState);
+    }
+    try {
+      spawn(cmd, { shell: true, detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    } catch (e) { DBG('custom chip failed:', e.message); }
+  });
   ipcMain.on('run-shortcut', () => {
     const sc = (configManager.config.modules || {}).shortcut || {};
     if (!sc.enabled || !sc.command) return;
@@ -573,9 +674,20 @@ function wireBar() {
     if (!width || bar._lastPillW === width) return;
     bar.setPillWidth(width, bar.cfg.bar);
   });
-  ipcMain.on('bar-context', () => {
-    buildChocobarMenu(false).popup({});
+  ipcMain.on('bar-context', (_e, pos) => {
+    let x = Number(pos && pos.x) || null, y = Number(pos && pos.y) || null;
+    try {
+      const gb = bar.win.getBounds();
+      if (x == null) ({ x, y } = require('electron').screen.getCursorScreenPoint());
+      openContextMenu(gb.x + x, gb.y + y);
+    } catch (_) { openContextMenu(x || 100, y || 100); }
   });
+  ipcMain.on('menu-action', (_e, id) => {
+    hideContextMenu();
+    const fn = MENU_ACTIONS[id];
+    if (fn) fn();
+  });
+  ipcMain.on('menu-hide', () => hideContextMenu());
   // Clicking the bar strip raises the followed terminal: the bar acts as the
   // terminal's title strip. bringToFront carries the synthetic-ALT foreground
   // grant (the click came from a non-activating bar window).

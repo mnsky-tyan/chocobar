@@ -46,10 +46,13 @@ function applyTheme(t) {
     '--divider': t.divider
   };
   for (const [k, v] of Object.entries(map)) if (v) r.setProperty(k, v);
-  // Same as the token dash: board surface follows the theme's pinkBg.
-  if (t.pinkBg) {
-    r.setProperty('--bg', t.pinkBg);
-    document.body.style.background = t.pinkBg;
+  // Same as the token dash: board surface follows theme.surfaces.subs
+  // (backgroundTint override), else the theme's pinkBg.
+  const surfBg = t.surfaces && t.surfaces.subs && t.surfaces.subs.bgCss;
+  const bg = surfBg || t.pinkBg;
+  if (bg) {
+    r.setProperty('--bg', bg);
+    document.body.style.background = bg;
   }
 }
 
