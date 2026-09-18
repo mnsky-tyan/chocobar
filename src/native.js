@@ -44,6 +44,26 @@ const ole32 = loadLib('ole32.dll');
 
 const RECT = kstruct('RECT', { left: 'long', top: 'long', right: 'long', bottom: 'long' });
 
+// Interactive drag detection: GUI_INMOVESIZE from GetGUIThreadInfo. While ANY
+// window is in an interactive move/size drag, chocobar must go hands-off —
+// the 60Hz SetWindowPos churn (bar reposition + z-order re-insert) starves
+// another window's modal move/size loop, and border drags never engage or
+// stall mid-drag. Polling is cheap and needs no hooks.
+const GUITHREADINFO = kstruct('GUITHREADINFO', {
+  cbSize: 'uint32', flags: 'uint32',
+  hwndActive: 'uintptr_t', hwndFocus: 'uintptr_t', hwndCapture: 'uintptr_t',
+  hwndMenuOwner: 'uintptr_t', hwndMoveSize: 'uintptr_t', hwndCaret: 'uintptr_t',
+  rcCaret: RECT
+});
+const GetGUIThreadInfo = bind(user32, 'int __stdcall GetGUIThreadInfo(uint32_t idThread, _Out_ GUITHREADINFO *info)');
+const GUI_INMOVESIZE = 0x2;
+function inMoveSize() {
+  try {
+    const g = { cbSize: ksize(GUITHREADINFO), flags: 0 };
+    return !!GetGUIThreadInfo(0, g) && (g.flags & GUI_INMOVESIZE) !== 0;
+  } catch (_) { return false; }
+}
+
 const EnumCb = kproto('int __stdcall EnumCb(uintptr_t hwnd, void *lparam)');
 const EnumWindows = bind(user32, 'int __stdcall EnumWindows(EnumCb *cb, void *lParam)');
 const GetWindowThreadProcessId = bind(user32, 'uintptr_t __stdcall GetWindowThreadProcessId(uintptr_t hwnd, _Out_ uint32_t *pid)');
@@ -820,7 +840,7 @@ function rectOnAnyMonitor(x, y, w, h) {
 
 module.exports = {
   getClassName, getWindowRect, getFrameBounds, getClientRect, forceSize, isCloaked, listWindowsByClass, listWindows,
-  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront,
+  setWindowPosAfter, isBelowInZOrder, isTopmost, setTopmost, setToolWindow, debugZOrder, raiseAboveTerminalChrome, roundCorners, setCornerPreference, setImmersiveDarkMode, removeBorderColor, hwndNumberFromBuffer, bringToFront, inMoveSize,
   isIconic: (h) => !!IsIconic(h), isWindow: (h) => !!IsWindow(h), isVisible: (h) => !!IsWindowVisible(h),
   getBattery, getBatteryLinux, getCpuTempLinux, batteryFromPowerStatus, initVolume, getVolume, volumeState, getHwinfoTemp, parseHwinfoCpuTemp,
   findPidWindows, petGuardSnapshot, moveWindow, getMonitorRects, rectOnAnyMonitor, findProcessIdByName, findPidsByName,
