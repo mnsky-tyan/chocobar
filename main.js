@@ -445,6 +445,9 @@ function togglePet() {
 function spawnBar() {
   bar = new BarWindow(configManager.config);
   bar.create();
+  // Any (re)show lands the bar at the top of its z-band; the bar belongs on
+  // the followed terminal's layer, so re-assert the insertion immediately.
+  bar.onShown = () => { if (tracker.hwnd) syncZ(tracker.hwnd, true); };
   // Self-heal: if the bar window is destroyed externally (Alt-F4, shell
   // close), rebuild it instead of leaving the stats and geometry loops
   // throwing on a dangling window. Skipped while the app is quitting.
@@ -463,16 +466,16 @@ function spawnBar() {
 
 let shuttingDown = false;
 
+let lastZSync = 0;
+const syncZ = (hwnd, force) => {
+  const now = Date.now();
+  if (!force && now - lastZSync < 400) return;
+  lastZSync = now;
+  if (bar) bar.syncZ(hwnd);
+};
+
 function wireBar() {
   spawnBar();
-
-  let lastZSync = 0;
-  const syncZ = (hwnd, force) => {
-    const now = Date.now();
-    if (!force && now - lastZSync < 400) return;
-    lastZSync = now;
-    bar.syncZ(hwnd);
-  };
 
   if (process.platform !== 'win32') {
     // Non-Windows: the tracker has no Win32 window classes to follow; it emits
