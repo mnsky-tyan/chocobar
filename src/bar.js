@@ -181,18 +181,22 @@ class BarWindow {
     this.assertNoTaskbar();
     const wPhys = Math.round(targetW * (scale || 1));
     const hPhys = Math.round(targetH * (scale || 1));
+    // An environment that keeps re-breaking the size makes this fire every
+    // tick; log at most one line per 5 minutes (the correction still
+    // applies every tick).
+    const healLog = (msg) => {
+      if (Date.now() - (this._lastHealLogAt || 0) < 300000) return;
+      this._lastHealLogAt = Date.now();
+      console.log('[wizbar] heal:', msg);
+    };
     const [, ch] = this.win.getContentSize();
     if (Math.abs(ch - targetH) > 1) {
-      // Log once per distinct fight, not every tick: an environment that
-      // keeps re-breaking the size otherwise spams megabytes per hour.
-      const msg = 'content ' + ch + ' -> ' + targetH;
-      if (this._lastHealMsg !== msg) { console.log('[wizbar] heal:', msg); this._lastHealMsg = msg; }
+      healLog('content ' + ch + ' -> ' + targetH);
       this.win.setContentSize(Math.round(targetW), targetH);
     }
     const rc = native.getWindowRect(this.hwnd);
     if (rc && (Math.abs(rc.right - rc.left - wPhys) > 1 || Math.abs(rc.bottom - rc.top - hPhys) > 1)) {
-      const msg = 'phys ' + (rc.right - rc.left) + 'x' + (rc.bottom - rc.top) + ' -> ' + wPhys + 'x' + hPhys;
-      if (this._lastHealMsg !== msg) { console.log('[wizbar] heal:', msg); this._lastHealMsg = msg; }
+      healLog('phys ' + (rc.right - rc.left) + 'x' + (rc.bottom - rc.top) + ' -> ' + wPhys + 'x' + hPhys);
       native.forceSize(this.hwnd, wPhys, hPhys);
     }
   }
