@@ -130,6 +130,15 @@ const native = require('../src/native');
     DEFAULTS.modules.shortcut.enabled === true &&
     DEFAULTS.tokens.showOnBar === true &&
     DEFAULTS.subs.enabled === true);
+  check('config: user-defined chips ship empty (nothing pre-wired)',
+    Array.isArray(DEFAULTS.modules.custom) && DEFAULTS.modules.custom.length === 0);
+  check('config: surface defaults (menu follows bar, dashboards keep built-in pink)',
+    DEFAULTS.theme.surfaces.menu.followBar === true &&
+    DEFAULTS.theme.surfaces.dashboard.followBar === false &&
+    DEFAULTS.theme.surfaces.subs.followBar === false &&
+    DEFAULTS.theme.surfaces.dashboard.backgroundTint === '' &&
+    DEFAULTS.theme.surfaces.subs.backgroundTint === '' &&
+    DEFAULTS.theme.surfaces.menu.backgroundTint === '');
   check('config: pet off, empty path; agents module fully removed',
     DEFAULTS.modules.pet.enabled === false && DEFAULTS.modules.pet.exePath === '' &&
     !('agents' in DEFAULTS.modules));

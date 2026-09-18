@@ -34,9 +34,14 @@ function applyTheme(t) {
   }
   // Card is PINK: follow the theme's pinkBg for the dashboard background and
   // body. (The old translucent card composited over the desktop = murky.)
-  if (t.pinkBg) {
-    r.setProperty('--bg', t.pinkBg);
-    document.body.style.background = t.pinkBg;
+  // Card surface: theme.surfaces.dashboard.backgroundTint overrides; empty =
+  // the theme's pinkBg. (Opaque window by design - a translucent card over
+  // the desktop reads murky - so only the color is configurable here.)
+  const surfBg = t.surfaces && t.surfaces.dashboard && t.surfaces.dashboard.bgCss;
+  const bg = surfBg || t.pinkBg;
+  if (bg) {
+    r.setProperty('--bg', bg);
+    document.body.style.background = bg;
   }
   // Section toggles apply on first open, pushed themes, and hot reload alike.
   applyVisibility();
