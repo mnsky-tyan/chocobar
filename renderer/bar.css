@@ -104,7 +104,6 @@ body {
 #seg-tokens .ico { color: var(--yellow); }
 #seg-tokens .val { color: var(--fg-dim); }
 #seg-tokens:hover .val { color: var(--pink-deep); }
-#bar > #seg-tokens { margin-right: auto; }
 
 #seg-pet .ico { color: var(--pink-deep); }
 #seg-pet:hover .ico { color: var(--pink-deep); }

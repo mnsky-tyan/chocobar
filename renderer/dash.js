@@ -68,6 +68,19 @@ function statCard(label, value, sub) {
   return `<div class="statcard"><div class="label">${esc(label)}</div><div class="value">${value}${sub ? ` <small>${esc(sub)}</small>` : ''}</div></div>`;
 }
 
+// Cache totals per period, shown as secondary text on the cards: the raw
+// total (input+output) is much smaller than the old cache-inclusive number,
+// and the cached amount is the missing part that makes the two comparable.
+function cacheSum(daysBack) {
+  let cached = 0;
+  const from = daysBack == null ? 0 : Date.now() - daysBack * 86400000;
+  for (const [key, d] of Object.entries(agg.byDay || {})) {
+    if (from && new Date(key + 'T12:00:00').getTime() < from) continue;
+    for (const a of Object.values(d.apps || {})) cached += (a.cacheRead || 0) + (a.cacheWrite || 0);
+  }
+  return cached;
+}
+
 function totalOfAgg(a) {
   if (!a) return 0;
   // Raw convention: input and output are cache-exclusive, so input+output is
@@ -86,11 +99,12 @@ function render() {
   $('usage-off').classList.toggle('hidden', !usageOff);
 
   // --- stat cards
+  const sub = (n) => (n > 0 ? `+${fmt(n)} cached` : '');
   $('statcards').innerHTML =
-    statCard('Today', fmt(agg.today.total)) +
-    statCard('Last 7 days', fmt(agg.week)) +
-    statCard('Last 30 days', fmt(agg.month)) +
-    statCard('All time', fmt(agg.allTime));
+    statCard('Today', fmt(agg.today.total), sub(cacheSum(1))) +
+    statCard('Last 7 days', fmt(agg.week), sub(cacheSum(7))) +
+    statCard('Last 30 days', fmt(agg.month), sub(cacheSum(30))) +
+    statCard('All time', fmt(agg.allTime), sub(cacheSum(null)));
 
   renderSubscription();
   renderHeatmap();
