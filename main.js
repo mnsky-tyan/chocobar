@@ -576,6 +576,17 @@ function wireBar() {
     metrics.setConfig(cfg);
     tokens.setConfig(cfg);
     if (subs) subs.setConfig(cfg);
+    // Bar height cannot be applied to a live window: Electron clamps Win32
+    // size changes (moves are fine) of the non-resizable frameless bar, so a
+    // height change left the stale height with the NEW position - the bar
+    // visibly crept toward the terminal on decreases. Recreate the window
+    // instead; the next follow tick re-applies geometry to it.
+    const prevBarCfg = bar.cfg && bar.cfg.bar;
+    if (process.platform === 'win32' && prevBarCfg &&
+        Number(prevBarCfg.height) !== Number(cfg.bar.height)) {
+      bar.destroy();
+      spawnBar();
+    }
     bar.cfg = cfg;
     bar.send('theme', themePayload(cfg));
     bar.send('tokens', tokens.aggregate());
