@@ -123,7 +123,7 @@ class TokenTracker extends require('events') {
     try { added += await this._scanZcode(); } catch (e) { console.error('[wizbar] zcode scan:', e.message); }
     try { added += this._scanZaiSessions(); } catch (e) { console.error('[wizbar] zai scan:', e.message); }
     try { added += this._scanPiAgentSessions(); } catch (e) { console.error('[wizbar] pi scan:', e.message); }
-    try { added += this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
+    try { added += await this._scanOpencode(); } catch (e) { console.error('[wizbar] opencode scan:', e.message); }
     try { added += await this._scanMimo(); } catch (e) { console.error('[wizbar] mimo scan:', e.message); }
     let plansChanged = false;
     try { plansChanged = this._scanSubscription(); } catch (e) { console.error('[wizbar] subscription scan:', e.message); }
@@ -375,20 +375,21 @@ class TokenTracker extends require('events') {
   // into the host store.
   _scanOpencode() {
     const src = this.cfg.sources.opencode;
-    if (!src || !src.enabled) return 0;
+    if (!src || !src.enabled) return Promise.resolve(0);
     let added = 0;
     const dbPath = expandHome(src.dbPath || '~/.local/share/opencode/opencode.db');
+    let result = Promise.resolve(0);
     if (dbPath && fs.existsSync(dbPath)) {
-      added += this._scanOpencodeDb(dbPath, 'o');
+      result = Promise.resolve(this._scanOpencodeDb(dbPath, 'o'));
     } else if (src.storageDir && fs.existsSync(expandHome(src.storageDir))) {
       added += this._scanOpencodeFiles();
     }
     // WSL Ubuntu store (same schema, separate machine identity in the key).
     if (src.wsl && src.wsl.enabled !== false) {
       const copy = this._copyWslOpencodeDb(src.wsl);
-      if (copy) added += this._scanOpencodeDb(copy, 'ow');
+      if (copy) result = result.then((n) => n + this._scanOpencodeDb(copy, 'ow'));
     }
-    return added;
+    return result.then((n) => added + n);
   }
 
   _scanOpencodeFiles() {
@@ -439,9 +440,13 @@ class TokenTracker extends require('events') {
   //   { role:'assistant', modelID, providerID, time:{created},
   //     tokens:{ input, output, reasoning, cache:{ read, write } } }
   // keyPrefix 'o' = host store, 'ow' = a WSL-distro copy (own app id).
+  // node:sqlite (Node >= 22) is used when present; Electron builds on older
+  // Node fall back to scripts/opencode_query.py (same pattern as the zcode
+  // source), so the source works everywhere.
   _scanOpencodeDb(dbPath, keyPrefix) {
     let DatabaseSync;
-    try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) { return 0; }
+    try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) { DatabaseSync = null; }
+    if (!DatabaseSync) return this._scanOpencodeDbPython(dbPath, keyPrefix);
     let db;
     try { db = new DatabaseSync(dbPath, { readOnly: true }); } catch (e) {
       console.error('[wizbar] opencode db open:', dbPath, e.message);
@@ -514,6 +519,55 @@ class TokenTracker extends require('events') {
     }
     if (added) console.log(`[wizbar] opencode ${app}: +${added} records`);
     return added;
+  }
+
+  // Python fallback for runtimes without node:sqlite (Electron <= 36 ships
+  // Node < 22). Returns a Promise; the caller tolerates both sync and async.
+  _scanOpencodeDbPython(dbPath, keyPrefix) {
+    const app = keyPrefix === 'ow' ? 'opencode-wsl' : 'opencode';
+    const run = (py) => new Promise((resolve, reject) => {
+      execFile(py, [path.join(__dirname, '..', 'scripts', 'opencode_query.py'), dbPath],
+        { windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' },
+        (err, out) => (err ? reject(err) : resolve(out)));
+    });
+    return (async () => {
+      let stdout;
+      try {
+        stdout = await run(this._pythonCmd);
+      } catch (e) {
+        if (e && e.code === 'ENOENT' && this._pythonCmd !== 'python3') {
+          this._pythonCmd = 'python3';
+          stdout = await run('python3');
+        } else {
+          console.error('[wizbar] opencode db scan:', e.message);
+          return 0;
+        }
+      }
+      let added = 0;
+      for (const r of JSON.parse(stdout)) {
+        const key = `${keyPrefix}:${r.id}`;
+        if (this.records.has(key)) continue;
+        this.records.set(key, {
+          app,
+          ts: Number(r.ts) || Date.now(),
+          model: r.model || 'unknown',
+          input: r.input || 0,
+          output: r.output || 0,
+          reasoning: r.reasoning || 0,
+          cacheRead: r.cacheRead || 0,
+          cacheWrite: r.cacheWrite || 0
+        });
+        added++;
+        const ts = Number(r.ts) || 0;
+        if (keyPrefix === 'ow') {
+          if (ts > (this._ocWslHigh || 0)) this._ocWslHigh = ts;
+        } else if (ts > (this._ocDbHigh || 0)) {
+          this._ocDbHigh = ts;
+        }
+      }
+      if (added) console.log(`[wizbar] opencode ${app}: +${added} records`);
+      return added;
+    })();
   }
 
   /**
