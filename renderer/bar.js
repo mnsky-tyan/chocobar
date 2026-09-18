@@ -35,6 +35,9 @@ const ICONS = {
   buds: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 3a3 3 0 0 0-3 3v2.2a3 3 0 1 0 3 3V3z"/><path d="M8.5 13.5v2a3.5 3.5 0 0 1-3.4 3.5"/><path d="M15.5 3a3 3 0 0 1 3 3v2.2a3 3 0 1 1-3 3V3z"/><path d="M15.5 13.5v2a3.5 3.5 0 0 0 3.4 3.5"/></svg>`,
   clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>`,
   diamond: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3 21 12 12 21 3 12z"/></svg>`,
+  // Subscription board chip: a generic gauge. No vendor glyph — the label
+  // text and the board content say which provider the number belongs to.
+  gauge: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 14l4-4"/></svg>`,
   // Pet bow icon: two loops per side around a small knot.
   bow: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 11C8.5 7.5 5.5 6.5 4.5 8s.5 4 6.5 3"/><path d="M13 11c2.5-3.5 5.5-4.5 6.5-3s-.5 4-6.5 3"/><path d="M11 13c-2.5 3.5-5.5 4.5-6.5 3s.5-4 6.5-3"/><path d="M13 13c2.5 3.5 5.5 4.5 6.5 3s-.5-4-6.5-3"/><circle cx="12" cy="12" r="1.1"/></svg>`,
   // Shortcut chip: a lightning bolt for "runs whatever you wired up".
@@ -45,6 +48,8 @@ let theme = null;
 let stats = null;
 let tokensAgg = null;
 let petState = null;
+let subsAgg = null;
+let subsPage = 0;           // which provider the subs chip shows; flips every minute
 let segEls = {};
 let sizeReportTimer = null;
 
@@ -94,16 +99,17 @@ function seg(id, iconSvg, clickable) {
 
 function rebuildSegments() {
   const c = el('segments');
-  // Pinned chips (shortcut/pet/tokens) are direct children of #bar — remove
-  // stale ones from earlier rebuilds before appending fresh chips.
-  for (const n of [...el('bar').querySelectorAll(':scope > #seg-shortcut, :scope > #seg-tokens, :scope > #seg-pet')]) n.remove();
+  // Pinned chips (shortcut/pet/tokens/subs) are direct children of #bar —
+  // remove stale ones from earlier rebuilds before appending fresh chips.
+  for (const n of [...el('bar').querySelectorAll(':scope > #seg-shortcut, :scope > #seg-pet, :scope > #seg-tokens, :scope > #seg-subs')]) n.remove();
   c.innerHTML = '';
   segEls = {};
   if (!theme) return;
   const m = theme.modules || {};
   const pinned = (theme.bar.align || 'right') === 'right';
 
-  // Chip order: shortcut leftmost, then the pet, then the token dashboard.
+  // Chip order: shortcut leftmost, then the pet (bow toggle), then the token
+  // dashboard, then the subscription board right of it.
   // With the right-aligned group these pin left of #segments as direct
   // children of #bar, and the auto margin that pushes the module group right
   // sits on the LAST pinned chip.
@@ -123,6 +129,12 @@ function rebuildSegments() {
     const s = seg('tokens', ICONS.diamond, true);
     s.title = 'Token usage today — click to open dashboard';
     s.addEventListener('click', () => window.wizbar.openDash());
+    chips.push(s);
+  }
+  if (theme.subs && theme.subs.enabled) {
+    const s = seg('subs', ICONS.gauge, true);
+    s.title = 'Subscription plan remaining — click to open board';
+    s.addEventListener('click', () => window.wizbar.openSubs());
     chips.push(s);
   }
   if (pinned) {
@@ -224,15 +236,46 @@ function render() {
   }
 
   if (segEls.pet) {
+    const pl = (m.pet && m.pet.label) || '';
     if (petState && petState.exists) {
-      setVal('pet', petState.running ? 'on' : 'off', petState.running ? 'good' : 'dim');
-      segEls.pet.root.title = petState.running
+      const on = petState.running;
+      setVal('pet', pl ? `${pl} ${on ? 'on' : 'off'}` : (on ? 'on' : 'off'), on ? 'good' : 'dim');
+      segEls.pet.root.title = on
         ? 'Pet is out — click to send it away'
         : 'Pet — click to summon it';
     } else {
-      setVal('pet', '—', 'dim');
+      setVal('pet', pl, 'dim');
       segEls.pet.root.title = 'Pet — exe not found (modules.pet.exePath in config)';
     }
+  }
+
+  if (segEls.subs) {
+    // Rotate through the enabled providers every minute so every wired plan is
+    // visible on the bar without opening the board. Remaining counts down
+    // 100% -> 0%; color: >70 green, >30 yellow, else red.
+    const providers = (theme.subs && theme.subs.providers) || [];
+    const pages = providers.map((p) => {
+      const snap = subsAgg && subsAgg.providers && subsAgg.providers[p.id];
+      // Week window preferred; else the first window; else no number yet.
+      const win = snap && snap.windows
+        ? (snap.windows.find((w) => w.key === 'secondary' || /week/i.test(String(w.label))) || snap.windows[0])
+        : null;
+      return { label: p.label, snap, win };
+    });
+    const page = pages[subsPage % Math.max(1, pages.length)] || { label: '', snap: null, win: null };
+    if (page.snap && page.snap.status === 'stale') {
+      setVal('subs', 'stale', 'dim');
+    } else if (page.win && page.win.remainingPercent != null) {
+      const rem = page.win.remainingPercent;
+      setVal('subs', Math.round(rem) + '%', rem > 70 ? 'good' : rem > 30 ? 'dim' : 'warn');
+    } else {
+      setVal('subs', '—', 'dim');
+    }
+    segEls.subs.root.title = pages.length
+      ? pages.map((pg) => `${pg.label}${pg.snap && pg.snap.plan ? ' ' + pg.snap.plan : ''} week: ${
+          pg.win && pg.win.remainingPercent != null ? Math.round(pg.win.remainingPercent) + '% left' : '—'}`
+        ).join('\n') + '\nclick for plan board'
+      : 'Subscription board — enable subs.providers in the config';
   }
 
   if (segEls.gpu) {
@@ -309,7 +352,14 @@ window.wizbar.onTheme(applyTheme);
 window.wizbar.onStats((s) => { stats = s; render(); });
 window.wizbar.onTokens((t) => { tokensAgg = t; render(); });
 window.wizbar.onPet((r) => { petState = r; render(); });
+window.wizbar.onSubs((s) => { subsAgg = s; render(); });
 
 window.wizbar.getTheme().then(applyTheme);
-// local clock tick for smooth seconds if the format uses them
-setInterval(() => { if (segEls.clock) render(); }, 1000);
+// local clock tick for smooth seconds if the format uses them; it also flips
+// the subs chip to the next provider once a minute
+setInterval(() => {
+  if (segEls.clock || segEls.subs) {
+    if (segEls.subs) subsPage = Math.floor(Date.now() / 60000);
+    render();
+  }
+}, 1000);

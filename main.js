@@ -4,7 +4,7 @@ const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } =
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
-const { ConfigManager, CONFIG_PATH, APP_DIR } = require('./src/config');
+const { ConfigManager, CONFIG_PATH, APP_DIR, resolveConfigPath } = require('./src/config');
 const { TerminalTracker } = require('./src/tracker');
 const { MetricsEngine } = require('./src/metrics');
 const { TokenTracker } = require('./src/tokens');
@@ -71,10 +71,18 @@ function themePayload(cfg) {
       dashboard: (cfg.tokens && cfg.tokens.dashboard) || {}
     },
     // Dashboard extras the renderers read: harness display-name overrides and
-    // whether the subscription board is wired (hides its launch button).
+    // whether the subscription board is wired (the bar chip + the board).
     labels: (cfg.tokens && cfg.tokens.labels) || {},
     heatmap: (theme && theme.heatmap) || null,
-    subs: { enabled: !!(cfg.subs && cfg.subs.enabled) }
+    // Enabled subs providers only: the bar chip rotates through these.
+    subs: {
+      enabled: !!(cfg.subs && cfg.subs.enabled),
+      providers: (cfg.subs && Array.isArray(cfg.subs.providers))
+        ? cfg.subs.providers
+            .map((p, i) => ({ id: p.type + ':' + i, label: p.label || p.type }))
+            .filter((_, i) => cfg.subs.providers[i].enabled !== false)
+        : []
+    }
   };
 }
 
@@ -231,10 +239,10 @@ function buildChocobarMenu(isTray) {
     { label: 'Subscription dashboard', click: () => openSubs() },
     { type: 'separator' },
     { label: 'Reload chocobar', click: () => reloadChocobar() },
-    { label: 'Edit config', click: () => shell.openPath(CONFIG_PATH) }
+    { label: 'Edit config', click: () => shell.openPath((configManager && configManager.path) || CONFIG_PATH) }
   ];
   if (isTray) {
-    items.push({ label: 'Open config folder', click: () => shell.showItemInFolder(CONFIG_PATH) });
+    items.push({ label: 'Open config folder', click: () => shell.showItemInFolder((configManager && configManager.path) || CONFIG_PATH) });
   }
   items.push(
     { label: 'Reload config', click: () => configManager.emit('changed', configManager.config) },
@@ -545,6 +553,7 @@ function wireBar() {
 
   subs.on('updated', (snap) => {
     if (subsWin && !subsWin.isDestroyed()) subsWin.send('subs', snap);
+    if (bar && bar.win && !bar.win.isDestroyed()) bar.send('subs', snap);
   });
 
   // Push theme + first stats once renderer is ready
@@ -560,6 +569,7 @@ function wireBar() {
     bar.send('stats', metrics.snapshot());
     bar.send('tokens', tokens.aggregate());
     bar.send('pet', petState);
+    if (configManager.config.subs && configManager.config.subs.enabled) bar.send('subs', subs.snapshot());
   });
 
   // config hot reload
@@ -596,7 +606,7 @@ function applyAutostart(enable) {
 app.whenReady().then(() => {
   DBG('whenReady');
   try {
-    configManager = new ConfigManager();
+    configManager = new ConfigManager(resolveConfigPath());
     const cfg = configManager.load();
     DBG('config loaded');
 
@@ -628,7 +638,7 @@ app.whenReady().then(() => {
 
     statsLoop();
     applyAutostart(cfg.general.autostart);
-    DBG('running. config:', CONFIG_PATH);
+    DBG('running. config:', configManager.path);
   } catch (e) {
     DBG('FATAL', e.stack || e.message);
     console.error('FATAL', e);

@@ -429,7 +429,7 @@ const native = require('../src/native');
       goodP.ok === true && goodP.windows.length === 1 &&
       afterP.ok === false && afterP.windows.length === 1 &&
       afterP.windows[0].percent === 20 &&
-      afterP.notes.some((n) => n.includes('stale')));
+      afterP.status === 'stale');
 
     // A DISABLED provider must not keep stale windows on the board: switching
     // an entry off shows its disabled state instead of frozen numbers.
@@ -442,7 +442,7 @@ const native = require('../src/native');
     const disP = dis.providers['chatgpt:0'];
     check('subs: disabled provider shows disabled state, no stale windows',
       disP.ok === false && disP.windows.length === 0 &&
-      disP.notes.some((n) => n.includes('disabled')));
+      disP.status === 'disabled');
 
     // A disabled tracker never fetches at all (master off = zero requests).
     let called = 0;
@@ -562,7 +562,7 @@ const native = require('../src/native');
         panelEl.querySelector('[data-pies]').innerHTML.includes('<svg'),
         `looked up: ${JSON.stringify(lookedUp)}`);
       // A status with no pill wording hides the capsule instead of an empty blob.
-      provider.status = 'warn';
+      provider.status = 'unknown';
       api.render();
       check('subs board: unlabeled status renders an empty pill',
         byId[emitted[0]].querySelector('[data-pill]').textContent === '');

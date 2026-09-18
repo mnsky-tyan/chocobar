@@ -13,8 +13,10 @@
 //  - pi:     ~/.pi/agent/sessions/<project-slug>/*.jsonl — the standalone pi
 //            coding agent's transcripts, nested under per-project subfolders;
 //            same per-message `usage` shape, scanned by the same reader as zai.
-//  - opencode: ~/.local/share/opencode/storage/message/<session>/msg_*.json
-//            assistant messages carry a `tokens` object.
+//  - opencode: SQLite ~/.local/share/opencode/opencode.db (message.data JSON
+//            with a `tokens` object); the legacy storage/message file tree is
+//            a fallback. A second WSL-distro store is copied in read-only and
+//            counted as its own app ("opencode-wsl").
 //  - mimo:  Xiaomi MiMo AI desktop exposes a localhost HTTP API while it runs
 //            (port + bearer token in %APPDATA%\Xiaomi MiMo AI\desktop-api.json);
 //            GET /v1/sessions and /v1/sessions/<id>/messages return transcripts
@@ -26,6 +28,16 @@
 //              { "plans": [ { "name": "Pro Plan", "total": 1500,
 //                             "used": 430, "resetsAt": "2026-10-14" } ] }
 //            Re-read on every rescan; rendered as its own dashboard card.
+//
+// Token convention: every stored record counts RAW tokens. input and output
+// are cache-EXCLUSIVE (what the provider bills as base prompt + completion);
+// cacheRead / cacheWrite are stored as separate breakdown columns and are
+// NEVER added to a total. Evidence: the zcode DB row
+// computed_total_tokens == input_tokens + output_tokens + reasoning_tokens
+// exactly, so input_tokens already contains its cache read/write tokens
+// (subtracted here to get the raw value); pi/zai transcripts expose
+// usage.totalTokens == input + output + cacheRead + cacheWrite, so their
+// input excludes cache already (stored as-is).
 //
 // The sources themselves are the durable store; we keep an in-memory record map
 // keyed by a stable source id (dedup) and a small cache file for fast restarts.
@@ -47,6 +59,13 @@ function localDateKey(tsMs) {
 
 function emptyAgg() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, requests: 0 };
+}
+
+function expandHome(p) {
+  if (typeof p === 'string' && p.startsWith('~/')) {
+    return path.join(os.homedir(), p.slice(2));
+  }
+  return p;
 }
 
 function addAgg(a, r) {
@@ -175,7 +194,10 @@ class TokenTracker extends require('events') {
         app: zaiIds.has(sessUuid) ? 'zai' : 'zcode',
         ts: Number(r.ts),
         model: r.model || 'unknown',
-        input: r.input || 0,
+        // The DB's input_tokens already INCLUDES cache creation/read tokens
+        // (computed_total_tokens == input + output + reasoning, verified on the
+        // live DB), so the raw value subtracts them. Cache stays as detail.
+        input: Math.max(0, (r.input || 0) - (r.cacheWrite || 0) - (r.cacheRead || 0)),
         output: r.output || 0,
         reasoning: r.reasoning || 0,
         cacheRead: r.cacheRead || 0,
@@ -321,10 +343,10 @@ class TokenTracker extends require('events') {
                   app,
                   ts: Number(d.message.timestamp) || st.mtimeMs,
                   model: d.message.model || 'unknown',
-                  // pi reports cache beside input (its input EXCLUDES cache, unlike the
-                  // zcode DB) and its own totalTokens = input+output+cacheRead+cacheWrite;
-                  // folding cache into input makes the record cache-inclusive like DB rows.
-                  input: input + cacheRead + cacheWrite, output, cacheRead, cacheWrite, reasoning: 0
+                  // pi's usage.totalTokens == input + output + cacheRead +
+                  // cacheWrite (verified on real transcripts), so its input is
+                  // already cache-exclusive. Cache columns stay as detail only.
+                  input, output, cacheRead, cacheWrite, reasoning: 0
                 });
                 added++;
               }
@@ -347,15 +369,38 @@ class TokenTracker extends require('events') {
   }
 
   // --- opencode ----------------------------------------------------------------
+  // Prefer the SQLite store (current opencode); fall back to the legacy
+  // message-file tree. A second WSL-distro store may be copied in read-only
+  // and is counted as its own app ("opencode-wsl") so its numbers never merge
+  // into the host store.
   _scanOpencode() {
     const src = this.cfg.sources.opencode;
-    if (!src.enabled || !src.storageDir || !fs.existsSync(src.storageDir)) return 0;
+    if (!src || !src.enabled) return 0;
+    let added = 0;
+    const dbPath = expandHome(src.dbPath || '~/.local/share/opencode/opencode.db');
+    if (dbPath && fs.existsSync(dbPath)) {
+      added += this._scanOpencodeDb(dbPath, 'o');
+    } else if (src.storageDir && fs.existsSync(expandHome(src.storageDir))) {
+      added += this._scanOpencodeFiles();
+    }
+    // WSL Ubuntu store (same schema, separate machine identity in the key).
+    if (src.wsl && src.wsl.enabled !== false) {
+      const copy = this._copyWslOpencodeDb(src.wsl);
+      if (copy) added += this._scanOpencodeDb(copy, 'ow');
+    }
+    return added;
+  }
+
+  _scanOpencodeFiles() {
+    const src = this.cfg.sources.opencode;
+    const storageDir = expandHome(src.storageDir);
+    if (!fs.existsSync(storageDir)) return 0;
     let added = 0;
     const cutoff = (this._ocMtimeFloor || 0);
-    const dirs = fs.readdirSync(src.storageDir, { withFileTypes: true })
+    const dirs = fs.readdirSync(storageDir, { withFileTypes: true })
       .filter((d) => d.isDirectory());
     for (const d of dirs) {
-      const dir = path.join(src.storageDir, d.name);
+      const dir = path.join(storageDir, d.name);
       let files;
       try { files = fs.readdirSync(dir); } catch (_) { continue; }
       for (const fn of files) {
@@ -374,9 +419,9 @@ class TokenTracker extends require('events') {
           app: 'opencode',
           ts: (msg.time && msg.time.created) || st.mtimeMs,
           model: (msg.model && (msg.model.modelID || msg.model.modelId)) || 'unknown',
-          // Same normalization as the pi scan: opencode's input excludes cache, and
-          // reasoning is a breakdown of output (never additive).
-          input: (t.input || 0) + ((t.cache && t.cache.read) || 0) + ((t.cache && t.cache.write) || 0),
+          // opencode's input excludes cache (total = input+output+cache):
+          // raw input stored as-is, cache is detail.
+          input: t.input || 0,
           output: t.output || 0,
           reasoning: t.reasoning || 0,
           cacheRead: (t.cache && t.cache.read) || 0,
@@ -390,11 +435,127 @@ class TokenTracker extends require('events') {
     return added;
   }
 
+  // Scan an opencode SQLite store. message.data is JSON:
+  //   { role:'assistant', modelID, providerID, time:{created},
+  //     tokens:{ input, output, reasoning, cache:{ read, write } } }
+  // keyPrefix 'o' = host store, 'ow' = a WSL-distro copy (own app id).
+  _scanOpencodeDb(dbPath, keyPrefix) {
+    let DatabaseSync;
+    try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) { return 0; }
+    let db;
+    try { db = new DatabaseSync(dbPath, { readOnly: true }); } catch (e) {
+      console.error('[wizbar] opencode db open:', dbPath, e.message);
+      return 0;
+    }
+    let added = 0;
+    const app = keyPrefix === 'ow' ? 'opencode-wsl' : 'opencode';
+    try {
+      const since = keyPrefix === 'ow' ? (this._ocWslHigh || 0) : (this._ocDbHigh || 0);
+      const rows = db.prepare(
+        `SELECT id, session_id, time_created, data FROM message
+         WHERE data LIKE '%"tokens"%' AND time_created >= ?
+         ORDER BY time_created`
+      ).all(since);
+      // session_id -> model label for messages that omit modelID
+      const sessionModels = new Map();
+      const loadSessionModel = (sid) => {
+        if (!sid || sessionModels.has(sid)) return sessionModels.get(sid) || '';
+        try {
+          const row = db.prepare('SELECT model FROM session WHERE id = ?').get(sid);
+          let label = '';
+          if (row && row.model) {
+            try {
+              const mj = typeof row.model === 'string' ? JSON.parse(row.model) : row.model;
+              label = mj.id || mj.modelID || '';
+            } catch (_) { label = String(row.model); }
+          }
+          sessionModels.set(sid, label);
+          return label;
+        } catch (_) {
+          sessionModels.set(sid, '');
+          return '';
+        }
+      };
+      for (const row of rows) {
+        let msg;
+        try { msg = JSON.parse(row.data); } catch (_) { continue; }
+        if (!msg || msg.role !== 'assistant' || !msg.tokens) continue;
+        const t = msg.tokens;
+        const input = t.input || 0, output = t.output || 0;
+        const cacheRead = (t.cache && t.cache.read) || 0;
+        const cacheWrite = (t.cache && t.cache.write) || 0;
+        if (!(input || output || cacheRead || cacheWrite)) continue;
+        const key = `${keyPrefix}:${row.id}`;
+        if (this.records.has(key)) continue;
+        const model = msg.modelID
+          || (msg.model && (msg.model.modelID || msg.model.modelId))
+          || loadSessionModel(row.session_id)
+          || 'unknown';
+        this.records.set(key, {
+          app,
+          ts: Number((msg.time && msg.time.created) || row.time_created) || Date.now(),
+          model,
+          input, // cache-exclusive (opencode reports cache beside input)
+          output,
+          reasoning: t.reasoning || 0,
+          cacheRead,
+          cacheWrite
+        });
+        added++;
+        const ts = Number(row.time_created) || 0;
+        if (keyPrefix === 'ow') {
+          if (ts > (this._ocWslHigh || 0)) this._ocWslHigh = ts;
+        } else if (ts > (this._ocDbHigh || 0)) {
+          this._ocDbHigh = ts;
+        }
+      }
+    } finally {
+      try { db.close(); } catch (_) {}
+    }
+    if (added) console.log(`[wizbar] opencode ${app}: +${added} records`);
+    return added;
+  }
+
+  /**
+   * Copy the WSL Ubuntu opencode.db so we can open it read-only (SQLite
+   * cannot open a live store across the 9p boundary safely). Windows-only:
+   * on any other host there is no WSL to call, so nothing is copied.
+   */
+  _copyWslOpencodeDb(wslCfg) {
+    if (process.platform !== 'win32') return null;
+    const { execFileSync } = require('child_process');
+    const dest = path.join(os.tmpdir(), 'wizbar-oc-copy.db');
+    const distro = (wslCfg && wslCfg.distro) || 'Ubuntu';
+    const before = (() => { try { return fs.statSync(dest).mtimeMs; } catch (_) { return 0; } })();
+    try {
+      execFileSync('wsl.exe', ['-d', distro, '--exec', 'bash', path.join(__dirname, '..', 'scripts', 'wsl-opencode-copy.sh')],
+        { windowsHide: true, timeout: 60000, encoding: 'utf8',
+          env: { ...process.env, WIN_TEMP: path.dirname(dest) } });
+      this._ocWslWarned = null;
+    } catch (e) {
+      if (this._ocWslWarned !== e.message) {
+        console.error('[wizbar] wsl opencode copy:', e.message);
+        this._ocWslWarned = e.message;
+      }
+      // A stale copy still beats nothing — WSL is often idle/sleeping.
+      if (fs.existsSync(dest)) return dest;
+      return null;
+    }
+    let after = 0;
+    try { after = fs.statSync(dest).mtimeMs; } catch (_) {}
+    if (!after) return null;
+    if (after <= before) {
+      // Copy succeeded but the store did not move: force a full re-read next time.
+      this._ocWslHigh = 0;
+    }
+    return dest;
+  }
+
   // --- Xiaomi MiMo AI desktop ---------------------------------------------------
   // Assistant messages from the app's local API carry
   // tokens {input, output, reasoning, cache:{read,write}} where input EXCLUDES
-  // cache (total = input+output+cacheRead+cacheWrite) — same shape as
-  // pi/opencode, so cache folds into the stored input the same way.
+  // cache (total = input+output+cacheRead+cacheWrite), so input is stored raw
+  // and cache columns stay as detail only.
   async _scanMimo() {
     const src = this.cfg.sources.mimo;
     if (!src || !src.enabled) return 0;
@@ -428,7 +589,7 @@ class TokenTracker extends require('events') {
             app: 'mimo',
             ts: (info.time && info.time.created) || 0,
             model: info.modelID || 'unknown',
-            input: input + cacheRead + cacheWrite,
+            input, // cache-exclusive: MiMo reports cache beside input
             output,
             reasoning: t.reasoning || 0,
             cacheRead, cacheWrite
@@ -481,13 +642,13 @@ class TokenTracker extends require('events') {
     try {
       if (!fs.existsSync(CACHE_PATH)) return;
       const parsed = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
-      // v3 = byte-offset record keys (see _readSessionTail). Older shapes (bare
-      // arrays, v2 line-index keys) lack the folded/offset-stable keys - discard
-      // them so the next scan rebuilds everything under the new keys.
-      const arr = (!Array.isArray(parsed) && parsed.v === 3 && Array.isArray(parsed.entries))
+      // v4 = cache-EXCLUSIVE stored input (see the file header). Older caches
+      // (bare arrays, v2/v3) hold cache-inclusive input values, so they are
+      // discarded and the next scan rebuilds the records raw.
+      const arr = (!Array.isArray(parsed) && parsed.v === 4 && Array.isArray(parsed.entries))
         ? parsed.entries : null;
       if (arr) for (const [k, r] of arr) this.records.set(k, r);
-      else console.log('[wizbar] token cache: stale pre-offset cache discarded; full rescan');
+      else console.log('[wizbar] token cache: stale cache discarded; full rescan');
       // Restore the per-file byte cursors (see _readSessionTail) so a cold
       // start resumes from the last scan instead of re-reading the stores.
       if (arr && parsed.progress && typeof parsed.progress === 'object') {
@@ -518,7 +679,7 @@ class TokenTracker extends require('events') {
       const arr = [...this.records.entries()].slice(-50000);
       const progress = {};
       if (this._fileProgress) for (const [k, p] of this._fileProgress) progress[k] = p;
-      const payload = JSON.stringify({ v: 3, entries: arr, mimoSigs: this._mimoSigs || {}, progress });
+      const payload = JSON.stringify({ v: 4, entries: arr, mimoSigs: this._mimoSigs || {}, progress });
       // Unique tmp per write: two savers must never truncate each other's
       // staging file between write and rename.
       const tmp = `${CACHE_PATH}.${Date.now()}-${(this._tmpSeq = (this._tmpSeq || 0) + 1)}.tmp`;
@@ -549,18 +710,17 @@ class TokenTracker extends require('events') {
       const arr = [...this.records.entries()].slice(-50000);
       const progress = {};
       if (this._fileProgress) for (const [k, p] of this._fileProgress) progress[k] = p;
-      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 3, entries: arr, mimoSigs: this._mimoSigs || {}, progress }), 'utf8');
+      fs.writeFileSync(CACHE_PATH, JSON.stringify({ v: 4, entries: arr, mimoSigs: this._mimoSigs || {}, progress }), 'utf8');
     } catch (e) {
       console.error('[wizbar] token cache flush failed:', e.message);
     }
   }
 
   // --- aggregation -----------------------------------------------------------------
-  // Totals count input + output only. Every scan site stores a cache-INCLUSIVE
-  // input: zcode DB input_tokens already include cached tokens, while pi and
-  // opencode report cache beside input and their scans fold it in, so
-  // input+output is the provider total for every source. Adding the cache
-  // columns to the total would double-count them; they stay as detail only.
+  // Totals count input + output only, and both columns are cache-EXCLUSIVE
+  // (see the file header). Cache read/write are detail columns that a table
+  // may show beside the total; adding them would double the provider's own
+  // reported numbers.
   aggregate() {
     if (!this.cfg.enabled) {
       // Master off: no sources are running, so the only honest dashboard state

@@ -38,7 +38,6 @@ function applyTheme(t) {
     r.setProperty('--bg', t.pinkBg);
     document.body.style.background = t.pinkBg;
   }
-  $('btn-subs').classList.toggle('hidden', !(t.subs && t.subs.enabled));
   // Section toggles apply on first open, pushed themes, and hot reload alike.
   applyVisibility();
 }
@@ -71,8 +70,8 @@ function statCard(label, value, sub) {
 
 function totalOfAgg(a) {
   if (!a) return 0;
-  // Same convention as the backend: input already includes cached tokens,
-  // so totals are input + output only (cache columns are informational).
+  // Raw convention: input and output are cache-exclusive, so input+output is
+  // the provider's billed total. Cache columns are detail only.
   return (a.input || 0) + (a.output || 0);
 }
 
@@ -272,9 +271,9 @@ function hasCacheData(aggs) {
   return aggs.some((a) => a && (((a.cacheRead || 0) + (a.cacheWrite || 0)) > 0));
 }
 
-const TH_INPUT = '<span title="Prompt tokens. The scanner folds cache reads and writes into this column per source (see the footer note), so input+output is the provider-reported total.">input</span>';
-const TH_CACHE_R = '<span title="Prompt-cache READ tokens: cached prefix tokens reported beside the input by the provider.">cache R</span>';
-const TH_CACHE_W = '<span title="Prompt-cache WRITE tokens: tokens the provider wrote to the cache on this request (reported as cache_creation / cache.write). Zero when the provider or model does not attribute cache creation.">cache W</span>';
+const TH_INPUT = '<span title="Raw prompt tokens, cache-exclusive. The cache R/W columns are counted separately and are never added to this number or to any total.">input</span>';
+const TH_CACHE_R = '<span title="Prompt-cache READ tokens reported beside the input by the provider: cached prefix tokens reused on this request. Detail only, never added to a total.">cache R</span>';
+const TH_CACHE_W = '<span title="Prompt-cache WRITE tokens the provider wrote to the cache on this request (cache_creation / cache.write). Zero when the provider does not attribute it. Detail only, never added to a total.">cache W</span>';
 
 function detailHeaders(cache) {
   return ['app', TH_INPUT, 'output', ...(cache ? [TH_CACHE_R, TH_CACHE_W] : []), 'calls'];
@@ -337,7 +336,6 @@ function tableHtml(headers, rows, shares) {
 }
 
 $('btn-close').addEventListener('click', () => window.wizbar.close());
-$('btn-subs').addEventListener('click', () => window.wizbar.openSubs());
 $('btn-refresh').addEventListener('click', async () => {
   const btn = $('btn-refresh');
   if (btn.disabled) return;

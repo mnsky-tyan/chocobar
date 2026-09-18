@@ -139,7 +139,7 @@ class SubsTracker extends EventEmitter {
     let snap;
     if (p.enabled === false) {
       snap = emptyProvider(p.label || p.type);
-      snap.notes.push('disabled in config');
+      snap.status = 'disabled';
     } else if (p.type === 'chatgpt') {
       snap = await this._fetchChatgpt(p);
     } else if (p.type === 'zai') {
@@ -161,7 +161,9 @@ class SubsTracker extends EventEmitter {
         const good = this._lastGood.get(id);
         snap.windows = good.windows;
         snap.plan = snap.plan || good.plan;
-        snap.notes = [...(snap.notes || []), 'showing last good windows (stale)'];
+        // Windows stay on the board but are marked stale so they are never
+        // mistaken for fresh numbers (the pill shows 'stale').
+        snap.status = 'stale';
       }
     }
     return snap;

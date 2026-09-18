@@ -88,6 +88,16 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
   RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
 
+## Config surfaces (since the dashboard-config pass)
+
+- `--config <path>` / `--config=<path>` / `WIZBAR_CONFIG` launch flag points the
+  whole app at any config file (never auto-created; the default `~/.wizbar/config.json`
+  still gets the annotated template on first run). Personal wiring = personal file;
+  shipped defaults stay neutral.
+- Personal display file for this machine: `~/.wizbar/personal.json` (pet 小蕾米,
+  token sources on, both subs providers) — launched with
+  `electron . --config ~/.wizbar/personal.json`.
+
 ## Public release (de-personalized)
 
 Shipped defaults are neutral: `tokens.enabled=false` with all sources off and empty paths,
@@ -104,6 +114,9 @@ off = zero scans, zero dashboard data, no chip (the dashboard says so via
 Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
 - zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` (via `scripts/zcode_query.py`).
+  On some WSL filesystems a live `-wal` store rejects `mode=ro` mid-query
+  ('disk I/O error'); the script falls back to an `immutable=1` snapshot
+  (may miss uncheckpointed rows) instead of failing the whole scan.
 - zai: per-message `usage` in `~/.zai/agent/sessions/*.jsonl` (flat; `ZCODE_sess_*` files
   are DB-backed legacy — never count them from disk too, they double-count).
 - pi (new source): `~/.pi/agent/sessions/<project-slug>/*.jsonl` — same per-message
@@ -112,19 +125,35 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   Timestamp shape: `message.timestamp` is epoch-ms int (verified 1402 real records);
   the ISO string lives on the line-level top-level `timestamp` the scanner never reads —
   don't 'fix' the `Number()` parse, it is correct (a review round was burned on this).
-- opencode: cache BESIDE input; mimo: input EXCLUDES cache. All scans fold cache into
-  stored input so aggregate() totals stay input+output (zcode DB input already includes
-  cache). Contract checks: `npm test` + `scripts/token_regression.js`.
-- Session JSONL scans use per-file BYTE cursors (`_readSessionTail`, cache `v:3` with
-  `progress`): warm scans read only appends (ms, not the old multi-second whole-file
-  re-read that froze the bar every rescan). Cursor shape, key stability (message id or
-  absolute byte offset), and the v3 cache version are one contract - change them together
-  or a cold start re-reads everything. Cache writes are async+coalesced; `flushCacheSync`
-  at quit lands the final cursors.
+- opencode: assistant message `tokens` in the SQLite `message.data` JSON
+  (dbPath preferred) or the legacy `msg_*.json` tree; a second WSL-distro
+  store can be copied in read-only and counts as its own app
+  (`opencode-wsl`, relabelable via `tokens.labels`).
+- TOKEN CONVENTION: records are cache-EXCLUSIVE raw input/output; cache
+  R/W are breakdown columns never added to totals. zcode DB input INCLUDES
+  cache (proven by `computed_total_tokens`), so its scan subtracts; pi/zai/
+  opencode/mimo input excludes cache and is stored raw. See the README
+  'Token accounting' section. Cache version pinning: the stored record
+  shape is `token-cache.json v4` — bump the version whenever record
+  semantics change or stale values are silently kept.
+- Session JSONL scans use per-file BYTE cursors (`_readSessionTail`, cache
+  `v:4` with `progress`): warm scans read only appends (ms, not the old
+  multi-second whole-file re-read that froze the bar every rescan; event-loop
+  lag across rescans measured 0ms). Cursor shape, key stability (message id or
+  absolute byte offset), and the cache version are one contract - change them
+  together or a cold start re-reads everything. Cache writes are async+coalesced;
+  `flushCacheSync` at quit lands the final cursors.
 - Subscription board (`src/subs.js`, `subs.providers` in config): every provider fetch is
   bounded by `subs.fetchTimeoutMs` (clamped 3-60s; per-provider `timeoutMs` overrides),
-  and a failed cycle keeps the provider's last good windows marked stale instead of
-  wiping the board. Tests inject a fake fetch (portable_regression section 10).
+  and a failed cycle keeps the provider's last good windows marked stale (status
+  'stale' pill) instead of wiping the board. Disabled providers report status 'disabled'
+  and the board renders no panel and no notes box for them. Tests inject a fake fetch
+  (portable_regression section 10). Both shipped adapters verified live 2026-09-18:
+  chatgpt wham/usage ~0.4-0.7s, zai quota/limit ~0.2-0.5s from this network.
+- Bar chips: pinned order is shortcut (bolt, leftmost) - pet (bow, on/off toggle,
+  optional `pet.label` prefix) - tokens (diamond) - subs (gauge, exactly right of
+  tokens, rotates per enabled provider every minute, shows the week window
+  remaining %). The subs chip renders only when `subs.enabled`.
 - Dashboard surface: `tokens.labels` (harness display names), `tokens.dashboard`
   (section visibility toggles), `theme.heatmap` (5-shade ramp) are user config; the
   renderers treat absent keys as defaults-on. Nothing may pin a vendor name in UI.
