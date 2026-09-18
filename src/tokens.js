@@ -601,9 +601,13 @@ class TokenTracker extends require('events') {
     const repoWin = path.join(__dirname, '..', 'scripts');
     const scriptWsl = repoWin.replace(/^([A-Za-z]):[\\/]/, (_m, d) => `/mnt/${d.toLowerCase()}/`).replace(/\\/g, '/');
     const run = () => new Promise((resolve) => {
+      // wsl.exe forwards only WSLENV-listed variables into the distro, so
+      // WIN_TEMP must be declared there or the script (which requires it)
+      // fails on every copy.
+      const wslenv = [process.env.WSLENV, 'WIN_TEMP'].filter(Boolean).join(':');
       execFile('wsl.exe', ['-d', distro, '--exec', 'bash', `${scriptWsl}/wsl-opencode-copy.sh`],
         { windowsHide: true, timeout: 180000, encoding: 'utf8',
-          env: { ...process.env, WIN_TEMP: path.dirname(dest) } },
+          env: { ...process.env, WSLENV: wslenv, WIN_TEMP: path.dirname(dest) } },
         (err) => resolve(err));
     });
     const err = await run();
