@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('wizbar', {
   runShortcut: () => ipcRenderer.send('run-shortcut'),
   runCustom: (id) => ipcRenderer.send('run-custom', id),
   onCustom: (cb) => ipcRenderer.on('custom', (_e, v) => cb(v)),
-  contextMenu: (x, y) => ipcRenderer.send('bar-context', { x, y }),
+  contextMenu: () => ipcRenderer.send('bar-context'),
   raiseTerminal: () => ipcRenderer.send('raise-terminal'),
   togglePet: () => ipcRenderer.invoke('toggle-pet'),
   reportSize: (w) => ipcRenderer.send('bar-content-size', w)

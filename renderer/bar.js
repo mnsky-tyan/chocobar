@@ -187,7 +187,7 @@ function rebuildSegments() {
 
 document.body.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  window.wizbar.contextMenu(e.clientX, e.clientY);
+  window.wizbar.contextMenu();
 });
 
 // Clicking the strip (not a chip) raises the followed terminal - the bar is
