@@ -94,9 +94,10 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   whole app at any config file (never auto-created; the default `~/.wizbar/config.json`
   still gets the annotated template on first run). Personal wiring = personal file;
   shipped defaults stay neutral.
-- Personal display file for this machine: `~/.wizbar/personal.json` (pet 小蕾米,
-  token sources on, both subs providers) — launched with
-  `electron . --config ~/.wizbar/personal.json`.
+- Personal display files live outside the repo (e.g. `~/.wizbar/personal.json`:
+  pet name, token sources on, subs providers) — launched with
+  `electron . --config ~/.wizbar/personal.json`. They carry the machine's real
+  names and paths so the repo never has to.
 
 ## Public release (de-personalized)
 
