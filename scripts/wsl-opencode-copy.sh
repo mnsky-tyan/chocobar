@@ -6,7 +6,9 @@
 set -e
 SRC="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
 DEST_WSL=/tmp/wizbar-oc-copy.db
-WIN_TEMP="${WIN_TEMP:-/mnt/c/Users/tyanw/AppData/Local/Temp}"
+# WIN_TEMP (Windows path of %TEMP%) is passed through the environment by
+# the Node side; there is no usable default on a stranger's machine.
+WIN_TEMP="${WIN_TEMP:?WIN_TEMP env var not set (pass %TEMP% as a Windows path)}"
 # Accept a native Windows path from the Node side.
 case "$WIN_TEMP" in
   [A-Za-z]:*) WIN_TEMP="/mnt/${WIN_TEMP:0:1,,}${WIN_TEMP:2}" ;;
