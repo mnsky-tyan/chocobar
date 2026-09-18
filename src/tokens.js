@@ -387,7 +387,7 @@ class TokenTracker extends require('events') {
     // WSL Ubuntu store (same schema, separate machine identity in the key).
     if (src.wsl && src.wsl.enabled !== false) {
       const copy = this._copyWslOpencodeDb(src.wsl);
-      if (copy) result = result.then((n) => n + this._scanOpencodeDb(copy, 'ow'));
+      if (copy) result = result.then(async (n) => n + (await this._scanOpencodeDb(copy, 'ow')));
     }
     return result.then((n) => added + n);
   }
@@ -580,10 +580,14 @@ class TokenTracker extends require('events') {
     const { execFileSync } = require('child_process');
     const dest = path.join(os.tmpdir(), 'wizbar-oc-copy.db');
     const distro = (wslCfg && wslCfg.distro) || 'Ubuntu';
+    // bash inside WSL cannot open a "C:\..." path: hand it the /mnt/<drive>/
+    // form of this repo's scripts directory instead.
+    const repoWin = path.join(__dirname, '..', 'scripts');
+    const scriptWsl = repoWin.replace(/^([A-Za-z]):[\\/]/, (_m, d) => `/mnt/${d.toLowerCase()}/`).replace(/\\/g, '/');
     const before = (() => { try { return fs.statSync(dest).mtimeMs; } catch (_) { return 0; } })();
     try {
-      execFileSync('wsl.exe', ['-d', distro, '--exec', 'bash', path.join(__dirname, '..', 'scripts', 'wsl-opencode-copy.sh')],
-        { windowsHide: true, timeout: 60000, encoding: 'utf8',
+      execFileSync('wsl.exe', ['-d', distro, '--exec', 'bash', `${scriptWsl}/wsl-opencode-copy.sh`],
+        { windowsHide: true, timeout: 120000, encoding: 'utf8',
           env: { ...process.env, WIN_TEMP: path.dirname(dest) } });
       this._ocWslWarned = null;
     } catch (e) {
