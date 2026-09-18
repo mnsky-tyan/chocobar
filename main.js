@@ -477,17 +477,17 @@ const syncZ = (hwnd, force) => {
 // Keep the pair glued: raising/activating the terminal moves it relative to
 // the bar WITHOUT any geometry change, so geometry-driven syncZ alone lets
 // the two drift apart (a show lands the bar above every app - a different
-// layer). Re-check the actual z relation cheaply on a fixed cadence and
-// re-insert only when drifted; during an interactive drag the hands-off rule
-// applies. Correct state: the bar sits directly below its terminal in the
-// same band (SetWindowPos insertAfter places the bar under the terminal),
-// so windows raised above the terminal cover the bar too.
+// layer; raising the terminal leaves it stranded under raised apps).
+// Re-check the real adjacency cheaply on a fixed cadence and re-insert only
+// when drifted; during an interactive drag the hands-off rule applies.
+// Glued = the bar's visible z-neighbor above is exactly the terminal's
+// insert target (the terminal or its drag-bar overlay).
 setInterval(() => {
   if (process.platform !== 'win32') return;
   if (!tracker.hwnd || !bar || !bar.hwnd || !bar.win || bar.win.isDestroyed()) return;
   if (native.inMoveSize()) return;
-  if (!native.isBelowInZOrder(bar.hwnd, tracker.hwnd)) syncZ(tracker.hwnd, true);
-}, 400);
+  if (!native.zGluedTo(bar.hwnd, tracker.hwnd)) syncZ(tracker.hwnd, true);
+}, 200);
 
 function wireBar() {
   spawnBar();
