@@ -32,7 +32,7 @@ function remClass(rem) {
 }
 
 function remColor(rem) {
-  return rem > 70 ? 'var(--good)' : rem > 30 ? 'var(--yellow)' : 'var(--warn)';
+  return rem > 70 ? 'var(--pie-ok)' : rem > 30 ? 'var(--pie-mid)' : 'var(--pie-crit)';
 }
 
 function statusLabel(s) {
