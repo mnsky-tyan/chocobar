@@ -121,6 +121,24 @@ the total, with nothing hidden and nothing doubled. Reasoning tokens,
 where a store reports them separately, are stored as a breakdown only and
 never added (providers include them in their own totals).
 
+This is the general convention - the providers themselves total it this
+way, verified on this machine's stores:
+
+- pi/zai transcripts: the provider's own `usage.totalTokens` equals
+  `input + output + cacheRead + cacheWrite` exactly on every record
+  checked (e.g. in 584 + out 504 + cacheRead 100096 = totalTokens 101184).
+- opencode: the store's own `tokens.total` equals
+  `input + output + cache.read + cache.write` on 357 of 358 sampled rows
+  (the one outlier differs by exactly its `reasoning` - opencode adds
+  reasoning to its total, we keep it as a breakdown).
+- zcode DB: `computed_total_tokens` equals
+  `input_tokens + output_tokens + reasoning_tokens`, and `input_tokens`
+  already contains the cache columns - i.e. the DB's own total includes
+  cache too.
+- ccusage, the reference usage dashboard for Claude-shaped APIs, defines
+  its Total column the same way (input + output + cache creation + cache
+  read).
+
 Per source, the raw numbers come from the provider's own usage records:
 
 | Source | Record read | Provider-reported semantics | Stored input (raw) |
