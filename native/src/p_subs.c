@@ -414,6 +414,16 @@ static int subsFetchZai(int idx) {
     return 1;
 }
 
+static LONG g_subsKick = 0; // board refresh button wakes the cycle early
+static volatile unsigned long long g_subsFetchedTick = 0; // cycle end (GetTickCount64)
+void subsRefetchNow(void) { InterlockedExchange(&g_subsKick, 1); }
+// seconds since the last completed fetch cycle (for the board footer)
+unsigned subsFetchedAgoSec(void) {
+    unsigned long long t = g_subsFetchedTick;
+    if (!t) return 0xFFFFFFFFu;
+    return (unsigned)((GetTickCount64() - t) / 1000ull);
+}
+
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
     for (;;) {
@@ -430,7 +440,14 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
         if (!anyEnabled) {
             for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
         }
-        Sleep(g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000);
+        g_subsFetchedTick = GetTickCount64();
+        // sleep the interval, but a kick (refresh button) breaks out early
+        int ivl = g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000;
+        for (int waited = 0; waited < ivl; waited += 250) {
+            if (InterlockedCompareExchange(&g_subsKick, 0, 0)) break;
+            Sleep(250);
+        }
+        InterlockedExchange(&g_subsKick, 0);
     }
     return 0;
 }
