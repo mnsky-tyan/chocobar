@@ -250,11 +250,14 @@ static void aggRecord(const char *app, int alen, long long ts,
     }
     // byModel: Electron keys are "app|model"
     if (model && mlen > 0 && ai >= 0) {
+        // the key must fit g_modelName's 48-byte row: clamp to 46 chars + NUL
         if (mlen > 40) mlen = 40;
-        char mk[64];
+        char mk[48];
         int n = 0;
         memcpy(mk, app, alen); n = alen;
         mk[n++] = '|';
+        int room = 46 - n;
+        if (mlen > room) mlen = room;
         memcpy(mk + n, model, mlen); n += mlen;
         mk[n] = 0;
         int mi = -1;
@@ -1123,8 +1126,11 @@ static void dashTableCols(int innerRight, int cache, int *xs) {
         xs[3] = xs[2] - DX(COL_CR);
         xs[4] = xs[3] - DX(COL_OUT);
     } else {
-        xs[1] = xs[2] = xs[3] = 0;
-        xs[4] = xs[0] - DX(COL_CALLS);
+        // no cache data: collapse only the cache R/W columns; input and
+        // output stay on screen (calls remain rightmost)
+        xs[3] = xs[0] - DX(COL_CALLS);
+        xs[4] = xs[3] - DX(COL_OUT);
+        xs[1] = xs[2] = 0;
     }
 }
 
@@ -1173,8 +1179,8 @@ static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH, int cache,
 }
 
 static void dashTableHead(HDC dc, int x0, int innerW, int y, int cache,
-                          const int *xs, DashTheme *t, HFONT f9) {
-    dashStr(dc, x0 + 2, y, L"APP", t->dim, f9);
+                          const int *xs, DashTheme *t, HFONT f9, const wchar_t *firstCol) {
+    dashStr(dc, x0 + 2, y, firstCol, t->dim, f9);
     wchar_t *in = L"INPUT", *out = L"OUTPUT", *cr = L"CACHE R", *cw = L"CACHE W", *ca = L"CALLS";
     dashStrR(dc, xs[4], y, in, t->dim, f9);
     dashStrR(dc, xs[3], y, out, t->dim, f9);
@@ -1204,6 +1210,15 @@ static void dashFmtTime(long long msUtc, wchar_t *out, int cb) {
     SYSTEMTIME st;
     FileTimeToSystemTime(&ft, &st);
     swprintf(out, cb, L"%02lu:%02lu:%02lu", (unsigned long)st.wHour, (unsigned long)st.wMinute, (unsigned long)st.wSecond);
+}
+
+// current local wall-clock as an epoch-ms value that dashFmtTime (which
+// reads a UTC FILETIME) renders back as local time-of-day
+static long long dashLocalNowMs(void) {
+    SYSTEMTIME now; GetLocalTime(&now);
+    FILETIME ft;
+    SystemTimeToFileTime(&now, &ft); // treats fields as UTC: matches dashFmtTime
+    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
 }
 
 // day date for a heatmap column start (daysBack of the dow=0 cell)
@@ -1424,7 +1439,7 @@ static void paintDash(HWND hwnd) {
             long long th[3] = { 1, 1, 1 };
             if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
             int hmH = 7 * pitch - cgap;
-            int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS && g_dayTot[g_daySel] > 0;
+            int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS && g_dayTot[DASH_MAX_DAYS - 1 - g_daySel] > 0;
             int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(17) : 0;
             int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10) + ddH;
             if (y + secH < h - DX(26)) {
@@ -1569,7 +1584,8 @@ static void paintDash(HWND hwnd) {
                     int xs[5];
                     dashTableCols(sx + DX(12) + inner, cache, xs);
                     int ry = y + secPad + th2;
-                    dashTableHead(dc, sx + DX(12), inner, ry, cache, xs, &t, fS9);
+                    dashTableHead(dc, sx + DX(12), inner, ry, cache, xs, &t, fS9,
+                                  side == 0 ? L"APP" : L"MODEL");
                     ry += th2;
                     if (side == 0) {
                         long long maxAll = 1;
@@ -1610,8 +1626,9 @@ static void paintDash(HWND hwnd) {
                             lstrcpynA(mk, g_modelName[mi], 47);
                             char *bar = strchr(mk, '|');
                             const char *mp2 = bar ? bar + 1 : mk;
-                            wchar_t mn[40];
-                            MultiByteToWideChar(CP_UTF8, 0, mp2, -1, mn, 40);
+                            wchar_t mn[48];
+                            int mnw = MultiByteToWideChar(CP_UTF8, 0, mp2, -1, mn, 47);
+                            mn[mnw > 0 ? mnw - 1 : 0] = 0; // force NUL even on truncation
                             long long s = g_modelAgg[mi].in + g_modelAgg[mi].out + g_modelAgg[mi].cr + g_modelAgg[mi].cw;
                             TokAgg a2 = g_modelAgg[mi];
                             if (i & 1) {
@@ -1641,15 +1658,7 @@ static void paintDash(HWND hwnd) {
             (void)ft3;
             if (g_lastScanMs) {
                 unsigned ago = (unsigned)((GetTickCount64() - (unsigned long long)g_lastScanMs) / 1000);
-                long long scanMs = 0;
-                SYSTEMTIME now3; GetLocalTime(&now3);
-                now3.wHour = now3.wMinute = now3.wSecond = now3.wMilliseconds = 0;
-                FILETIME lft2, ft4;
-                SystemTimeToFileTime(&now3, &lft2);
-                LocalFileTimeToFileTime(&lft2, &ft4);
-                long long midMs = ((((long long)ft4.dwHighDateTime) << 32) | ft4.dwLowDateTime) / 10000;
-                scanMs = midMs - ago * 1000;
-                dashFmtTime(scanMs, ftxt, 39);
+                dashFmtTime(dashLocalNowMs() - (long long)ago * 1000, ftxt, 39);
             } else lstrcpynW(ftxt, L"\x2014", 39);
             wchar_t fl[64];
             swprintf(fl, 63, L"last scan %ls", ftxt);
@@ -1792,15 +1801,8 @@ static void paintDash(HWND hwnd) {
             DeleteObject(fpen);
             unsigned ago = subsFetchedAgoSec();
             wchar_t ftim[16];
-            if (ago != 0xFFFFFFFFu) {
-                SYSTEMTIME now3; GetLocalTime(&now3);
-                now3.wHour = now3.wMinute = now3.wSecond = now3.wMilliseconds = 0;
-                FILETIME lft2, ft4;
-                SystemTimeToFileTime(&now3, &lft2);
-                LocalFileTimeToFileTime(&lft2, &ft4);
-                long long midMs = ((((long long)ft4.dwHighDateTime) << 32) | ft4.dwLowDateTime) / 10000;
-                dashFmtTime(midMs - (long long)ago * 1000, ftim, 15);
-            } else lstrcpynW(ftim, L"\x2014", 15);
+            if (ago != 0xFFFFFFFFu) dashFmtTime(dashLocalNowMs() - (long long)ago * 1000, ftim, 15);
+            else lstrcpynW(ftim, L"\x2014", 15);
             wchar_t fl2[32];
             swprintf(fl2, 31, L"%ls", ftim);
             dashStrR(dc, px2 + colW2 - DX(14), fy + DX(6), fl2, t.dim, fS10);
@@ -2019,10 +2021,12 @@ static void tipShow(const wchar_t *text, int cx, int cy) {
     }
     if (!g_tipDc) g_tipDc = CreateCompatibleDC(NULL);
     HFONT of = (HFONT)SelectObject(g_tipDc, g_tipFont);
-    SIZE ts; GetTextExtentPoint32W(g_tipDc, text, lstrlenW(text), &ts);
+    // multi-line aware measure: DrawText with DT_CALCRECT expands on \n
+    RECT mr = { 0, 0, 8000, 0 };
+    DrawTextW(g_tipDc, text, -1, &mr, DT_CALCRECT | DT_NOPREFIX);
     SelectObject(g_tipDc, of);
     int padX = (int)(7 * g_scale), padY = (int)(4 * g_scale);
-    LONG w = ts.cx + 2 * padX, h = ts.cy + 2 * padY;
+    LONG w = mr.right + 2 * padX, h = mr.bottom + 2 * padY;
     if (w != g_tipW || h != g_tipH || !g_tipDib) {
         if (g_tipDib) DeleteObject(g_tipDib);
         BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
@@ -2048,7 +2052,7 @@ static void tipShow(const wchar_t *text, int cx, int cy) {
     SelectObject(g_tipDc, g_tipFont);
     SetBkMode(g_tipDc, TRANSPARENT);
     SetTextColor(g_tipDc, RGB(31, 31, 31));
-    DrawTextW(g_tipDc, text, -1, &tr, DT_SINGLELINE | DT_LEFT);
+    DrawTextW(g_tipDc, text, -1, &tr, DT_LEFT | DT_NOPREFIX); // \n breaks lines
     // clamp to the screen, then place below-right of the cursor
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     int x = cx + (int)(6 * g_scale), y = cy + (int)(16 * g_scale);
@@ -2228,7 +2232,6 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         // title tooltips (Electron: seg.title): the metric segs show the
         // small label, the pinned chips theirs; no chip = no tooltip
-        { char dbg[48]; sprintf(dbg, "mm h=%d x=%d", h, (int)(short)LOWORD(lp)); writeLogA(dbg); }
         const wchar_t *tt = chipTitle(h);
         if (tt) {
             POINT sp; GetCursorPos(&sp);
