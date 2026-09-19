@@ -52,6 +52,17 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 ## Terminal follow + subscription source
 
+- Native bar chip semantics mirror the Electron renderer exactly: the token
+  value = today's `input + output + cacheRead + cacheWrite` (Electron
+  rowTotal, NOT cache-exclusive - do not "fix"), read from the Electron
+  app's `~/.wizbar/token-cache.json` (v4) with a needle scan; keys may
+  arrive mid-rewrite (retry full-size reads). Local midnight must go
+  through LocalFileTimeToFileTime (SystemTimeToFileTime treats fields as
+  UTC; HKT showed an exact 8h shift). GDI colors: hexToColorref returns a
+  real COLORREF (raw 0xRRGGBB byte-swapped), and hand-written DIB pixels
+  are DWORD = A<<24 | R<<16 | G<<8 | B. GDI text runs ~15% wider than
+  browser metrics at the same nominal px - the bar scales the font by
+  0.864 to match Electron's measured layout.
 - Terminal targeting is terminal-agnostic: `terminal.className: ""` (default)
   probes Windows Terminal / conhost / ConEmu / mintty by Win32 class, then
   WezTerm / Alacritty / Hyper by owning process (their class is the generic
@@ -80,10 +91,15 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 - Native Win32 port of the bar lives in `native/` (PR #49). Build = `native/build.sh`
   (assembles 4 parts into `src/chocobar_full.c`, then nix mingw cross-compiles).
-  Edit the parts, never the assembled file. Run notes + COM/DXGI sharp edges
-  (mingw dcomp.h is C-broken, hand-vtbl slot numbers, DXGI usage 0x20,
-  GetBuffer-via-IUNKNOWN, TARGET-only bitmap options, rebindVisual after resize)
-  are in `native/README.md` - read it before touching the render path.
+  Edit the parts, never the assembled file. The render path is GDI +
+  UpdateLayeredWindow on a WS_EX_LAYERED window (the earlier D2D-over-DComp
+  pipeline is dead on this machine: TARGET-only bitmap options fail
+  E_INVALIDARG per frame, TARGET|CANNOT_DRAW hits D2DERR_WRONG_STATE at
+  EndDraw - do not resurrect). Layered windows never get WM_PAINT (first
+  paint is explicit), DWM backdrops are ignored on them, and screen captures
+  must use PrintWindow (CopyFromScreen races the follow loop). Chips draw
+  Nerd Font glyphs (cmap-verified codepoints) dim + value dark. Sharp edges:
+  `native/README.md` - read it before touching the render path.
 - Electron stays the daily driver until native phase 2 (token dashboards, subs).
 - Screenshot verification of Windows windows only works while the session is
   UNLOCKED; when locked, captures show the lock screen for every window.

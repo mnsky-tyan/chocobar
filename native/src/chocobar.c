@@ -72,7 +72,7 @@ typedef struct {
     int height, gap, fontSize, backgroundAlpha, align;
     wchar_t *tint, *backdrop, *fontFamily;
 
-    wchar_t *fg, *pinkDeep, *divider, *warn, *pinkBg;
+    wchar_t *fg, *fgDim, *pinkDeep, *divider, *warn, *pinkBg, *yellow, *good;
 
     int mGpu, mCpu, mCpuTemp, mRam, mVolume, mBattery, mClock;
     int cpuWarnAt, ramWarnAt, tempWarnAt;
@@ -150,7 +150,8 @@ static int jboolDefault(const char *js, const jsmntok_t *t, int i, int def) {
 
 static void freeConfig(Config *c) {
     wideFree(&c->tint); wideFree(&c->backdrop); wideFree(&c->fontFamily);
-    wideFree(&c->fg); wideFree(&c->pinkDeep); wideFree(&c->divider);
+    wideFree(&c->fg); wideFree(&c->fgDim); wideFree(&c->pinkDeep); wideFree(&c->divider);
+    wideFree(&c->yellow); wideFree(&c->good);
     wideFree(&c->warn); wideFree(&c->pinkBg);
     wideFree(&c->shortcutLabel); wideFree(&c->shortcutCommand);
     wideFree(&c->petLabel); wideFree(&c->petExePath);
@@ -169,9 +170,10 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->height = 24; c->gap = 8; c->fontSize = 12; c->backgroundAlpha = 110;
     c->tint = wideDup(L"#FBF2E2"); c->backdrop = wideDup(L"acrylic");
     c->fontFamily = wideDup(L"Cascadia Mono");
-    c->fg = wideDup(L"#080808"); c->pinkDeep = wideDup(L"#D493AA");
+    c->fg = wideDup(L"#080808"); c->fgDim = wideDup(L"#5a5245"); c->pinkDeep = wideDup(L"#D493AA");
     c->divider = wideDup(L"#D9CCB2"); c->warn = wideDup(L"#A00000");
     c->pinkBg = wideDup(L"#FEF7F9");
+    c->yellow = wideDup(L"#B8A96A"); c->good = wideDup(L"#006400");
     c->mGpu = c->mCpu = c->mCpuTemp = c->mRam = c->mVolume = c->mBattery = c->mClock = 1;
     c->cpuWarnAt = 85; c->ramWarnAt = 90; c->tempWarnAt = 85;
     c->showTray = 1;
@@ -195,10 +197,13 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     int theme = jobjGet(js, t, root, "theme");
     if (theme >= 0) {
         wideFree(&c->fg);       c->fg       = jstrTok(js, t, jobjGet(js, t, theme, "fg"), c->fg);
+        wideFree(&c->fgDim);    c->fgDim    = jstrTok(js, t, jobjGet(js, t, theme, "fgDim"), c->fgDim);
         wideFree(&c->pinkDeep); c->pinkDeep = jstrTok(js, t, jobjGet(js, t, theme, "pinkDeep"), c->pinkDeep);
         wideFree(&c->divider);  c->divider  = jstrTok(js, t, jobjGet(js, t, theme, "divider"), c->divider);
         wideFree(&c->warn);     c->warn     = jstrTok(js, t, jobjGet(js, t, theme, "warn"), c->warn);
         wideFree(&c->pinkBg);   c->pinkBg   = jstrTok(js, t, jobjGet(js, t, theme, "pinkBg"), c->pinkBg);
+        wideFree(&c->yellow);   c->yellow   = jstrTok(js, t, jobjGet(js, t, theme, "yellow"), c->yellow);
+        wideFree(&c->good);     c->good     = jstrTok(js, t, jobjGet(js, t, theme, "good"), c->good);
     }
     int modules = jobjGet(js, t, root, "modules");
     if (modules >= 0) {
