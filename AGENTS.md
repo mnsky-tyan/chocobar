@@ -90,19 +90,53 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 ## Native rewrite (native/, phase 1)
 
 - Native Win32 port of the bar lives in `native/` (PR #49). Build = `native/build.sh`
-  (assembles 4 parts into `src/chocobar_full.c`, then nix mingw cross-compiles).
-  Edit the parts, never the assembled file. The render path is GDI +
-  UpdateLayeredWindow on a WS_EX_LAYERED window (the earlier D2D-over-DComp
-  pipeline is dead on this machine: TARGET-only bitmap options fail
-  E_INVALIDARG per frame, TARGET|CANNOT_DRAW hits D2DERR_WRONG_STATE at
+  (assembles the source parts into `src/chocobar_full.c`, then nix mingw
+  cross-compiles). Edit the parts, never the assembled file. The render path
+  is GDI + UpdateLayeredWindow on a WS_EX_LAYERED window (the earlier
+  D2D-over-DComp pipeline is dead on this machine: TARGET-only bitmap options
+  fail E_INVALIDARG per frame, TARGET|CANNOT_DRAW hits D2DERR_WRONG_STATE at
   EndDraw - do not resurrect). Layered windows never get WM_PAINT (first
   paint is explicit), DWM backdrops are ignored on them, and screen captures
-  must use PrintWindow (CopyFromScreen races the follow loop). Chips draw
-  Nerd Font glyphs (cmap-verified codepoints) dim + value dark. Sharp edges:
+  must use PrintWindow (CopyFromScreen races the follow loop). Sharp edges:
   `native/README.md` - read it before touching the render path.
-- Electron stays the daily driver until native phase 2 (token dashboards, subs).
+- Native bar is FEATURE-PARITY phase 2 (dashboards, subs, icons). The bar
+  window MUST stay WS_EX_TOPMOST (Electron uses alwaysOnTop 'floating') AND
+  the follow tick must SetWindowPos with HWND_TOPMOST: inserting the bar
+  after a normal window (g_term) silently CLEARS the topmost bit and the
+  raised terminal then swallows every click/hover meant for the bar
+  (WindowFromPoint proves it in one call). Hidden bar (terminal minimized)
+  also explains "dead" hover - check IsWindowVisible first.
+- Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
+  pinkDeep), 24-unit paths flattened once, stroked with a round geometric
+  pen. Flattener sharp edges: the M point must be stored as subpath vertex 0
+  (closed fills/strokes lose their first edge otherwise) and svgArc must
+  sample from the START angle (atan2 of the start point), not angle 0 -
+  both bugs only showed once paths used arcs/closed shapes beyond the first
+  full-circle icons. Battery = dynamic fill (charge amount, warn <10%,
+  full + zigzag on AC) drawn by svgDrawBatt. theme.iconOpacity fades icon
+  boxes post-paint (pxScale after the alpha-repair pass; GDI writes alpha 0
+  and the repair must run first).
+- Bar chrome parity: rounded corners are CSS (bar.css border-radius), drawn
+  by fading the premultiplied tint per-pixel in the corner boxes (pxScale);
+  DWM rounding does not apply to ULW surfaces. Hover pill = CLICKABLE chips
+  only (align 2: shortcut/pet/tokens/subs/custom), pink at 50% blended over
+  the tint, rounded 5px, inflated 5x2 CSS px; RHS metric segs get title
+  tooltips instead (hand-rolled layered ChocobarTip window; TIP has
+  WS_EX_TRANSPARENT so it never eats the click). Clicking empty bar raises
+  the followed terminal. Token dashboard + subs board = WS_POPUP
+  "ChocobarDash" windows (DWM-rounded via DwmSetWindowAttribute 33 at
+  runtime), sizes from dashboard.width/height and subs.width/height.
+- Native config surface (all hot-reload): theme colors incl iconColor +
+  iconOpacity + heatmap[5], bar.radius/backgroundAlpha/tint/font, dashboard
+  + subs popup sizes, tokens.cachePath override + tokens.appFilter
+  (harness allowlist for the chip/dash), subs providers/interval/timeout
+  (which plans to check), modules toggles + warnAt, custom chips (label/
+  icon/color/title/command/toggle), terminal.className/title. Template
+  (writeTemplate) documents all of it.
 - Screenshot verification of Windows windows only works while the session is
   UNLOCKED; when locked, captures show the lock screen for every window.
+  PW captures of the LAYERED bar return the raw premultiplied DIB (tint
+  alpha 70% reads dark; alpha 0 reads black) - threshold accordingly.
 
 ## Native config parser (sharp edges, all bit us once)
 
@@ -121,8 +155,11 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 - Mirrors src/subs.js chip semantics: ChatGPT wham/usage (Bearer token from
   `~/.codex/auth.json`) + Z.ai quota/limit (apiKey from the ZCode config);
-  lowest remaining window wins; chip states: em dash (no data), "stale"
-  (failed cycle keeps last good), `N%` colored good/dim/warn at 70/30.
+  lowest remaining window across PROVIDERS wins (per-provider rem/stale
+  arrays - one provider failing must never stale the others, and the old
+  global state did exactly that via a never-set `any` flag); chip states:
+  em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
+  board reads the same per-provider window arrays (label/pct/used/total).
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.

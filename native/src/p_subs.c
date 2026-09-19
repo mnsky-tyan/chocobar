@@ -18,8 +18,13 @@ static void writeLogA(const char *s); // p_ui
 
 static CRITICAL_SECTION g_subsLock;
 static int g_subsLockInit = 0;
-static int g_subsRem = -1;   // lowest remaining window percent, -1 = never fetched
-static int g_subsStale = 0;  // last cycle failed but an older value is shown
+// Per-provider state: a provider that fails keeps its last good numbers
+// marked stale; one provider failing must never blank or stale the others.
+typedef struct { wchar_t label[16]; int pct; int rem; int used; int total; } SubsWin;
+static SubsWin g_subsWin[MAX_SUBS][4];  // last good windows per provider
+static int g_subsWinN[MAX_SUBS];
+static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
+static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
 
 static const wchar_t *subsNz(const wchar_t *s) { return (s && *s) ? s : NULL; }
@@ -241,29 +246,41 @@ static int subsJint(const char *js, jsmntok_t *t, int obj, const char *key, int 
     return (int)subsJdouble(js, t, obj, key, (double)dflt);
 }
 
-static void subsSetState(int rem, int success) {
+static void subsSetState(int idx, int rem, int success) {
+    if (idx < 0 || idx >= MAX_SUBS) return;
     EnterCriticalSection(&g_subsLock);
-    if (success) { g_subsRem = rem; g_subsStale = 0; }
-    else if (g_subsRem >= 0) g_subsStale = 1;
-    else g_subsRem = -1; // never succeeded: keep the no-data marker
+    if (success) { g_subsProvRem[idx] = rem; g_subsProvStale[idx] = 0; }
+    else if (g_subsProvRem[idx] >= 0) g_subsProvStale[idx] = 1;
+    else g_subsProvRem[idx] = -1; // never succeeded: keep the no-data marker
+    LeaveCriticalSection(&g_subsLock);
+}
+
+static void subsSetWins(int idx, const SubsWin *w, int n) {
+    if (idx < 0 || idx >= MAX_SUBS) return;
+    if (n > 4) n = 4;
+    EnterCriticalSection(&g_subsLock);
+    memcpy(g_subsWin[idx], w, n * sizeof(SubsWin));
+    g_subsWinN[idx] = n;
     LeaveCriticalSection(&g_subsLock);
 }
 
 static int subsFetchChatgpt(int idx) {
     wchar_t *tok = subsChatgptToken(idx);
-    if (!tok) { writeLogA("subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(0, 0); return 0; }
+    if (!tok) { writeLogA("subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(idx, 0, 0); return 0; }
     // access_token is a multi-KB JWT: build the header block at its full size
     int need = 32 + lstrlenW(tok) + 64;
     wchar_t *hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, need * sizeof(wchar_t));
-    if (!hdrs) { wideFree(&tok); subsSetState(0, 0); return 0; }
+    if (!hdrs) { wideFree(&tok); subsSetState(idx, 0, 0); return 0; }
     swprintf(hdrs, need, L"Authorization: Bearer %ls\r\nAccept: application/json", tok);
     wideFree(&tok);
     int status = 0, len = 0;
     char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, g_cfg.subsTimeoutMs, &status, &len);
     HeapFree(GetProcessHeap(), 0, hdrs);
+    SubsWin wins[2];
+    int nwin = 0;
     if (!body || (status != 200 && status != 207)) {
         HeapFree(GetProcessHeap(), 0, body ? (void *)body : 0);
-        subsSetState(0, 0);
+        subsSetState(idx, 0, 0);
         return 0;
     }
     double rem = 100;
@@ -277,9 +294,10 @@ static int subsFetchChatgpt(int idx) {
             int reached = subsJint(body, t, rl, "limit_reached", 0);
             double lo = 100;
             int found = 0;
-            const char *wins[2] = { "primary_window", "secondary_window" };
+            const char *wnames[2] = { "primary_window", "secondary_window" };
+            const wchar_t *wlabels[2] = { L"5h", L"week" };
             for (int i = 0; i < 2; i++) {
-                int w = jobjGet(body, t, rl, wins[i]);
+                int w = jobjGet(body, t, rl, wnames[i]);
                 if (w < 0 || t[w].type != JSMN_OBJECT) continue;
                 double used = subsJdouble(body, t, w, "used_percent", -1);
                 if (used < 0) continue;
@@ -287,20 +305,28 @@ static int subsFetchChatgpt(int idx) {
                 if (used < 0) used = 0;
                 lo = found ? (100 - used < lo ? 100 - used : lo) : (100 - used);
                 found = 1;
+                memset(&wins[nwin], 0, sizeof(SubsWin));
+                lstrcpynW(wins[nwin].label, wlabels[i], 16);
+                wins[nwin].pct = (int)(used + 0.5);
+                wins[nwin].rem = 100 - (int)(used + 0.5);
+                wins[nwin].used = -1;
+                wins[nwin].total = -1;
+                nwin++;
             }
             rem = found ? lo : 100;
             if (reached) rem = 0;
         }
     }
     HeapFree(GetProcessHeap(), 0, body);
-    subsSetState((int)(rem + 0.5), 1);
+    subsSetWins(idx, wins, nwin);
+    subsSetState(idx, (int)(rem + 0.5), 1);
     return 1;
 }
 
 static int subsFetchZai(int idx) {
     wchar_t *mid = NULL;
     wchar_t *key = subsZaiKey(idx, &mid);
-    if (!key) { subsSetState(0, 0); return 0; }
+    if (!key) { subsSetState(idx, 0, 0); return 0; }
     wchar_t hdrs[1600];
     swprintf(hdrs, 1600,
         L"authorization: %ls\r\n"
@@ -323,7 +349,7 @@ static int subsFetchZai(int idx) {
     int status = 0, len = 0;
     char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, g_cfg.subsTimeoutMs, &status, &len);
 
-    if (!body) { subsSetState(0, 0); return 0; }
+    if (!body) { subsSetState(idx, 0, 0); return 0; }
     jsmntok_t t[1024];
     jsmn_parser p;
     jsmn_init(&p);
@@ -336,9 +362,11 @@ static int subsFetchZai(int idx) {
         sprintf(dbg, "subs zai: reject code=%d", code);
         writeLogA(dbg);
         HeapFree(GetProcessHeap(), 0, body);
-        subsSetState(0, 0);
+        subsSetState(idx, 0, 0);
         return 0;
     }
+    SubsWin wins[4];
+    int nwin = 0;
     double lo = 100;
     int limits = jobjGet(body, t, 0, "data");
     if (limits >= 0 && t[limits].type == JSMN_OBJECT) {
@@ -358,6 +386,20 @@ static int subsFetchZai(int idx) {
                     double rem = 100 - pct;
                     lo = found ? (rem < lo ? rem : lo) : rem;
                     found = 1;
+                    if (nwin < 4) {
+                        int unit = subsJint(body, t, k, "unit", -1);
+                        int num = subsJint(body, t, k, "number", 5);
+                        memset(&wins[nwin], 0, sizeof(SubsWin));
+                        if (unit == 3) swprintf(wins[nwin].label, 16, L"%dh", num ? num : 5);
+                        else if (unit == 6) lstrcpynW(wins[nwin].label, L"week", 16);
+                        else if (unit == 2) lstrcpynW(wins[nwin].label, L"day", 16);
+                        else swprintf(wins[nwin].label, 16, L"unit%d", unit);
+                        wins[nwin].pct = (int)(pct + 0.5);
+                        wins[nwin].rem = 100 - (int)(pct + 0.5);
+                        wins[nwin].used = (int)used;
+                        wins[nwin].total = (int)total;
+                        nwin++;
+                    }
                 }
                 // advance past this element
                 k += jtokSpan(t, k);
@@ -367,21 +409,27 @@ static int subsFetchZai(int idx) {
         }
     }
     HeapFree(GetProcessHeap(), 0, body);
-    subsSetState((int)(lo + 0.5), 1);
+    subsSetWins(idx, wins, nwin);
+    subsSetState(idx, (int)(lo + 0.5), 1);
     return 1;
 }
 
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
     for (;;) {
-        int any = 0;
+        int any = 0, anyEnabled = 0;
         int n = g_cfg.subsProviderCount;
         if (n > MAX_SUBS) n = MAX_SUBS;
         for (int i = 0; i < n; i++) {
             if (!g_cfg.subsProviders[i].enabled) continue;
+            anyEnabled = 1;
             int ok = g_cfg.subsProviders[i].type == 0 ? subsFetchChatgpt(i) : subsFetchZai(i);
+            any |= ok;
         }
-        if (!any) subsSetState(-1, 0); // nothing succeeded: no-data marker
+        (void)any; // per-provider state now lives in g_subsProvRem/g_subsProvStale
+        if (!anyEnabled) {
+            for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
+        }
         Sleep(g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000);
     }
     return 0;
@@ -398,19 +446,48 @@ static void subsStart(void) {
     if (h) CloseHandle(h);
 }
 
-// chip state readers (UI thread)
+// chip state readers (UI thread): lowest remaining across providers with data
 static int subsChipRem(void) {
     if (!g_subsLockInit) return -1;
     EnterCriticalSection(&g_subsLock);
-    int r = g_subsStale ? -2 : g_subsRem;
+    int r = -1;
+    for (int i = 0; i < MAX_SUBS; i++)
+        if (g_subsProvRem[i] >= 0 && (r < 0 || g_subsProvRem[i] < r)) r = g_subsProvRem[i];
+    int stale = 0;
+    for (int i = 0; i < MAX_SUBS; i++) if (g_subsProvStale[i]) stale = 1;
     LeaveCriticalSection(&g_subsLock);
-    return r; // -2 = stale (old value lives in g_subsRem), -1 = no data
+    return stale ? -2 : r; // -2 = stale, -1 = no data
 }
 
 static int subsChipStale(void) {
     if (!g_subsLockInit) return 0;
     EnterCriticalSection(&g_subsLock);
-    int s = g_subsStale;
+    int s = 0;
+    for (int i = 0; i < MAX_SUBS; i++) if (g_subsProvStale[i]) s = 1;
     LeaveCriticalSection(&g_subsLock);
     return s;
+}
+
+// ---- subs board (dashboard) readers ----------------------------------------
+// provider display label: config label, else the type default (Electron does
+// `p.label || 'ChatGPT'` / 'Z.ai')
+static void subsProvLabel(int i, wchar_t *out, int cb) {
+    const wchar_t *l = i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].label
+                           ? g_cfg.subsProviders[i].label : NULL;
+    if (!l) l = (i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].type == 1) ? L"Z.ai" : L"ChatGPT";
+    lstrcpynW(out, l, cb);
+}
+static int subsProvEnabled(int i) {
+    return i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].enabled;
+}
+// copy one provider's last good windows; returns count
+static int subsProvWins(int i, SubsWin *out, int max) {
+    if (!g_subsLockInit || i < 0 || i >= MAX_SUBS) return 0;
+    EnterCriticalSection(&g_subsLock);
+    int n = g_subsWinN[i];
+    if (n > max) n = max;
+    memcpy(out, g_subsWin[i], n * sizeof(SubsWin));
+    int stale = g_subsProvStale[i];
+    LeaveCriticalSection(&g_subsLock);
+    return stale ? -n : n; // negative = stale
 }
