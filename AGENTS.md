@@ -80,10 +80,15 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 - Native Win32 port of the bar lives in `native/` (PR #49). Build = `native/build.sh`
   (assembles 4 parts into `src/chocobar_full.c`, then nix mingw cross-compiles).
-  Edit the parts, never the assembled file. Run notes + COM/DXGI sharp edges
-  (mingw dcomp.h is C-broken, hand-vtbl slot numbers, DXGI usage 0x20,
-  GetBuffer-via-IUNKNOWN, TARGET-only bitmap options, rebindVisual after resize)
-  are in `native/README.md` - read it before touching the render path.
+  Edit the parts, never the assembled file. The render path is GDI +
+  UpdateLayeredWindow on a WS_EX_LAYERED window (the earlier D2D-over-DComp
+  pipeline is dead on this machine: TARGET-only bitmap options fail
+  E_INVALIDARG per frame, TARGET|CANNOT_DRAW hits D2DERR_WRONG_STATE at
+  EndDraw - do not resurrect). Layered windows never get WM_PAINT (first
+  paint is explicit), DWM backdrops are ignored on them, and screen captures
+  must use PrintWindow (CopyFromScreen races the follow loop). Chips draw
+  Nerd Font glyphs (cmap-verified codepoints) dim + value dark. Sharp edges:
+  `native/README.md` - read it before touching the render path.
 - Electron stays the daily driver until native phase 2 (token dashboards, subs).
 - Screenshot verification of Windows windows only works while the session is
   UNLOCKED; when locked, captures show the lock screen for every window.

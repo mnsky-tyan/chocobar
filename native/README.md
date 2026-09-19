@@ -41,36 +41,37 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 
 ## Sharp edges (learned the hard way - do not "simplify" these)
 
-- **mingw headers**: `d2d1_1.h` and `dxgi1_2.h` provide working C bindings
-  and macros (use `ID2D1Factory1_CreateDevice`,
-  `ID2D1Device_CreateDeviceContext`,
-  `ID2D1DeviceContext_CreateBitmapFromDxgiSurface`, `..._SetTarget`,
-  `IDXGIFactory2_CreateSwapChainForComposition`). `dcomp.h` is BROKEN in C
-  mode (duplicate overload members) - `src/p_ui.c` hand-declares those
-  vtbls with slots verified against the header's interface blocks:
-  Commit=3, CreateTargetForHwnd=6, CreateVisual=7, SetRoot=3,
-  SetContent=15 (the offset/transform setter pairs occupy 3-14; the
-  MSVC-C++ header orders each pair opposite to the C/IDL order - both
-  place SetContent at 15).
-- `ID2D1Resource::GetFactory` owns slot 3 on every D2D object; interface
-  methods start at slot 4. RT vtbl = 4 base + 48 own = slots 0..51, so
-  DeviceContext additions start at 52 (CreateBitmapFromDxgiSurface=57,
-  SetTarget=69). ID2D1Factory1::CreateDevice = slot 17 (never 16).
-- **Swapchain usage must be `DXGI_USAGE_RENDER_TARGET_OUTPUT` = 0x20**
-  (0x40 is BACKBUFFER and makes the back buffer unusable as a D2D target:
-  CreateBitmapFromDxgiSurface gives E_INVALIDARG for any explicit props).
-- Swapchain: `CreateSwapChainForComposition`, FLIP_DISCARD(4),
-  ALPHA_PREMULTIPLIED, 2 buffers, B8G8R8A8_UNORM.
-- `GetBuffer` with `IID_IDXGISurface` returns E_NOINTERFACE on this path;
-  fetch with `IID_IUnknown` (or IDXGIResource) and QueryInterface to
-  `IDXGISurface` (`cafcb56c-b2ca-47bb-a495-08e6a41ace2b` - get GUIDs from
-  the headers' `__CRT_UUID_DECL`, not from memory).
-- Back-buffer bitmap options: `D2D1_BITMAP_OPTIONS_TARGET` alone works;
-  adding `CANNOT_DRAW` compiles but makes BeginDraw fail with
-  D2DERR_WRONG_STATE on every EndDraw.
-- After any swapchain rebuild (WM_SIZE path), rebind the composition tree:
-  `rebindVisual()` (SetContent + SetRoot + Commit) or the visual keeps
-  pointing at the released swapchain and the bar goes silent.
+- **Render path is GDI + UpdateLayeredWindow** (deliberate). The original
+  D2D-over-DComp-swapchain pipeline is dead on this machine: with
+  `D2D1_BITMAP_OPTIONS_TARGET` alone `CreateBitmapFromDxgiSurface` fails
+  E_INVALIDARG on EVERY frame; adding `CANNOT_DRAW` makes it "succeed" but
+  every EndDraw returns D2DERR_WRONG_STATE. Do not resurrect that design.
+- The window is `WS_EX_LAYERED`; content = a 32bpp top-down premultiplied
+  DIB selected into a memory DC (tint at `backgroundAlpha`, chips drawn
+  right-aligned with DrawTextW), handed to DWM via `UpdateLayeredWindow`
+  (`AC_SRC_ALPHA`). DWM backdrop attributes are ignored on layered
+  windows - the tint alpha itself provides the translucency.
+- **Layered windows never receive WM_PAINT.** The first frame must be
+  drawn explicitly (`paint(g_bar)` in wWinMain after `initRender`);
+  otherwise the bar stays invisible forever.
+- The bar FOLLOWS the terminal, so screen captures at probed coordinates
+  race the follow loop (stale rect = black/empty screenshots).
+  `PrintWindow` on the `ChocobarBar` hwnd is the reliable verification.
+- Icons are Nerd Font glyphs drawn from the configured family (codepoints
+  verified against the font's cmap: pet 0xF004, gpu 0xF08CA, cpu 0xF035B,
+  temp 0xF05C3, ram 0xF04B0, vol 0xF057E / muted 0xF0581, battery 0xF240 /
+  AC 0xF0427, clock 0xF017). Icon + space is drawn dim (`theme.fgDim`),
+  the value in `theme.fg` / warn / override color - the two-tone look.
+- `theme.fgDim` is a real config key (default `#5a5245`); the config
+  jsmn walker counts key+value PAIRS (2N tokens) - never "fix" that.
+- All wide strings go through `wideDup`/HeapFree; mixing `_wcsdup` with
+  HeapFree caused a 0xC0000374 heap corruption once.
+- A crash handler (`SetUnhandledExceptionFilter` -> `writeLogA`) appends
+  the exception code to `native.log` next to the config; paint failures
+  log there too. No other logging in steady state.
+- `CreateWindowExW` starts the bar at (-2000,-2000); the follow tick moves
+  it. Never paint assumptions before `followTick` has run.
+
 - A crash handler (`SetUnhandledExceptionFilter` -> `writeLogA`) appends
   the exception code to `native.log` next to the config; paint failures
   log there too. No other logging in steady state.
