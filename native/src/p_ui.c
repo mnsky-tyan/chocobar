@@ -356,6 +356,15 @@ static void repaintBar(HWND hwnd) {
         DrawTextW(g_memDc, c->text, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
     }
 
+    // GDI leaves ALPHA=0 in the reserved byte of every pixel it touches
+    // (text, icons, hover fill): DWM would composite those pixels as fully
+    // transparent - the bar shows tint but no content. Any pixel GDI drew
+    // is a content pixel: make it opaque. (Background pixels keep bgA.)
+    for (size_t i = 0; i < total; i++) {
+        DWORD v = px[i];
+        if ((v & 0xFF000000u) == 0 && (v & 0x00FFFFFFu) != 0) px[i] = v | 0xFF000000u;
+    }
+
     // hand the buffer to DWM; keeps the current window position
     POINT ptSrc = {0, 0};
     SIZE sz = { g_dibW, g_dibH };
@@ -446,14 +455,18 @@ static void petToggle(void) {
 
 
 static void followTick(void) {
-    // the foreground window wins when it is a supported terminal; otherwise
-    // keep the last followed terminal, or probe for one (same rule as the
-    // Electron build's probe order).
-    HWND fg = GetForegroundWindow();
-    if (isTerminalHwnd(fg)) g_term = fg;
-    if (g_term && !IsWindow(g_term)) { g_term = NULL; g_haveTarget = 0; }
-    if (!g_term) g_term = findTerminalByProbe();
+    // STICKY like the Electron build's tracker: attach once, keep the terminal
+    // until it dies, only then re-probe (foreground-wins). Re-targeting on
+    // every foreground switch would overlap a second bar tracking another
+    // terminal and yank the bar around while the user works in other apps.
+    if (g_term && IsWindow(g_term)) { /* keep */ }
+    else {
+        HWND fg = GetForegroundWindow();
+        if (isTerminalHwnd(fg)) g_term = fg;
+        else if (!g_term) g_term = findTerminalByProbe();
+    }
     if (!g_term) { hideBar(); return; }
+    if (!IsWindow(g_term)) { g_term = NULL; g_haveTarget = 0; return; }
 
     // hands-off during the terminal's modal move/size loop
     GUITHREADINFO gi; memset(&gi, 0, sizeof(gi)); gi.cbSize = sizeof(gi);
