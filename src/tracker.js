@@ -228,6 +228,13 @@ class TerminalTracker extends require('events') {
     this._ensureScan();
   }
 
+  // Current visible frame of the followed terminal (null when detached).
+  // Lets the app re-derive bar geometry on visibility restore without
+  // waiting for a geometry event that an unchanged rect will never emit.
+  frameBounds() {
+    return this.hwnd && native.isWindow(this.hwnd) ? native.getFrameBounds(this.hwnd) : null;
+  }
+
   _followTick() {
     const hwnd = this.hwnd;
     if (!hwnd || !native.isWindow(hwnd)) {
