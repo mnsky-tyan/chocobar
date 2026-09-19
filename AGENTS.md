@@ -107,25 +107,43 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   (WindowFromPoint proves it in one call). Hidden bar (terminal minimized)
   also explains "dead" hover - check IsWindowVisible first.
 - Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
-  pinkDeep), 24-unit paths flattened once, stroked with a round geometric
-  pen. Flattener sharp edges: the M point must be stored as subpath vertex 0
-  (closed fills/strokes lose their first edge otherwise) and svgArc must
-  sample from the START angle (atan2 of the start point), not angle 0 -
-  both bugs only showed once paths used arcs/closed shapes beyond the first
-  full-circle icons. Battery = dynamic fill (charge amount, warn <10%,
-  full + zigzag on AC) drawn by svgDrawBatt. theme.iconOpacity fades icon
-  boxes post-paint (pxScale after the alpha-repair pass; GDI writes alpha 0
-  and the repair must run first).
+  pinkDeep), 24-unit paths flattened once, rendered with GDI+
+  (SmoothingModeAntiAlias8x8, round caps/joins) into per-icon premultiplied
+  DIB caches and AlphaBlended - GDI Polyline stroking has no AA and read
+  wiggly. theme.iconOpacity rides AlphaBlend's SourceConstantAlpha (default
+  90 = Electron's `.seg svg { opacity: .9 }`); the old per-box pixel fade
+  is GONE (it double-faded). The gdip* facade + flattener serve the
+  dashboards too (donut pies, AA cards). Flattener sharp edges: the M point
+  must be stored as subpath vertex 0, and svgArc must sample from the START
+  angle. Battery = dynamic fill (charge amount, warn <10%, full + zigzag on
+  AC) drawn by svgDrawBatt into its own cache keyed by charge bucket.
+- GDI+ flat-API binding: GetProcAddress EVERY function and bail to the GDI
+  fallback if any is missing - `GdipCloseFigure` does not exist (the export
+  is `GdipClosePathFigure`); a NULL binding crashes the first paint
+  (C0000005 addr 0).
+- Bar font = FW_NORMAL: the Meslo Nerd Font family ships only Regular+Bold,
+  Chromium maps bar.css weight 600 to Regular, GDI rounds FW_SEMIBOLD to
+  Bold (read too heavy). 700 -> FW_BOLD.
 - Bar chrome parity: rounded corners are CSS (bar.css border-radius), drawn
   by fading the premultiplied tint per-pixel in the corner boxes (pxScale);
   DWM rounding does not apply to ULW surfaces. Hover pill = CLICKABLE chips
   only (align 2: shortcut/pet/tokens/subs/custom), pink at 50% blended over
   the tint, rounded 5px, inflated 5x2 CSS px; RHS metric segs get title
   tooltips instead (hand-rolled layered ChocobarTip window; TIP has
-  WS_EX_TRANSPARENT so it never eats the click). Clicking empty bar raises
-  the followed terminal. Token dashboard + subs board = WS_POPUP
-  "ChocobarDash" windows (DWM-rounded via DwmSetWindowAttribute 33 at
-  runtime), sizes from dashboard.width/height and subs.width/height.
+  WS_EX_TRANSPARENT so it never eats the click, and MUST be destroyed with
+  the bar - a lingering topmost tip reads as a second bar ghost). Clicking
+  empty bar raises the followed terminal. Token dashboard + subs board =
+  WS_POPUP WS_EX_APPWINDOW "ChocobarDash" windows (DWM-rounded via
+  DwmSetWindowAttribute 33), a 1:1 port of renderer/dash.css + subs.css:
+  stat cards white25 over pinkBg, plan-usage rows, 26-week heatmap (cell
+  radius 2.5 NOT the card 10, month labels, Sun/Fri rows, quantile
+  thresholds, click = day detail), by-app + by-model tables (sorted by
+  total desc, models capped 7, share bar pre-blended behind the first
+  cell, cache columns only when data exists), subs = donut pies per window
+  + status pills. Titlebar drag = HTCAPTION; refresh/✕ buttons drawn.
+- Posted mouse coordinates to the PMv2 bar from a DPI-UNAWARE process get
+  DOUBLED by Windows message-DPI translation: SetProcessDpiAwarenessContext(-4)
+  in the poster, or halve the coords. (Cost a debug round twice.)
 - Native config surface (all hot-reload): theme colors incl iconColor +
   iconOpacity + heatmap[5], bar.radius/backgroundAlpha/tint/font, dashboard
   + subs popup sizes, tokens.cachePath override + tokens.appFilter
@@ -170,7 +188,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 - The native dev bar runs on its OWN shell: spawn a `wt` window titled
   `chocobar-dev` away from the captain's workspace, then launch the bar so
-  it attaches to that window (sticky follow keeps it there).
+  it attaches to that window (sticky follow keeps it there). NEVER launch
+  it on the captain's terminal: his Electron bar lives there too, and two
+  always-on-top bars fight (his disappears under the dev bar). A closed or
+  zombie dev shell leaves the bar hidden at -1000,-1000 400x26; recreate
+  with `wt -w new nt --title chocobar-dev` (a dead shell can also linger as
+  an offscreen 157x25 rect - EnumWindows finds it, GetWindowRect fails).
 - `terminal.className` in config is AUTHORITATIVE: when set, the probe tries
   only that class and never falls back to the generic terminal class list.
 

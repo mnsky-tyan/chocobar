@@ -143,9 +143,12 @@ static int initRender(HWND hwnd) {
     }
     fam[n] = 0;
     // Electron bar.css: font-weight 600, font-size 11px CSS -> em px at DPI.
-    // Chromium renders DirectWrite semibold; GDI needs FW_SEMIBOLD to match.
+    // The Meslo Nerd Font family ships only Regular + Bold: Chromium maps the
+    // 600 to Regular (no synthetic bolding below the 700 threshold), while GDI
+    // rounds FW_SEMIBOLD up to Bold - which read too heavy. FW_NORMAL is the
+    // Chromium-identical face.
     int px = (int)(g_cfg.fontSize * g_scale + 0.5);
-    g_font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    g_font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
     if (!g_font) return 0;
@@ -189,16 +192,34 @@ static int g_tokensTick = 0;
 
 // ---- dashboard aggregation (filled by scanTokenCache) ----------------------
 #define DASH_MAX_APPS 12
+#define DASH_MAX_MODELS 16
 #define DASH_MAX_DAYS 190
-static long long g_appToday[DASH_MAX_APPS], g_appWeek[DASH_MAX_APPS];
-static long long g_appMonth[DASH_MAX_APPS], g_appAll[DASH_MAX_APPS];
+// token-cache record fields kept separately: the Electron dash shows the
+// input/output/cache R/cache W/calls table columns, not one lumped sum
+typedef struct { long long in, out, cr, cw, req; } TokAgg;
+static TokAgg g_appAgg[DASH_MAX_APPS];
 static char g_appName[DASH_MAX_APPS][20];
 static int g_appCount = 0;
+static char g_modelName[DASH_MAX_MODELS][48]; // "app|model", Electron byModel key
+static TokAgg g_modelAgg[DASH_MAX_MODELS];
+static int g_modelCount = 0;
+static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day detail)
 static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
 static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
 static long long g_lastScanMs = 0;
+static int g_daySel = -1; // selected heatmap cell (daysBack), -1 = none
 
-static void aggRecord(const char *app, int alen, long long ts, long long sum, long long midnight) {
+// blend two opaque colors, num/256 of the foreground
+static COLORREF blendCr(COLORREF bg, COLORREF fg, int num) {
+    int r = GetRValue(bg) + ((GetRValue(fg) - GetRValue(bg)) * num >> 8);
+    int g2 = GetGValue(bg) + ((GetGValue(fg) - GetGValue(bg)) * num >> 8);
+    int b = GetBValue(bg) + ((GetBValue(fg) - GetBValue(bg)) * num >> 8);
+    return RGB(r, g2, b);
+}
+
+static void aggRecord(const char *app, int alen, long long ts,
+                      long long vin, long long vout, long long vcr, long long vcw,
+                      const char *model, int mlen, long long midnight) {
     if (alen <= 0) alen = 1;
     if (alen > 19) alen = 19;
     // tokens.appFilter: when set, only the listed harness apps are tracked
@@ -212,6 +233,7 @@ static void aggRecord(const char *app, int alen, long long ts, long long sum, lo
         }
         if (!ok) return;
     }
+    long long sum = vin + vout + vcr + vcw;
     long long day = (ts - midnight) / 86400000LL; // 0 = today, -n = n days ago
     int ai = -1;
     for (int i = 0; i < g_appCount; i++)
@@ -222,13 +244,41 @@ static void aggRecord(const char *app, int alen, long long ts, long long sum, lo
         g_appName[ai][alen] = 0;
     }
     if (ai >= 0) {
-        if (day == 0) g_appToday[ai] += sum;
-        if (day >= -6) g_appWeek[ai] += sum;
-        if (day >= -29) g_appMonth[ai] += sum;
-        g_appAll[ai] += sum;
+        g_appAgg[ai].in += vin; g_appAgg[ai].out += vout;
+        g_appAgg[ai].cr += vcr; g_appAgg[ai].cw += vcw;
+        g_appAgg[ai].req++;
     }
-    if (day >= -(DASH_MAX_DAYS - 1) && day <= 0)
-        g_dayTot[DASH_MAX_DAYS - 1 + (int)day] += sum;
+    // byModel: Electron keys are "app|model"
+    if (model && mlen > 0 && ai >= 0) {
+        if (mlen > 40) mlen = 40;
+        char mk[64];
+        int n = 0;
+        memcpy(mk, app, alen); n = alen;
+        mk[n++] = '|';
+        memcpy(mk + n, model, mlen); n += mlen;
+        mk[n] = 0;
+        int mi = -1;
+        for (int i = 0; i < g_modelCount; i++)
+            if (strncmp(g_modelName[i], mk, 47) == 0) { mi = i; break; }
+        if (mi < 0 && g_modelCount < DASH_MAX_MODELS) {
+            mi = g_modelCount++;
+            memcpy(g_modelName[mi], mk, (size_t)n + 1);
+        }
+        if (mi >= 0) {
+            g_modelAgg[mi].in += vin; g_modelAgg[mi].out += vout;
+            g_modelAgg[mi].cr += vcr; g_modelAgg[mi].cw += vcw;
+            g_modelAgg[mi].req++;
+        }
+    }
+    if (day >= -(DASH_MAX_DAYS - 1) && day <= 0) {
+        int di = DASH_MAX_DAYS - 1 + (int)day;
+        g_dayTot[di] += sum;
+        if (ai >= 0) {
+            g_dayApp[di][ai].in += vin; g_dayApp[di][ai].out += vout;
+            g_dayApp[di][ai].cr += vcr; g_dayApp[di][ai].cw += vcw;
+            g_dayApp[di][ai].req++;
+        }
+    }
 }
 
 static const char *findStr(const char *p, const char *end, const char *needle) {
@@ -297,7 +347,12 @@ static void scanTokenCache(void) {
     long long midnight = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
     long long total = 0;
     memset(g_dayTot, 0, sizeof(g_dayTot));
+    memset(g_appAgg, 0, sizeof(g_appAgg));
+    memset(g_dayApp, 0, sizeof(g_dayApp));
+    memset(g_modelAgg, 0, sizeof(g_modelAgg));
     g_appCount = 0;
+    g_modelCount = 0;
+    g_daySel = -1;
     g_tokWeek = g_tokMonth = g_tokAll = 0;
     // records look like ["key",{"app":"<name>","ts":...,...}] - walk by the
     // app key (it precedes ts inside each record)
@@ -313,16 +368,26 @@ static void scanTokenCache(void) {
         long long ts = parseLL(tsp + 5, end);
         const char *next = findStr(tsp + 5, end, "\"app\":\"");
         const char *recEnd = next ? next : end;
-        long long sum = 0;
-        // Electron rowTotal: input + output + cacheRead + cacheWrite
+        // per-field breakdown (the dash table columns); Electron rowTotal =
+        // input + output + cacheRead + cacheWrite
         const char *keys[4] = { "\"input\":", "\"output\":", "\"cacheRead\":", "\"cacheWrite\":" };
         int lens[4] = { 8, 9, 12, 13 };
+        long long fld[4] = { 0, 0, 0, 0 };
+        long long sum = 0;
         for (int k = 0; k < 4; k++) {
             const char *f = findStr(ae, recEnd, keys[k]);
-            if (f) sum += parseLL(f + lens[k], recEnd);
+            if (f) { fld[k] = parseLL(f + lens[k], recEnd); sum += fld[k]; }
+        }
+        const char *mp = findStr(tsp + 5, recEnd, "\"model\":\"");
+        const char *mv = NULL; int mlen = 0;
+        if (mp) {
+            mv = mp + 9;
+            const char *me = mv;
+            while (me < recEnd && *me != '"' && *me && me - mv < 40) me++;
+            if (me < recEnd && *me == '"') mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
-        aggRecord(p, alen, ts, sum, midnight);
+        aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, midnight);
         if (ts >= midnight - 6LL * 86400000LL) g_tokWeek += sum;
         if (ts >= midnight - 29LL * 86400000LL) g_tokMonth += sum;
         g_tokAll += sum;
@@ -545,7 +610,6 @@ static void repaintBar(HWND hwnd) {
     DWORD *px = (DWORD *)g_bits;
     size_t total = (size_t)g_dibW * (size_t)g_dibH;
     for (size_t i = 0; i < total; i++) px[i] = bgPixel;
-    g_iconBoxN = 0;
 
     // rounded bar corners (bar.css: border-radius 8px; corners are CSS, not
     // DWM, because the window is layered): fade the tint to transparent in
@@ -675,19 +739,6 @@ static void repaintBar(HWND hwnd) {
     for (size_t i = 0; i < total; i++) {
         DWORD v = px[i];
         if ((v & 0xFF000000u) == 0 && (v & 0x00FFFFFFu) != 0) px[i] = v | 0xFF000000u;
-    }
-    // theme.iconOpacity: fade the freshly drawn icons (boxes recorded by svgDraw)
-    if (g_iconBoxN > 0) {
-        int cov = (int)(g_iconOpacity * 255.0);
-        for (int b = 0; b < g_iconBoxN; b++) {
-            RECT *bx = &g_iconBoxes[b];
-            for (int yy = bx->top > 0 ? bx->top : 0; yy < bx->bottom && yy < g_dibH; yy++)
-                for (int xx = bx->left > 0 ? bx->left : 0; xx < bx->right && xx < g_dibW; xx++) {
-                    DWORD v2 = px[(size_t)yy * g_dibW + xx];
-                    if ((v2 & 0xFF000000u) == 0xFF000000u) px[(size_t)yy * g_dibW + xx] = pxScale(v2, cov);
-                }
-        }
-        g_iconBoxN = 0;
     }
 
     // hand the buffer to DWM; keeps the current window position
@@ -935,16 +986,238 @@ static HFONT dashFont(int cssPx, int weight) {
                        DEFAULT_PITCH | FF_DONTCARE, fam);
 }
 
-static void dashText(HDC dc, int x, int y, const wchar_t *s, COLORREF cr,
-                     HFONT f, int rightAlign, int maxW) {
-    SelectObject(dc, f);
-    SetTextColor(dc, cr);
-    RECT r = { x, y, rightAlign ? x + maxW : x + 4000, y + (int)(40 * g_scale) };
-    DrawTextW(dc, s, -1, &r, DT_SINGLELINE | DT_LEFT | (rightAlign ? DT_RIGHT : 0));
+// ---- dashboard (ChocobarDash) ----------------------------------------------
+// Pixel-parity port of the Electron dashboard/subscriptions windows
+// (renderer/dash.css, subs.css). Layout constants are CSS px scaled by g_scale.
+// Anti-aliased cards, donut pies and share bars come from the GDI+ facade in
+// p_icons.c; text is GDI ClearType (the family has no true semibold: CSS 600
+// renders as the Regular face in Chromium too).
+
+static void tipHide(void);
+static void tipShow(const wchar_t *text, int cx, int cy);
+
+static const wchar_t *DASH_MONTHS[12] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
+                                          L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec" };
+static const wchar_t *DASH_DAYS[7] = { L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat" };
+
+// per-paint theme resolution
+typedef struct {
+    COLORREF bg, card, head, zebra, fg, dim, divider, pinkDeep, pink, warn, good, yellow;
+    COLORREF ramp[5];
+} DashTheme;
+
+#define DX(v) ((int)((v) * g_scale + 0.5))
+
+static void dashResolveTheme(DashTheme *t) {
+    t->bg = colorrefFromHex(g_cfg.pinkBg, 255);
+    t->fg = colorrefFromHex(g_cfg.fg, 255);
+    t->dim = colorrefFromHex(g_cfg.fgDim, 255);
+    t->divider = colorrefFromHex(g_cfg.divider, 255);
+    t->pinkDeep = colorrefFromHex(g_cfg.pinkDeep, 255);
+    t->pink = colorrefFromHex(g_cfg.pink, 255);
+    t->warn = colorrefFromHex(g_cfg.warn, 255);
+    t->good = colorrefFromHex(g_cfg.good, 255);
+    t->yellow = colorrefFromHex(L"#B8A96A", 255);
+    t->card = blendCr(t->bg, RGB(255, 255, 255), 64);  // rgba(255,255,255,.25)
+    t->head = blendCr(t->card, RGB(255, 255, 255), 64); // stacked head tint
+    t->zebra = blendCr(t->card, t->bg, 128);            // rgba(pinkBg,.5)
+    for (int i = 0; i < 5; i++) t->ramp[i] = colorrefFromHex(g_cfg.heatmap[i], 255);
 }
 
-// heatmap ramp: theme.heatmap from the config (COLORREF resolved at paint)
-static COLORREF dashRamp[5];
+// anti-aliased rounded card (GDI+; GDI RoundRect fallback)
+static void dashCard(HDC dc, int x, int y, int w, int h, COLORREF fill, COLORREF border) {
+    if (g_gdipOk && w > 4 && h > 4) {
+        gdipRoundRect(dc, fill, border, x, y, w, h, DX(10));
+        return;
+    }
+    int r = DX(10);
+    HBRUSH b = CreateSolidBrush(fill);
+    LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = border; lb1.lbHatch = 0;
+    HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL);
+    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pen);
+    RoundRect(dc, x, y, x + w, y + h, r * 2, r * 2);
+    SelectObject(dc, ob); SelectObject(dc, op);
+    DeleteObject(b); DeleteObject(pen);
+}
+
+static void dashStr(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT f) {
+    SelectObject(dc, f);
+    SetTextColor(dc, cr);
+    RECT r = { x, y, x + 8000, y + DX(40) };
+    DrawTextW(dc, s, -1, &r, DT_SINGLELINE | DT_LEFT);
+}
+static void dashStrR(HDC dc, int xRight, int y, const wchar_t *s, COLORREF cr, HFONT f) {
+    SelectObject(dc, f);
+    SetTextColor(dc, cr);
+    RECT r = { xRight - 4000, y, xRight, y + DX(40) };
+    DrawTextW(dc, s, -1, &r, DT_SINGLELINE | DT_RIGHT);
+}
+static int dashStrW(HDC dc, const wchar_t *s, HFONT f) {
+    HGDIOBJ of = SelectObject(dc, f);
+    SIZE ts; GetTextExtentPoint32W(dc, s, lstrlenW(s), &ts);
+    SelectObject(dc, of);
+    return ts.cx;
+}
+// 11px bold uppercase section head with 0.06em letter spacing
+static void dashHead(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT f) {
+    SelectObject(dc, f);
+    SetTextColor(dc, cr);
+    SetTextCharacterExtra(dc, DX(0.7));
+    RECT r = { x, y, x + 4000, y + DX(30) };
+    DrawTextW(dc, s, -1, &r, DT_SINGLELINE | DT_LEFT);
+    SetTextCharacterExtra(dc, 0);
+}
+
+// app dot color table (dash.css .app-*)
+static COLORREF appDotColor(const char *app, DashTheme *t) {
+    if (!strncmp(app, "zcode", 5)) return t->pinkDeep;
+    if (!strncmp(app, "zai", 3)) return RGB(0xB8, 0xA9, 0x6A);
+    if (!strncmp(app, "opencode", 8)) return RGB(0x7F, 0xA8, 0xA0);
+    if (!strncmp(app, "mimo", 4)) return RGB(0xB7, 0x9C, 0xE0);
+    if (!strncmp(app, "pi", 2)) return RGB(0x8F, 0xA8, 0xD4);
+    return blendCr(t->card, t->dim, 140);
+}
+static void dashDot(HDC dc, int cx, int cy, int d, COLORREF cr) {
+    if (g_gdipOk) {
+        GpGraphics *g = NULL;
+        if (t_GdipCreateFromHDC(dc, &g) == 0) {
+            t_GdipSetSmoothingMode(g, 6);
+            GpBrush *br = NULL;
+            if (t_GdipCreateSolidFill(GDIP_ARGB(cr), &br) == 0) {
+                t_GdipFillEllipse(g, br, (float)cx, (float)cy, (float)d, (float)d);
+                t_GdipDeleteBrush(br);
+            }
+            t_GdipDeleteGraphics(g);
+        }
+        return;
+    }
+    HBRUSH b = CreateSolidBrush(cr);
+    LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = cr; lb1.lbHatch = 0;
+    HPEN pen = ExtCreatePen(PS_GEOMETRIC, 1, &lb1, 0, NULL);
+    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pen);
+    Ellipse(dc, cx, cy, cx + d, cy + d);
+    SelectObject(dc, ob); SelectObject(dc, op);
+    DeleteObject(b); DeleteObject(pen);
+}
+
+// heatmap hit rects (physical px) + the days-back each holds
+static RECT g_hmRect[26][7];
+static int g_hmBack[26][7];
+static RECT g_btnRefresh, g_btnClose; // physical px
+static int g_btnHover = 0;            // 0 none, 1 refresh, 2 close
+static int g_tbBottom = 0;            // titlebar bottom (physical px) for drag
+
+// table column x positions (right-aligned edge offsets, CSS px)
+#define COL_CALLS 36
+#define COL_CW 56
+#define COL_CR 56
+#define COL_OUT 56
+#define COL_IN 56
+
+static void dashTableCols(int innerRight, int cache, int *xs) {
+    // xs[0]=calls, xs[1]=cacheW, xs[2]=cacheR, xs[3]=output, xs[4]=input (right edges)
+    xs[0] = innerRight;
+    if (cache) {
+        xs[1] = xs[0] - DX(COL_CALLS);
+        xs[2] = xs[1] - DX(COL_CW);
+        xs[3] = xs[2] - DX(COL_CR);
+        xs[4] = xs[3] - DX(COL_OUT);
+    } else {
+        xs[1] = xs[2] = xs[3] = 0;
+        xs[4] = xs[0] - DX(COL_CALLS);
+    }
+}
+
+// one table row: share bar behind the first cell, dot, numbers right-aligned
+static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH, int cache,
+                         const int *xs, const wchar_t *label, COLORREF dot,
+                         double share, TokAgg *a, DashTheme *t, HFONT f11, HFONT f9) {
+    // zebra-less; share bar behind the label (dash.css .share i)
+    if (share > 0.003) {
+        int bw = (int)(share * innerW);
+        if (bw < DX(3)) bw = DX(3);
+        int bh = (int)(rowH * 0.7);
+        int by = y + (rowH - bh) / 2;
+        COLORREF c1 = blendCr(t->card, t->pink, 90);     // pink @35%
+        COLORREF c2 = blendCr(t->card, t->pinkDeep, 90); // pinkDeep @35%
+        if (g_gdipOk && bw > 4) {
+            // horizontal gradient endpoints pre-blended (matches the CSS gradient)
+            GRADIENT_RECT gr = { 0, 1 };
+            TRIVERTEX tv[2];
+            memset(tv, 0, sizeof(tv));
+            tv[0].x = x0 + 2; tv[0].y = by;
+            tv[0].Red = GetRValue(c1) << 8; tv[0].Green = GetGValue(c1) << 8; tv[0].Blue = GetBValue(c1) << 8; tv[0].Alpha = 0xFF00;
+            tv[1].x = x0 + 2 + bw; tv[1].y = by + bh;
+            tv[1].Red = GetRValue(c2) << 8; tv[1].Green = GetGValue(c2) << 8; tv[1].Blue = GetBValue(c2) << 8; tv[1].Alpha = 0xFF00;
+            GradientFill(dc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
+        } else {
+            HBRUSH b = CreateSolidBrush(c1);
+            RECT fr = { x0 + 2, by, x0 + 2 + bw, by + bh };
+            FillRect(dc, &fr, b);
+            DeleteObject(b);
+        }
+    }
+    dashDot(dc, x0 + 2, y + (rowH - DX(8)) / 2, DX(8), dot);
+    SelectObject(dc, f11);
+    SetTextColor(dc, t->fg);
+    RECT lr = { x0 + 2 + DX(14), y, x0 + DX(150), y + rowH + 1 };
+    DrawTextW(dc, label, -1, &lr, DT_SINGLELINE | DT_LEFT | DT_END_ELLIPSIS);
+    wchar_t vs[32];
+    fmtTokens(a->in, vs, 32); dashStrR(dc, xs[4], y, vs, t->fg, f11);
+    fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], y, vs, t->fg, f11);
+    if (cache) {
+        fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], y, vs, t->fg, f11);
+        fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], y, vs, t->fg, f11);
+    }
+    swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], y, vs, t->fg, f11);
+}
+
+static void dashTableHead(HDC dc, int x0, int innerW, int y, int cache,
+                          const int *xs, DashTheme *t, HFONT f9) {
+    dashStr(dc, x0 + 2, y, L"APP", t->dim, f9);
+    wchar_t *in = L"INPUT", *out = L"OUTPUT", *cr = L"CACHE R", *cw = L"CACHE W", *ca = L"CALLS";
+    dashStrR(dc, xs[4], y, in, t->dim, f9);
+    dashStrR(dc, xs[3], y, out, t->dim, f9);
+    if (cache) {
+        dashStrR(dc, xs[2], y, cr, t->dim, f9);
+        dashStrR(dc, xs[1], y, cw, t->dim, f9);
+    }
+    dashStrR(dc, xs[0], y, ca, t->dim, f9);
+    (void)innerW;
+}
+
+// hasCacheData: cache columns exist only while some record carries cache data
+static int dashHasCache(void) {
+    for (int i = 0; i < g_appCount; i++)
+        if (g_appAgg[i].cr + g_appAgg[i].cw > 0) return 1;
+    for (int i = 0; i < g_modelCount; i++)
+        if (g_modelAgg[i].cr + g_modelAgg[i].cw > 0) return 1;
+    return 0;
+}
+
+// format a FILETIME (already local) as HH:MM:SS
+static void dashFmtTime(long long msUtc, wchar_t *out, int cb) {
+    FILETIME ft;
+    long long v = msUtc * 10000LL;
+    ft.dwHighDateTime = (DWORD)(v >> 32);
+    ft.dwLowDateTime = (DWORD)v;
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&ft, &st);
+    swprintf(out, cb, L"%02lu:%02lu:%02lu", (unsigned long)st.wHour, (unsigned long)st.wMinute, (unsigned long)st.wSecond);
+}
+
+// day date for a heatmap column start (daysBack of the dow=0 cell)
+static void dashColDate(int daysBack, SYSTEMTIME *out) {
+    SYSTEMTIME now; GetLocalTime(&now);
+    now.wHour = now.wMinute = now.wSecond = now.wMilliseconds = 0;
+    FILETIME lft, ft;
+    SystemTimeToFileTime(&now, &lft);
+    LocalFileTimeToFileTime(&lft, &ft);
+    long long v = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) - (long long)daysBack * 864000000000LL;
+    ft.dwHighDateTime = (DWORD)(v >> 32);
+    ft.dwLowDateTime = (DWORD)v;
+    FileTimeToSystemTime(&ft, out);
+}
 
 static void paintDash(HWND hwnd) {
     if (!g_dashDc) {
@@ -972,193 +1245,629 @@ static void paintDash(HWND hwnd) {
         g_dashPainted = g_dashType;
     }
     HDC dc = g_dashDc;
-    COLORREF bg = colorrefFromHex(g_cfg.pinkBg, 255);
-    COLORREF card = colorrefFromHex(g_cfg.tint, 255);
-    COLORREF fg = colorrefFromHex(g_cfg.fg, 255);
-    COLORREF dim = colorrefFromHex(g_cfg.fgDim, 255);
-    COLORREF pink = colorrefFromHex(g_cfg.pinkDeep, 255);
-    COLORREF warn = colorrefFromHex(g_cfg.warn, 255);
-    // opaque panel background
+    DashTheme t;
+    dashResolveTheme(&t);
+    // opaque panel background (pinkBg)
     {
-        HBRUSH b = CreateSolidBrush(bg);
+        HBRUSH b = CreateSolidBrush(t.bg);
         RECT fr = { 0, 0, w, h };
         FillRect(dc, &fr, b);
         DeleteObject(b);
     }
     SetBkMode(dc, TRANSPARENT);
-    for (int i = 0; i < 5; i++) dashRamp[i] = colorrefFromHex(g_cfg.heatmap[i], 255);
     HFONT fTitle = dashFont(15, FW_BOLD);
-    HFONT fBody = dashFont(11, FW_SEMIBOLD);
+    HFONT fBody = dashFont(11, FW_NORMAL);
     HFONT fVal = dashFont(17, FW_BOLD);
-    HFONT fSmall = dashFont(10, FW_NORMAL);
+    HFONT fS10 = dashFont(10, FW_NORMAL);
+    HFONT fS9 = dashFont(9, FW_NORMAL);
+    HFONT fBtn = dashFont(11, FW_NORMAL);
+    HFONT fHead = dashFont(11, FW_BOLD);
+    HFONT f13 = dashFont(13, FW_BOLD);
+    HFONT f18 = dashFont(18, FW_BOLD);
 
-    int pad = (int)(18 * g_scale);
+    int padL = DX(18), padT = DX(14), gap = DX(12);
+    COLORREF white = RGB(255, 255, 255);
+
+    // ---- titlebar: logo + title, refresh/close buttons, hairline divider
+    int ty = padT;
+    {
+        int logoBox = DX(14);
+        const wchar_t *icol = (g_cfg.iconColor && *g_cfg.iconColor) ? g_cfg.iconColor : g_cfg.pinkDeep;
+        COLORREF acc = colorrefFromHex(icol, 255);
+        svgDraw(dc, g_dashType == 0 ? SVG_DIAMOND : SVG_GAUGE, acc, padL, ty + (DX(20) - logoBox) / 2);
+        dashStr(dc, padL + logoBox + DX(10), ty, g_dashType == 0 ? L"Token Usage" : L"Subscriptions", t.fg, fTitle);
+        // buttons right: [refresh] [close]
+        int bx = w - padL;
+        const wchar_t *cl = L"\x2715";
+        int cw = dashStrW(dc, cl, fBtn) + DX(18);
+        g_btnClose.right = bx; g_btnClose.left = bx - cw;
+        g_btnClose.top = ty - DX(3); g_btnClose.bottom = ty + DX(11) + DX(6);
+        bx -= cw + DX(6);
+        const wchar_t *rf = L"refresh";
+        int rw = dashStrW(dc, rf, fBtn) + DX(18);
+        g_btnRefresh.right = bx; g_btnRefresh.left = bx - rw;
+        g_btnRefresh.top = ty - DX(3); g_btnRefresh.bottom = ty + DX(11) + DX(6);
+        bx -= rw + DX(6);
+        for (int bi2 = 1; bi2 <= 2; bi2++) {
+            RECT *br = bi2 == 1 ? &g_btnRefresh : &g_btnClose;
+            const wchar_t *tx = bi2 == 1 ? rf : cl;
+            if (g_btnHover == bi2) {
+                dashCard(dc, br->left, br->top, br->right - br->left, br->bottom - br->top, t.bg, t.pink);
+                dashStr(dc, br->left + DX(9), br->top + DX(3), tx, t.pinkDeep, fBtn);
+            } else {
+                dashStr(dc, br->left + DX(9), br->top + DX(3), tx, t.dim, fBtn);
+            }
+        }
+        g_tbBottom = g_btnRefresh.bottom + DX(10) + 1;
+        HPEN pen = CreatePen(PS_SOLID, 1, t.divider);
+        HGDIOBJ op = SelectObject(dc, pen);
+        MoveToEx(dc, padL, g_tbBottom, NULL);
+        LineTo(dc, w - padL, g_tbBottom);
+        SelectObject(dc, op);
+        DeleteObject(pen);
+    }
+
+    int y = g_tbBottom + gap;
+
     if (g_dashType == 0) {
         // ---- token usage panel
-        dashText(dc, pad, (int)(12 * g_scale), L"Token usage", fg, fTitle, 0, 0);
-        wchar_t sub[64];
-        if (g_lastScanMs) {
-            swprintf(sub, 63, L"last scan %lld s ago", (long long)((GetTickCount64() - (unsigned long long)g_lastScanMs) / 1000));
-        } else lstrcpynW(sub, L"no scan yet", 64);
-        dashText(dc, pad + (int)(120 * g_scale), (int)(18 * g_scale), sub, dim, fSmall, 0, 0);
+        int innerW = w - 2 * padL;
+        if (g_tokensToday < 0 && g_tokAll == 0) {
+            dashCard(dc, padL, y, innerW, DX(38), t.card, t.divider);
+            dashStr(dc, padL + DX(14), y + DX(10), L"Usage is off. Set tokens.enabled to true in the config file.", t.dim, fBody);
+        } else {
+            // stat cards: Today / Last 7 / Last 30 / All time
+            int cw2 = (innerW - 3 * DX(10)) / 4;
+            int chh = DX(52);
+            struct { const wchar_t *label; long long v; } cards[4] = {
+                { L"Today", g_tokensToday < 0 ? 0 : g_tokensToday },
+                { L"Last 7 days", g_tokWeek },
+                { L"Last 30 days", g_tokMonth },
+                { L"All time", g_tokAll } };
+            for (int i = 0; i < 4; i++) {
+                int cx = padL + i * (cw2 + DX(10));
+                dashCard(dc, cx, y, cw2, chh, t.card, t.divider);
+                dashStr(dc, cx + DX(12), y + DX(8), cards[i].label, t.dim, fS10);
+                wchar_t vs[32];
+                fmtTokens(cards[i].v, vs, 32);
+                dashStr(dc, cx + DX(12), y + DX(8) + DX(13) + DX(3), vs, t.fg, fVal);
+            }
+            y += chh + gap;
 
-        // stat cards: Today / Last 7 days / Last 30 days / All time
-        struct { const wchar_t *label; long long v; } cards[4] = {
-            { L"Today", g_tokensToday }, { L"Last 7 days", g_tokWeek },
-            { L"Last 30 days", g_tokMonth }, { L"All time", g_tokAll } };
-        int cy = (int)(46 * g_scale), chh = (int)(54 * g_scale), gap = (int)(10 * g_scale);
-        int cw = (w - 2 * pad - 3 * gap) / 4;
-        for (int i = 0; i < 4; i++) {
-            int cx = pad + i * (cw + gap);
-            // stat card: tint fill, small rounded corners
-            int rr = (int)(4 * g_scale);
-            HBRUSH b = CreateSolidBrush(card);
-            LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = card; lb1.lbHatch = 0;
-            HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL);
-            HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pen);
-            RoundRect(dc, cx, cy, cx + cw, cy + chh, rr * 2, rr * 2);
-            SelectObject(dc, ob); SelectObject(dc, op);
-            DeleteObject(b); DeleteObject(pen);
-            dashText(dc, cx + (int)(12 * g_scale), cy + (int)(7 * g_scale), cards[i].label, dim, fSmall, 0, 0);
-            wchar_t vs[32];
-            fmtTokens(cards[i].v, vs, 32);
-            dashText(dc, cx + (int)(12 * g_scale), cy + (int)(24 * g_scale), vs, fg, fVal, 0, 0);
-        }
-
-        // heatmap: 26 weeks x 7 days, 11px cells, 3px gaps
-        long long nz[150]; int nnz = 0;
-        for (int i = 0; i < DASH_MAX_DAYS && nnz < 150; i++) if (g_dayTot[i] > 0) nz[nnz++] = g_dayTot[i];
-        for (int i = 1; i < nnz; i++) { long long v = nz[i]; int j = i - 1; while (j >= 0 && nz[j] > v) { nz[j + 1] = nz[j]; j--; } nz[j + 1] = v; }
-        long long th[3] = { 1, 1, 1 };
-        if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
-        int cell = (int)(11 * g_scale), cgap = (int)(3 * g_scale);
-        int hy = (int)(118 * g_scale);
-        int weeks = 26;
-        int rowLabW = (int)(21 * g_scale);
-        for (int wk = 0; wk < weeks; wk++) {
-            for (int dow = 0; dow < 7; dow++) {
-                int idx = DASH_MAX_DAYS - 1 - ((weeks - 1 - wk) * 7 + (6 - dow));
-                int cx = pad + rowLabW + wk * (cell + cgap);
-                int cyy = hy + dow * (cell + cgap);
-                if (idx < 0) continue;
-                long long t = g_dayTot[idx];
-                COLORREF cc = card; // level 0
-                if (t > 0) {
-                    int lv = (t <= th[0]) ? 1 : (t <= th[1]) ? 2 : (t <= th[2]) ? 3 : 4;
-                    cc = dashRamp[lv];
+            // plan usage section (when subs providers report windows)
+            int planH = 0;
+            int provIdx[2];
+            int provN = 0;
+            int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
+            for (int i = 0; i < pn && provN < 2; i++) {
+                if (!subsProvEnabled(i)) continue;
+                SubsWin tmp[4];
+                int wn = subsProvWins(i, tmp, 4);
+                if (wn < 0) wn = -wn;
+                long long used = 0, tot = 0;
+                for (int k = 0; k < wn; k++) { if (tmp[k].used > 0) used += tmp[k].used; if (tmp[k].total > 0) tot += tmp[k].total; }
+                if (tot > 0) {
+                    provIdx[provN] = i;
+                    provN++;
                 }
-                HBRUSH b = CreateSolidBrush(cc);
-                RECT fr = { cx, cyy, cx + cell, cyy + cell };
-                FillRect(dc, &fr, b);
-                DeleteObject(b);
+                (void)used; (void)tot;
             }
-        }
-        // legend: less [][][][][] more
-        int ly = hy + 7 * (cell + cgap) + (int)(2 * g_scale);
-        dashText(dc, pad + rowLabW, ly, L"less", dim, fSmall, 0, 0);
-        int lx = pad + rowLabW + (int)(28 * g_scale);
-        for (int i = 0; i < 5; i++) {
-            HBRUSH b = CreateSolidBrush(dashRamp[i]);
-            RECT fr = { lx + i * (cell / 2 + cgap / 2), ly + (int)(2 * g_scale),
-                        lx + i * (cell / 2 + cgap / 2) + cell / 2, ly + (int)(2 * g_scale) + cell / 2 };
-            FillRect(dc, &fr, b);
-            DeleteObject(b);
-        }
-        dashText(dc, lx + 5 * (cell / 2 + cgap / 2) + (int)(4 * g_scale), ly, L"more", dim, fSmall, 0, 0);
+            if (provN > 0) {
+                int secPadX = DX(12);
+                int headH = DX(11) + DX(8);
+                planH = DX(10) + headH + provN * DX(30) + DX(4) + DX(10);
+                if (y + planH < h - DX(30)) {
+                    dashCard(dc, padL, y, innerW, planH, t.card, t.divider);
+                    dashHead(dc, padL + secPadX, y + DX(10), L"PLAN USAGE", t.dim, fHead);
+                    int ry = y + DX(10) + headH;
+                    for (int i = 0; i < provN; i++) {
+                        wchar_t label[48];
+                        subsProvLabel(provIdx[i], label, 48);
+                        SubsWin tmp[4];
+                        int wn = subsProvWins(provIdx[i], tmp, 4);
+                        int stale = wn < 0; if (wn < 0) wn = -wn;
+                        long long used = 0, tot = 0;
+                        for (int k = 0; k < wn; k++) { if (tmp[k].used > 0) used += tmp[k].used; if (tmp[k].total > 0) tot += tmp[k].total; }
+                        int pct = tot > 0 ? (int)((double)used / tot * 100.0 + 0.5) : 0;
+                        if (pct > 100) pct = 100;
+                        SelectObject(dc, fBody);
+                        dashStr(dc, padL + secPadX, ry, label, t.fg, fBody);
+                        wchar_t us[24], ts2[24], nums[72];
+                        fmtTokens(used, us, 24);
+                        fmtTokens(tot, ts2, 24);
+                        swprintf(nums, 71, L"%ls / %ls \x00b7 %d%%", us, ts2, pct);
+                        dashStrR(dc, padL + innerW - secPadX, ry, nums, t.dim, fS10);
+                        int barY = ry + DX(15);
+                        int barW = innerW - 2 * secPadX;
+                        COLORREF track = blendCr(t.card, white, 141);
+                        dashCard(dc, padL + secPadX, barY, barW, DX(7), track, t.divider);
+                        if (pct > 0) {
+                            int fw = (int)((double)barW * pct / 100.0);
+                            COLORREF c1 = blendCr(track, t.yellow, 141);
+                            COLORREF c2 = blendCr(track, t.pinkDeep, 141);
+                            if (pct >= 90) { c1 = c2 = blendCr(track, t.warn, 115); }
+                            if (g_gdipOk && fw > 4) {
+                                GRADIENT_RECT gr = { 0, 1 };
+                                TRIVERTEX tv[2];
+                                memset(tv, 0, sizeof(tv));
+                                tv[0].x = padL + secPadX; tv[0].y = barY;
+                                tv[0].Red = GetRValue(c1) << 8; tv[0].Green = GetGValue(c1) << 8; tv[0].Blue = GetBValue(c1) << 8; tv[0].Alpha = 0xFF00;
+                                tv[1].x = padL + secPadX + fw; tv[1].y = barY + DX(7);
+                                tv[1].Red = GetRValue(c2) << 8; tv[1].Green = GetGValue(c2) << 8; tv[1].Blue = GetBValue(c2) << 8; tv[1].Alpha = 0xFF00;
+                                GradientFill(dc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
+                            } else {
+                                HBRUSH b = CreateSolidBrush(c1);
+                                RECT fr2 = { padL + secPadX, barY, padL + secPadX + fw, barY + DX(7) };
+                                FillRect(dc, &fr2, b);
+                                DeleteObject(b);
+                            }
+                        }
+                        (void)stale;
+                        ry += DX(30);
+                    }
+                    y += planH + gap;
+                } else planH = 0;
+            }
 
-        // apps table: all-time per app, share bar
-        int ay = ly + (int)(30 * g_scale);
-        dashText(dc, pad, ay, L"Apps", fg, fBody, 0, 0);
-        ay += (int)(22 * g_scale);
-        long long maxAll = 1;
-        for (int i = 0; i < g_appCount; i++) if (g_appAll[i] > maxAll) maxAll = g_appAll[i];
-        int rowH = (int)(22 * g_scale);
-        int barW = (int)(240 * g_scale);
-        for (int i = 0; i < g_appCount && ay + rowH < h - (int)(8 * g_scale); i++) {
-            int ry = ay + i * rowH;
-            wchar_t an[24];
-            MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
-            dashText(dc, pad, ry + (int)(3 * g_scale), an, fg, fBody, 0, 0);
-            // share bar
-            int bx = pad + (int)(140 * g_scale);
-            int by = ry + (int)(5 * g_scale), bh = (int)(8 * g_scale);
-            HBRUSH track = CreateSolidBrush(colorrefFromHex(g_cfg.divider, 255));
-            RECT fr = { bx, by, bx + barW, by + bh };
-            FillRect(dc, &fr, track);
-            DeleteObject(track);
-            long long v = g_appAll[i];
-            int fw = (int)((double)barW * (double)v / (double)maxAll);
-            if (fw > 0) {
-                HBRUSH b = CreateSolidBrush(pink);
-                RECT fr2 = { bx, by, bx + fw, by + bh };
-                FillRect(dc, &fr2, b);
-                DeleteObject(b);
+            // daily usage section: heatmap + legend (+ optional day detail)
+            int cell = DX(11), cgap = DX(3), pitch = cell + cgap;
+            int rowLabW = DX(16) + DX(5);
+            int weeks = 26;
+            int hmW = rowLabW + weeks * pitch;
+            int secPadX = DX(12);
+            SYSTEMTIME nowSt; GetLocalTime(&nowSt);
+            int endDow = nowSt.wDayOfWeek; // 0 = Sun
+            // quantile thresholds over nonzero days (dash.js renderHeatmap)
+            long long nz[200]; int nnz = 0;
+            for (int i = 0; i < DASH_MAX_DAYS && nnz < 200; i++) if (g_dayTot[i] > 0) nz[nnz++] = g_dayTot[i];
+            for (int i = 1; i < nnz; i++) { long long v = nz[i]; int j = i - 1; while (j >= 0 && nz[j] > v) { nz[j + 1] = nz[j]; j--; } nz[j + 1] = v; }
+            long long th[3] = { 1, 1, 1 };
+            if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
+            int hmH = 7 * pitch - cgap;
+            int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS && g_dayTot[g_daySel] > 0;
+            int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(17) : 0;
+            int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10) + ddH;
+            if (y + secH < h - DX(26)) {
+                dashCard(dc, padL, y, innerW, secH, t.card, t.divider);
+                int hx = padL + secPadX;
+                int hy = y + DX(10) + DX(11) + DX(8) + DX(13);
+                dashHead(dc, hx, y + DX(10), L"DAILY USAGE", t.dim, fHead);
+                // legend right: less [5 swatches] more
+                {
+                    const wchar_t *less = L"less", *more = L"more";
+                    int sw2 = DX(10), sgap = DX(3);
+                    int lw = dashStrW(dc, less, fS9) + DX(4) + 5 * sw2 + 4 * sgap + DX(4) + dashStrW(dc, more, fS9);
+                    int lx = padL + innerW - secPadX - lw;
+                    int ly2 = y + DX(10) + (DX(11) - sw2) / 2;
+                    dashStr(dc, lx, ly2, less, t.dim, fS9);
+                    int sx2 = lx + dashStrW(dc, less, fS9) + DX(4);
+                    for (int i = 0; i < 5; i++) {
+                        dashCard(dc, sx2, ly2, sw2, sw2, t.ramp[i], blendCr(t.ramp[i], RGB(0, 0, 0), 15));
+                        sx2 += sw2 + sgap;
+                    }
+                    dashStr(dc, sx2, ly2, more, t.dim, fS9);
+                }
+                int lastMonth = -1;
+                for (int wk = 0; wk < weeks; wk++) {
+                    int daysBack0 = (weeks - 1 - wk) * 7 + endDow; // dow=0 cell
+                    SYSTEMTIME cd;
+                    dashColDate(daysBack0, &cd);
+                    if ((int)cd.wMonth != lastMonth && cd.wDay <= 21) {
+                        lastMonth = cd.wMonth;
+                        wchar_t ml[16];
+                        lstrcpynW(ml, DASH_MONTHS[(cd.wMonth - 1) % 12], 15);
+                        dashStr(dc, hx + rowLabW + wk * pitch, hy - DX(13), ml, t.dim, fS9);
+                    }
+                    for (int dow = 0; dow < 7; dow++) {
+                        int daysBack = daysBack0 - dow;
+                        int cx = hx + rowLabW + wk * pitch;
+                        int cy = hy + dow * pitch;
+                        g_hmRect[wk][dow].left = cx; g_hmRect[wk][dow].top = cy;
+                        g_hmRect[wk][dow].right = cx + cell; g_hmRect[wk][dow].bottom = cy + cell;
+                        g_hmBack[wk][dow] = daysBack;
+                        if (daysBack < 0 || daysBack >= DASH_MAX_DAYS) continue; // future
+                        long long tot = g_dayTot[DASH_MAX_DAYS - 1 - daysBack];
+                        int lv = 0;
+                        if (tot > 0) lv = (tot <= th[0]) ? 1 : (tot <= th[1]) ? 2 : (tot <= th[2]) ? 3 : 4;
+                        COLORREF cc = t.ramp[lv];
+                        if (g_gdipOk) gdipRoundRect(dc, cc, blendCr(cc, RGB(0, 0, 0), 10), cx, cy, cell, cell, DX(2.5));
+                        else dashCard(dc, cx, cy, cell, cell, cc, blendCr(cc, RGB(0, 0, 0), 10));
+                        if (daysBack == g_daySel)
+                            dashCard(dc, cx - DX(1), cy - DX(1), cell + DX(2), cell + DX(2), 0, t.pinkDeep);
+                    }
+                }
+                // sparse row labels: Sun + Fri
+                dashStr(dc, hx, hy + 0 * pitch, L"Sun", t.dim, fS9);
+                dashStr(dc, hx, hy + 5 * pitch, L"Fri", t.dim, fS9);
+                // day detail (click a cell)
+                if (hasSel) {
+                    int ddy = y + secH - DX(10) - ddH;
+                    HPEN dpen = CreatePen(PS_DOT, 1, t.divider);
+                    HGDIOBJ op = SelectObject(dc, dpen);
+                    MoveToEx(dc, padL + secPadX, ddy, NULL);
+                    LineTo(dc, padL + innerW - secPadX, ddy);
+                    SelectObject(dc, op);
+                    DeleteObject(dpen);
+                    ddy += DX(8);
+                    SYSTEMTIME d2;
+                    dashColDate(g_daySel, &d2);
+                    long long tot = g_dayTot[DASH_MAX_DAYS - 1 - g_daySel];
+                    wchar_t dtitle[96];
+                    wchar_t dnum[24];
+                    fmtTokens(tot, dnum, 24);
+                    swprintf(dtitle, 95, L"%ls, %ls %lu, %lu \x2014 %ls tokens", DASH_DAYS[d2.wDayOfWeek % 7],
+                             DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear, dnum);
+                    dashStr(dc, padL + secPadX, ddy, dtitle, t.fg, fBody);
+                    ddy += DX(15);
+                    int xs[5];
+                    dashTableCols(padL + innerW - secPadX, 0, xs);
+                    for (int i = 0; i < g_appCount && ddy + DX(17) < y + secH; i++) {
+                        TokAgg *a = &g_dayApp[DASH_MAX_DAYS - 1 - g_daySel][i];
+                        if (a->req == 0) continue;
+                        wchar_t an[24];
+                        MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
+                        dashDot(dc, padL + secPadX + 2, ddy + (DX(15) - DX(8)) / 2, DX(8), appDotColor(g_appName[i], &t));
+                        SelectObject(dc, fBody);
+                        SetTextColor(dc, t.fg);
+                        RECT lr2 = { padL + secPadX + 2 + DX(14), ddy, padL + secPadX + DX(150), ddy + DX(15) + 1 };
+                        DrawTextW(dc, an, -1, &lr2, DT_SINGLELINE | DT_LEFT | DT_END_ELLIPSIS);
+                        wchar_t vs[32];
+                        fmtTokens(a->in, vs, 32); dashStrR(dc, xs[4], ddy, vs, t.fg, fBody);
+                        fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], ddy, vs, t.fg, fBody);
+                        swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
+                        ddy += DX(17);
+                    }
+                }
+                y += secH + gap;
             }
-            wchar_t vs[32];
-            fmtTokens(v, vs, 32);
-            dashText(dc, bx + barW + (int)(12 * g_scale), ry + (int)(3 * g_scale), vs, dim, fBody, 0, 0);
+
+            // tables: By app + By model (2-col grid). Electron sorts by total
+            // desc and caps the model table at 7 rows - mirror that.
+            int colW2 = (innerW - DX(10)) / 2;
+            int cache = dashHasCache();
+            int secPad = DX(10);
+            int th2 = DX(9) + DX(4);
+            int rowH = DX(19);
+            int appOrder[DASH_MAX_APPS], appN = g_appCount;
+            for (int i = 0; i < appN; i++) appOrder[i] = i;
+            for (int i = 1; i < appN; i++) {
+                int v = appOrder[i], j = i - 1;
+                long long vt = g_appAgg[v].in + g_appAgg[v].out + g_appAgg[v].cr + g_appAgg[v].cw;
+                while (j >= 0) {
+                    int u = appOrder[j];
+                    long long ut = g_appAgg[u].in + g_appAgg[u].out + g_appAgg[u].cr + g_appAgg[u].cw;
+                    if (ut >= vt) break;
+                    appOrder[j + 1] = appOrder[j];
+                    j--;
+                }
+                appOrder[j + 1] = v;
+            }
+            int mdlOrder[DASH_MAX_MODELS], mdlN = g_modelCount;
+            if (mdlN > 7) mdlN = 7;
+            for (int i = 0; i < mdlN; i++) mdlOrder[i] = i;
+            for (int i = 1; i < g_modelCount; i++) {
+                int v = i, j = i - 1;
+                long long vt = g_modelAgg[v].in + g_modelAgg[v].out + g_modelAgg[v].cr + g_modelAgg[v].cw;
+                while (j >= 0) {
+                    int u = mdlOrder[j];
+                    long long ut = g_modelAgg[u].in + g_modelAgg[u].out + g_modelAgg[u].cr + g_modelAgg[u].cw;
+                    if (ut >= vt) break;
+                    if (j + 1 < DASH_MAX_MODELS) mdlOrder[j + 1] = mdlOrder[j];
+                    j--;
+                }
+                if (j + 1 < DASH_MAX_MODELS) mdlOrder[j + 1] = v;
+            }
+            int rows = appN > mdlN ? appN : mdlN;
+            if (rows < 1) rows = 1;
+            int tblH = secPad + th2 + rows * rowH + secPad;
+            if (y + tblH < h - DX(24)) {
+                for (int side = 0; side < 2; side++) {
+                    int sx = padL + side * (colW2 + DX(10));
+                    dashCard(dc, sx, y, colW2, tblH, t.card, t.divider);
+                    dashHead(dc, sx + DX(12), y + secPad, side == 0 ? L"BY APP" : L"BY MODEL", t.dim, fHead);
+                    int inner = colW2 - DX(24);
+                    int xs[5];
+                    dashTableCols(sx + DX(12) + inner, cache, xs);
+                    int ry = y + secPad + th2;
+                    dashTableHead(dc, sx + DX(12), inner, ry, cache, xs, &t, fS9);
+                    ry += th2;
+                    if (side == 0) {
+                        long long maxAll = 1;
+                        for (int i = 0; i < g_appCount; i++) {
+                            long long s = g_appAgg[i].in + g_appAgg[i].out + g_appAgg[i].cr + g_appAgg[i].cw;
+                            if (s > maxAll) maxAll = s;
+                        }
+                        for (int i = 0; i < appN; i++) {
+                            int ai = appOrder[i];
+                            wchar_t an[24];
+                            MultiByteToWideChar(CP_UTF8, 0, g_appName[ai], -1, an, 24);
+                            long long s = g_appAgg[ai].in + g_appAgg[ai].out + g_appAgg[ai].cr + g_appAgg[ai].cw;
+                            TokAgg a2 = g_appAgg[ai];
+                            // even rows get the zebra wash (dash.css nth-child(even))
+                            if (i & 1) {
+                                HBRUSH b = CreateSolidBrush(t.zebra);
+                                RECT fr2 = { sx + 1, ry, sx + colW2 - 1, ry + rowH };
+                                FillRect(dc, &fr2, b);
+                                DeleteObject(b);
+                            }
+                            dashTableRow(dc, sx + DX(12), inner, ry, rowH, cache, xs, an,
+                                         appDotColor(g_appName[ai], &t), (double)s / maxAll, &a2, &t, fBody, fS9);
+                            ry += rowH;
+                        }
+                        if (appN == 0) {
+                            dashStr(dc, sx + DX(12), ry + DX(2), L"No usage recorded yet.", t.dim, fBody);
+                        }
+                    } else {
+                        long long maxAll = 1;
+                        for (int i = 0; i < g_modelCount; i++) {
+                            long long s = g_modelAgg[i].in + g_modelAgg[i].out + g_modelAgg[i].cr + g_modelAgg[i].cw;
+                            if (s > maxAll) maxAll = s;
+                        }
+                        for (int i = 0; i < mdlN; i++) {
+                            int mi = mdlOrder[i];
+                            // label = the model part of "app|model"; dot = app color
+                            char mk[48];
+                            lstrcpynA(mk, g_modelName[mi], 47);
+                            char *bar = strchr(mk, '|');
+                            const char *mp2 = bar ? bar + 1 : mk;
+                            wchar_t mn[40];
+                            MultiByteToWideChar(CP_UTF8, 0, mp2, -1, mn, 40);
+                            long long s = g_modelAgg[mi].in + g_modelAgg[mi].out + g_modelAgg[mi].cr + g_modelAgg[mi].cw;
+                            TokAgg a2 = g_modelAgg[mi];
+                            if (i & 1) {
+                                HBRUSH b = CreateSolidBrush(t.zebra);
+                                RECT fr2 = { sx + 1, ry, sx + colW2 - 1, ry + rowH };
+                                FillRect(dc, &fr2, b);
+                                DeleteObject(b);
+                            }
+                            COLORREF dc2 = bar ? appDotColor(mk, &t) : t.dim;
+                            dashTableRow(dc, sx + DX(12), inner, ry, rowH, cache, xs, mn,
+                                         dc2, (double)s / maxAll, &a2, &t, fBody, fS9);
+                            ry += rowH;
+                        }
+                        if (mdlN == 0) {
+                            dashStr(dc, sx + DX(12), ry + DX(2), L"No model data.", t.dim, fBody);
+                        }
+                    }
+                }
+                y += tblH + gap;
+            }
         }
-        if (g_appCount == 0) {
-            dashText(dc, pad, ay, g_tokensToday >= 0 ? L"No usage recorded yet." : L"Token usage tracking is off (tokens.enabled).", dim, fBody, 0, 0);
+        // footer: last scan time, right-aligned
+        {
+            SYSTEMTIME now2; GetLocalTime(&now2);
+            wchar_t ft3[16], ftxt[40];
+            swprintf(ft3, 15, L"%02lu:%02lu:%02lu", (unsigned long)now2.wHour, (unsigned long)now2.wMinute, (unsigned long)now2.wSecond);
+            (void)ft3;
+            if (g_lastScanMs) {
+                unsigned ago = (unsigned)((GetTickCount64() - (unsigned long long)g_lastScanMs) / 1000);
+                long long scanMs = 0;
+                SYSTEMTIME now3; GetLocalTime(&now3);
+                now3.wHour = now3.wMinute = now3.wSecond = now3.wMilliseconds = 0;
+                FILETIME lft2, ft4;
+                SystemTimeToFileTime(&now3, &lft2);
+                LocalFileTimeToFileTime(&lft2, &ft4);
+                long long midMs = ((((long long)ft4.dwHighDateTime) << 32) | ft4.dwLowDateTime) / 10000;
+                scanMs = midMs - ago * 1000;
+                dashFmtTime(scanMs, ftxt, 39);
+            } else lstrcpynW(ftxt, L"\x2014", 39);
+            wchar_t fl[64];
+            swprintf(fl, 63, L"last scan %ls", ftxt);
+            dashStrR(dc, w - padL, h - DX(10) - DX(12), fl, t.dim, fS9);
         }
     } else {
-        // ---- subscriptions board
-        dashText(dc, pad, (int)(12 * g_scale), L"Subscriptions", fg, fTitle, 0, 0);
-        int y = (int)(52 * g_scale);
+        // ---- subscriptions board: donut pies per plan window (subs.css)
+        int innerW = w - 2 * padL;
+        int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
         int shown = 0;
-        int n = g_cfg.subsProviderCount; if (n > MAX_SUBS) n = MAX_SUBS;
-        for (int i = 0; i < n; i++) {
-            if (!subsProvEnabled(i)) continue; // disabled: no panel (Electron parity)
+        int colW2 = (innerW - gap) / 2;
+        int panelH = h - y - DX(12) - DX(12) - DX(14);
+        if (panelH < DX(160)) panelH = DX(160);
+        for (int pi2 = 0; pi2 < pn; pi2++) {
+            if (!subsProvEnabled(pi2)) continue; // disabled: no panel (Electron parity)
             wchar_t label[48];
-            subsProvLabel(i, label, 48);
-            wchar_t head[80];
+            subsProvLabel(pi2, label, 48);
             SubsWin wins[4];
-            int wn = subsProvWins(i, wins, 4);
-            int stale = wn < 0;
-            if (wn < 0) wn = -wn;
-            swprintf(head, 79, L"%ls%ls", label, stale ? L"  (stale)" : L"");
-            dashText(dc, pad, y, head, stale ? warn : fg, fBody, 0, 0);
-            y += (int)(24 * g_scale);
-            if (wn == 0) {
-                dashText(dc, pad + (int)(16 * g_scale), y, L"\x2014  no data yet", dim, fBody, 0, 0);
-                y += (int)(26 * g_scale);
-            }
-            int barW = w - 2 * pad - (int)(252 * g_scale); // leave room for the used/total text
-            for (int k = 0; k < wn; k++) {
-                dashText(dc, pad + (int)(16 * g_scale), y, wins[k].label, fg, fBody, 0, 0);
-                int bx = pad + (int)(90 * g_scale);
-                int by = y + (int)(4 * g_scale), bh = (int)(10 * g_scale);
-                HBRUSH track = CreateSolidBrush(colorrefFromHex(g_cfg.divider, 255));
-                RECT fr = { bx, by, bx + barW, by + bh };
-                FillRect(dc, &fr, track);
-                DeleteObject(track);
-                int fw = (int)((double)barW * (double)wins[k].pct / 100.0);
-                if (fw > 0) {
-                    HBRUSH b = CreateSolidBrush(wins[k].pct >= 90 ? warn : pink);
-                    RECT fr2 = { bx, by, bx + fw, by + bh };
-                    FillRect(dc, &fr2, b);
-                    DeleteObject(b);
+            int wn = subsProvWins(pi2, wins, 4);
+            int stale = wn < 0; if (wn < 0) wn = -wn;
+            int px2 = padL + (shown % 2) * (colW2 + gap);
+            int py2 = y + (shown / 2) * (panelH + gap);
+            if (py2 + panelH > h - DX(30)) break;
+            // panel: card + head (dot, name, pill) + body (pies) + foot
+            dashCard(dc, px2, py2, colW2, panelH, t.card, t.divider);
+            int headH = DX(40);
+            dashCard(dc, px2, py2, colW2, headH, t.head, 0);
+            // dashed head underline
+            HPEN dpen = CreatePen(PS_DOT, 1, t.divider);
+            HGDIOBJ op = SelectObject(dc, dpen);
+            MoveToEx(dc, px2, py2 + headH, NULL);
+            LineTo(dc, px2 + colW2, py2 + headH);
+            SelectObject(dc, op);
+            DeleteObject(dpen);
+            // dot (heatmap ramp color per provider index)
+            COLORREF dotc = t.ramp[pi2 % 5];
+            dashDot(dc, px2 + DX(14), py2 + (headH - DX(9)) / 2, DX(9), dotc);
+            dashStr(dc, px2 + DX(14) + DX(9) + DX(8), py2 + DX(11), label, t.fg, f13);
+            // status pill (subs.css .pill): stale / near cap / warn / ok
+            {
+                int lowest = 1000, anyw = 0;
+                for (int k = 0; k < wn; k++) { int r2 = 100 - wins[k].pct; if (r2 < lowest) lowest = r2; anyw = 1; }
+                const wchar_t *ps2 = NULL; COLORREF pc = t.dim, pbg = blendCr(t.head, t.dim, 31);
+                if (stale) { ps2 = L"STALE"; pc = t.yellow; pbg = blendCr(t.head, t.yellow, 31); }
+                else if (!anyw) ps2 = NULL;
+                else if (lowest <= 10) { ps2 = L"NEAR CAP"; pc = t.warn; pbg = blendCr(t.head, t.warn, 20); }
+                else if (lowest <= 30) { ps2 = L"WARN"; pc = blendCr(t.warn, t.yellow, 80); pbg = blendCr(t.head, t.yellow, 64); }
+                else { ps2 = L"OK"; pc = t.good; pbg = blendCr(t.head, t.good, 20); }
+                if (ps2) {
+                    int pw2 = dashStrW(dc, ps2, fS10) + DX(16);
+                    int ph2 = DX(18);
+                    int plx = px2 + colW2 - DX(14) - pw2;
+                    dashCard(dc, plx, py2 + (headH - ph2) / 2, pw2, ph2, pbg, pc);
+                    SelectObject(dc, fS10);
+                    SetTextColor(dc, pc);
+                    SetTextCharacterExtra(dc, DX(0.4));
+                    RECT pr3 = { plx, py2 + (headH - ph2) / 2 + DX(2), plx + pw2, py2 + (headH - ph2) / 2 + ph2 };
+                    DrawTextW(dc, ps2, -1, &pr3, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                    SetTextCharacterExtra(dc, 0);
                 }
-                wchar_t rs[64];
-                if (wins[k].used >= 0 && wins[k].total > 0) {
-                    wchar_t us[24], ts2[24];
-                    fmtTokens(wins[k].used, us, 24);
-                    fmtTokens(wins[k].total, ts2, 24);
-                    swprintf(rs, 63, L"%ls / %ls \x2014 %d%% used", us, ts2, wins[k].pct);
-                } else swprintf(rs, 63, L"%d%% used", wins[k].pct);
-                dashText(dc, bx + barW + (int)(12 * g_scale), y, rs, wins[k].pct >= 90 ? warn : dim, fBody, 0, 0);
-                y += (int)(24 * g_scale);
             }
-            y += (int)(10 * g_scale);
+            // pies
+            int bodyY = py2 + headH + DX(14);
+            int bodyH = panelH - headH - DX(14) - DX(30);
+            if (wn == 0) {
+                dashStr(dc, px2 + DX(14), bodyY + DX(12), stale ? L"stale \x2014 no data yet" : L"no windows reported", t.dim, fBody);
+            }
+            for (int k = 0; k < wn; k++) {
+                int pieD = DX(96);
+                int ky = bodyY + k * (pieD + DX(16));
+                if (ky + pieD > py2 + panelH - DX(34)) break;
+                int kx = px2 + DX(14);
+                int rem = 100 - wins[k].pct;
+                if (rem < 0) rem = 0; if (rem > 100) rem = 100;
+                // track + arc (rotate -90: start at 12 o'clock, clockwise)
+                COLORREF track = blendCr(t.card, t.dim, 31);
+                if (g_gdipOk) {
+                    float wpen = (float)DX(12.57);
+                    float rr = (float)DX(36.4);
+                    float cx2 = (float)kx + pieD / 2.0f, cy2 = (float)ky + pieD / 2.0f;
+                    // track: full circle
+                    {
+                        GpGraphics *g2 = NULL;
+                        if (t_GdipCreateFromHDC(dc, &g2) == 0) {
+                            t_GdipSetSmoothingMode(g2, 6);
+                            GpPen *pen = NULL;
+                            if (t_GdipCreatePen1(GDIP_ARGB(track), wpen, 2, &pen) == 0) {
+                                t_GdipDrawEllipse(g2, pen, cx2 - rr, cy2 - rr, 2 * rr, 2 * rr);
+                                t_GdipDeletePen(pen);
+                            }
+                            t_GdipDeleteGraphics(g2);
+                        }
+                    }
+                    if (rem > 0) gdipArcStroke(dc, t.pinkDeep, wpen, cx2 - rr, cy2 - rr, 2 * rr, 2 * rr, -90.0f, rem * 3.6f);
+                }
+                // center: "N%" pinkDeep + "left"
+                wchar_t pctS[8];
+                swprintf(pctS, 7, L"%d", rem);
+                int pw2 = dashStrW(dc, pctS, f18) + DX(8);
+                int cx0 = kx + (pieD - pw2) / 2;
+                dashStr(dc, cx0, ky + pieD / 2 - DX(15), pctS, t.pinkDeep, f18);
+                dashStr(dc, cx0 + dashStrW(dc, pctS, f18) + DX(1), ky + pieD / 2 - DX(11), L"%", t.pinkDeep, fS10);
+                dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, ky + pieD / 2 + DX(6), L"left", t.dim, fS9);
+                // meta right of the pie
+                int mx = kx + pieD + DX(14);
+                wchar_t up[40];
+                // uppercase label
+                {
+                    wchar_t ul[20];
+                    for (int ci = 0; wins[k].label[ci] && ci < 19; ci++) {
+                        wchar_t ch = wins[k].label[ci];
+                        ul[ci] = (ch >= L'a' && ch <= L'z') ? ch - 32 : ch;
+                        ul[ci + 1] = 0;
+                    }
+                    lstrcpynW(up, ul, 39);
+                }
+                SelectObject(dc, f13);
+                SetTextColor(dc, t.fg);
+                SetTextCharacterExtra(dc, DX(0.7));
+                RECT mr3 = { mx, ky + DX(24), mx + colW2 - DX(14) - mx, ky + DX(24) + DX(20) };
+                DrawTextW(dc, up, -1, &mr3, DT_SINGLELINE | DT_LEFT);
+                SetTextCharacterExtra(dc, 0);
+                wchar_t usedLine[72];
+                if (wins[k].used >= 0 && wins[k].total > 0) {
+                    wchar_t us2[24], ts3[24];
+                    fmtTokens(wins[k].used, us2, 24);
+                    fmtTokens(wins[k].total, ts3, 24);
+                    swprintf(usedLine, 71, L"%ls / %ls used", us2, ts3);
+                } else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
+                dashStr(dc, mx, ky + DX(50), usedLine, t.dim, fS10);
+                dashStr(dc, mx, ky + DX(66), wins[k].label, t.dim, fS10);
+            }
+            // panel foot: dashed top + fetched time right
+            int fy = py2 + panelH - DX(26);
+            HPEN fpen = CreatePen(PS_DOT, 1, t.divider);
+            HGDIOBJ op2 = SelectObject(dc, fpen);
+            MoveToEx(dc, px2 + DX(14), fy, NULL);
+            LineTo(dc, px2 + colW2 - DX(14), fy);
+            SelectObject(dc, op2);
+            DeleteObject(fpen);
+            unsigned ago = subsFetchedAgoSec();
+            wchar_t ftim[16];
+            if (ago != 0xFFFFFFFFu) {
+                SYSTEMTIME now3; GetLocalTime(&now3);
+                now3.wHour = now3.wMinute = now3.wSecond = now3.wMilliseconds = 0;
+                FILETIME lft2, ft4;
+                SystemTimeToFileTime(&now3, &lft2);
+                LocalFileTimeToFileTime(&lft2, &ft4);
+                long long midMs = ((((long long)ft4.dwHighDateTime) << 32) | ft4.dwLowDateTime) / 10000;
+                dashFmtTime(midMs - (long long)ago * 1000, ftim, 15);
+            } else lstrcpynW(ftim, L"\x2014", 15);
+            wchar_t fl2[32];
+            swprintf(fl2, 31, L"%ls", ftim);
+            dashStrR(dc, px2 + colW2 - DX(14), fy + DX(6), fl2, t.dim, fS10);
             shown++;
         }
-        if (!shown) dashText(dc, pad, y, g_cfg.subsEnabled ? L"No providers enabled." : L"Subscriptions are off (subs.enabled).", dim, fBody, 0, 0);
+        if (!shown) {
+            dashStr(dc, padL, y, g_cfg.subsEnabled ? L"No providers enabled." : L"Subscriptions are off (subs.enabled).", t.dim, fBody);
+        }
     }
-    DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal); DeleteObject(fSmall);
+
+    DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal);
+    DeleteObject(fS10); DeleteObject(fS9); DeleteObject(fBtn);
+    DeleteObject(fHead); DeleteObject(f13); DeleteObject(f18);
 
     HDC wdc = GetDC(hwnd);
     BitBlt(wdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     ReleaseDC(hwnd, wdc);
+}
+
+static int dashPtInBtn(POINT p, int *which) {
+    if (PtInRect(&g_btnRefresh, p)) { *which = 1; return 1; }
+    if (PtInRect(&g_btnClose, p)) { *which = 2; return 1; }
+    *which = 0;
+    return 0;
+}
+
+static void dashTipCell(HWND hwnd, POINT p) {
+    for (int wk = 0; wk < 26; wk++)
+        for (int dow = 0; dow < 7; dow++) {
+            if (!PtInRect(&g_hmRect[wk][dow], p)) continue;
+            int daysBack = g_hmBack[wk][dow];
+            if (daysBack < 0 || daysBack >= DASH_MAX_DAYS) { tipHide(); return; }
+            int di = DASH_MAX_DAYS - 1 - daysBack;
+            long long tot = g_dayTot[di];
+            SYSTEMTIME d2;
+            dashColDate(daysBack, &d2);
+            wchar_t head[64], body[160];
+            swprintf(head, 63, L"%ls, %ls %lu, %lu", DASH_DAYS[d2.wDayOfWeek % 7],
+                     DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear);
+            if (tot > 0) {
+                wchar_t tn[24];
+                fmtTokens(tot, tn, 24);
+                lstrcpynW(body, tn, 159);
+                lstrcatW(body, L" tokens");
+                int left = 150;
+                for (int i = 0; i < g_appCount && left > 0; i++) {
+                    TokAgg *a = &g_dayApp[di][i];
+                    if (a->req == 0) continue;
+                    wchar_t an[24], line[56];
+                    MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
+                    wchar_t tn2[24];
+                    fmtTokens(a->in + a->out + a->cr + a->cw, tn2, 24);
+                    swprintf(line, 55, L"\n%ls: %ls (%lld)", an, tn2, a->req);
+                    if (lstrlenW(body) + lstrlenW(line) < 150) lstrcatW(body, line);
+                    left--;
+                }
+            } else {
+                lstrcpynW(body, L"no usage", 159);
+            }
+            static wchar_t tipBuf[192];
+            swprintf(tipBuf, 191, L"%ls\n%ls", head, body);
+            POINT sp = p;
+            ClientToScreen(hwnd, &sp);
+            tipShow(tipBuf, sp.x, sp.y);
+            return;
+        }
+    tipHide();
 }
 
 static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1176,9 +1885,68 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONUP:
         DestroyWindow(hwnd);
         return 0;
+    case WM_NCHITTEST: {
+        LRESULT base = DefWindowProcW(hwnd, msg, wp, lp);
+        if (base == HTCLIENT) {
+            POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            ScreenToClient(hwnd, &p);
+            int bi2;
+            if (p.y < g_tbBottom && !dashPtInBtn(p, &bi2)) return HTCAPTION; // title drag
+        }
+        return base;
+    }
+    case WM_SETCURSOR: {
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p);
+            ScreenToClient(hwnd, &p);
+            int bi2;
+            SetCursor(dashPtInBtn(p, &bi2) ? LoadCursor(NULL, IDC_HAND) : LoadCursor(NULL, IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int bi2 = 0;
+        dashPtInBtn(p, &bi2);
+        if (bi2 != g_btnHover) { g_btnHover = bi2; InvalidateRect(hwnd, NULL, FALSE); }
+        if (g_dashType == 0) dashTipCell(hwnd, p);
+        TRACKMOUSEEVENT te = { sizeof(te), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&te);
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g_btnHover) { g_btnHover = 0; InvalidateRect(hwnd, NULL, FALSE); }
+        tipHide();
+        return 0;
+    case WM_LBUTTONUP: {
+        POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int bi2;
+        if (dashPtInBtn(p, &bi2)) {
+            if (bi2 == 1) { // refresh: rescan tokens / refetch subs (Electron parity)
+                if (g_dashType == 0) scanTokenCache(); else subsRefetchNow();
+                InvalidateRect(hwnd, NULL, FALSE);
+            } else DestroyWindow(hwnd);
+            return 0;
+        }
+        if (g_dashType == 0) {
+            for (int wk = 0; wk < 26; wk++)
+                for (int dow = 0; dow < 7; dow++) {
+                    if (!PtInRect(&g_hmRect[wk][dow], p)) continue;
+                    int daysBack = g_hmBack[wk][dow];
+                    if (daysBack < 0 || daysBack >= DASH_MAX_DAYS) return 0;
+                    g_daySel = (g_daySel == daysBack) ? -1 : daysBack;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+        }
+        return 0;
+    }
     case WM_DESTROY:
         g_dash = NULL;
         g_dashPainted = -1;
+        g_daySel = -1;
+        tipHide();
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1206,8 +1974,10 @@ static void dashToggle(int type) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassW(&wc);
     g_dashType = type;
-    g_dash = CreateWindowExW(0, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
-                             WS_POPUP | WS_VISIBLE, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
+    // APPWINDOW: the Electron dash is a NORMAL window on purpose (taskbar +
+    // Alt-Tab entry) so activation never falls through to the terminal.
+    g_dash = CreateWindowExW(WS_EX_APPWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
+                             WS_POPUP | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
                              NULL, NULL, GetModuleHandleW(NULL), NULL);
     if (!g_dash) return;
     dashRoundCorners(g_dash);
@@ -1493,6 +2263,10 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         trayRemove();
+        // the layered tip is topmost: it must die with the bar or it lingers
+        // on screen looking like a second bar fragment
+        tipHide();
+        if (g_tip) { DestroyWindow(g_tip); g_tip = NULL; }
         PostQuitMessage(0);
         return 0;
     }

@@ -243,7 +243,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->fontFamily = wideDup(L"Cascadia Mono");
     c->fg = wideDup(L"#080808"); c->fgDim = wideDup(L"#5a5245"); c->pink = wideDup(L"#E8C7D0"); c->pinkDeep = wideDup(L"#D493AA");
     c->iconColor = wideDup(L""); // empty = follow pinkDeep
-    c->iconOpacity = 100;
+    c->iconOpacity = 90; // Electron: .seg svg { opacity: 0.9 }
     c->barRadius = 8;
     lstrcpynW(c->heatmap[0], L"#F1ECD8", 12); lstrcpynW(c->heatmap[1], L"#F6D8E0", 12);
     lstrcpynW(c->heatmap[2], L"#EFB7C7", 12); lstrcpynW(c->heatmap[3], L"#E28FB0", 12);
