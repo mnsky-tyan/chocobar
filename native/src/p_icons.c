@@ -24,10 +24,6 @@
 #include <math.h>
 
 extern double g_iconOpacity; // theme.iconOpacity/100, defined in chocobar.c
-// theme.iconOpacity is applied inside AlphaBlend (SourceConstantAlpha); the
-// old per-box pixel fade is gone - it would double-fade the GDI+ icons.
-static void svgRecordBox(int x, int y) { (void)x; (void)y; }
-
 // icon ids (order = table below)
 enum {
     SVG_BOW, SVG_DIAMOND, SVG_GAUGE, SVG_BOLT, SVG_CLOCK,
@@ -411,6 +407,8 @@ static int iconDibMake(IconDib *d, int w, int h) {
     return 1;
 }
 
+static void iconDibPremultiply(IconDib *d);
+
 // render one flattened path set into an icon DIB with GDI+ AA strokes
 static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
     if (!iconDibMake(d, w, h)) return 0;
@@ -451,9 +449,16 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
         t_GdipDeletePath(gp);
     }
     t_GdipDeleteGraphics(g);
-    // GDI+ writes straight (non-premultiplied) ARGB: convert in place
+    iconDibPremultiply(d);
+    return 1;
+}
+
+// GDI+ writes straight (non-premultiplied) ARGB: convert in place. Must run
+// AFTER all drawing - a later GDI+ pass would treat the buffer as straight.
+static void iconDibPremultiply(IconDib *d) {
     DWORD *pxb = (DWORD *)d->bits;
-    for (int i = 0; i < w * h; i++) {
+    int n = d->w * d->h;
+    for (int i = 0; i < n; i++) {
         DWORD v = pxb[i];
         unsigned a = (v >> 24) & 255;
         if (a == 255) continue;
@@ -463,7 +468,6 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
             out |= ((((v >> sh) & 255) * a + 127) / 255) << sh;
         pxb[i] = out;
     }
-    return 1;
 }
 
 // legacy GDI Polyline stroke (fallback when gdiplus.dll is unavailable)
@@ -534,7 +538,6 @@ static void svgDraw(HDC hdc, int id, COLORREF color, int x, int y) {
     } else {
         iconStrokeGdi(hdc, id, color, x, y);
     }
-    svgRecordBox(x, y);
 }
 
 // battery with a charge-level fill: icon color (warn red under 10%), full +
@@ -590,12 +593,12 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                     }
                     t_GdipDeleteGraphics(g);
                 }
+                iconDibPremultiply(&g_battDib); // once, after fill + zigzag
                 memcpy(g_battKey, key, sizeof(key));
             }
         }
         iconBlit(hdc, &g_battDib, x, y);
-        svgRecordBox(x, y);
-        return;
+            return;
     }
     // GDI fallback: outline + plain rect fill
     float s = (float)g_scale / 2;
@@ -627,5 +630,4 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
         }
     }
     iconStrokeGdi(hdc, SVG_BAT, accent, x, y);
-    svgRecordBox(x, y);
 }
