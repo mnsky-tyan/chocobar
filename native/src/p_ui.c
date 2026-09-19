@@ -115,7 +115,9 @@ typedef struct {
     wchar_t text[96];
     int warn;
     const wchar_t *colorOverride;
-    unsigned iconCp;     // Nerd Font codepoint drawn dim before text (0 = none)
+    unsigned iconCp;     // Nerd Font codepoint drawn before text (0 = none)
+    int align;           // 1 = right group (metrics), 2 = left pinned group
+    int iconYellow;      // tokens diamond renders yellow, others pink
 } Chip;
 
 enum { CT_SHORTCUT, CT_PET, CT_CUSTOM, CT_GPU, CT_CPU, CT_CPUTEMP, CT_RAM, CT_VOLUME, CT_BATTERY, CT_CLOCK };
@@ -140,7 +142,7 @@ static int initRender(HWND hwnd) {
         while (src && src[n] && src[n] != L',' && n < 63) { fam[n] = src[n]; n++; }
     }
     fam[n] = 0;
-    int px = (int)(g_cfg.fontSize * g_scale + 0.5);
+    int px = (int)(g_cfg.fontSize * g_scale * 0.864 + 0.5); // GDI runs wide vs browser metrics
     g_font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
@@ -171,6 +173,7 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
     Chip *c = &g_chips[g_chipCount++];
     c->type = type; c->customIdx = customIdx; c->warn = warn;
     c->colorOverride = colorOverride; c->iconCp = iconCp;
+    c->align = 1; c->iconYellow = 0;
     lstrcpynW(c->text, text ? text : L"", 96);
     c->r.left = c->r.right = c->r.top = c->r.bottom = 0;
 }
@@ -178,51 +181,144 @@ static void addChip(int type, int customIdx, const wchar_t *text, int warn, cons
     addChipI(type, customIdx, text, warn, colorOverride, 0);
 }
 
+static long long g_tokensToday = -1;
+static int g_tokensTick = 0;
+
+static const char *findStr(const char *p, const char *end, const char *needle) {
+    int n = 0; while (needle[n]) n++;
+    while (p + n <= end) {
+        if (*p == needle[0] && memcmp(p, needle, n) == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
+static long long parseLL(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == ':')) p++;
+    int neg = 0; if (p < end && *p == '-') { neg = 1; p++; }
+    long long v = 0;
+    while (p < end && *p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    return neg ? -v : v;
+}
+
+// today's raw (cache-exclusive) input+output, mirroring tokens.js; the
+// Electron app rewrites this cache every rescan, we just read it
+static void scanTokenCache(void) {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
+    if (!n || n >= MAX_PATH - 40) { g_tokensToday = -1; return; }
+    lstrcatW(path, L"\\.wizbar\\token-cache.json");
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; return; }
+    DWORD size = GetFileSize(h, NULL), got = 0;
+    if (size == INVALID_FILE_SIZE || !size) { CloseHandle(h); g_tokensToday = -1; return; }
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
+    if (!buf) { CloseHandle(h); g_tokensToday = -1; return; }
+    // the Electron app rewrites this file in place: a read can land mid-write.
+    // require the full size, retry a few times before trusting the number.
+    BOOL ok = FALSE;
+    for (int attempt = 0; attempt < 4; attempt++) {
+        size = GetFileSize(h, NULL);
+        if (size == INVALID_FILE_SIZE || !size) break;
+        ok = ReadFile(h, buf, size, &got, NULL) && got == size;
+        if (ok) break;
+        SetFilePointer(h, 0, NULL, FILE_BEGIN);
+        Sleep(150);
+    }
+    CloseHandle(h);
+    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); g_tokensToday = -1; return; }
+    buf[got] = 0;
+
+    SYSTEMTIME st; GetLocalTime(&st);
+    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
+    FILETIME lft, ft;
+    SystemTimeToFileTime(&st, &lft);        // treats fields as UTC
+    LocalFileTimeToFileTime(&lft, &ft);     // apply the real TZ bias
+    long long midnight = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
+    long long total = 0;
+    const char *p = buf, *end = buf + got;
+    while ((p = findStr(p, end, "\"ts\":")) != NULL) {
+        p += 5;
+        long long ts = parseLL(p, end);
+        const char *next = findStr(p, end, "\"ts\":");
+        const char *recEnd = next ? next : end;
+        long long sum = 0;
+        // Electron rowTotal: input + output + cacheRead + cacheWrite
+        const char *keys[4] = { "\"input\":", "\"output\":", "\"cacheRead\":", "\"cacheWrite\":" };
+        int lens[4] = { 8, 9, 12, 13 };
+        for (int k = 0; k < 4; k++) {
+            const char *f = findStr(p, recEnd, keys[k]);
+            if (f) sum += parseLL(f + lens[k], recEnd);
+        }
+        if (ts >= midnight) total += sum;
+        p = (next && next > p) ? next : p + 5;
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    g_tokensToday = total;
+}
+
+static void fmtTokens(long long n2, wchar_t *out, int cb) {
+    if (n2 < 0) { lstrcpynW(out, L"\u2014", cb); return; }
+    if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
+    else if (n2 >= 1000000) swprintf(out, cb, L"%.1fM", n2 / 1e6);
+    else if (n2 >= 1000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
+    else swprintf(out, cb, L"%lld", n2);
+}
+
 static void buildChips(void) {
     g_chipCount = 0;
-    if (g_cfg.shortcutEnabled) {
-        const wchar_t *label = (g_cfg.shortcutLabel && *g_cfg.shortcutLabel) ? g_cfg.shortcutLabel : L"run";
-        addChip(CT_SHORTCUT, 0, label, 0, NULL);
-    }
+    if (++g_tokensTick >= 30) { g_tokensTick = 0; scanTokenCache(); }
+    if (g_tokensToday < 0 && g_tokensTick == 1) scanTokenCache();
+    // left pinned group: pet, tokens, divider dash
     if (g_cfg.petEnabled) {
-        wchar_t txt[96] = L"pet";
-        if (g_cfg.petLabel && *g_cfg.petLabel) lstrcpynW(txt, g_cfg.petLabel, 80);
-        lstrcatW(txt, g_m.petRunning ? L" on" : L" off");
-        addChipI(CT_PET, 0, txt, 0, NULL, 0xF004); // nf-fa-heart
+        wchar_t txt[16];
+        int running = g_m.petRunning;
+        lstrcpynW(txt, running ? L"on" : L"off", 16);
+        addChipI(CT_PET, 0, txt, 0, running ? g_cfg.good : g_cfg.fgDim, 0xF004);
+        g_chips[g_chipCount - 1].align = 2;
     }
-    for (int i = 0; i < g_cfg.customCount; i++) {
-        CustomChip *cc = &g_cfg.custom[i];
-        if (!cc->enabled) continue;
-        wchar_t txt[96] = L"";
-        if (cc->icon && *cc->icon) { lstrcpynW(txt, cc->icon, 48); lstrcatW(txt, L" "); }
-        if (cc->label && *cc->label) lstrcatW(txt, cc->label);
-        if (cc->toggle) lstrcatW(txt, customStateGet(i) ? L" on" : L" off");
-        if (!txt[0]) lstrcpynW(txt, L"chip", 96);
-        addChip(CT_CUSTOM, i, txt, 0, cc->color);
+    if (1) { // token chip (reads the Electron cache)
+        wchar_t txt[32];
+        fmtTokens(g_tokensToday, txt, 32);
+        addChipI(CT_CUSTOM, -1, txt, 0, g_cfg.fgDim, 0xF0687);
+        g_chips[g_chipCount - 1].align = 2;
+        g_chips[g_chipCount - 1].iconYellow = 1;
     }
+    {
+        addChipI(CT_CUSTOM, -1, L"\u2014", 0, g_cfg.divider, 0);
+        g_chips[g_chipCount - 1].align = 2;
+    }
+    // right metric group: icon + bare value, like the Electron bar
     wchar_t v[48];
-    if (g_cfg.mGpu) { swprintf(v, 48, L"gpu %d%%", (int)(g_m.gpu + 0.5)); addChipI(CT_GPU, 0, v, 0, NULL, 0xF08CA); }
+    if (g_cfg.mGpu) { swprintf(v, 48, L"%d%%", (int)(g_m.gpu + 0.5)); addChipI(CT_GPU, 0, v, 0, NULL, 0xF08CA); }
     if (g_cfg.mCpu) {
         int hot = g_cfg.cpuWarnAt > 0 && g_m.cpu >= g_cfg.cpuWarnAt;
-        swprintf(v, 48, L"cpu %d%%", (int)(g_m.cpu + 0.5));
+        swprintf(v, 48, L"%d%%", (int)(g_m.cpu + 0.5));
         addChipI(CT_CPU, 0, v, hot, hot ? g_cfg.warn : NULL, 0xF035B);
     }
     if (g_cfg.mCpuTemp) {
         if (g_m.tempOk) {
-            swprintf(v, 48, L"%d.%d\u00B0C", (int)g_m.tempC, (int)(g_m.tempC * 10) % 10);
+            if ((int)(g_m.tempC * 10) % 10 == 0) swprintf(v, 48, L"%d\u00B0C", (int)g_m.tempC);
+            else swprintf(v, 48, L"%.1f\u00B0C", g_m.tempC);
             addChipI(CT_CPUTEMP, 0, v, g_m.tempHot, g_m.tempHot ? g_cfg.warn : NULL, 0xF05C3);
         } else addChipI(CT_CPUTEMP, 0, L"\u2014", 0, g_cfg.divider, 0);
     }
     if (g_cfg.mRam) {
         int hot = g_cfg.ramWarnAt > 0 && g_m.ram >= g_cfg.ramWarnAt;
-        swprintf(v, 48, L"ram %d%%", (int)(g_m.ram + 0.5));
+        swprintf(v, 48, L"%d%%", (int)(g_m.ram + 0.5));
         addChipI(CT_RAM, 0, v, hot, hot ? g_cfg.warn : NULL, 0xF04B0);
     }
-    if (g_cfg.mVolume) { unsigned volIc = g_m.volume == 0 ? 0xF0581 : 0xF057E;
-    swprintf(v, 48, L"vol %d%%", g_m.volume); addChipI(CT_VOLUME, 0, v, 0, NULL, volIc); }
+    if (g_cfg.mVolume) {
+        int muted = g_m.volume == 0;
+        swprintf(v, 48, L"%d%%", g_m.volume);
+        addChipI(CT_VOLUME, 0, v, 0, muted ? g_cfg.fgDim : NULL, muted ? 0xF0581 : 0xF057E);
+    }
     if (g_cfg.mBattery) {
-        if (g_m.battValid) { swprintf(v, 48, L"batt %d%%", g_m.battPct); addChipI(CT_BATTERY, 0, v, 0, NULL, 0xF240); }
-        else addChipI(CT_BATTERY, 0, L"batt ac", 0, NULL, 0xF0427);
+        if (g_m.battValid) {
+            int low = g_m.battPct <= 20;
+            swprintf(v, 48, L"%d%%", g_m.battPct);
+            addChipI(CT_BATTERY, 0, v, low, low ? g_cfg.warn : NULL, 0xF240);
+        } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0xF0427);
     }
     if (g_cfg.mClock) addChipI(CT_CLOCK, 0, g_m.clockText, 0, NULL, 0xF017);
 }
@@ -298,7 +394,7 @@ static void repaintBar(HWND hwnd) {
 
     // fill the whole DIB with the premultiplied background (alpha included)
     COLORREF fgCr = colorrefFromHex(g_cfg.fg, 255);
-    DWORD bgPixel = (DWORD)((GetRValue(bg)) | (GetGValue(bg) << 8) | (GetBValue(bg) << 16) | ((DWORD)bgA << 24));
+    DWORD bgPixel = (DWORD)(((DWORD)bgA << 24) | ((DWORD)GetBValue(bg) << 16) | ((DWORD)GetGValue(bg) << 8) | (DWORD)GetRValue(bg));
     DWORD *px = (DWORD *)g_bits;
     size_t total = (size_t)g_dibW * (size_t)g_dibH;
     for (size_t i = 0; i < total; i++) px[i] = bgPixel;
@@ -307,8 +403,11 @@ static void repaintBar(HWND hwnd) {
     int textH = g_dibH;
     int pad = (int)(6.0f * (FLOAT)g_scale);
 
-    // layout chips right-aligned (icon glyph + space precede the value text)
+    // Electron geometry: bar padding 8px left / 12px right, 14px between
+    // segments, 5px between icon and value (CSS px, x2 at this DPI)
     FLOAT hf = (FLOAT)g_dibH;
+    FLOAT padL = 8.0f * (FLOAT)g_scale, padR = 12.0f * (FLOAT)g_scale;
+    FLOAT segGap = 14.0f * (FLOAT)g_scale, icoGap = 5.0f * (FLOAT)g_scale;
     int iconW[MAX_CHIPS];
     for (int i = 0; i < g_chipCount; i++) {
         iconW[i] = 0;
@@ -318,14 +417,27 @@ static void repaintBar(HWND hwnd) {
             iconW[i] = textWidth(ico);
         }
     }
-    FLOAT x = (FLOAT)g_dibW - pad;
+    // right group grows leftward from the right edge
+    FLOAT xr = (FLOAT)g_dibW - padR;
     for (int i = g_chipCount - 1; i >= 0; i--) {
         Chip *c = &g_chips[i];
-        FLOAT cw = (FLOAT)(iconW[i] + textWidth(c->text)) + pad * 2;
-        c->r.right = (LONG)x;
-        c->r.left = (LONG)(x - cw);
+        if (c->align != 1) continue;
+        FLOAT cw = (FLOAT)(iconW[i] + (iconW[i] ? (int)icoGap : 0)) + textWidth(c->text);
+        c->r.right = (LONG)xr;
+        c->r.left = (LONG)(xr - cw);
         c->r.top = 0; c->r.bottom = (LONG)hf;
-        x -= cw + pad;
+        xr -= cw + segGap;
+    }
+    // left pinned group grows rightward from the left edge
+    FLOAT xl = padL;
+    for (int i = 0; i < g_chipCount; i++) {
+        Chip *c = &g_chips[i];
+        if (c->align != 2) continue;
+        FLOAT cw = (FLOAT)(iconW[i] + (iconW[i] ? (int)icoGap : 0)) + textWidth(c->text);
+        c->r.left = (LONG)xl;
+        c->r.right = (LONG)(xl + cw);
+        c->r.top = 0; c->r.bottom = (LONG)hf;
+        xl += cw + segGap;
     }
 
     for (int i = 0; i < g_chipCount; i++) {
@@ -333,23 +445,24 @@ static void repaintBar(HWND hwnd) {
         if (i == g_hover) {
             COLORREF pink = colorrefFromHex(g_cfg.pinkBg, 255);
             HBRUSH hb = CreateSolidBrush(pink);
-            RECT hr = { c->r.left + 1, 2, c->r.right, g_dibH - 2 };
+            RECT hr = { c->r.left, 1, c->r.right, g_dibH - 1 };
             FillRect(g_memDc, &hr, hb);
             DeleteObject(hb);
         }
         const wchar_t *col = c->colorOverride;
         if (c->warn) col = g_cfg.warn;
         COLORREF vc = col ? colorrefFromHex(col, 255) : fgCr;
-        int tx = c->r.left + pad;
+        int tx = c->r.left;
+        SetTextColor(g_memDc, vc);
         if (c->iconCp) {
             wchar_t ico[8];
             chipIconText(c, ico);
-            SetTextColor(g_memDc, colorrefFromHex(g_cfg.fgDim, 255));
+            COLORREF ic = c->iconYellow ? colorrefFromHex(g_cfg.yellow, 255)
+                                        : colorrefFromHex(g_cfg.pinkDeep, 255);
+            SetTextColor(g_memDc, ic);
             RECT ir = { tx, 0, tx + iconW[i] + 8, textH };
             DrawTextW(g_memDc, ico, -1, &ir, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            tx += iconW[i];
-            SetTextColor(g_memDc, vc);
-        } else {
+            tx += iconW[i] + (int)icoGap;
             SetTextColor(g_memDc, vc);
         }
         RECT tr = { tx, 0, c->r.right, textH };
@@ -530,6 +643,7 @@ static void chipClick(int idx) {
     case CT_SHORTCUT: execCmd(g_cfg.shortcutCommand); break;
     case CT_PET: petToggle(); break;
     case CT_CUSTOM: {
+        if (c->customIdx < 0 || c->customIdx >= MAX_CUSTOM) break; // display-only chip
         CustomChip *cc = &g_cfg.custom[c->customIdx];
         if (!cc->command) break;
         if (cc->toggle) {

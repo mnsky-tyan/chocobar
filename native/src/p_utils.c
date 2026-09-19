@@ -59,5 +59,6 @@ static int hexToColorref(const wchar_t *s) {
     wchar_t *end = NULL;
     long v = wcstol(s + 1, &end, 16);
     if (!end || *end) return -1;
-    return (int)(GetRValue((COLORREF)v) | (GetGValue((COLORREF)v) << 8) | (GetBValue((COLORREF)v) << 16));
+    // v is raw 0xRRGGBB; COLORREF wants 0x00bbggrr (red in the low byte)
+    return (int)(((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF));
 }
