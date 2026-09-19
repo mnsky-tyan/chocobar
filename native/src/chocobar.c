@@ -83,7 +83,7 @@ typedef struct {
     int height, gap, fontSize, backgroundAlpha, align;
     wchar_t *tint, *backdrop, *fontFamily;
 
-    wchar_t *fg, *fgDim, *pinkDeep, *divider, *warn, *pinkBg, *yellow, *good;
+    wchar_t *fg, *fgDim, *pink, *pinkDeep, *divider, *warn, *pinkBg, *yellow, *good;
 
     int mGpu, mCpu, mCpuTemp, mRam, mVolume, mBattery, mClock;
     int cpuWarnAt, ramWarnAt, tempWarnAt;
@@ -98,20 +98,72 @@ typedef struct {
     int customCount;
 
     wchar_t *terminalClassName;
+    wchar_t *terminalTitle;   // substring match on the terminal's window title
     wchar_t *clockFormat;
     int showTray;
 
     int subsEnabled, subsIntervalMin, subsTimeoutMs;
     SubsProvider subsProviders[MAX_SUBS];
     int subsProviderCount;
+
+    // make-everything-tunable surface
+    wchar_t *iconColor;         // bar icon stroke color (default = pinkDeep)
+    int iconOpacity;            // 0..100, icon alpha over the tint
+    int barRadius;              // bar corner radius in CSS px (0 = square)
+    wchar_t heatmap[5][12];     // dashboard ramp, hex colors light -> dark
+    int dashW, dashH;           // token dashboard popup, CSS px
+    int subsW, subsH;           // subscriptions board popup, CSS px
+    wchar_t *tokenCachePath;    // override for ~/.wizbar/token-cache.json
+    wchar_t tokensApps[16][20]; // harness allowlist for token stats (empty = all)
+    int tokensAppCount;
 } Config;
+
+double g_scale = 1.0;        // display scale (dpi/96): config values are in DIPs (shared)
+double g_iconOpacity = 1.0;  // theme.iconOpacity/100 (used by the icon renderer)
 
 static Config g_cfg;
 static FILETIME g_cfgMtime;
 static int g_cfgLoaded = 0;
 
 static wchar_t *jdup(const char *js, const jsmntok_t *t) {
-    return utf8ToWide(js + t->start, t->end - t->start);
+    wchar_t *w = utf8ToWide(js + t->start, t->end - t->start);
+    if (!w) return NULL;
+    // decode JSON escapes in place (jsmn keeps \n \uXXXX ... literal, and
+    // JSON.parse in the Electron app decodes them - parity requires it too)
+    int r = 0, wr = 0;
+    for (; w[r]; r++) {
+        if (w[r] != L'\\') { w[wr++] = w[r]; continue; }
+        r++;
+        switch (w[r]) {
+            case L'"':  w[wr++] = L'"';  break;
+            case L'\\': w[wr++] = L'\\'; break;
+            case L'/':  w[wr++] = L'/';  break;
+            case L'b':  w[wr++] = L'\b'; break;
+            case L'f':  w[wr++] = L'\f'; break;
+            case L'n':  w[wr++] = L'\n'; break;
+            case L'r':  w[wr++] = L'\r'; break;
+            case L't':  w[wr++] = L'\t'; break;
+            case L'u': {
+                unsigned cp = 0;
+                for (int k = 1; k <= 4; k++) {
+                    wchar_t c = w[r + k];
+                    unsigned d;
+                    if (c >= L'0' && c <= L'9') d = (unsigned)(c - L'0');
+                    else if (c >= L'a' && c <= L'f') d = (unsigned)(c - L'a' + 10);
+                    else if (c >= L'A' && c <= L'F') d = (unsigned)(c - L'A' + 10);
+                    else { d = 16; }
+                    cp = cp * 16 + (d & 15);
+                }
+                r += 4;
+                if (cp) w[wr++] = (wchar_t)cp; // invalid 0000: drop
+                break;
+            }
+            case 0: w[wr++] = L'\\'; break;
+            default: w[wr++] = w[r]; break;
+        }
+    }
+    w[wr] = 0;
+    return w;
 }
 
 // find key `key` (len `kl`) among the children of object token `obj`
@@ -133,7 +185,7 @@ static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key)
     int kl = (int)strlen(key);
     int k = obj + 1;
     for (int j = 0; j < kids; j++) {
-        jsmntok_t *kt = &t[k];
+        const jsmntok_t *kt = &t[k];
         if (kt->type == JSMN_STRING && kt->end - kt->start == kl &&
             memcmp(js + kt->start, key, kl) == 0) return k + 1;
         // advance past key + value subtree (object values hold key/value pairs)
@@ -168,7 +220,8 @@ static int jboolDefault(const char *js, const jsmntok_t *t, int i, int def) {
 
 static void freeConfig(Config *c) {
     wideFree(&c->tint); wideFree(&c->backdrop); wideFree(&c->fontFamily);
-    wideFree(&c->fg); wideFree(&c->fgDim); wideFree(&c->pinkDeep); wideFree(&c->divider);
+    wideFree(&c->fg); wideFree(&c->fgDim); wideFree(&c->pink); wideFree(&c->pinkDeep); wideFree(&c->divider);
+    wideFree(&c->iconColor); wideFree(&c->tokenCachePath);
     wideFree(&c->yellow); wideFree(&c->good);
     wideFree(&c->warn); wideFree(&c->pinkBg);
     wideFree(&c->shortcutLabel); wideFree(&c->shortcutCommand);
@@ -188,7 +241,16 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->height = 24; c->gap = 8; c->fontSize = 12; c->backgroundAlpha = 110;
     c->tint = wideDup(L"#FBF2E2"); c->backdrop = wideDup(L"acrylic");
     c->fontFamily = wideDup(L"Cascadia Mono");
-    c->fg = wideDup(L"#080808"); c->fgDim = wideDup(L"#5a5245"); c->pinkDeep = wideDup(L"#D493AA");
+    c->fg = wideDup(L"#080808"); c->fgDim = wideDup(L"#5a5245"); c->pink = wideDup(L"#E8C7D0"); c->pinkDeep = wideDup(L"#D493AA");
+    c->iconColor = wideDup(L""); // empty = follow pinkDeep
+    c->iconOpacity = 100;
+    c->barRadius = 8;
+    lstrcpynW(c->heatmap[0], L"#F1ECD8", 12); lstrcpynW(c->heatmap[1], L"#F6D8E0", 12);
+    lstrcpynW(c->heatmap[2], L"#EFB7C7", 12); lstrcpynW(c->heatmap[3], L"#E28FB0", 12);
+    lstrcpynW(c->heatmap[4], L"#C95E8F", 12);
+    c->dashW = 840; c->dashH = 580; c->subsW = 820; c->subsH = 480;
+    c->tokenCachePath = wideDup(L"");
+    c->tokensAppCount = 0;
     c->divider = wideDup(L"#D9CCB2"); c->warn = wideDup(L"#A00000");
     c->pinkBg = wideDup(L"#FEF7F9");
     c->yellow = wideDup(L"#B8A96A"); c->good = wideDup(L"#006400");
@@ -212,11 +274,31 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         wideFree(&c->fontFamily);
         c->fontFamily = jstrTok(js, t, jobjGet(js, t, bar, "fontFamily"), c->fontFamily);
         c->align      = jintTok(js, t, jobjGet(js, t, bar, "align"), 0) == 2 ? 2 : 1; // 1=right 2=left
+        c->barRadius  = jintTok(js, t, jobjGet(js, t, bar, "radius"), c->barRadius);
+        if (c->barRadius < 0) c->barRadius = 0; if (c->barRadius > 26) c->barRadius = 26;
     }
     int theme = jobjGet(js, t, root, "theme");
     if (theme >= 0) {
         wideFree(&c->fg);       c->fg       = jstrTok(js, t, jobjGet(js, t, theme, "fg"), c->fg);
         wideFree(&c->fgDim);    c->fgDim    = jstrTok(js, t, jobjGet(js, t, theme, "fgDim"), c->fgDim);
+        wideFree(&c->pink); c->pink = jstrTok(js, t, jobjGet(js, t, theme, "pink"), c->pink);
+        wideFree(&c->iconColor); c->iconColor = jstrTok(js, t, jobjGet(js, t, theme, "iconColor"), c->iconColor);
+        c->iconOpacity = jintTok(js, t, jobjGet(js, t, theme, "iconOpacity"), c->iconOpacity);
+        if (c->iconOpacity < 0) c->iconOpacity = 0; if (c->iconOpacity > 100) c->iconOpacity = 100;
+        {
+            int hm = jobjGet(js, t, theme, "heatmap");
+            if (hm >= 0 && t[hm].type == JSMN_ARRAY) {
+                int cnt = t[hm].size; if (cnt > 5) cnt = 5;
+                int k = hm + 1;
+                for (int i = 0; i < cnt; i++) {
+                    if (t[k].type == JSMN_STRING) {
+                        wchar_t *s = jdup(js, &t[k]);
+                        if (s) { lstrcpynW(c->heatmap[i], s, 12); wideFree(&s); }
+                    }
+                    k += jtokSpan(t, k);
+                }
+            }
+        }
         wideFree(&c->pinkDeep); c->pinkDeep = jstrTok(js, t, jobjGet(js, t, theme, "pinkDeep"), c->pinkDeep);
         wideFree(&c->divider);  c->divider  = jstrTok(js, t, jobjGet(js, t, theme, "divider"), c->divider);
         wideFree(&c->warn);     c->warn     = jstrTok(js, t, jobjGet(js, t, theme, "warn"), c->warn);
@@ -285,6 +367,40 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->subsEnabled = jboolDefault(js, t, jobjGet(js, t, subs, "enabled"), 0);
         c->subsIntervalMin = jintTok(js, t, jobjGet(js, t, subs, "intervalMinutes"), c->subsIntervalMin);
         c->subsTimeoutMs = jintTok(js, t, jobjGet(js, t, subs, "fetchTimeoutMs"), c->subsTimeoutMs);
+        c->subsW = jintTok(js, t, jobjGet(js, t, subs, "width"), c->subsW);
+        c->subsH = jintTok(js, t, jobjGet(js, t, subs, "height"), c->subsH);
+        if (c->subsW < 280) c->subsW = 280; if (c->subsH < 180) c->subsH = 180;
+    }
+    // token stats surface: which cache file + which harness apps to count
+    int toks = jobjGet(js, t, root, "tokens");
+    if (toks >= 0 && t[toks].type == JSMN_OBJECT) {
+        wideFree(&c->tokenCachePath);
+        c->tokenCachePath = jstrTok(js, t, jobjGet(js, t, toks, "cachePath"), c->tokenCachePath);
+        int af = jobjGet(js, t, toks, "appFilter");
+        if (af >= 0 && t[af].type == JSMN_ARRAY) {
+            int cnt = t[af].size; if (cnt > 16) cnt = 16;
+            int k = af + 1;
+            c->tokensAppCount = 0;
+            for (int i = 0; i < cnt; i++) {
+                if (t[k].type == JSMN_STRING) {
+                    wchar_t *s = jdup(js, &t[k]);
+                    if (s) {
+                        lstrcpynW(c->tokensApps[c->tokensAppCount], s, 20);
+                        c->tokensAppCount++;
+                        wideFree(&s);
+                    }
+                }
+                k += jtokSpan(t, k);
+            }
+        }
+    }
+    // dashboard popup size
+    int dash = jobjGet(js, t, root, "dashboard");
+    if (dash >= 0 && t[dash].type == JSMN_OBJECT) {
+        c->dashW = jintTok(js, t, jobjGet(js, t, dash, "width"), c->dashW);
+        c->dashH = jintTok(js, t, jobjGet(js, t, dash, "height"), c->dashH);
+        if (c->dashW < 360) c->dashW = 360; if (c->dashH < 240) c->dashH = 240;
+    }
         int arr = jobjGet(js, t, subs, "providers");
         if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
             int n2 = t[arr].size;
@@ -309,9 +425,11 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 k += jtokSpan(t, k);
             }
         }
-    }
     int term = jobjGet(js, t, root, "terminal");
-    if (term >= 0) c->terminalClassName = jstrTok(js, t, jobjGet(js, t, term, "className"), L"");
+    if (term >= 0) {
+        c->terminalClassName = jstrTok(js, t, jobjGet(js, t, term, "className"), L"");
+        c->terminalTitle = jstrTok(js, t, jobjGet(js, t, term, "title"), L"");
+    }
     int general = jobjGet(js, t, root, "general");
     if (general >= 0) c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
 }

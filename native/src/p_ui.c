@@ -82,7 +82,7 @@ static const GUID my_IID_IDXGIFactory2       = {0x50c83a1c,0xe072,0x4c48,{0x87,0
 
 // shared state (declared here so every section below sees it)
 static wchar_t g_cfgPath[MAX_PATH];
-static double g_scale = 1.0; // display scale (dpi/96): config values are in DIPs
+extern double g_scale; // display scale (dpi/96): defined in chocobar.c (shared with p_icons)
 static int g_customState[MAX_CUSTOM];
 
 // ------------------------------------------------------------- globals ----
@@ -116,8 +116,8 @@ typedef struct {
     int warn;
     const wchar_t *colorOverride;
     unsigned iconCp;     // Nerd Font codepoint drawn before text (0 = none)
+    int iconSvg;         // vector icon id (p_icons) - preferred over iconCp
     int align;           // 1 = right group (metrics), 2 = left pinned group
-    int iconYellow;      // tokens diamond renders yellow, others pink
 } Chip;
 
 enum { CT_SHORTCUT, CT_PET, CT_CUSTOM, CT_GPU, CT_CPU, CT_CPUTEMP, CT_RAM, CT_VOLUME, CT_BATTERY, CT_CLOCK };
@@ -142,8 +142,10 @@ static int initRender(HWND hwnd) {
         while (src && src[n] && src[n] != L',' && n < 63) { fam[n] = src[n]; n++; }
     }
     fam[n] = 0;
-    int px = (int)(g_cfg.fontSize * g_scale * 0.887 + 0.5); // width-matched to the Electron text block (GDI em renders narrower per px)
-    g_font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    // Electron bar.css: font-weight 600, font-size 11px CSS -> em px at DPI.
+    // Chromium renders DirectWrite semibold; GDI needs FW_SEMIBOLD to match.
+    int px = (int)(g_cfg.fontSize * g_scale + 0.5);
+    g_font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
     if (!g_font) return 0;
@@ -173,7 +175,8 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
     Chip *c = &g_chips[g_chipCount++];
     c->type = type; c->customIdx = customIdx; c->warn = warn;
     c->colorOverride = colorOverride; c->iconCp = iconCp;
-    c->align = 1; c->iconYellow = 0;
+    c->iconSvg = -1;
+    c->align = 1;
     lstrcpynW(c->text, text ? text : L"", 96);
     c->r.left = c->r.right = c->r.top = c->r.bottom = 0;
 }
@@ -183,6 +186,50 @@ static void addChip(int type, int customIdx, const wchar_t *text, int warn, cons
 
 static long long g_tokensToday = -1;
 static int g_tokensTick = 0;
+
+// ---- dashboard aggregation (filled by scanTokenCache) ----------------------
+#define DASH_MAX_APPS 12
+#define DASH_MAX_DAYS 190
+static long long g_appToday[DASH_MAX_APPS], g_appWeek[DASH_MAX_APPS];
+static long long g_appMonth[DASH_MAX_APPS], g_appAll[DASH_MAX_APPS];
+static char g_appName[DASH_MAX_APPS][20];
+static int g_appCount = 0;
+static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
+static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
+static long long g_lastScanMs = 0;
+
+static void aggRecord(const char *app, int alen, long long ts, long long sum, long long midnight) {
+    if (alen <= 0) alen = 1;
+    if (alen > 19) alen = 19;
+    // tokens.appFilter: when set, only the listed harness apps are tracked
+    if (g_cfg.tokensAppCount > 0) {
+        int ok = 0;
+        for (int i = 0; i < g_cfg.tokensAppCount && !ok; i++) {
+            wchar_t wide[20];
+            MultiByteToWideChar(CP_UTF8, 0, app, alen, wide, 20);
+            wide[alen] = 0;
+            if (lstrcmpiW(wide, g_cfg.tokensApps[i]) == 0) ok = 1;
+        }
+        if (!ok) return;
+    }
+    long long day = (ts - midnight) / 86400000LL; // 0 = today, -n = n days ago
+    int ai = -1;
+    for (int i = 0; i < g_appCount; i++)
+        if (memcmp(g_appName[i], app, alen) == 0 && g_appName[i][alen] == 0) { ai = i; break; }
+    if (ai < 0 && g_appCount < DASH_MAX_APPS) {
+        ai = g_appCount++;
+        memcpy(g_appName[ai], app, alen);
+        g_appName[ai][alen] = 0;
+    }
+    if (ai >= 0) {
+        if (day == 0) g_appToday[ai] += sum;
+        if (day >= -6) g_appWeek[ai] += sum;
+        if (day >= -29) g_appMonth[ai] += sum;
+        g_appAll[ai] += sum;
+    }
+    if (day >= -(DASH_MAX_DAYS - 1) && day <= 0)
+        g_dayTot[DASH_MAX_DAYS - 1 + (int)day] += sum;
+}
 
 static const char *findStr(const char *p, const char *end, const char *needle) {
     int n = 0; while (needle[n]) n++;
@@ -205,9 +252,22 @@ static long long parseLL(const char *p, const char *end) {
 // Electron app rewrites this cache every rescan, we just read it
 static void scanTokenCache(void) {
     wchar_t path[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-    if (!n || n >= MAX_PATH - 40) { g_tokensToday = -1; return; }
-    lstrcatW(path, L"\\.wizbar\\token-cache.json");
+    path[0] = 0;
+    if (g_cfg.tokenCachePath && *g_cfg.tokenCachePath) {
+        // ~ prefix = relative to the profile dir; else absolute
+        if (g_cfg.tokenCachePath[0] == L'~' && lstrlenW(g_cfg.tokenCachePath) < MAX_PATH - 2) {
+            DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
+            if (!n) { g_tokensToday = -1; return; }
+            lstrcatW(path, g_cfg.tokenCachePath + 1);
+        } else if (lstrlenW(g_cfg.tokenCachePath) < MAX_PATH) {
+            lstrcpynW(path, g_cfg.tokenCachePath, MAX_PATH);
+        }
+    } else {
+        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
+        if (!n || n >= MAX_PATH - 40) { g_tokensToday = -1; return; }
+        lstrcatW(path, L"\\.wizbar\\token-cache.json");
+    }
+    if (!path[0]) { g_tokensToday = -1; return; }
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; return; }
     DWORD size = GetFileSize(h, NULL), got = 0;
@@ -236,25 +296,41 @@ static void scanTokenCache(void) {
     LocalFileTimeToFileTime(&lft, &ft);     // apply the real TZ bias
     long long midnight = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
     long long total = 0;
+    memset(g_dayTot, 0, sizeof(g_dayTot));
+    g_appCount = 0;
+    g_tokWeek = g_tokMonth = g_tokAll = 0;
+    // records look like ["key",{"app":"<name>","ts":...,...}] - walk by the
+    // app key (it precedes ts inside each record)
     const char *p = buf, *end = buf + got;
-    while ((p = findStr(p, end, "\"ts\":")) != NULL) {
-        p += 5;
-        long long ts = parseLL(p, end);
-        const char *next = findStr(p, end, "\"ts\":");
+    while ((p = findStr(p, end, "\"app\":\"")) != NULL) {
+        p += 7;
+        const char *ae = p;
+        while (ae < end && *ae != '"' && *ae && ae - p < 24) ae++;
+        if (ae >= end || *ae != '"') break;
+        int alen = (int)(ae - p);
+        const char *tsp = findStr(ae, end, "\"ts\":");
+        if (!tsp) break;
+        long long ts = parseLL(tsp + 5, end);
+        const char *next = findStr(tsp + 5, end, "\"app\":\"");
         const char *recEnd = next ? next : end;
         long long sum = 0;
         // Electron rowTotal: input + output + cacheRead + cacheWrite
         const char *keys[4] = { "\"input\":", "\"output\":", "\"cacheRead\":", "\"cacheWrite\":" };
         int lens[4] = { 8, 9, 12, 13 };
         for (int k = 0; k < 4; k++) {
-            const char *f = findStr(p, recEnd, keys[k]);
+            const char *f = findStr(ae, recEnd, keys[k]);
             if (f) sum += parseLL(f + lens[k], recEnd);
         }
         if (ts >= midnight) total += sum;
-        p = (next && next > p) ? next : p + 5;
+        aggRecord(p, alen, ts, sum, midnight);
+        if (ts >= midnight - 6LL * 86400000LL) g_tokWeek += sum;
+        if (ts >= midnight - 29LL * 86400000LL) g_tokMonth += sum;
+        g_tokAll += sum;
+        p = next ? next : end;
     }
     HeapFree(GetProcessHeap(), 0, buf);
     g_tokensToday = total;
+    g_lastScanMs = (long long)GetTickCount64();
 }
 
 static void fmtTokens(long long n2, wchar_t *out, int cb) {
@@ -269,20 +345,26 @@ static void buildChips(void) {
     g_chipCount = 0;
     if (++g_tokensTick >= 30) { g_tokensTick = 0; scanTokenCache(); }
     if (g_tokensToday < 0 && g_tokensTick == 1) scanTokenCache();
-    // left pinned group: pet, tokens, subs (Electron order)
+    // left pinned group: shortcut, pet, tokens, subs (Electron order)
+    if (g_cfg.shortcutEnabled) {
+        addChipI(CT_SHORTCUT, 0, g_cfg.shortcutLabel ? g_cfg.shortcutLabel : L"", 0, NULL, 0);
+        g_chips[g_chipCount - 1].align = 2;
+        g_chips[g_chipCount - 1].iconSvg = SVG_BOLT;
+    }
     if (g_cfg.petEnabled) {
         wchar_t txt[16];
         int running = g_m.petRunning;
         lstrcpynW(txt, running ? L"on" : L"off", 16);
-        addChipI(CT_PET, 0, txt, 0, running ? g_cfg.good : g_cfg.fgDim, 0xF004);
+        addChipI(CT_PET, 0, txt, 0, running ? g_cfg.good : g_cfg.fgDim, 0);
         g_chips[g_chipCount - 1].align = 2;
+        g_chips[g_chipCount - 1].iconSvg = SVG_BOW;
     }
     if (1) { // token chip (reads the Electron cache)
         wchar_t txt[32];
         fmtTokens(g_tokensToday, txt, 32);
-        addChipI(CT_CUSTOM, -1, txt, 0, g_cfg.fgDim, 0xF0687);
+        addChipI(CT_CUSTOM, -1, txt, 0, g_cfg.fgDim, 0);
         g_chips[g_chipCount - 1].align = 2;
-        g_chips[g_chipCount - 1].iconYellow = 1;
+        g_chips[g_chipCount - 1].iconSvg = SVG_DIAMOND;
     }
     if (g_cfg.subsEnabled) {
         // Electron subs chip: percent with good/dim/warn, "stale" after a
@@ -291,7 +373,6 @@ static void buildChips(void) {
         int rem = subsChipRem();
         wchar_t txt[16];
         const wchar_t *col;
-        unsigned icon = 0xF0498; // gauge
         if (rem == -1) {
             lstrcpynW(txt, L"\u2014", 16);
             col = g_cfg.fgDim;
@@ -302,16 +383,17 @@ static void buildChips(void) {
             swprintf(txt, 16, L"%d%%", rem);
             col = rem > 70 ? g_cfg.good : rem > 30 ? g_cfg.fgDim : g_cfg.warn;
         }
-        addChipI(CT_CUSTOM, -1, txt, 0, col, icon);
+        addChipI(CT_CUSTOM, -1, txt, 0, col, 0);
         g_chips[g_chipCount - 1].align = 2;
+        g_chips[g_chipCount - 1].iconSvg = SVG_GAUGE;
     }
     // right metric group: icon + bare value, like the Electron bar
     wchar_t v[48];
-    if (g_cfg.mGpu) { swprintf(v, 48, L"%d%%", (int)(g_m.gpu + 0.5)); addChipI(CT_GPU, 0, v, 0, NULL, 0xF08CA); }
+    if (g_cfg.mGpu) { swprintf(v, 48, L"%d%%", (int)(g_m.gpu + 0.5)); addChipI(CT_GPU, 0, v, 0, NULL, 0); g_chips[g_chipCount - 1].iconSvg = SVG_GPU; }
     if (g_cfg.mCpu) {
         int hot = g_cfg.cpuWarnAt > 0 && g_m.cpu >= g_cfg.cpuWarnAt;
         swprintf(v, 48, L"%d%%", (int)(g_m.cpu + 0.5));
-        addChipI(CT_CPU, 0, v, hot, hot ? g_cfg.warn : NULL, 0xF035B);
+        addChipI(CT_CPU, 0, v, hot, hot ? g_cfg.warn : NULL, 0); g_chips[g_chipCount - 1].iconSvg = SVG_CPU;
     }
     if (g_cfg.mCpuTemp) {
         if (g_m.tempOk) {
@@ -319,25 +401,31 @@ static void buildChips(void) {
             else swprintf(v, 48, L"%.1f\u00B0C", g_m.tempC);
             addChipI(CT_CPUTEMP, 0, v, g_m.tempHot, g_m.tempHot ? g_cfg.warn : NULL, 0xF05C3);
         } else addChipI(CT_CPUTEMP, 0, L"\u2014", 0, g_cfg.divider, 0);
+        g_chips[g_chipCount - 1].iconSvg = SVG_TEMP;
     }
     if (g_cfg.mRam) {
         int hot = g_cfg.ramWarnAt > 0 && g_m.ram >= g_cfg.ramWarnAt;
         swprintf(v, 48, L"%d%%", (int)(g_m.ram + 0.5));
-        addChipI(CT_RAM, 0, v, hot, hot ? g_cfg.warn : NULL, 0xF04B0);
+        addChipI(CT_RAM, 0, v, hot, hot ? g_cfg.warn : NULL, 0); g_chips[g_chipCount - 1].iconSvg = SVG_RAM;
     }
     if (g_cfg.mVolume) {
         int muted = g_m.volume == 0;
         swprintf(v, 48, L"%d%%", g_m.volume);
-        addChipI(CT_VOLUME, 0, v, 0, muted ? g_cfg.fgDim : NULL, muted ? 0xF0581 : 0xF057E);
+        addChipI(CT_VOLUME, 0, v, 0, muted ? g_cfg.fgDim : NULL, 0);
+        g_chips[g_chipCount - 1].iconSvg = muted ? SVG_MUTE : SVG_VOL;
     }
     if (g_cfg.mBattery) {
         if (g_m.battValid) {
             int low = g_m.battPct <= 20;
             swprintf(v, 48, L"%d%%", g_m.battPct);
-            addChipI(CT_BATTERY, 0, v, low, low ? g_cfg.warn : NULL, 0xF240);
-        } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0xF0427);
+            addChipI(CT_BATTERY, 0, v, low, low ? g_cfg.warn : NULL, 0);
+            g_chips[g_chipCount - 1].iconSvg = SVG_BAT; // fill tracks the charge
+        } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0);
     }
-    if (g_cfg.mClock) addChipI(CT_CLOCK, 0, g_m.clockText, 0, NULL, 0xF017);
+    if (g_cfg.mClock) {
+        addChipI(CT_CLOCK, 0, g_m.clockText, 0, NULL, 0);
+        g_chips[g_chipCount - 1].iconSvg = SVG_CLOCK;
+    }
 }
 
 // ------------------------------------------------------------- painting ----
@@ -380,6 +468,47 @@ static void chipIconText(const Chip *c, wchar_t *out) {
 }
 
 // draw the bar into the premultiplied DIB and hand it to DWM (ULW)
+extern double g_iconOpacity; // theme.iconOpacity/100 (definition in chocobar.c)
+
+// premultiplied-DIB source-over blend with coverage (0..255): used for the
+// rounded bar corners, the hover pill, and any other alpha-shaped paint
+static DWORD pxBlend(DWORD dst, DWORD srcPm, int cov) {
+    unsigned da = (dst >> 24) & 255, sa = (srcPm >> 24) & 255;
+    unsigned outA = (sa > da) ? da + (((sa - da) * (unsigned)cov) >> 8)
+                              : da - (((da - sa) * (unsigned)cov) >> 8);
+    DWORD out = (outA & 255) << 24;
+    for (int sh = 0; sh < 24; sh += 8) {
+        int dc = (int)((dst >> sh) & 255), sc = (int)((srcPm >> sh) & 255);
+        out |= (DWORD)((dc + ((sc - dc) * cov >> 8)) & 255) << sh;
+    }
+    return out;
+}
+
+// scale a premultiplied pixel's alpha/color by coverage (0..255): used to
+// fade the bar tint out at the rounded corners
+static DWORD pxScale(DWORD v, int cov) {
+    unsigned a = ((((v >> 24) & 255)) * (unsigned)cov) / 255;
+    DWORD out = (a & 255) << 24;
+    for (int sh = 0; sh < 24; sh += 8)
+        out |= (DWORD)(((((v >> sh) & 255)) * (unsigned)cov / 255) & 255) << sh;
+    return out;
+}
+
+// anti-aliased coverage of one pixel against a rounded rect (radius rad)
+static int roundCov(int xx, int yy, int l, int t, int r, int b, int rad) {
+    if (rad < 1 || r - l < 2 * rad || b - t < 2 * rad) return 255;
+    int lx = l + rad, rx = r - 1 - rad, ty = t + rad, by = b - 1 - rad;
+    int dx = 0, dy = 0;
+    if (xx < lx) dx = lx - xx; else if (xx > rx) dx = xx - rx;
+    if (yy < ty) dy = ty - yy; else if (yy > by) dy = yy - by;
+    if (!dx && !dy) return 255;
+    float dist = sqrtf((float)dx * dx + (float)dy * dy);
+    float f = (float)rad + 0.5f - dist;
+    if (f <= 0) return 0;
+    if (f >= 1) return 255;
+    return (int)(f * 255.0f);
+}
+
 static void repaintBar(HWND hwnd) {
     if (!g_memDc || !g_font) return;
     RECT rc; GetClientRect(hwnd, &rc);
@@ -416,6 +545,27 @@ static void repaintBar(HWND hwnd) {
     DWORD *px = (DWORD *)g_bits;
     size_t total = (size_t)g_dibW * (size_t)g_dibH;
     for (size_t i = 0; i < total; i++) px[i] = bgPixel;
+    g_iconBoxN = 0;
+
+    // rounded bar corners (bar.css: border-radius 8px; corners are CSS, not
+    // DWM, because the window is layered): fade the tint to transparent in
+    // the four corner boxes
+    int rad = (int)(g_cfg.barRadius * g_scale + 0.5); // theme.bar.radius, CSS px
+    if (rad > 2 && g_dibW > 2 * rad && g_dibH > 2 * rad) {
+        for (int yy = 0; yy < rad; yy++) {
+            DWORD *rowT = px + (size_t)yy * g_dibW;
+            DWORD *rowB = px + (size_t)(g_dibH - 1 - yy) * g_dibW;
+            for (int xx = 0; xx < rad; xx++) {
+                int cov = roundCov(xx, yy, 0, 0, g_dibW, g_dibH, rad);
+                if (cov < 255) {
+                    rowT[xx] = pxScale(rowT[xx], cov);
+                    rowT[g_dibW - 1 - xx] = pxScale(rowT[g_dibW - 1 - xx], cov);
+                    rowB[xx] = pxScale(rowB[xx], cov);
+                    rowB[g_dibW - 1 - xx] = pxScale(rowB[g_dibW - 1 - xx], cov);
+                }
+            }
+        }
+    }
 
     SetBkMode(g_memDc, TRANSPARENT);
     int textH = g_dibH;
@@ -427,9 +577,11 @@ static void repaintBar(HWND hwnd) {
     FLOAT padL = 8.0f * (FLOAT)g_scale, padR = 12.0f * (FLOAT)g_scale;
     FLOAT segGap = 14.0f * (FLOAT)g_scale, icoGap = 5.0f * (FLOAT)g_scale;
     int iconW[MAX_CHIPS];
+    int svgBox = (int)(12 * g_scale + 0.5);
     for (int i = 0; i < g_chipCount; i++) {
         iconW[i] = 0;
-        if (g_chips[i].iconCp) {
+        if (g_chips[i].iconSvg >= 0) iconW[i] = svgBox;
+        else if (g_chips[i].iconCp) {
             wchar_t ico[8];
             chipIconText(&g_chips[i], ico);
             iconW[i] = textWidth(ico);
@@ -458,25 +610,54 @@ static void repaintBar(HWND hwnd) {
         xl += cw + segGap;
     }
 
+    // hover pill (bar.css .seg.clickable:hover): pink at 50% over the tint,
+    // rounded 5px, inflated 5px horizontally / 2px vertically beyond the chip.
+    // Only the pinned (clickable) chips get it - the metric segs are hover-
+    // inert in the renderer.
+    int pillRad = (int)(5 * g_scale + 0.5);
+    int pillPadX = (int)(5 * g_scale + 0.5), pillPadY = (int)(2 * g_scale + 0.5);
+    COLORREF pinkHover = colorrefFromHex(g_cfg.pink, 255);
+    DWORD pillPm = ((DWORD)128 << 24) | ((DWORD)(GetRValue(pinkHover) * 128 / 255) << 16)
+                 | ((DWORD)(GetGValue(pinkHover) * 128 / 255) << 8)
+                 | (DWORD)(GetBValue(pinkHover) * 128 / 255);
     for (int i = 0; i < g_chipCount; i++) {
         Chip *c = &g_chips[i];
-        if (i == g_hover) {
-            COLORREF pink = colorrefFromHex(g_cfg.pinkBg, 255);
-            HBRUSH hb = CreateSolidBrush(pink);
-            RECT hr = { c->r.left, 1, c->r.right, g_dibH - 1 };
-            FillRect(g_memDc, &hr, hb);
-            DeleteObject(hb);
+        if (i == g_hover && c->align == 2) {
+            int pl = c->r.left - pillPadX, pt = c->r.top + pillPadY;
+            int prr = c->r.right + pillPadX, pb = c->r.bottom - pillPadY;
+            if (pl < 0) pl = 0; if (pt < 0) pt = 0;
+            if (prr > g_dibW) prr = g_dibW; if (pb > g_dibH) pb = g_dibH;
+            for (int yy = pt; yy < pb; yy++) {
+                DWORD *row = px + (size_t)yy * g_dibW;
+                for (int xx = pl; xx < prr; xx++) {
+                    int cov = roundCov(xx, yy, pl, pt, prr, pb, pillRad);
+                    if (cov > 0) row[xx] = pxBlend(row[xx], pillPm, cov);
+                }
+            }
         }
         const wchar_t *col = c->colorOverride;
         if (c->warn) col = g_cfg.warn;
         COLORREF vc = col ? colorrefFromHex(col, 255) : fgCr;
+        // #seg-tokens:hover .val -> the value turns pinkDeep on hover
+        if (i == g_hover && c->align == 2 && c->iconSvg == SVG_DIAMOND) vc = colorrefFromHex(g_cfg.pinkDeep, 255);
         int tx = c->r.left;
         SetTextColor(g_memDc, vc);
-        if (c->iconCp) {
+        if (c->iconSvg >= 0) {
+            // single-color icon set; theme.iconColor, else pinkDeep
+            const wchar_t *icol = (g_cfg.iconColor && *g_cfg.iconColor) ? g_cfg.iconColor : g_cfg.pinkDeep;
+            COLORREF acc = colorrefFromHex(icol, 255);
+            int iy = (g_dibH - svgBox) / 2;
+            if (c->iconSvg == SVG_BAT)
+                svgDrawBatt(g_memDc, g_m.battPct, g_m.battAc, acc, colorrefFromHex(g_cfg.warn, 255),
+                            colorrefFromHex(g_cfg.tint, 255), tx, iy);
+            else
+                svgDraw(g_memDc, c->iconSvg, acc, tx, iy);
+            tx += iconW[i] + (int)icoGap;
+        } else if (c->iconCp) {
             wchar_t ico[8];
             chipIconText(c, ico);
-            COLORREF ic = c->iconYellow ? colorrefFromHex(g_cfg.yellow, 255)
-                                        : colorrefFromHex(g_cfg.pinkDeep, 255);
+            const wchar_t *icol2 = (g_cfg.iconColor && *g_cfg.iconColor) ? g_cfg.iconColor : g_cfg.pinkDeep;
+            COLORREF ic = colorrefFromHex(icol2, 255);
             SetTextColor(g_memDc, ic);
             RECT ir = { tx, 0, tx + iconW[i] + 8, textH };
             DrawTextW(g_memDc, ico, -1, &ir, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
@@ -495,6 +676,19 @@ static void repaintBar(HWND hwnd) {
         DWORD v = px[i];
         if ((v & 0xFF000000u) == 0 && (v & 0x00FFFFFFu) != 0) px[i] = v | 0xFF000000u;
     }
+    // theme.iconOpacity: fade the freshly drawn icons (boxes recorded by svgDraw)
+    if (g_iconBoxN > 0) {
+        int cov = (int)(g_iconOpacity * 255.0);
+        for (int b = 0; b < g_iconBoxN; b++) {
+            RECT *bx = &g_iconBoxes[b];
+            for (int yy = bx->top > 0 ? bx->top : 0; yy < bx->bottom && yy < g_dibH; yy++)
+                for (int xx = bx->left > 0 ? bx->left : 0; xx < bx->right && xx < g_dibW; xx++) {
+                    DWORD v2 = px[(size_t)yy * g_dibW + xx];
+                    if ((v2 & 0xFF000000u) == 0xFF000000u) px[(size_t)yy * g_dibW + xx] = pxScale(v2, cov);
+                }
+        }
+        g_iconBoxN = 0;
+    }
 
     // hand the buffer to DWM; keeps the current window position
     POINT ptSrc = {0, 0};
@@ -511,15 +705,34 @@ static int g_paintHooked = 0;
 static void paint(HWND hwnd) { repaintBar(hwnd); (void)g_paintHooked; }
 
 
+static int wikilessContains(const wchar_t *hay, const wchar_t *needle) {
+    if (!hay || !needle || !*needle) return 1;
+    int nl = lstrlenW(needle);
+    int hl = lstrlenW(hay);
+    for (int i = 0; i + nl <= hl; i++) {
+        if (CompareStringW(LOCALE_INVARIANT, NORM_IGNORECASE, hay + i, nl, needle, nl) == CSTR_EQUAL) return 1;
+    }
+    return 0;
+}
+
 static int isTerminalHwnd(HWND h) {
     if (!h || h == g_bar) return 0;
     wchar_t cls[64];
     if (!GetClassNameW(h, cls, 64)) return 0;
-    if (g_cfg.terminalClassName && *g_cfg.terminalClassName) return !lstrcmpiW(cls, g_cfg.terminalClassName);
-    return !lstrcmpiW(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") ||
-           !lstrcmpiW(cls, L"ConsoleWindowClass") ||
-           !lstrcmpiW(cls, L"VirtualConsoleClass") ||
-           !lstrcmpiW(cls, L"mintty");
+    int classOk;
+    if (g_cfg.terminalClassName && *g_cfg.terminalClassName) classOk = !lstrcmpiW(cls, g_cfg.terminalClassName);
+    else classOk = !lstrcmpiW(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") ||
+                   !lstrcmpiW(cls, L"ConsoleWindowClass") ||
+                   !lstrcmpiW(cls, L"VirtualConsoleClass") ||
+                   !lstrcmpiW(cls, L"mintty");
+    if (!classOk) return 0;
+    // configured title substring must match too (else any same-class window wins)
+    if (g_cfg.terminalTitle && *g_cfg.terminalTitle) {
+        wchar_t title[128];
+        if (!GetWindowTextW(h, title, 128)) return 0;
+        if (!wikilessContains(title, g_cfg.terminalTitle)) return 0;
+    }
+    return 1;
 }
 
 static HWND findTerminalByProbe(void) {
@@ -528,7 +741,16 @@ static HWND findTerminalByProbe(void) {
     // "don't follow anything" would silently attach to the first wt found).
     if (g_cfg.terminalClassName && *g_cfg.terminalClassName) {
         HWND h = FindWindowW(g_cfg.terminalClassName, NULL);
-        if (h && h != g_bar) return h;
+        if (h && isTerminalHwnd(h)) return h;
+        // class+title: enumerate (FindWindowW only returns the first match)
+        if (g_cfg.terminalTitle && *g_cfg.terminalTitle) {
+            h = NULL;
+            for (;;) {
+                h = FindWindowExW(NULL, h, g_cfg.terminalClassName, NULL);
+                if (!h) break;
+                if (isTerminalHwnd(h)) return h;
+            }
+        }
         return NULL;
     }
     static const wchar_t *const classes[] = {
@@ -636,7 +858,7 @@ static void followTick(void) {
         g_lastTarget = target;
         g_haveTarget = 1;
         // insertAfter semantics: the bar sits DIRECTLY BELOW the terminal in z
-        SetWindowPos(g_bar, g_term, target.left, target.top,
+        SetWindowPos(g_bar, HWND_TOPMOST, target.left, target.top, // keep always-on-top (Electron 'floating'); inserting after a normal window would clear it
                      target.right - target.left, target.bottom - target.top,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g_barVisible = 1;
@@ -664,6 +886,449 @@ static void configCheckTick(void) {
     }
 }
 
+// ---- dashboard popups (token usage + subscriptions) ------------------------
+// Electron opens frameless BrowserWindows (840x580 / 820x480 CSS, opaque
+// pinkBg, Win11-rounded by DWM). The native panels mirror that: WS_POPUP,
+// DWM-rounded corners, one panel at a time, chip click toggles.
+static HWND g_dash = NULL;
+static int g_dashType = 0;          // 0 = token usage, 1 = subs board
+static void *g_dashBits = NULL;
+static HBITMAP g_dashDib = NULL;
+static HDC g_dashDc = NULL;
+static HGDIOBJ g_dashOldBmp = NULL;
+static LONG g_dashW = 0, g_dashH = 0;
+static int g_dashPainted = -1;      // which type the current DIB shows
+
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#define DWMWCP_ROUND_NATIVE 2
+
+static void dashRoundCorners(HWND h) {
+    typedef HRESULT (WINAPI *PFN)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE m = GetModuleHandleW(L"dwmapi.dll");
+    if (!m) m = LoadLibraryW(L"dwmapi.dll");
+    if (!m) return;
+    PFN f = (PFN)(void *)GetProcAddress(m, "DwmSetWindowAttribute");
+    if (f) { DWORD pref = DWMWCP_ROUND_NATIVE; f(h, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref)); }
+}
+
+static void uiFontFamily(wchar_t *fam, int cb) {
+    const wchar_t *src = g_cfg.fontFamily;
+    int n = 0;
+    while (src && *src && *src != L'\'' && *src != L'-' && !iswalpha(*src)) src++;
+    if (src && *src == L'\'') {
+        src++;
+        while (src[n] && src[n] != L'\'' && n < cb - 1) { fam[n] = src[n]; n++; }
+    } else {
+        while (src && src[n] && src[n] != L',' && n < cb - 1) { fam[n] = src[n]; n++; }
+    }
+    fam[n] = 0;
+    if (!fam[0]) lstrcpynW(fam, L"Segoe UI", cb);
+}
+
+static HFONT dashFont(int cssPx, int weight) {
+    wchar_t fam[64];
+    uiFontFamily(fam, 64);
+    return CreateFontW(-(int)(cssPx * g_scale + 0.5), 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                       DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, fam);
+}
+
+static void dashText(HDC dc, int x, int y, const wchar_t *s, COLORREF cr,
+                     HFONT f, int rightAlign, int maxW) {
+    SelectObject(dc, f);
+    SetTextColor(dc, cr);
+    RECT r = { x, y, rightAlign ? x + maxW : x + 4000, y + (int)(40 * g_scale) };
+    DrawTextW(dc, s, -1, &r, DT_SINGLELINE | DT_LEFT | (rightAlign ? DT_RIGHT : 0));
+}
+
+// heatmap ramp: theme.heatmap from the config (COLORREF resolved at paint)
+static COLORREF dashRamp[5];
+
+static void paintDash(HWND hwnd) {
+    if (!g_dashDc) {
+        g_dashDc = CreateCompatibleDC(NULL);
+        g_dashOldBmp = NULL;
+    }
+    RECT rc; GetClientRect(hwnd, &rc);
+    LONG w = rc.right, h = rc.bottom;
+    if (w < 1 || h < 1) return;
+    if (w != g_dashW || h != g_dashH || !g_dashDib || g_dashPainted != g_dashType) {
+        if (g_dashDib) { DeleteObject(g_dashDib); g_dashDib = NULL; g_dashBits = NULL; }
+        BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void *bits = NULL;
+        g_dashDib = CreateDIBSection(g_dashDc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+        if (!g_dashDib || !bits) return;
+        g_dashOldBmp = SelectObject(g_dashDc, g_dashDib);
+        g_dashBits = bits;
+        g_dashW = w; g_dashH = h;
+        g_dashPainted = g_dashType;
+    }
+    HDC dc = g_dashDc;
+    COLORREF bg = colorrefFromHex(g_cfg.pinkBg, 255);
+    COLORREF card = colorrefFromHex(g_cfg.tint, 255);
+    COLORREF fg = colorrefFromHex(g_cfg.fg, 255);
+    COLORREF dim = colorrefFromHex(g_cfg.fgDim, 255);
+    COLORREF pink = colorrefFromHex(g_cfg.pinkDeep, 255);
+    COLORREF warn = colorrefFromHex(g_cfg.warn, 255);
+    // opaque panel background
+    {
+        HBRUSH b = CreateSolidBrush(bg);
+        RECT fr = { 0, 0, w, h };
+        FillRect(dc, &fr, b);
+        DeleteObject(b);
+    }
+    SetBkMode(dc, TRANSPARENT);
+    for (int i = 0; i < 5; i++) dashRamp[i] = colorrefFromHex(g_cfg.heatmap[i], 255);
+    HFONT fTitle = dashFont(15, FW_BOLD);
+    HFONT fBody = dashFont(11, FW_SEMIBOLD);
+    HFONT fVal = dashFont(17, FW_BOLD);
+    HFONT fSmall = dashFont(10, FW_NORMAL);
+
+    int pad = (int)(18 * g_scale);
+    if (g_dashType == 0) {
+        // ---- token usage panel
+        dashText(dc, pad, (int)(12 * g_scale), L"Token usage", fg, fTitle, 0, 0);
+        wchar_t sub[64];
+        if (g_lastScanMs) {
+            swprintf(sub, 63, L"last scan %lld s ago", (long long)((GetTickCount64() - (unsigned long long)g_lastScanMs) / 1000));
+        } else lstrcpynW(sub, L"no scan yet", 64);
+        dashText(dc, pad + (int)(120 * g_scale), (int)(18 * g_scale), sub, dim, fSmall, 0, 0);
+
+        // stat cards: Today / Last 7 days / Last 30 days / All time
+        struct { const wchar_t *label; long long v; } cards[4] = {
+            { L"Today", g_tokensToday }, { L"Last 7 days", g_tokWeek },
+            { L"Last 30 days", g_tokMonth }, { L"All time", g_tokAll } };
+        int cy = (int)(46 * g_scale), chh = (int)(54 * g_scale), gap = (int)(10 * g_scale);
+        int cw = (w - 2 * pad - 3 * gap) / 4;
+        for (int i = 0; i < 4; i++) {
+            int cx = pad + i * (cw + gap);
+            // stat card: tint fill, small rounded corners
+            int rr = (int)(4 * g_scale);
+            HBRUSH b = CreateSolidBrush(card);
+            LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = card; lb1.lbHatch = 0;
+            HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL);
+            HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pen);
+            RoundRect(dc, cx, cy, cx + cw, cy + chh, rr * 2, rr * 2);
+            SelectObject(dc, ob); SelectObject(dc, op);
+            DeleteObject(b); DeleteObject(pen);
+            dashText(dc, cx + (int)(12 * g_scale), cy + (int)(7 * g_scale), cards[i].label, dim, fSmall, 0, 0);
+            wchar_t vs[32];
+            fmtTokens(cards[i].v, vs, 32);
+            dashText(dc, cx + (int)(12 * g_scale), cy + (int)(24 * g_scale), vs, fg, fVal, 0, 0);
+        }
+
+        // heatmap: 26 weeks x 7 days, 11px cells, 3px gaps
+        long long nz[150]; int nnz = 0;
+        for (int i = 0; i < DASH_MAX_DAYS && nnz < 150; i++) if (g_dayTot[i] > 0) nz[nnz++] = g_dayTot[i];
+        for (int i = 1; i < nnz; i++) { long long v = nz[i]; int j = i - 1; while (j >= 0 && nz[j] > v) { nz[j + 1] = nz[j]; j--; } nz[j + 1] = v; }
+        long long th[3] = { 1, 1, 1 };
+        if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
+        int cell = (int)(11 * g_scale), cgap = (int)(3 * g_scale);
+        int hy = (int)(118 * g_scale);
+        int weeks = 26;
+        int rowLabW = (int)(21 * g_scale);
+        for (int wk = 0; wk < weeks; wk++) {
+            for (int dow = 0; dow < 7; dow++) {
+                int idx = DASH_MAX_DAYS - 1 - ((weeks - 1 - wk) * 7 + (6 - dow));
+                int cx = pad + rowLabW + wk * (cell + cgap);
+                int cyy = hy + dow * (cell + cgap);
+                if (idx < 0) continue;
+                long long t = g_dayTot[idx];
+                COLORREF cc = card; // level 0
+                if (t > 0) {
+                    int lv = (t <= th[0]) ? 1 : (t <= th[1]) ? 2 : (t <= th[2]) ? 3 : 4;
+                    cc = dashRamp[lv];
+                }
+                HBRUSH b = CreateSolidBrush(cc);
+                RECT fr = { cx, cyy, cx + cell, cyy + cell };
+                FillRect(dc, &fr, b);
+                DeleteObject(b);
+            }
+        }
+        // legend: less [][][][][] more
+        int ly = hy + 7 * (cell + cgap) + (int)(2 * g_scale);
+        dashText(dc, pad + rowLabW, ly, L"less", dim, fSmall, 0, 0);
+        int lx = pad + rowLabW + (int)(28 * g_scale);
+        for (int i = 0; i < 5; i++) {
+            HBRUSH b = CreateSolidBrush(dashRamp[i]);
+            RECT fr = { lx + i * (cell / 2 + cgap / 2), ly + (int)(2 * g_scale),
+                        lx + i * (cell / 2 + cgap / 2) + cell / 2, ly + (int)(2 * g_scale) + cell / 2 };
+            FillRect(dc, &fr, b);
+            DeleteObject(b);
+        }
+        dashText(dc, lx + 5 * (cell / 2 + cgap / 2) + (int)(4 * g_scale), ly, L"more", dim, fSmall, 0, 0);
+
+        // apps table: all-time per app, share bar
+        int ay = ly + (int)(30 * g_scale);
+        dashText(dc, pad, ay, L"Apps", fg, fBody, 0, 0);
+        ay += (int)(22 * g_scale);
+        long long maxAll = 1;
+        for (int i = 0; i < g_appCount; i++) if (g_appAll[i] > maxAll) maxAll = g_appAll[i];
+        int rowH = (int)(22 * g_scale);
+        int barW = (int)(240 * g_scale);
+        for (int i = 0; i < g_appCount && ay + rowH < h - (int)(8 * g_scale); i++) {
+            int ry = ay + i * rowH;
+            wchar_t an[24];
+            MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
+            dashText(dc, pad, ry + (int)(3 * g_scale), an, fg, fBody, 0, 0);
+            // share bar
+            int bx = pad + (int)(140 * g_scale);
+            int by = ry + (int)(5 * g_scale), bh = (int)(8 * g_scale);
+            HBRUSH track = CreateSolidBrush(colorrefFromHex(g_cfg.divider, 255));
+            RECT fr = { bx, by, bx + barW, by + bh };
+            FillRect(dc, &fr, track);
+            DeleteObject(track);
+            long long v = g_appAll[i];
+            int fw = (int)((double)barW * (double)v / (double)maxAll);
+            if (fw > 0) {
+                HBRUSH b = CreateSolidBrush(pink);
+                RECT fr2 = { bx, by, bx + fw, by + bh };
+                FillRect(dc, &fr2, b);
+                DeleteObject(b);
+            }
+            wchar_t vs[32];
+            fmtTokens(v, vs, 32);
+            dashText(dc, bx + barW + (int)(12 * g_scale), ry + (int)(3 * g_scale), vs, dim, fBody, 0, 0);
+        }
+        if (g_appCount == 0) {
+            dashText(dc, pad, ay, g_tokensToday >= 0 ? L"No usage recorded yet." : L"Token usage tracking is off (tokens.enabled).", dim, fBody, 0, 0);
+        }
+    } else {
+        // ---- subscriptions board
+        dashText(dc, pad, (int)(12 * g_scale), L"Subscriptions", fg, fTitle, 0, 0);
+        int y = (int)(52 * g_scale);
+        int shown = 0;
+        int n = g_cfg.subsProviderCount; if (n > MAX_SUBS) n = MAX_SUBS;
+        for (int i = 0; i < n; i++) {
+            if (!subsProvEnabled(i)) continue; // disabled: no panel (Electron parity)
+            wchar_t label[48];
+            subsProvLabel(i, label, 48);
+            wchar_t head[80];
+            SubsWin wins[4];
+            int wn = subsProvWins(i, wins, 4);
+            int stale = wn < 0;
+            if (wn < 0) wn = -wn;
+            swprintf(head, 79, L"%ls%ls", label, stale ? L"  (stale)" : L"");
+            dashText(dc, pad, y, head, stale ? warn : fg, fBody, 0, 0);
+            y += (int)(24 * g_scale);
+            if (wn == 0) {
+                dashText(dc, pad + (int)(16 * g_scale), y, L"\x2014  no data yet", dim, fBody, 0, 0);
+                y += (int)(26 * g_scale);
+            }
+            int barW = w - 2 * pad - (int)(252 * g_scale); // leave room for the used/total text
+            for (int k = 0; k < wn; k++) {
+                dashText(dc, pad + (int)(16 * g_scale), y, wins[k].label, fg, fBody, 0, 0);
+                int bx = pad + (int)(90 * g_scale);
+                int by = y + (int)(4 * g_scale), bh = (int)(10 * g_scale);
+                HBRUSH track = CreateSolidBrush(colorrefFromHex(g_cfg.divider, 255));
+                RECT fr = { bx, by, bx + barW, by + bh };
+                FillRect(dc, &fr, track);
+                DeleteObject(track);
+                int fw = (int)((double)barW * (double)wins[k].pct / 100.0);
+                if (fw > 0) {
+                    HBRUSH b = CreateSolidBrush(wins[k].pct >= 90 ? warn : pink);
+                    RECT fr2 = { bx, by, bx + fw, by + bh };
+                    FillRect(dc, &fr2, b);
+                    DeleteObject(b);
+                }
+                wchar_t rs[64];
+                if (wins[k].used >= 0 && wins[k].total > 0) {
+                    wchar_t us[24], ts2[24];
+                    fmtTokens(wins[k].used, us, 24);
+                    fmtTokens(wins[k].total, ts2, 24);
+                    swprintf(rs, 63, L"%ls / %ls \x2014 %d%% used", us, ts2, wins[k].pct);
+                } else swprintf(rs, 63, L"%d%% used", wins[k].pct);
+                dashText(dc, bx + barW + (int)(12 * g_scale), y, rs, wins[k].pct >= 90 ? warn : dim, fBody, 0, 0);
+                y += (int)(24 * g_scale);
+            }
+            y += (int)(10 * g_scale);
+            shown++;
+        }
+        if (!shown) dashText(dc, pad, y, g_cfg.subsEnabled ? L"No providers enabled." : L"Subscriptions are off (subs.enabled).", dim, fBody, 0, 0);
+    }
+    DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal); DeleteObject(fSmall);
+
+    HDC wdc = GetDC(hwnd);
+    BitBlt(wdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+    ReleaseDC(hwnd, wdc);
+}
+
+static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        paintDash(hwnd);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); }
+        return 0;
+    case WM_RBUTTONUP:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_dash = NULL;
+        g_dashPainted = -1;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void dashToggle(int type) {
+    if (g_dash) {
+        if (g_dashType == type) { DestroyWindow(g_dash); g_dash = NULL; return; }
+        g_dashType = type;
+        SetWindowTextW(g_dash, type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions");
+        InvalidateRect(g_dash, NULL, FALSE);
+        SetForegroundWindow(g_dash);
+        return;
+    }
+    scanTokenCache(); // fresh numbers for the panel
+    int cw = (int)((double)(type == 0 ? g_cfg.dashW : g_cfg.subsW) * g_scale + 0.5);
+    int ch = (int)((double)(type == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale + 0.5);
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    if (cw > sw - 40) cw = sw - 40;
+    if (ch > sh - 40) ch = sh - 40;
+    WNDCLASSW wc; memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = dashProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"ChocobarDash";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassW(&wc);
+    g_dashType = type;
+    g_dash = CreateWindowExW(0, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
+                             WS_POPUP | WS_VISIBLE, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
+                             NULL, NULL, GetModuleHandleW(NULL), NULL);
+    if (!g_dash) return;
+    dashRoundCorners(g_dash);
+    SetForegroundWindow(g_dash);
+    InvalidateRect(g_dash, NULL, FALSE);
+}
+
+// ---- hover tooltips (Electron: seg.title) -----------------------------------
+static HWND g_tip = NULL;
+static int g_tipOn = 0;
+static HFONT g_tipFont = NULL;
+static HDC g_tipDc = NULL;
+static HBITMAP g_tipDib = NULL;
+static HGDIOBJ g_tipOldBmp = NULL;
+static void *g_tipBits = NULL;
+static LONG g_tipW = 0, g_tipH = 0;
+
+static void tipHide(void) {
+    if (g_tip && g_tipOn) ShowWindow(g_tip, SW_HIDE);
+    g_tipOn = 0;
+}
+
+static void tipShow(const wchar_t *text, int cx, int cy) {
+    if (!text || !*text) { tipHide(); return; }
+    if (!g_tipFont) {
+        g_tipFont = CreateFontW(-(int)(12 * g_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    }
+    if (!g_tip) {
+        WNDCLASSW wc; memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = DefWindowProcW;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"ChocobarTip";
+        RegisterClassW(&wc);
+        g_tip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+                                L"ChocobarTip", L"", WS_POPUP, 0, 0, 10, 10, NULL, NULL, GetModuleHandleW(NULL), NULL);
+        if (!g_tip) return;
+    }
+    if (!g_tipDc) g_tipDc = CreateCompatibleDC(NULL);
+    HFONT of = (HFONT)SelectObject(g_tipDc, g_tipFont);
+    SIZE ts; GetTextExtentPoint32W(g_tipDc, text, lstrlenW(text), &ts);
+    SelectObject(g_tipDc, of);
+    int padX = (int)(7 * g_scale), padY = (int)(4 * g_scale);
+    LONG w = ts.cx + 2 * padX, h = ts.cy + 2 * padY;
+    if (w != g_tipW || h != g_tipH || !g_tipDib) {
+        if (g_tipDib) DeleteObject(g_tipDib);
+        BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        g_tipDib = CreateDIBSection(g_tipDc, &bi, DIB_RGB_COLORS, &g_tipBits, NULL, 0);
+        if (!g_tipDib) return;
+        g_tipOldBmp = SelectObject(g_tipDc, g_tipDib);
+        g_tipW = w; g_tipH = h;
+    }
+    DWORD *px = (DWORD *)g_tipBits;
+    // opaque white tooltip, gray hairline border, opaque alpha
+    for (LONG yy = 0; yy < h; yy++)
+        for (LONG xx = 0; xx < w; xx++) {
+            int border = (xx == 0 || yy == 0 || xx == w - 1 || yy == h - 1);
+            px[yy * w + xx] = border ? 0xFFC8C8C8 : 0xFFFFFFFF;
+        }
+    RECT tr = { padX, padY, w - padX, h };
+    SelectObject(g_tipDc, g_tipFont);
+    SetBkMode(g_tipDc, TRANSPARENT);
+    SetTextColor(g_tipDc, RGB(31, 31, 31));
+    DrawTextW(g_tipDc, text, -1, &tr, DT_SINGLELINE | DT_LEFT);
+    // clamp to the screen, then place below-right of the cursor
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    int x = cx + (int)(6 * g_scale), y = cy + (int)(16 * g_scale);
+    if (x + w > sw) x = cx - w - (int)(6 * g_scale);
+    if (y + h > sh) y = cy - h - (int)(14 * g_scale);
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+    POINT ptSrc = { 0, 0 };
+    SIZE sz = { w, h };
+    BLENDFUNCTION bl = { AC_SRC_OVER, 0, 255, 0 };
+    UpdateLayeredWindow(g_tip, NULL, NULL, &sz, g_tipDc, &ptSrc, 0, &bl, ULW_ALPHA);
+    ShowWindow(g_tip, SW_SHOWNOACTIVATE);
+    g_tipOn = 1;
+}
+
+// Electron seg.title table
+static const wchar_t *chipTitle(int idx) {
+    static wchar_t buf[320];
+    if (idx < 0 || idx >= g_chipCount) return NULL;
+    Chip *c = &g_chips[idx];
+    switch (c->type) {
+    case CT_SHORTCUT:
+        if (g_cfg.shortcutCommand && *g_cfg.shortcutCommand) {
+            swprintf(buf, 319, L"Run: %ls", g_cfg.shortcutCommand);
+            return buf;
+        }
+        return L"Shortcut (set modules.shortcut.command in the config)";
+    case CT_PET:
+        return NULL;
+    case CT_CUSTOM:
+        if (c->iconSvg == SVG_DIAMOND) return L"Token usage today";
+        if (c->iconSvg == SVG_GAUGE) return L"Subscription plan remaining";
+        if (c->customIdx >= 0 && c->customIdx < MAX_CUSTOM) {
+            CustomChip *cc = &g_cfg.custom[c->customIdx];
+            if (cc->title && *cc->title) return cc->title;
+            if (cc->label && *cc->label) return cc->label;
+            return L"Custom chip";
+        }
+        return NULL;
+    case CT_GPU: return L"GPU usage";
+    case CT_CPU: return L"CPU usage";
+    case CT_CPUTEMP: return L"CPU temperature";
+    case CT_RAM: return L"Memory usage";
+    case CT_VOLUME: return L"Volume";
+    case CT_BATTERY: return L"Battery";
+    case CT_CLOCK: return L"Local time";
+    }
+    return NULL;
+}
+
 static int chipAt(POINT p) {
     for (int i = 0; i < g_chipCount; i++) {
         if (PtInRect(&g_chips[i].r, p)) return i;
@@ -677,7 +1342,13 @@ static void chipClick(int idx) {
     case CT_SHORTCUT: execCmd(g_cfg.shortcutCommand); break;
     case CT_PET: petToggle(); break;
     case CT_CUSTOM: {
-        if (c->customIdx < 0 || c->customIdx >= MAX_CUSTOM) break; // display-only chip
+        if (c->customIdx < 0 || c->customIdx >= MAX_CUSTOM) {
+            // display-only chip: the dashboard openers (diamond = token
+            // usage, gauge = subscriptions board)
+            if (c->iconSvg == SVG_DIAMOND) dashToggle(0);
+            else if (c->iconSvg == SVG_GAUGE) dashToggle(1);
+            break;
+        }
         CustomChip *cc = &g_cfg.custom[c->customIdx];
         if (!cc->command) break;
         if (cc->toggle) {
@@ -785,6 +1456,14 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hover = h;
             repaintBar(hwnd);
         }
+        // title tooltips (Electron: seg.title): the metric segs show the
+        // small label, the pinned chips theirs; no chip = no tooltip
+        { char dbg[48]; sprintf(dbg, "mm h=%d x=%d", h, (int)(short)LOWORD(lp)); writeLogA(dbg); }
+        const wchar_t *tt = chipTitle(h);
+        if (tt) {
+            POINT sp; GetCursorPos(&sp);
+            tipShow(tt, sp.x, sp.y);
+        } else tipHide();
         if (!g_trackingMouse) {
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
             TrackMouseEvent(&tme);
@@ -795,12 +1474,18 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         g_hover = -1;
         g_trackingMouse = 0;
+        tipHide();
         repaintBar(hwnd);
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int h = chipAt(p);
         if (h >= 0) chipClick(h);
+        else if (g_term) {
+            // the bar is the terminal's title-strip substitute: clicking the
+            // strip (not a chip) raises the followed terminal
+            SetForegroundWindow(g_term);
+        }
         return 0;
     }
     case WM_TRAY:
@@ -821,13 +1506,19 @@ static void CALLBACK winEventProc(HWINEVENTHOOK h, DWORD event, HWND hwnd, LONG 
 
 static const char *g_template =
     "// Chocobar (native build) config. Saved on first run; hot-reloads on save.\r\n"
-    "// This build reads a subset of the Chocobar config format today:\r\n"
-    "// bar look, metric chips, clock, shortcut/pet/custom chips, tray.\r\n"
+    "// Everything below is optional - delete a key and the built-in default applies.\r\n"
     "{\r\n"
     "  \"bar\": { \"height\": 24, \"gap\": 8, \"fontSize\": 12,\r\n"
-    "            \"backgroundTint\": \"#FBF2E2\", \"backgroundAlpha\": 110, \"backdrop\": \"acrylic\" },\r\n"
-    "  \"theme\": { \"fg\": \"#080808\", \"pinkDeep\": \"#D493AA\", \"warn\": \"#A00000\" },\r\n"
+    "            \"backgroundTint\": \"#FBF2E2\", \"backgroundAlpha\": 110, \"backdrop\": \"acrylic\",\r\n"
+    "            \"radius\": 8 },\r\n"
+    "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#E8C7D0\", \"pinkDeep\": \"#D493AA\",\r\n"
+    "              \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
+    "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 100,\r\n"
+    "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
+    "  \"dashboard\": { \"width\": 840, \"height\": 580 },\r\n"
+    "  \"tokens\": { \"appFilter\": [], \"cachePath\": \"\" },\r\n"
     "  \"modules\": {\r\n"
+    "    \"gpu\": { \"enabled\": true },\r\n"
     "    \"cpu\":  { \"enabled\": true, \"warnAt\": 85 },\r\n"
     "    \"cputemp\": { \"enabled\": true, \"warnAt\": 85 },\r\n"
     "    \"ram\":  { \"enabled\": true, \"warnAt\": 90 },\r\n"
@@ -840,7 +1531,13 @@ static const char *g_template =
     "      { \"enabled\": false, \"icon\": \"\", \"label\": \"Example\", \"command\": \"notepad.exe\", \"toggle\": false }\r\n"
     "    ]\r\n"
     "  },\r\n"
-    "  \"terminal\": { \"className\": \"\" },\r\n"
+    "  \"subs\": { \"enabled\": false, \"intervalMinutes\": 2, \"fetchTimeoutMs\": 20000,\r\n"
+    "             \"width\": 820, \"height\": 480,\r\n"
+    "             \"providers\": [\r\n"
+    "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
+    "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" }\r\n"
+    "             ] },\r\n"
+    "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
     "  \"general\": { \"showTray\": true }\r\n"
     "}\r\n";
 
@@ -936,8 +1633,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     RegisterClassW(&wc);
 
+    // WS_EX_TOPMOST: the Electron bar is always-on-top ('floating'); without
+    // it the followed terminal raises over the bar and swallows every
+    // click/hover meant for the chips
     g_bar = CreateWindowExW(
-        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         APP_CLASS, L"Chocobar", WS_POPUP,
         -2000, -2000, 800, (int)(g_cfg.height * g_scale + 0.5),
         NULL, NULL, hInst, NULL);
@@ -955,6 +1655,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
 
     trayAdd(g_bar);
 
+    svgInitAll();
     SendMessageW(g_bar, WM_TIMER, TIMER_METRICS, 0); // prime metrics + first paint
     // layered windows never receive WM_PAINT: draw + UpdateLayeredWindow explicitly
     paint(g_bar);
