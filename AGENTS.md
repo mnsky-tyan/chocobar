@@ -52,6 +52,17 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 ## Terminal follow + subscription source
 
+- Native bar chip semantics mirror the Electron renderer exactly: the token
+  value = today's `input + output + cacheRead + cacheWrite` (Electron
+  rowTotal, NOT cache-exclusive - do not "fix"), read from the Electron
+  app's `~/.wizbar/token-cache.json` (v4) with a needle scan; keys may
+  arrive mid-rewrite (retry full-size reads). Local midnight must go
+  through LocalFileTimeToFileTime (SystemTimeToFileTime treats fields as
+  UTC; HKT showed an exact 8h shift). GDI colors: hexToColorref returns a
+  real COLORREF (raw 0xRRGGBB byte-swapped), and hand-written DIB pixels
+  are DWORD = A<<24 | R<<16 | G<<8 | B. GDI text runs ~15% wider than
+  browser metrics at the same nominal px - the bar scales the font by
+  0.864 to match Electron's measured layout.
 - Terminal targeting is terminal-agnostic: `terminal.className: ""` (default)
   probes Windows Terminal / conhost / ConEmu / mintty by Win32 class, then
   WezTerm / Alacritty / Hyper by owning process (their class is the generic
