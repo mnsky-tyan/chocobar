@@ -99,7 +99,7 @@ static void pollGpu(void) {
     double sum = 0;
     if (PdhGetFormattedCounterArrayW(g_gpuCounter, PDH_FMT_DOUBLE, &size, &count, items) == ERROR_SUCCESS) {
         for (DWORD i = 0; i < count; i++)
-            if (items[i].FmtValue.CStatus == ERROR_SUCCESS) sum += items[i].FmtValue.largeValue;
+            if (items[i].FmtValue.CStatus == ERROR_SUCCESS) sum += items[i].FmtValue.doubleValue;
     }
     HeapFree(GetProcessHeap(), 0, items);
     if (sum < 0) sum = 0;
