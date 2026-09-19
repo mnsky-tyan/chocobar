@@ -561,6 +561,14 @@ function wireBar() {
     tracker.on('visibility', (v) => {
       if (configManager.config.general.debug) DBG('visibility', v);
       if (v) {
+        // Restore is not just a z-order fixup: hide() cleared _shouldShow, so
+        // without a fresh applyGeometry the heal loop leaves the bar hidden
+        // forever whenever the restore lands on the same rect (no geometry
+        // event follows). Re-derive bounds from the terminal itself.
+        const rect = tracker.frameBounds();
+        const bounds = rect && tracker.computeBarBounds(rect, configManager.config.bar);
+        if (bounds) bar.applyGeometry(bounds);
+        else bar.hide();
         syncZ(tracker.hwnd, true); // re-insert above terminal on restore
       } else {
         bar.hide();
