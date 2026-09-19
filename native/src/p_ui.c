@@ -142,7 +142,7 @@ static int initRender(HWND hwnd) {
         while (src && src[n] && src[n] != L',' && n < 63) { fam[n] = src[n]; n++; }
     }
     fam[n] = 0;
-    int px = (int)(g_cfg.fontSize * g_scale * 0.77 + 0.5); // GDI rasterizes ~30% taller/wider than DirectWrite at the same nominal px; calibrated against the live bars
+    int px = (int)(g_cfg.fontSize * g_scale * 0.887 + 0.5); // width-matched to the Electron text block (GDI em renders narrower per px)
     g_font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
@@ -269,7 +269,7 @@ static void buildChips(void) {
     g_chipCount = 0;
     if (++g_tokensTick >= 30) { g_tokensTick = 0; scanTokenCache(); }
     if (g_tokensToday < 0 && g_tokensTick == 1) scanTokenCache();
-    // left pinned group: pet, tokens, divider dash
+    // left pinned group: pet, tokens, subs (Electron order)
     if (g_cfg.petEnabled) {
         wchar_t txt[16];
         int running = g_m.petRunning;
@@ -284,8 +284,25 @@ static void buildChips(void) {
         g_chips[g_chipCount - 1].align = 2;
         g_chips[g_chipCount - 1].iconYellow = 1;
     }
-    {
-        addChipI(CT_CUSTOM, -1, L"\u2014", 0, g_cfg.divider, 0);
+    if (g_cfg.subsEnabled) {
+        // Electron subs chip: percent with good/dim/warn, "stale" after a
+        // failed cycle, em dash when there is no data at all.
+        int stale = subsChipStale();
+        int rem = subsChipRem();
+        wchar_t txt[16];
+        const wchar_t *col;
+        unsigned icon = 0xF0498; // gauge
+        if (rem == -1) {
+            lstrcpynW(txt, L"\u2014", 16);
+            col = g_cfg.fgDim;
+        } else if (stale) {
+            lstrcpynW(txt, L"stale", 16);
+            col = g_cfg.fgDim;
+        } else {
+            swprintf(txt, 16, L"%d%%", rem);
+            col = rem > 70 ? g_cfg.good : rem > 30 ? g_cfg.fgDim : g_cfg.warn;
+        }
+        addChipI(CT_CUSTOM, -1, txt, 0, col, icon);
         g_chips[g_chipCount - 1].align = 2;
     }
     // right metric group: icon + bare value, like the Electron bar
@@ -506,6 +523,14 @@ static int isTerminalHwnd(HWND h) {
 }
 
 static HWND findTerminalByProbe(void) {
+    // A configured className is AUTHORITATIVE: probe only that class and
+    // never fall back to the generic list (otherwise a no-match config like
+    // "don't follow anything" would silently attach to the first wt found).
+    if (g_cfg.terminalClassName && *g_cfg.terminalClassName) {
+        HWND h = FindWindowW(g_cfg.terminalClassName, NULL);
+        if (h && h != g_bar) return h;
+        return NULL;
+    }
     static const wchar_t *const classes[] = {
         L"CASCADIA_HOSTING_WINDOW_CLASS", L"ConsoleWindowClass",
         L"VirtualConsoleClass", L"mintty"
@@ -543,7 +568,7 @@ static void petToggle(void) {
         wchar_t base[MAX_PATH];
         lstrcpynW(base, pathBaseName(g_cfg.petExePath), MAX_PATH);
         wchar_t cmd[MAX_PATH + 32];
-        swprintf(cmd, MAX_PATH + 31, L"/IM %s /F", base);
+        swprintf(cmd, MAX_PATH + 31, L"/IM %ls /F", base);
         SHELLEXECUTEINFOW sei;
         memset(&sei, 0, sizeof(sei));
         sei.cbSize = sizeof(sei);
@@ -585,7 +610,15 @@ static void followTick(void) {
     // hands-off during the terminal's modal move/size loop
     GUITHREADINFO gi; memset(&gi, 0, sizeof(gi)); gi.cbSize = sizeof(gi);
     DWORD tid = GetWindowThreadProcessId(g_term, NULL);
-    if (GetGUIThreadInfo(tid, &gi) && (gi.flags & GUI_INMOVESIZE)) return;
+    static DWORD s_lastMoveSync = 0;
+    if (GetGUIThreadInfo(tid, &gi) && (gi.flags & GUI_INMOVESIZE)) {
+        // Follow LIVE during border resizes: a full-rate SetWindowPos flood
+        // starves the modal loop (the old freeze-until-release), but a light
+        // 120ms throttle stays instant-feeling without starving anything.
+        DWORD now = GetTickCount();
+        if (now - s_lastMoveSync < 120) return;
+        s_lastMoveSync = now;
+    }
 
     RECT ef;
     if (DwmGetWindowAttribute(g_term, DWMWA_EXTENDED_FRAME_BOUNDS, &ef, sizeof(ef)) != S_OK)
@@ -650,7 +683,7 @@ static void chipClick(int idx) {
         if (cc->toggle) {
             g_customState[c->customIdx] = !g_customState[c->customIdx];
             wchar_t full[1100];
-            swprintf(full, 1099, L"%s %s", cc->command, g_customState[c->customIdx] ? L"on" : L"off");
+            swprintf(full, 1099, L"%ls %ls", cc->command, g_customState[c->customIdx] ? L"on" : L"off");
             execCmd(full);
         } else execCmd(cc->command);
         InvalidateRect(g_bar, NULL, FALSE);
@@ -866,7 +899,7 @@ static void resolveConfigPath(void) {
     if (!g_cfgPath[0]) {
         wchar_t home[MAX_PATH];
         GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
-        swprintf(g_cfgPath, MAX_PATH, L"%s\\.wizbar\\config.json", home);
+        swprintf(g_cfgPath, MAX_PATH, L"%ls\\.wizbar\\config.json", home);
     }
 }
 
@@ -925,6 +958,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     SendMessageW(g_bar, WM_TIMER, TIMER_METRICS, 0); // prime metrics + first paint
     // layered windows never receive WM_PAINT: draw + UpdateLayeredWindow explicitly
     paint(g_bar);
+    {
+        char dbg[160];
+        sprintf(dbg, "[wizbar] start %s %s: subs en=%d n=%d", __DATE__, __TIME__, g_cfg.subsEnabled, g_cfg.subsProviderCount);
+        writeLogA(dbg);
+    }
+    subsStart();
     followTick();
 
     MSG msg;

@@ -104,6 +104,39 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Screenshot verification of Windows windows only works while the session is
   UNLOCKED; when locked, captures show the lock screen for every window.
 
+## Native config parser (sharp edges, all bit us once)
+
+- jsmn object children are key+value PAIRS: any subtree walk must advance
+  `1 + jtokSpan(value)`; `jtokSpan` (chocobar.c) counts object children as
+  pairs. The old ad-hoc walk silently skipped top-level keys that follow a
+  deeply nested sibling (general/terminal/tokens/subs were never parsed!).
+- JSON booleans MUST go through `jboolDefault` - `jintTok` uses atoi and
+  `atoi("true") == 0` (disabled every subs provider silently).
+- MinGW `swprintf` follows C99: `%s` = char*, NOT wchar_t*. Every wide
+  format needs `%ls` or the value truncates to its first byte
+  ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
+  the default config path and both subs auth headers.
+
+## Native subs chip (p_subs.c)
+
+- Mirrors src/subs.js chip semantics: ChatGPT wham/usage (Bearer token from
+  `~/.codex/auth.json`) + Z.ai quota/limit (apiKey from the ZCode config);
+  lowest remaining window wins; chip states: em dash (no data), "stale"
+  (failed cycle keeps last good), `N%` colored good/dim/warn at 70/30.
+- The Z.ai gateway 200s with body `{code:401,msg:"token expired or
+  incorrect"}` for a bad key and 200+`{code:500}` for missing identity
+  headers - check the body `code`, not just HTTP status.
+- Fetches run on a worker thread (WinHTTP, AUTOMATIC_PROXY); the UI timer
+  only reads the latest state. HTTP failures log one line to native.log.
+
+## Dev bar etiquette
+
+- The native dev bar runs on its OWN shell: spawn a `wt` window titled
+  `chocobar-dev` away from the captain's workspace, then launch the bar so
+  it attaches to that window (sticky follow keeps it there).
+- `terminal.className` in config is AUTHORITATIVE: when set, the probe tries
+  only that class and never falls back to the generic terminal class list.
+
 ## Perf invariants (do not reintroduce)
 
 - Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);

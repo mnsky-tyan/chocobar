@@ -54,6 +54,7 @@
 #define TIMER_FOLLOW  2
 #define TIMER_CONFIG  3
 #define MAX_CUSTOM 16
+#define MAX_SUBS 4
 
 // ---------------------------------------------------------------- util ----
 static void dbg(const char *fmt, ...) {
@@ -67,6 +68,16 @@ typedef struct {
     wchar_t *icon, *label, *color, *title, *command;
     int toggle;
 } CustomChip;
+
+// subscription provider (chip fetcher; mirrors config.subs.providers)
+typedef struct {
+    int type;            // 0 = chatgpt, 1 = zai
+    int enabled;
+    wchar_t *label;
+    wchar_t *authPath;     // chatgpt auth.json
+    wchar_t *configPath;   // zai config.json
+    wchar_t *providerName; // zai provider key
+} SubsProvider;
 
 typedef struct {
     int height, gap, fontSize, backgroundAlpha, align;
@@ -89,6 +100,10 @@ typedef struct {
     wchar_t *terminalClassName;
     wchar_t *clockFormat;
     int showTray;
+
+    int subsEnabled, subsIntervalMin, subsTimeoutMs;
+    SubsProvider subsProviders[MAX_SUBS];
+    int subsProviderCount;
 } Config;
 
 static Config g_cfg;
@@ -100,6 +115,18 @@ static wchar_t *jdup(const char *js, const jsmntok_t *t) {
 }
 
 // find key `key` (len `kl`) among the children of object token `obj`
+// total token count of the subtree rooted at i (jsmn stores trees contiguously)
+static int jtokSpan(const jsmntok_t *t, int i) {
+    if (t[i].type == JSMN_PRIMITIVE || t[i].type == JSMN_STRING) return 1;
+    int n = 1;
+    for (int c = 0; c < t[i].size; c++) {
+        // object children come in key+value PAIRS; array children are single tokens
+        if (t[i].type == JSMN_OBJECT) n += 1 + jtokSpan(t, i + n + 1);
+        else n += jtokSpan(t, i + n);
+    }
+    return n;
+}
+
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key) {
     if (t[obj].type != JSMN_OBJECT) return -1;
     int kids = t[obj].size;
@@ -109,17 +136,8 @@ static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key)
         jsmntok_t *kt = &t[k];
         if (kt->type == JSMN_STRING && kt->end - kt->start == kl &&
             memcmp(js + kt->start, key, kl) == 0) return k + 1;
-        jsmntok_t *v = &t[k + 1];
-        if (v->type == JSMN_OBJECT || v->type == JSMN_ARRAY) {
-            // object children are key+value PAIRS (2N tokens); array children are N
-            int end = k + 2, stack = v->size * (v->type == JSMN_OBJECT ? 2 : 1);
-            while (stack > 0) {
-                jsmntok_t *e = &t[end];
-                if (e->type == JSMN_OBJECT || e->type == JSMN_ARRAY) stack += e->size - 1; else stack--;
-                end++;
-            }
-            k = end;
-        } else k += 2;
+        // advance past key + value subtree (object values hold key/value pairs)
+        k += 1 + jtokSpan(t, k + 1);
     }
     return -1;
 }
@@ -178,6 +196,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->cpuWarnAt = 85; c->ramWarnAt = 90; c->tempWarnAt = 85;
     c->showTray = 1;
     c->clockFormat = wideDup(L"{MMM} {dd} ({Wkk}) {HH}:{mm}");
+    c->subsEnabled = 0; c->subsIntervalMin = 2; c->subsTimeoutMs = 20000; c->subsProviderCount = 0;
 
     if (root < 0 || t[root].type != JSMN_OBJECT) return;
     int bar = jobjGet(js, t, root, "bar");
@@ -247,8 +266,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     CustomChip *cc = &c->custom[c->customCount];
                     memset(cc, 0, sizeof(*cc));
                     cc->enabled = 1; cc->toggle = 0;
-                    en = jobjGet(js, t, k, "enabled");   cc->enabled = jintTok(js, t, en, 1);
-                    en = jobjGet(js, t, k, "toggle");    cc->toggle  = jintTok(js, t, en, 0);
+                    en = jobjGet(js, t, k, "enabled");   cc->enabled = jboolDefault(js, t, en, 1);
+                    en = jobjGet(js, t, k, "toggle");    cc->toggle  = jboolDefault(js, t, en, 0);
                     cc->icon    = jstrTok(js, t, jobjGet(js, t, k, "icon"), L"");
                     cc->label   = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
                     cc->color   = jstrTok(js, t, jobjGet(js, t, k, "color"), L"");
@@ -256,16 +275,38 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     cc->command = jstrTok(js, t, jobjGet(js, t, k, "command"), L"");
                     c->customCount++;
                 }
-                // advance k past this element (object elements own 2N child tokens)
-                if (e->type == JSMN_OBJECT || e->type == JSMN_ARRAY) {
-                    int end = k + 1, stack = e->size * (e->type == JSMN_OBJECT ? 2 : 1);
-                    while (stack > 0) {
-                        jsmntok_t *x = &t[end];
-                        if (x->type == JSMN_OBJECT || x->type == JSMN_ARRAY) stack += x->size - 1; else stack--;
-                        end++;
-                    }
-                    k = end;
-                } else k += 2;
+                // advance k past this element
+                k += jtokSpan(t, k);
+            }
+        }
+    }
+    int subs = jobjGet(js, t, root, "subs");
+    if (subs >= 0 && t[subs].type == JSMN_OBJECT) {
+        c->subsEnabled = jboolDefault(js, t, jobjGet(js, t, subs, "enabled"), 0);
+        c->subsIntervalMin = jintTok(js, t, jobjGet(js, t, subs, "intervalMinutes"), c->subsIntervalMin);
+        c->subsTimeoutMs = jintTok(js, t, jobjGet(js, t, subs, "fetchTimeoutMs"), c->subsTimeoutMs);
+        int arr = jobjGet(js, t, subs, "providers");
+        if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
+            int n2 = t[arr].size;
+            if (n2 > MAX_SUBS) n2 = MAX_SUBS;
+            int k = arr + 1;
+            for (int j = 0; j < n2; j++) {
+                jsmntok_t *e = &t[k];
+                if (e->type == JSMN_OBJECT) {
+                    SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
+                    memset(sp, 0, sizeof(*sp));
+                    int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
+                    wchar_t *ty = subs == -1 ? NULL : jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
+                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1 : 0;
+                    wideFree(&ty);
+                    sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
+                    sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
+                    sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
+                    sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
+                    c->subsProviderCount++;
+                }
+                // advance k past this element
+                k += jtokSpan(t, k);
             }
         }
     }
