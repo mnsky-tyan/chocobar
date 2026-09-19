@@ -142,7 +142,7 @@ static int initRender(HWND hwnd) {
         while (src && src[n] && src[n] != L',' && n < 63) { fam[n] = src[n]; n++; }
     }
     fam[n] = 0;
-    int px = (int)(g_cfg.fontSize * g_scale * 0.864 + 0.5); // GDI runs wide vs browser metrics
+    int px = (int)(g_cfg.fontSize * g_scale * 0.77 + 0.5); // GDI rasterizes ~30% taller/wider than DirectWrite at the same nominal px; calibrated against the live bars
     g_font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
@@ -394,7 +394,8 @@ static void repaintBar(HWND hwnd) {
 
     // fill the whole DIB with the premultiplied background (alpha included)
     COLORREF fgCr = colorrefFromHex(g_cfg.fg, 255);
-    DWORD bgPixel = (DWORD)(((DWORD)bgA << 24) | ((DWORD)GetBValue(bg) << 16) | ((DWORD)GetGValue(bg) << 8) | (DWORD)GetRValue(bg));
+    // DIB 32bpp memory order is B,G,R,A -> little-endian DWORD = A<<24|R<<16|G<<8|B
+    DWORD bgPixel = (DWORD)(((DWORD)bgA << 24) | ((DWORD)GetRValue(bg) << 16) | ((DWORD)GetGValue(bg) << 8) | (DWORD)GetBValue(bg));
     DWORD *px = (DWORD *)g_bits;
     size_t total = (size_t)g_dibW * (size_t)g_dibH;
     for (size_t i = 0; i < total; i++) px[i] = bgPixel;
