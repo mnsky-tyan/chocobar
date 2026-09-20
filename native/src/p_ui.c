@@ -355,7 +355,6 @@ static void scanTokenCache(void) {
     memset(g_modelAgg, 0, sizeof(g_modelAgg));
     g_appCount = 0;
     g_modelCount = 0;
-    g_daySel = -1;
     g_tokWeek = g_tokMonth = g_tokAll = 0;
     // records look like ["key",{"app":"<name>","ts":...,...}] - walk by the
     // app key (it precedes ts inside each record)
@@ -639,7 +638,6 @@ static void repaintBar(HWND hwnd) {
 
     SetBkMode(g_memDc, TRANSPARENT);
     int textH = g_dibH;
-    int pad = (int)(6.0f * (FLOAT)g_scale);
 
     // Electron geometry: bar padding 8px left / 12px right, 14px between
     // segments, 5px between icon and value (CSS px, x2 at this DPI)
@@ -1582,7 +1580,9 @@ static void paintDash(HWND hwnd) {
             }
             int mdlOrder[DASH_MAX_MODELS], mdlN = g_modelCount;
             if (mdlN > 7) mdlN = 7;
-            for (int i = 0; i < mdlN; i++) mdlOrder[i] = i;
+            // every slot the sort loop touches must be defined: init ALL
+            // entries, sort the full set, cap only the displayed rows at 7
+            for (int i = 0; i < g_modelCount; i++) mdlOrder[i] = i;
             for (int i = 1; i < g_modelCount; i++) {
                 int v = i, j = i - 1;
                 long long vt = g_modelAgg[v].in + g_modelAgg[v].out + g_modelAgg[v].cr + g_modelAgg[v].cw;
