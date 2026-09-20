@@ -15,9 +15,10 @@ click behavior. Measured on the deployment machine: ~47 MB working set /
 34 MB private / one process (Electron baseline was 408 MB / 245 MB / four
 processes).
 
-Phase 2 (not here yet): token analytics chips + dashboards, subscription
-board, bluetooth battery, autostart writing. Until phase 2 lands, the
-Electron bar stays the daily driver.
+Phase 2 progress: the token analytics chips + dashboards and the
+subscription board are DONE (`paintDash` / `dashToggle`, ported 1:1 from
+`renderer/dash.css` + `subs.css`). Still open: bluetooth battery, autostart
+writing.
 
 ## Build (from WSL, cross-compiled)
 

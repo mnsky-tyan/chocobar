@@ -235,7 +235,9 @@ static void aggRecord(const char *app, int alen, long long ts,
         if (!ok) return;
     }
     long long sum = vin + vout + vcr + vcw;
-    long long day = (ts - midnight) / 86400000LL; // 0 = today, -n = n days ago
+    long long off = ts - midnight;
+    long long day = off / 86400000LL; // 0 = today, -n = n days ago
+    if (off % 86400000LL != 0 && off < 0) day--;
     int ai = -1;
     for (int i = 0; i < g_appCount; i++)
         if (memcmp(g_appName[i], app, alen) == 0 && g_appName[i][alen] == 0) { ai = i; break; }
@@ -1855,7 +1857,6 @@ static void paintDash(HWND hwnd) {
                     swprintf(usedLine, 71, L"%ls / %ls used", us2, ts3);
                 } else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
                 dashStr(dc, mx, ky + DX(50), usedLine, t.dim, fS10);
-                dashStr(dc, mx, ky + DX(66), wins[k].label, t.dim, fS10);
             }
             // panel foot: dashed top + fetched time right
             int fy = py2 + panelH - DX(26);
