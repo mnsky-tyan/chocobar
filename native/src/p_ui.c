@@ -192,7 +192,7 @@ static int g_tokensTick = 0;
 
 // ---- dashboard aggregation (filled by scanTokenCache) ----------------------
 #define DASH_MAX_APPS 12
-#define DASH_MAX_MODELS 16
+#define DASH_MAX_MODELS 64
 #define DASH_MAX_DAYS 190
 // token-cache record fields kept separately: the Electron dash shows the
 // input/output/cache R/cache W/calls table columns, not one lumped sum
@@ -1361,13 +1361,12 @@ static void paintDash(HWND hwnd) {
                 SubsWin tmp[4];
                 int wn = subsProvWins(i, tmp, 4);
                 if (wn < 0) wn = -wn;
-                long long used = 0, tot = 0;
-                for (int k = 0; k < wn; k++) { if (tmp[k].used > 0) used += tmp[k].used; if (tmp[k].total > 0) tot += tmp[k].total; }
+                long long tot = 0;
+                for (int k = 0; k < wn; k++) if (tmp[k].total > 0) tot += tmp[k].total;
                 if (tot > 0) {
                     provIdx[provN] = i;
                     provN++;
                 }
-                (void)used; (void)tot;
             }
             if (provN > 0) {
                 int secPadX = DX(12);
@@ -1382,7 +1381,7 @@ static void paintDash(HWND hwnd) {
                         subsProvLabel(provIdx[i], label, 48);
                         SubsWin tmp[4];
                         int wn = subsProvWins(provIdx[i], tmp, 4);
-                        int stale = wn < 0; if (wn < 0) wn = -wn;
+                        if (wn < 0) wn = -wn;
                         long long used = 0, tot = 0;
                         for (int k = 0; k < wn; k++) { if (tmp[k].used > 0) used += tmp[k].used; if (tmp[k].total > 0) tot += tmp[k].total; }
                         int pct = tot > 0 ? (int)((double)used / tot * 100.0 + 0.5) : 0;
@@ -1419,7 +1418,6 @@ static void paintDash(HWND hwnd) {
                                 DeleteObject(b);
                             }
                         }
-                        (void)stale;
                         ry += DX(30);
                     }
                     y += planH + gap;
@@ -1698,9 +1696,11 @@ static void paintDash(HWND hwnd) {
         // ---- subscriptions board: donut pies per plan window (subs.css)
         int innerW = w - 2 * padL;
         int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
-        int shown = 0;
+        int shown = 0, enabledN = 0;
+        for (int i = 0; i < pn; i++) if (subsProvEnabled(i)) enabledN++;
+        int rows = (enabledN + 1) / 2; if (rows < 1) rows = 1;
         int colW2 = (innerW - gap) / 2;
-        int panelH = h - y - DX(12) - DX(12) - DX(14);
+        int panelH = (h - DX(30) - y - gap * (rows - 1)) / rows;
         if (panelH < DX(160)) panelH = DX(160);
         for (int pi2 = 0; pi2 < pn; pi2++) {
             if (!subsProvEnabled(pi2)) continue; // disabled: no panel (Electron parity)
@@ -1909,7 +1909,7 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTimer(hwnd, 1, 500, NULL);
         return 0;
     case WM_TIMER:
-        if (g_dashType == 1) InvalidateRect(hwnd, NULL, FALSE);
+        InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
