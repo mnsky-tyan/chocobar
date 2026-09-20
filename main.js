@@ -18,9 +18,18 @@ const native = require('./src/native');
 // write throws EPIPE, and Electron pops an "A JavaScript error occurred"
 // dialog PER LINE - the app logs every scan, so the dialogs never stop. A
 // dead log sink must never reach the user: swallow stream errors instead.
+// EPIPE is the dead-sink case and stays silent; any OTHER stream error still
+// means something is broken, so it is recorded in the debug log (which does
+// not depend on the dead stdout) instead of vanishing without a trace.
 for (const s of [process.stdout, process.stderr]) {
   if (s && typeof s.on === 'function') {
-    s.on('error', (e) => { if (e && e.code === 'EPIPE') return; });
+    s.on('error', (e) => {
+      if (e && e.code === 'EPIPE') return;
+      try {
+        fs.appendFileSync(path.join(APP_DIR, 'debug.log'),
+          new Date().toISOString() + ' stream error: ' + ((e && e.code) || e) + '\n');
+      } catch (_) {}
+    });
   }
 }
 
