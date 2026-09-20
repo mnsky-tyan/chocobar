@@ -1060,13 +1060,8 @@ static void dashResolveTheme(DashTheme *t) {
     for (int i = 0; i < 5; i++) t->ramp[i] = colorrefFromHex(g_cfg.heatmap[i], 255);
 }
 
-// anti-aliased rounded card (GDI+; GDI RoundRect fallback)
-static void dashCard(HDC dc, int x, int y, int w, int h, COLORREF fill, COLORREF border) {
-    if (g_gdipOk && w > 4 && h > 4) {
-        gdipRoundRect(dc, fill, border, x, y, w, h, DX(10));
-        return;
-    }
-    int r = DX(10);
+// GDI rounded-rect fallback (gdiplus.dll or any export missing): radius in device px
+static void dashRoundRectGDI(HDC dc, int x, int y, int w, int h, int r, COLORREF fill, COLORREF border) {
     HBRUSH b = fill ? CreateSolidBrush(fill) : NULL; // fill 0 = border-only ring
     LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = border; lb1.lbHatch = 0;
     HPEN pen = border ? ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL)
@@ -1076,6 +1071,15 @@ static void dashCard(HDC dc, int x, int y, int w, int h, COLORREF fill, COLORREF
     SelectObject(dc, ob); SelectObject(dc, op);
     if (b) DeleteObject(b);
     if (border) DeleteObject(pen);
+}
+
+// anti-aliased rounded card (GDI+; GDI RoundRect fallback)
+static void dashCard(HDC dc, int x, int y, int w, int h, COLORREF fill, COLORREF border) {
+    if (g_gdipOk && w > 4 && h > 4) {
+        gdipRoundRect(dc, fill, border, x, y, w, h, DX(10));
+        return;
+    }
+    dashRoundRectGDI(dc, x, y, w, h, DX(10), fill, border);
 }
 
 static void dashStr(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT f) {
@@ -1529,7 +1533,7 @@ static void paintDash(HWND hwnd) {
                         if (tot > 0) lv = (tot <= th[0]) ? 1 : (tot <= th[1]) ? 2 : (tot <= th[2]) ? 3 : 4;
                         COLORREF cc = t.ramp[lv];
                         if (g_gdipOk) gdipRoundRect(dc, cc, blendCr(cc, RGB(0, 0, 0), 10), cx, cy, cell, cell, DX(2.5));
-                        else dashCard(dc, cx, cy, cell, cell, cc, blendCr(cc, RGB(0, 0, 0), 10));
+                        else dashRoundRectGDI(dc, cx, cy, cell, cell, DX(2.5), cc, blendCr(cc, RGB(0, 0, 0), 10));
                         if (daysBack == g_daySel)
                             dashCard(dc, cx - DX(1), cy - DX(1), cell + DX(2), cell + DX(2), 0, t.pinkDeep);
                     }
@@ -1777,15 +1781,15 @@ static void paintDash(HWND hwnd) {
             COLORREF dotc = t.ramp[pi2 % 5];
             dashDot(dc, px2 + DX(14), py2 + (headH - DX(9)) / 2, DX(9), dotc);
             dashStr(dc, px2 + DX(14) + DX(9) + DX(8), py2 + DX(11), label, t.fg, f13);
-            // status pill (subs.css .pill): stale / near cap / warn / ok
+            // status pill (subs.css .pill): stale / capped / near cap / ok
             {
                 int lowest = 1000, anyw = 0;
                 for (int k = 0; k < wn; k++) { int r2 = 100 - wins[k].pct; if (r2 < lowest) lowest = r2; anyw = 1; }
                 const wchar_t *ps2 = NULL; COLORREF pc = t.dim, pbg = blendCr(t.head, t.dim, 31);
                 if (stale) { ps2 = L"STALE"; pc = t.yellow; pbg = blendCr(t.head, t.yellow, 31); }
                 else if (!anyw) ps2 = NULL;
+                else if (lowest <= 0) { ps2 = L"CAPPED"; pc = t.warn; pbg = blendCr(t.head, t.warn, 20); }
                 else if (lowest <= 10) { ps2 = L"NEAR CAP"; pc = t.warn; pbg = blendCr(t.head, t.warn, 20); }
-                else if (lowest <= 30) { ps2 = L"WARN"; pc = blendCr(t.warn, t.yellow, 80); pbg = blendCr(t.head, t.yellow, 64); }
                 else { ps2 = L"OK"; pc = t.good; pbg = blendCr(t.head, t.good, 20); }
                 if (ps2) {
                     int pw2 = dashStrW(dc, ps2, fS10) + DX(16);
