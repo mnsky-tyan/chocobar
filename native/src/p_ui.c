@@ -201,6 +201,7 @@ static TokAgg g_appAgg[DASH_MAX_APPS];
 static char g_appName[DASH_MAX_APPS][20];
 static int g_appCount = 0;
 static char g_modelName[DASH_MAX_MODELS][48]; // "app|model", Electron byModel key
+static char g_modelLabel[DASH_MAX_MODELS][48]; // first-seen raw model id (display)
 static TokAgg g_modelAgg[DASH_MAX_MODELS];
 static int g_modelCount = 0;
 static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day detail)
@@ -248,7 +249,8 @@ static void aggRecord(const char *app, int alen, long long ts,
         g_appAgg[ai].cr += vcr; g_appAgg[ai].cw += vcw;
         g_appAgg[ai].req++;
     }
-    // byModel: Electron keys are "app|model"
+    // byModel: Electron keys are "app|lowercased model" (case-insensitive
+    // grouping), so the same model recorded under two casings merges
     if (model && mlen > 0 && ai >= 0) {
         // the key must fit g_modelName's 48-byte row: clamp to 46 chars + NUL
         if (mlen > 40) mlen = 40;
@@ -258,7 +260,11 @@ static void aggRecord(const char *app, int alen, long long ts,
         mk[n++] = '|';
         int room = 46 - n;
         if (mlen > room) mlen = room;
-        memcpy(mk + n, model, mlen); n += mlen;
+        for (int i = 0; i < mlen; i++) {
+            char c = model[i];
+            mk[n + i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+        }
+        n += mlen;
         mk[n] = 0;
         int mi = -1;
         for (int i = 0; i < g_modelCount; i++)
@@ -266,6 +272,8 @@ static void aggRecord(const char *app, int alen, long long ts,
         if (mi < 0 && g_modelCount < DASH_MAX_MODELS) {
             mi = g_modelCount++;
             memcpy(g_modelName[mi], mk, (size_t)n + 1);
+            memcpy(g_modelLabel[mi], model, (size_t)mlen); // display: first-seen raw casing
+            g_modelLabel[mi][mlen] = 0;
         }
         if (mi >= 0) {
             g_modelAgg[mi].in += vin; g_modelAgg[mi].out += vout;
@@ -1195,15 +1203,6 @@ static void dashTableHead(HDC dc, int x0, int innerW, int y, int cache,
     (void)innerW;
 }
 
-// hasCacheData: cache columns exist only while some record carries cache data
-static int dashHasCache(void) {
-    for (int i = 0; i < g_appCount; i++)
-        if (g_appAgg[i].cr + g_appAgg[i].cw > 0) return 1;
-    for (int i = 0; i < g_modelCount; i++)
-        if (g_modelAgg[i].cr + g_modelAgg[i].cw > 0) return 1;
-    return 0;
-}
-
 // format a FILETIME (already local) as HH:MM:SS
 static void dashFmtTime(long long msUtc, wchar_t *out, int cb) {
     if (msUtc < 0) { lstrcpynW(out, L"\x2014", cb); return; }
@@ -1246,7 +1245,7 @@ static void paintDash(HWND hwnd) {
     LONG w = rc.right, h = rc.bottom;
     if (w < 1 || h < 1) return;
     if (w != g_dashW || h != g_dashH || !g_dashDib || g_dashPainted != g_dashType) {
-        if (g_dashDib) { DeleteObject(g_dashDib); g_dashDib = NULL; g_dashBits = NULL; }
+        if (g_dashDib) { SelectObject(g_dashDc, g_dashOldBmp); DeleteObject(g_dashDib); g_dashDib = NULL; g_dashBits = NULL; }
         BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bi.bmiHeader.biWidth = w;
@@ -1332,7 +1331,7 @@ static void paintDash(HWND hwnd) {
         int innerW = w - 2 * padL;
         if (g_tokensToday < 0 && g_tokAll == 0) {
             dashCard(dc, padL, y, innerW, DX(38), t.card, t.divider);
-            dashStr(dc, padL + DX(14), y + DX(10), L"Usage is off. Set tokens.enabled to true in the config file.", t.dim, fBody);
+            dashStr(dc, padL + DX(14), y + DX(10), L"No token data. The token cache file could not be read \x2014 start Chocobar, or check tokens.cachePath.", t.dim, fBody);
         } else {
             // stat cards: Today / Last 7 / Last 30 / All time
             int cw2 = (innerW - 3 * DX(10)) / 4;
@@ -1581,7 +1580,6 @@ static void paintDash(HWND hwnd) {
             // tables: By app + By model (2-col grid). Electron sorts by total
             // desc and caps the model table at 7 rows - mirror that.
             int colW2 = (innerW - DX(10)) / 2;
-            int cache = dashHasCache();
             int secPad = DX(10);
             int th2 = DX(9) + DX(4);
             int rowH = DX(19);
@@ -1616,6 +1614,14 @@ static void paintDash(HWND hwnd) {
                 }
                 mdlOrder[j + 1] = v;
             }
+            // cache columns are per table (Electron appCache vs modelCache):
+            // apps over every app, models over the displayed top-7 only
+            int appCache = 0;
+            for (int i = 0; i < g_appCount; i++)
+                if (g_appAgg[i].cr + g_appAgg[i].cw > 0) { appCache = 1; break; }
+            int modelCache = 0;
+            for (int i = 0; i < mdlN; i++)
+                if (g_modelAgg[mdlOrder[i]].cr + g_modelAgg[mdlOrder[i]].cw > 0) { modelCache = 1; break; }
             int rows = appN > mdlN ? appN : mdlN;
             if (rows < 1) rows = 1;
             // never drop the section on a 1px miss: clip the row count to the
@@ -1631,6 +1637,7 @@ static void paintDash(HWND hwnd) {
                     dashHead(dc, sx + DX(12), y + secPad, side == 0 ? L"BY APP" : L"BY MODEL", t.dim, fHead);
                     int inner = colW2 - DX(24);
                     int xs[5];
+                    int cache = side == 0 ? appCache : modelCache;
                     dashTableCols(sx + DX(12) + inner, cache, xs);
                     int ry = y + secPad + th2;
                     dashTableHead(dc, sx + DX(12), inner, ry, cache, xs, &t, fS9,
@@ -1672,11 +1679,11 @@ static void paintDash(HWND hwnd) {
                         int mdlRows = mdlN < rows ? mdlN : rows;
                         for (int i = 0; i < mdlRows; i++) {
                             int mi = mdlOrder[i];
-                            // label = the model part of "app|model"; dot = app color
+                            // label = the first-seen raw model casing; dot = app color
                             char mk[48];
                             lstrcpynA(mk, g_modelName[mi], 47);
                             char *bar = strchr(mk, '|');
-                            const char *mp2 = bar ? bar + 1 : mk;
+                            const char *mp2 = g_modelLabel[mi];
                             wchar_t mn[48];
                             int mnw = MultiByteToWideChar(CP_UTF8, 0, mp2, -1, mn, 47);
                             mn[mnw > 0 ? mnw - 1 : 0] = 0; // force NUL even on truncation
@@ -1782,6 +1789,8 @@ static void paintDash(HWND hwnd) {
                 int fit = (bodyAvail - (wn - 1) * DX(16)) / wn;
                 if (fit < pieD) pieD = fit;
             }
+            // legible floor: pen width and text geometry derive from pieD
+            if (pieD < DX(24)) pieD = DX(24);
             float pieScale = (float)pieD / (float)DX(96);
             HFONT fPct = pieD >= DX(56) ? f18 : (pieD >= DX(38) ? f13 : fS10);
             for (int k = 0; k < wn; k++) {
@@ -2031,7 +2040,7 @@ static void dashToggle(int type) {
         int tsw = GetSystemMetrics(SM_CXSCREEN), tsh = GetSystemMetrics(SM_CYSCREEN);
         if (tw > tsw - 40) tw = tsw - 40;
         if (th2 > tsh - 40) th2 = tsh - 40;
-        SetWindowPos(g_dash, NULL, 0, 0, tw, th2, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(g_dash, NULL, (tsw - tw) / 2, (tsh - th2) / 2, tw, th2, SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
         SetForegroundWindow(g_dash);
         return;
