@@ -1037,12 +1037,13 @@ static void dashCard(HDC dc, int x, int y, int w, int h, COLORREF fill, COLORREF
     int r = DX(10);
     HBRUSH b = fill ? CreateSolidBrush(fill) : NULL; // fill 0 = border-only ring
     LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = border; lb1.lbHatch = 0;
-    HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL);
+    HPEN pen = border ? ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL)
+                      : (HPEN)GetStockObject(NULL_PEN); // border 0 = no outline (GDI+ parity)
     HGDIOBJ ob = SelectObject(dc, b ? b : GetStockObject(NULL_BRUSH)), op = SelectObject(dc, pen);
     RoundRect(dc, x, y, x + w, y + h, r * 2, r * 2);
     SelectObject(dc, ob); SelectObject(dc, op);
     if (b) DeleteObject(b);
-    DeleteObject(pen);
+    if (border) DeleteObject(pen);
 }
 
 static void dashStr(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT f) {
@@ -1228,9 +1229,8 @@ static long long dashLocalNowMs(void) {
 static void dashColDate(int daysBack, SYSTEMTIME *out) {
     SYSTEMTIME now; GetLocalTime(&now);
     now.wHour = now.wMinute = now.wSecond = now.wMilliseconds = 0;
-    FILETIME lft, ft;
-    SystemTimeToFileTime(&now, &lft);
-    LocalFileTimeToFileTime(&lft, &ft);
+    FILETIME ft;
+    SystemTimeToFileTime(&now, &ft); // stays in the local frame: FileTimeToSystemTime reads it back as local
     long long v = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) - (long long)daysBack * 864000000000LL;
     ft.dwHighDateTime = (DWORD)(v >> 32);
     ft.dwLowDateTime = (DWORD)v;
@@ -1362,9 +1362,7 @@ static void paintDash(HWND hwnd) {
                 SubsWin tmp[4];
                 int wn = subsProvWins(i, tmp, 4);
                 if (wn < 0) wn = -wn;
-                long long tot = 0;
-                for (int k = 0; k < wn; k++) if (tmp[k].total > 0) tot += tmp[k].total;
-                if (tot > 0) {
+                if (wn > 0) { // any reported window: absolute totals OR percent-only
                     provIdx[provN] = i;
                     provN++;
                 }
@@ -1384,15 +1382,24 @@ static void paintDash(HWND hwnd) {
                         int wn = subsProvWins(provIdx[i], tmp, 4);
                         if (wn < 0) wn = -wn;
                         long long used = 0, tot = 0;
-                        for (int k = 0; k < wn; k++) { if (tmp[k].used > 0) used += tmp[k].used; if (tmp[k].total > 0) tot += tmp[k].total; }
-                        int pct = tot > 0 ? (int)((double)used / tot * 100.0 + 0.5) : 0;
+                        int maxPct = 0;
+                        for (int k = 0; k < wn; k++) {
+                            if (tmp[k].used > 0) used += tmp[k].used;
+                            if (tmp[k].total > 0) tot += tmp[k].total;
+                            else if (tmp[k].pct > maxPct) maxPct = tmp[k].pct;
+                        }
+                        int pct = tot > 0 ? (int)((double)used / tot * 100.0 + 0.5) : maxPct;
                         if (pct > 100) pct = 100;
                         SelectObject(dc, fBody);
                         dashStr(dc, padL + secPadX, ry, label, t.fg, fBody);
                         wchar_t us[24], ts2[24], nums[72];
-                        fmtTokens(used, us, 24);
-                        fmtTokens(tot, ts2, 24);
-                        swprintf(nums, 71, L"%ls / %ls \x00b7 %d%%", us, ts2, pct);
+                        if (tot > 0) {
+                            fmtTokens(used, us, 24);
+                            fmtTokens(tot, ts2, 24);
+                            swprintf(nums, 71, L"%ls / %ls \x00b7 %d%%", us, ts2, pct);
+                        } else {
+                            swprintf(nums, 71, L"%d%% used", pct);
+                        }
                         dashStrR(dc, padL + innerW - secPadX, ry, nums, t.dim, fS10);
                         int barY = ry + DX(15);
                         int barW = innerW - 2 * secPadX;
@@ -1611,8 +1618,13 @@ static void paintDash(HWND hwnd) {
             }
             int rows = appN > mdlN ? appN : mdlN;
             if (rows < 1) rows = 1;
+            // never drop the section on a 1px miss: clip the row count to the
+            // height that is actually left, so the section always renders
+            int avail = (h - DX(24) - y - secPad - th2 - secPad) / rowH;
+            if (rows > avail) rows = avail;
+            if (rows < 1) rows = 1;
             int tblH = secPad + th2 + rows * rowH + secPad;
-            if (y + tblH < h - DX(24)) {
+            if (y + tblH <= h - DX(24)) {
                 for (int side = 0; side < 2; side++) {
                     int sx = padL + side * (colW2 + DX(10));
                     dashCard(dc, sx, y, colW2, tblH, t.card, t.divider);
@@ -1630,7 +1642,8 @@ static void paintDash(HWND hwnd) {
                             long long s = g_appAgg[i].in + g_appAgg[i].out + g_appAgg[i].cr + g_appAgg[i].cw;
                             if (s > maxAll) maxAll = s;
                         }
-                        for (int i = 0; i < appN; i++) {
+                        int appRows = appN < rows ? appN : rows;
+                        for (int i = 0; i < appRows; i++) {
                             int ai = appOrder[i];
                             wchar_t an[24];
                             MultiByteToWideChar(CP_UTF8, 0, g_appName[ai], -1, an, 24);
@@ -1656,7 +1669,8 @@ static void paintDash(HWND hwnd) {
                             long long s = g_modelAgg[i].in + g_modelAgg[i].out + g_modelAgg[i].cr + g_modelAgg[i].cw;
                             if (s > maxAll) maxAll = s;
                         }
-                        for (int i = 0; i < mdlN; i++) {
+                        int mdlRows = mdlN < rows ? mdlN : rows;
+                        for (int i = 0; i < mdlRows; i++) {
                             int mi = mdlOrder[i];
                             // label = the model part of "app|model"; dot = app color
                             char mk[48];
@@ -1707,7 +1721,6 @@ static void paintDash(HWND hwnd) {
         int rows = (enabledN + 1) / 2; if (rows < 1) rows = 1;
         int colW2 = (innerW - gap) / 2;
         int panelH = (h - DX(30) - y - gap * (rows - 1)) / rows;
-        if (panelH < DX(160)) panelH = DX(160);
         for (int pi2 = 0; pi2 < pn; pi2++) {
             if (!subsProvEnabled(pi2)) continue; // disabled: no panel (Electron parity)
             wchar_t label[48];
@@ -1761,8 +1774,17 @@ static void paintDash(HWND hwnd) {
             if (wn == 0) {
                 dashStr(dc, px2 + DX(14), bodyY + DX(12), stale ? L"stale \x2014 no data yet" : L"no windows reported", t.dim, fBody);
             }
+            // every window gets a pie: shrink the pie to the body height the
+            // way the provider rows compress (never drop the later windows)
+            int bodyAvail = py2 + panelH - DX(34) - bodyY;
+            int pieD = DX(96);
+            if (wn > 0) {
+                int fit = (bodyAvail - (wn - 1) * DX(16)) / wn;
+                if (fit < pieD) pieD = fit;
+            }
+            float pieScale = (float)pieD / (float)DX(96);
+            HFONT fPct = pieD >= DX(56) ? f18 : (pieD >= DX(38) ? f13 : fS10);
             for (int k = 0; k < wn; k++) {
-                int pieD = DX(96);
                 int ky = bodyY + k * (pieD + DX(16));
                 if (ky + pieD > py2 + panelH - DX(34)) break;
                 int kx = px2 + DX(14);
@@ -1771,8 +1793,8 @@ static void paintDash(HWND hwnd) {
                 // track + arc (rotate -90: start at 12 o'clock, clockwise)
                 COLORREF track = blendCr(t.card, t.dim, 31);
                 if (g_gdipOk) {
-                    float wpen = (float)DX(12.57);
-                    float rr = (float)DX(36.4);
+                    float wpen = (float)DX(12.57) * pieScale;
+                    float rr = (float)DX(36.4) * pieScale;
                     float cx2 = (float)kx + pieD / 2.0f, cy2 = (float)ky + pieD / 2.0f;
                     // track: full circle
                     {
@@ -1792,10 +1814,10 @@ static void paintDash(HWND hwnd) {
                 // center: "N%" pinkDeep + "left"
                 wchar_t pctS[8];
                 swprintf(pctS, 7, L"%d", rem);
-                int pw2 = dashStrW(dc, pctS, f18) + DX(8);
+                int pw2 = dashStrW(dc, pctS, fPct) + DX(8);
                 int cx0 = kx + (pieD - pw2) / 2;
-                dashStr(dc, cx0, ky + pieD / 2 - DX(15), pctS, t.pinkDeep, f18);
-                dashStr(dc, cx0 + dashStrW(dc, pctS, f18) + DX(1), ky + pieD / 2 - DX(11), L"%", t.pinkDeep, fS10);
+                dashStr(dc, cx0, ky + pieD / 2 - DX(15), pctS, t.pinkDeep, fPct);
+                dashStr(dc, cx0 + dashStrW(dc, pctS, fPct) + DX(1), ky + pieD / 2 - DX(11), L"%", t.pinkDeep, fS10);
                 dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, ky + pieD / 2 + DX(6), L"left", t.dim, fS9);
                 // meta right of the pie
                 int mx = kx + pieD + DX(14);
@@ -2003,6 +2025,13 @@ static void dashToggle(int type) {
         if (g_dashType == type) { DestroyWindow(g_dash); g_dash = NULL; return; }
         g_dashType = type;
         SetWindowTextW(g_dash, type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions");
+        // the other board has its own configured size: adopt it in place
+        int tw = (int)((double)(type == 0 ? g_cfg.dashW : g_cfg.subsW) * g_scale + 0.5);
+        int th2 = (int)((double)(type == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale + 0.5);
+        int tsw = GetSystemMetrics(SM_CXSCREEN), tsh = GetSystemMetrics(SM_CYSCREEN);
+        if (tw > tsw - 40) tw = tsw - 40;
+        if (th2 > tsh - 40) th2 = tsh - 40;
+        SetWindowPos(g_dash, NULL, 0, 0, tw, th2, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
         SetForegroundWindow(g_dash);
         return;
@@ -2072,7 +2101,7 @@ static void tipShow(const wchar_t *text, int cx, int cy) {
     int padX = (int)(7 * g_scale), padY = (int)(4 * g_scale);
     LONG w = mr.right + 2 * padX, h = mr.bottom + 2 * padY;
     if (w != g_tipW || h != g_tipH || !g_tipDib) {
-        if (g_tipDib) DeleteObject(g_tipDib);
+        if (g_tipDib) { SelectObject(g_tipDc, g_tipOldBmp); DeleteObject(g_tipDib); g_tipDib = NULL; g_tipBits = NULL; }
         BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bi.bmiHeader.biWidth = w;
