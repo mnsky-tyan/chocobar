@@ -1001,6 +1001,10 @@ static void configCheckTick(void) {
     if (CompareFileTime(&fa.ftLastWriteTime, &g_cfgMtime) != 0) {
         g_cfgMtime = fa.ftLastWriteTime;
         loadConfig();
+        // loadConfig freed every g_cfg string: the chip array still points at
+        // the old allocations (colorOverride / iconColorOverride), so rebuild
+        // it now - before any paint can read a dangling pointer
+        buildChips();
         // font may change with the config: rebuild it
         if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); g_font = NULL; }
         wchar_t fam[64];
@@ -1718,16 +1722,19 @@ static void paintDash(HWND hwnd) {
             for (int i = 0; i < mdlN; i++)
                 if (g_modelAgg[mdlOrder[i]].cr + g_modelAgg[mdlOrder[i]].cw > 0) { modelCache = 1; break; }
             int rows = appN > mdlN ? appN : mdlN;
-            if (rows < 1) rows = 1;
             // fit EVERY row: tighten the row pitch (17..19 CSS px) before
-            // dropping one, so the model table never loses a row silently
+            // dropping one, so the model table never loses a row silently.
+            // Zero rows is allowed: the section header alone still fits and
+            // draws, so the tables never vanish without a trace.
             int budget = h - DX(24) - y - secPad - th2 - secPad;
             int fitMax = budget / DX(17);
             if (rows > fitMax) rows = fitMax;
-            if (rows < 1) rows = 1;
-            rowH = budget / rows;
-            if (rowH > DX(19)) rowH = DX(19);
-            if (rowH < DX(17)) rowH = DX(17);
+            if (rows < 0) rows = 0;
+            if (rows > 0) {
+                rowH = budget / rows;
+                if (rowH > DX(19)) rowH = DX(19);
+                if (rowH < DX(17)) rowH = DX(17);
+            }
             int tblH = secPad + th2 + rows * rowH + secPad;
             if (y + tblH <= h - DX(24)) {
                 for (int side = 0; side < 2; side++) {
@@ -1766,7 +1773,7 @@ static void paintDash(HWND hwnd) {
                                          appDotColor(g_appName[ai], &t), (double)s / maxAll, &a2, &t, fBody, fS9);
                             ry += rowH;
                         }
-                        if (appN == 0) {
+                        if (appN == 0 && rows > 0) {
                             dashStr(dc, sx + DX(12), ry + DX(2), L"No usage recorded yet.", t.dim, fBody);
                         }
                     } else {
@@ -1799,7 +1806,7 @@ static void paintDash(HWND hwnd) {
                                          dc2, (double)s / maxAll, &a2, &t, fBody, fS9);
                             ry += rowH;
                         }
-                        if (mdlN == 0) {
+                        if (mdlN == 0 && rows > 0) {
                             dashStr(dc, sx + DX(12), ry + DX(2), L"No model data.", t.dim, fBody);
                         }
                     }
