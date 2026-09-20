@@ -1440,7 +1440,7 @@ static void paintDash(HWND hwnd) {
             long long th[3] = { 1, 1, 1 };
             if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
             int hmH = 7 * pitch - cgap;
-            int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS && g_dayTot[DASH_MAX_DAYS - 1 - g_daySel] > 0;
+            int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS;
             int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(13) + DX(17) : 0;
             int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10);
             if (y + secH < h - DX(26)) {
@@ -1513,24 +1513,34 @@ static void paintDash(HWND hwnd) {
                     ddy += DX(8);
                     SYSTEMTIME d2;
                     dashColDate(g_daySel, &d2);
+                    TokAgg *dayRows = g_dayApp[DASH_MAX_DAYS - 1 - g_daySel];
                     long long tot = g_dayTot[DASH_MAX_DAYS - 1 - g_daySel];
+                    int anyRec = 0;
+                    for (int i = 0; i < g_appCount; i++)
+                        if (dayRows[i].req > 0) { anyRec = 1; break; }
                     wchar_t dtitle[96];
-                    wchar_t dnum[24];
-                    fmtTokens(tot, dnum, 24);
-                    swprintf(dtitle, 95, L"%ls, %ls %lu, %lu \x2014 %ls tokens", DASH_DAYS[d2.wDayOfWeek % 7],
-                             DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear, dnum);
+                    if (anyRec) {
+                        wchar_t dnum[24];
+                        fmtTokens(tot, dnum, 24);
+                        swprintf(dtitle, 95, L"%ls, %ls %lu, %lu \x2014 %ls tokens", DASH_DAYS[d2.wDayOfWeek % 7],
+                                 DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear, dnum);
+                    } else {
+                        swprintf(dtitle, 95, L"%ls, %ls %lu, %lu \x2014 no usage", DASH_DAYS[d2.wDayOfWeek % 7],
+                                 DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear);
+                    }
                     dashStr(dc, padL + secPadX, ddy, dtitle, t.fg, fBody);
                     ddy += DX(15);
                     // per-day cache presence from g_dayApp (Electron hasCacheData):
                     // cache columns + header only while the day carries cache
-                    TokAgg *dayRows = g_dayApp[DASH_MAX_DAYS - 1 - g_daySel];
                     int cache = 0;
                     for (int i = 0; i < g_appCount; i++)
                         if (dayRows[i].cr + dayRows[i].cw > 0) { cache = 1; break; }
                     int xs[5];
                     dashTableCols(padL + innerW - secPadX, cache, xs);
-                    dashTableHead(dc, padL + secPadX, innerW, ddy, cache, xs, &t, fS9, L"APP");
-                    ddy += DX(13);
+                    if (anyRec) {
+                        dashTableHead(dc, padL + secPadX, innerW, ddy, cache, xs, &t, fS9, L"APP");
+                        ddy += DX(13);
+                    }
                     for (int i = 0; i < g_appCount && ddy + DX(17) < y + secH; i++) {
                         TokAgg *a = &dayRows[i];
                         if (a->req == 0) continue;
@@ -2245,8 +2255,6 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (wp == TIMER_FOLLOW) {
             followTick();
             return 0;
-        } else if (0) {
-            followTick();
         } else if (wp == TIMER_CONFIG) {
             configCheckTick();
         }
