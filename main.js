@@ -12,6 +12,18 @@ const { SubsTracker } = require('./src/subs');
 const { BarWindow } = require('./src/bar');
 const native = require('./src/native');
 
+// --- dead log sink guard -------------------------------------------------------
+// The bar is started by start-wizbar.vbs with stdout redirected. When that
+// pipe/file dies (rotated, truncated, or its reader closes) every console
+// write throws EPIPE, and Electron pops an "A JavaScript error occurred"
+// dialog PER LINE - the app logs every scan, so the dialogs never stop. A
+// dead log sink must never reach the user: swallow stream errors instead.
+for (const s of [process.stdout, process.stderr]) {
+  if (s && typeof s.on === 'function') {
+    s.on('error', (e) => { if (e && e.code === 'EPIPE') return; });
+  }
+}
+
 // --- single instance -----------------------------------------------------------
 if (!app.requestSingleInstanceLock()) {
   app.quit();

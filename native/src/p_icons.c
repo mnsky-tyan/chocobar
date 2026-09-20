@@ -42,6 +42,8 @@ typedef struct {
     SvgPath *out;
     float cx, cy;        // current point
     float sx, sy;        // current subpath start
+    float qx, qy;        // previous cubic control point (for S reflection)
+    wchar_t prev;        // previous command letter (for S reflection)
     int open;            // current subpath index, -1 = none
 } SvgCtx;
 
@@ -62,6 +64,27 @@ static void svgPt(SvgCtx *k, float x, float y) {
     k->cx = x; k->cy = y;
 }
 static void svgLine(SvgCtx *k, float x, float y) { svgPt(k, x, y); }
+
+// cubic bezier, sampled (the same 5-degree-ish step density as arcs)
+static void svgCubic(SvgCtx *k, float x1, float y1, float x2, float y2, float x, float y) {
+    float x0 = k->cx, y0 = k->cy;
+    float dx = x - x0, dy = y - y0;
+    float d1 = (float)fabs(x1 - x0) + (float)fabs(y1 - y0);
+    float d2 = (float)fabs(x2 - x1) + (float)fabs(y2 - y1);
+    float d3 = (float)fabs(x - x2) + (float)fabs(y - y2);
+    float len = (float)fabs(dx) + (float)fabs(dy) + d1 + d2 + d3;
+    // dense sampling: small icon loops (the bow) read polygonal at one point
+    // per 6 units - 1.5 keeps the curves round at 12 CSS px
+    int steps = (int)(len / 1.5f) + 10;
+    if (steps > 160) steps = 160;
+    for (int i = 1; i <= steps; i++) {
+        float t = (float)i / steps, u = 1 - t;
+        float a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+        svgPt(k, a * x0 + b * x1 + c * x2 + d * x, a * y0 + b * y1 + c * y2 + d * y);
+    }
+    k->qx = x2; k->qy = y2;
+    k->prev = L'C';
+}
 
 // SVG arc endpoint parameterization (spec F.6), sampled from the start angle
 static void svgArc(SvgCtx *k, float rx, float ry, float phiDeg, int fa, int fs, float x2, float y2) {
@@ -186,6 +209,32 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
                 if (rel && (j == 5 || j == 6)) { v[j] += (j == 5) ? k.cx : k.cy; }
             }
             if (ok) svgArc(&k, v[0], v[1], v[2], (int)v[3], (int)v[4], v[5], v[6]);
+            k.prev = L'A';
+            break;
+        }
+        case L'C': case L'c': {
+            float v[6];
+            int ok = 1;
+            for (int j = 0; j < 6; j++) {
+                if (!svgNum(d, &i, &v[j])) { ok = 0; break; }
+                if (rel) v[j] += (j % 2 == 0) ? k.cx : k.cy;
+            }
+            if (ok) svgCubic(&k, v[0], v[1], v[2], v[3], v[4], v[5]);
+            k.prev = L'C';
+            break;
+        }
+        case L'S': case L's': {
+            // smooth cubic: first control reflects the previous command's
+            float c1x = k.cx, c1y = k.cy;
+            if (k.prev == L'C' || k.prev == L'S') { c1x = 2 * k.cx - k.qx; c1y = 2 * k.cy - k.qy; }
+            float v[4];
+            int ok = 1;
+            for (int j = 0; j < 4; j++) {
+                if (!svgNum(d, &i, &v[j])) { ok = 0; break; }
+                if (rel) v[j] += (j % 2 == 0) ? k.cx : k.cy;
+            }
+            if (ok) svgCubic(&k, c1x, c1y, v[0], v[1], v[2], v[3]);
+            k.prev = L'S';
             break;
         }
         default:
@@ -198,35 +247,49 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
 // ---- icon table --------------------------------------------------------------
 // Each icon = up to 3 stroke paths in the ONE icon color. wmul scales the pen
 // width for accents (the gauge ring reads better slightly thicker).
-typedef struct { const wchar_t *d; int wmul; } SvgPart;
+typedef struct { const wchar_t *d; float w; } SvgPart;
 static const SvgPart SVG_P[][3] = {
-    // bow (pet): two wings + knot
-    { { L"M3 7 L11.2 12 L3 17 Z M21 7 L12.8 12 L21 17 Z M9.8 9.4 h4.4 v5.2 h-4.4 Z", 1 } },
-    // diamond (tokens): gem outline + girdle + top facets
-    { { L"M4.5 9 L8.5 4 H15.5 L19.5 9 L12 20 Z M4.5 9 H19.5 M8.5 4 L12 9 L15.5 4", 1 } },
-    // gauge (subs): ring + needle (a meter, not a C)
-    { { L"M12 4.5 A7.5 7.5 0 1 0 12.01 4.5 Z", 1 }, { L"M12 12 L16.6 16.6", 1 }, { L"M10.8 12 a1.2 1.2 0 1 0 2.4 0 a1.2 1.2 0 1 0 -2.4 0 Z", 1 } },
+    // bow (pet): two loops per side around a small knot (Electron ICONS.bow,
+    // stroke-width 2). Rect/circle converted to path syntax; S = smooth cubic.
+    { { L"M11 11C8.5 7.5 5.5 6.5 4.5 8S5 12 11 11"
+        L"M13 11c2.5-3.5 5.5-4.5 6.5-3s-.5 4-6.5 3"
+        L"M11 13c-2.5 3.5-5.5 4.5-6.5 3s.5-4 6.5-3"
+        L"M13 13c2.5 3.5 5.5 4.5 6.5 3s-.5-4-6.5-3"
+        L"M10.9 12a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0-2.2 0Z", 0.9090909f } },
+    // diamond (tokens): plain rhombus (Electron ICONS.diamond)
+    { { L"M12 3L21 12L12 21L3 12Z", 1.0f } },
+    // gauge (subs): ring + needle (Electron ICONS.gauge)
+    { { L"M4 18A8 8 0 1 1 20 18", 1.0f }, { L"M12 14L16 10", 1.0f } },
     // bolt (shortcut)
-    { { L"M13 2.5 L5 13.5 H10.6 L9.4 21.5 L19 9.5 H13.2 Z", 1 } },
+    { { L"M13 2L4.5 13.5H11L9.5 22L19 10H12.5L13 2Z", 1.0f } },
     // clock (time): ring + hands
-    { { L"M12 4 A8 8 0 1 0 12.01 4 Z", 1 }, { L"M12 7.4 V12.4 L15.4 14.4", 1 } },
-    // gpu: card body + two fans + pins
-    { { L"M5 7.5 H18.4 A1.6 1.6 0 0 1 20 9.1 V14.9 A1.6 1.6 0 0 1 18.4 16.5 H5 A1.6 1.6 0 0 1 3.4 14.9 V9.1 A1.6 1.6 0 0 1 5 7.5 Z M8.4 12 a1.9 1.9 0 1 0 3.8 0 a1.9 1.9 0 1 0 -3.8 0 Z M14.6 12 a1.9 1.9 0 1 0 3.8 0 a1.9 1.9 0 1 0 -3.8 0 Z M8 16.5 V19 M12 16.5 V19 M16 16.5 V19", 1 } },
-    // cpu: body + core + pins (2 per side)
-    { { L"M7.6 7.6 H16.4 A1.1 1.1 0 0 1 17.5 8.7 V15.3 A1.1 1.1 0 0 1 16.4 16.4 H7.6 A1.1 1.1 0 0 1 6.5 15.3 V8.7 A1.1 1.1 0 0 1 7.6 7.6 Z M9.7 9.7 H14.3 V14.3 H9.7 Z M9.5 3.6 V6.2 M14.5 3.6 V6.2 M9.5 17.8 V20.4 M14.5 17.8 V20.4 M3.6 9.5 H6.2 M3.6 14.5 H6.2 M17.8 9.5 H20.4 M17.8 14.5 H20.4", 1 } },
-    // cpu temp: thermometer + one steam dash
-    { { L"M10.1 4.6 A1.9 1.9 0 0 1 13.9 4.6 V13.3 A4.3 4.3 0 1 1 10.1 13.3 Z M12 9 V14 M17.4 7 H20 M17.4 11 H20 M17.4 15 H20", 1 } },
-    // ram: stick + three chips + pins
-    { { L"M4.6 7.6 H19.4 A1.4 1.4 0 0 1 20.8 9 V15 A1.4 1.4 0 0 1 19.4 16.4 H4.6 A1.4 1.4 0 0 1 3.2 15 V9 A1.4 1.4 0 0 1 4.6 7.6 Z M6.4 10 H8.8 V14 H6.4 Z M10.8 10 H13.2 V14 H10.8 Z M15.2 10 H17.6 V14 H15.2 Z M7 16.4 V19 M12 16.4 V19 M17 16.4 V19", 1 } },
-    // volume: speaker + waves
-    { { L"M11.2 5.2 L6.8 9.2 H3.4 V14.8 H6.8 L11.2 18.8 Z M15 9.6 A4.2 4.2 0 0 1 15 14.4 M17.6 7.2 A7.6 7.6 0 0 1 17.6 16.8", 1 } },
-    // muted: speaker + X
-    { { L"M11.2 5.2 L6.8 9.2 H3.4 V14.8 H6.8 L11.2 18.8 Z M15.8 9.8 L20.8 14.8 M20.8 9.8 L15.8 14.8", 1 } },
-    // battery: body + nub only; the fill is dynamic (svgDrawBatt)
-    { { L"M4.4 8.2 H17.6 A1.7 1.7 0 0 1 19.3 9.9 V14.1 A1.7 1.7 0 0 1 17.6 15.8 H4.4 A1.7 1.7 0 0 1 2.7 14.1 V9.9 A1.7 1.7 0 0 1 4.4 8.2 Z M21.3 10.4 V13.6", 1 } },
+    { { L"M3.5 12A8.5 8.5 0 1 0 20.5 12A8.5 8.5 0 1 0 3.5 12Z", 1.0f }, { L"M12 7.5V12L15 14", 1.0f } },
+    // gpu: card + fan + two vents + pins (Electron ICONS.gpu)
+    { { L"M4.5 7H17.5A1.5 1.5 0 0 1 19 8.5V15.5A1.5 1.5 0 0 1 17.5 17H4.5A1.5 1.5 0 0 1 3 15.5V8.5A1.5 1.5 0 0 1 4.5 7Z"
+        L"M6.6 12A2.4 2.4 0 1 0 11.4 12A2.4 2.4 0 1 0 6.6 12Z"
+        L"M14 9.5V14.5M17 9.5V14.5M19 10V14M6 17V20M10 17V20", 1.0f } },
+    // cpu: body + pins 2 per side (Electron ICONS.cpu)
+    { { L"M7.5 6H16.5A1.5 1.5 0 0 1 18 7.5V16.5A1.5 1.5 0 0 1 16.5 18H7.5A1.5 1.5 0 0 1 6 16.5V7.5A1.5 1.5 0 0 1 7.5 6Z"
+        L"M9 2V5M15 2V5M9 19V22M15 19V22M2 9H5M2 15H5M19 9H22M19 15H22", 1.0f } },
+    // cpu temp: thermometer + stem (Electron ICONS.temp)
+    { { L"M10 4A2 2 0 1 1 14 4V13.3A4.5 4.5 0 1 1 10 13.3Z", 1.0f },
+      { L"M12 9.5V16", 1.0f } },
+    // ram: stick + three chips + pins (Electron ICONS.ram)
+    { { L"M4.5 8H19.5A1.5 1.5 0 0 1 21 9.5V15.5A1.5 1.5 0 0 1 19.5 17H4.5A1.5 1.5 0 0 1 3 15.5V9.5A1.5 1.5 0 0 1 4.5 8Z"
+        L"M7 17V20M12 17V20M17 17V20M7 11V14M11 11V14M15 11V14", 1.0f } },
+    // volume: speaker + waves (Electron ICONS.vol)
+    { { L"M11 5L6.5 9H3V15H6.5L11 19Z", 1.0f },
+      { L"M15.5 9.5A4 4 0 0 1 15.5 14.5M18 7A7.5 7.5 0 0 1 18 17", 1.0f } },
+    // muted: speaker + X (Electron ICONS.mute)
+    { { L"M11 5L6.5 9H3V15H6.5L11 19Z", 1.0f },
+      { L"M16 9.5L21 14.5M21 9.5L16 14.5", 1.0f } },
+    // battery: body + nub only; the fill is dynamic (svgDrawBatt, matches
+    // Electron ICONS.batBody: innerX 4.3, innerW 12.4, y 9.7, h 5.1, rx 0.8)
+    { { L"M4 8H17A1.5 1.5 0 0 1 18.5 9.5V15A1.5 1.5 0 0 1 17 16.5H4A1.5 1.5 0 0 1 2.5 15V9.5A1.5 1.5 0 0 1 4 8Z"
+        L"M21.5 11V13.5", 1.0f } },
 };
 
-typedef struct { SvgPath path; int wmul; } SvgFlat;
+typedef struct { SvgPath path; float w; } SvgFlat;
 #define SVG_MAXPARTS 3
 static SvgFlat g_flat[SVG_COUNT][SVG_MAXPARTS];
 static int g_flatN[SVG_COUNT];
@@ -383,6 +446,7 @@ typedef struct {
 } IconDib;
 static IconDib g_iconDib[SVG_COUNT];
 static IconDib g_battDib;         // battery cache (charge bucket + ac + colors)
+static IconDib g_ssDib;           // 2x supersample scratch (AA quality)
 static int g_battKey[7];          // pct bucket, ac, accent, warn, line, valid, warn-fill
 
 static void iconDrop(IconDib *d) {
@@ -412,16 +476,9 @@ static int iconDibMake(IconDib *d, int w, int h) {
 static void iconDibPremultiply(IconDib *d);
 
 // render one flattened path set into an icon DIB with GDI+ AA strokes
-static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
-    if (!iconDibMake(d, w, h)) return 0;
-    memset(d->bits, 0, (size_t)w * h * 4);
-    GpGraphics *g = NULL;
-    if (t_GdipCreateFromHDC(d->dc, &g) != 0) return 0;
-    t_GdipSetSmoothingMode(g, 6); // AntiAlias8x8
-    float s = (float)g_scale / 2; // 24-unit box -> 12 CSS px
+// Draw the icon into `g` at supersample factor ss (path units -> pixels).
+static void iconStrokeAll(GpGraphics *g, int id, COLORREF color, float s, float penW) {
     unsigned argb = GDIP_ARGB(color);
-    int wpen = (int)(1.1f * g_scale + 0.5);
-    if (wpen < 1) wpen = 1;
     for (int j = 0; j < g_flatN[id]; j++) {
         SvgPath *sp = &g_flat[id][j].path;
         GpPath *gp = NULL;
@@ -441,7 +498,7 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
             if (ss->closed) t_GdipClosePathFigure(gp);
         }
         GpPen *pen = NULL;
-        if (t_GdipCreatePen1(argb, (float)(wpen * (g_flat[id][j].wmul ? g_flat[id][j].wmul : 1)), 2 /*pixel*/, &pen) == 0) {
+        if (t_GdipCreatePen1(argb, (float)(penW * (g_flat[id][j].w ? g_flat[id][j].w : 1.0f)), 2 /*pixel*/, &pen) == 0) {
             t_GdipSetPenStartCap(pen, 2); // LineCapRound
             t_GdipSetPenEndCap(pen, 2);
             t_GdipSetPenLineJoin(pen, 2); // LineJoinRound
@@ -450,6 +507,45 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
         }
         t_GdipDeletePath(gp);
     }
+}
+
+static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
+    if (!iconDibMake(d, w, h)) return 0;
+    memset(d->bits, 0, (size_t)w * h * 4);
+    float s = (float)g_scale / 2; // 24-unit box -> 12 CSS px
+    int wpen = (int)(1.1f * g_scale + 0.5);
+    if (wpen < 1) wpen = 1;
+    // Supersample 2x: GDI+ edge AA at 1:1 reads blocky next to Chromium's
+    // SVG renderer. One color per icon, so the downscale only averages the
+    // coverage (alpha); the RGB stays the icon color.
+    const int SS = 2;
+    if (iconDibMake(&g_ssDib, w * SS, h * SS)) {
+        memset(g_ssDib.bits, 0, (size_t)w * SS * h * SS * 4);
+        GpGraphics *g = NULL;
+        if (t_GdipCreateFromHDC(g_ssDib.dc, &g) == 0) {
+            t_GdipSetSmoothingMode(g, 6); // AntiAlias8x8
+            iconStrokeAll(g, id, color, s * SS, (float)wpen * SS);
+            t_GdipDeleteGraphics(g);
+            unsigned *src = (unsigned *)g_ssDib.bits;
+            unsigned *dst = (unsigned *)d->bits;
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    unsigned a = 0;
+                    for (int dy = 0; dy < SS; dy++)
+                        for (int dx = 0; dx < SS; dx++)
+                            a += (src[((y * SS + dy) * (w * SS)) + x * SS + dx] >> 24) & 0xFF;
+                    a /= SS * SS;
+                    dst[y * w + x] = (a << 24) | (GDIP_ARGB(color) & 0x00FFFFFFu);
+                }
+            }
+            return 1;
+        }
+    }
+    // fallback: draw 1:1 straight into the cache DIB
+    GpGraphics *g = NULL;
+    if (t_GdipCreateFromHDC(d->dc, &g) != 0) return 0;
+    t_GdipSetSmoothingMode(g, 6); // AntiAlias8x8
+    iconStrokeAll(g, id, color, s, (float)wpen);
     t_GdipDeleteGraphics(g);
     return 1;
 }
@@ -478,7 +574,7 @@ static void iconStrokeGdi(HDC hdc, int id, COLORREF color, int x, int y) {
     if (wpen < 1) wpen = 1;
     LOGBRUSH lb; lb.lbStyle = BS_SOLID; lb.lbColor = color; lb.lbHatch = 0;
     for (int j = 0; j < g_flatN[id]; j++) {
-        int w = g_flat[id][j].wmul * wpen;
+        int w = (int)(wpen * (g_flat[id][j].w ? g_flat[id][j].w : 1.0f) + 0.5);
         if (w < 1) w = 1;
         HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, (DWORD)w, &lb, 0, NULL);
         if (!pen) return;
@@ -510,7 +606,7 @@ static void svgInitAll(void) {
             if (!SVG_P[i][j].d) break;
             memset(&g_flat[i][j].path, 0, sizeof(SvgPath));
             svgWalk(&g_flat[i][j].path, SVG_P[i][j].d);
-            g_flat[i][j].wmul = SVG_P[i][j].wmul;
+            g_flat[i][j].w = SVG_P[i][j].w;
             n++;
         }
         g_flatN[i] = n;
@@ -556,29 +652,46 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
         if (!g_battKey[5] || memcmp(g_battKey, key, sizeof(key)) != 0 || g_battDib.w != bw) {
             if (iconRenderGdip(&g_battDib, SVG_BAT, accent, bw, bw)) {
                 float s = (float)g_scale / 2;
-                // inner fill: 24-unit x 4.9..17.1, y 9.7..14.3 - drawn with GDI+
+                // inner fill: Electron ICONS.batBody - innerX 4.3, innerW 12.4,
+                // y 9.7, h 5.1, rx 0.8, opacity 0.75 (0.9 under 10%), 4% floor
                 GpGraphics *g = NULL;
                 if (t_GdipCreateFromHDC(g_battDib.dc, &g) == 0) {
                     t_GdipSetSmoothingMode(g, 6);
-                    float fw = ac ? 12.2f : (pct <= 0 ? 0.0f : 12.2f * (float)(bucket * 2) / 100.0f);
-                    if (fw > 0.5f) {
+                    float fw = ac ? 12.4f : (pct <= 0 ? 0.0f : 12.4f * (float)(bucket * 2) / 100.0f);
+                    if (fw < 0.9f) fw = 0.9f; // never zero-width sliver floor
+                    int low = (pct < 10 && !ac);
+                    COLORREF fc = low ? warn : accent;
+                    unsigned int alpha = low ? 230u : 191u; // 0.9 / 0.75
+                    GpPath *fp = NULL;
+                    if (t_GdipCreatePath(0, &fp) == 0) {
+                        float fx = 4.3f * s, fy = 9.7f * s;
+                        float fw2 = fw * s, fh = 5.1f * s, fr = 0.8f * s;
+                        if (fr * 2 > fw2) fr = fw2 / 2;
+                        if (fr * 2 > fh) fr = fh / 2;
+                        t_GdipAddPathArc(fp, fx, fy, 2 * fr, 2 * fr, 180, 90);
+                        t_GdipAddPathArc(fp, fx + fw2 - 2 * fr, fy, 2 * fr, 2 * fr, 270, 90);
+                        t_GdipAddPathArc(fp, fx + fw2 - 2 * fr, fy + fh - 2 * fr, 2 * fr, 2 * fr, 0, 90);
+                        t_GdipAddPathArc(fp, fx, fy + fh - 2 * fr, 2 * fr, 2 * fr, 90, 90);
+                        t_GdipCloseFigure(fp);
                         GpBrush *br = NULL;
-                        COLORREF fc = (pct <= 10 && !ac) ? warn : accent;
-                        if (t_GdipCreateSolidFill(GDIP_ARGB(fc), &br) == 0) {
-                            t_GdipFillRectangleI(g, br, (int)(4.9f * s + 0.5f), (int)(9.7f * s + 0.5f),
-                                                 (int)(fw * s + 0.5f), (int)(4.6f * s + 0.5f));
+                        unsigned int argb = alpha << 24 | ((unsigned int)GetRValue(fc) << 16)
+                                         | ((unsigned int)GetGValue(fc) << 8) | (unsigned int)GetBValue(fc);
+                        if (t_GdipCreateSolidFill(argb, &br) == 0) {
+                            t_GdipFillPath(g, br, fp);
                             t_GdipDeleteBrush(br);
                         }
+                        t_GdipDeletePath(fp);
                     }
-                    if (ac) { // zigzag bolt over the fill (tint-dark contrast)
+                    if (ac) { // zigzag bolt over the fill (Electron batCharge path, stroke 1.8)
                         GpPen *pen = NULL;
-                        if (t_GdipCreatePen1(GDIP_ARGB(lineCr), (float)(g_scale >= 1.5 ? 2 : 1), 2, &pen) == 0) {
+                        float boltW = (float)(1.8 / 2.2) * 1.1f * g_scale;
+                        if (t_GdipCreatePen1(GDIP_ARGB(accent), boltW, 2, &pen) == 0) {
                             t_GdipSetPenLineJoin(pen, 2);
                             GpPath *p2 = NULL;
                             if (t_GdipCreatePath(0, &p2) == 0) {
                                 GpPointF zz[4] = {
-                                    { 11.9f * s, 9.2f * s }, { 9.3f * s, 12.6f * s },
-                                    { 11.6f * s, 12.6f * s }, { 9.9f * s, 15.2f * s }
+                                    { 12.2f * s, 8.9f * s }, { 9.6f * s, 12.4f * s },
+                                    { 12.0f * s, 12.4f * s }, { 9.9f * s, 15.7f * s }
                                 };
                                 t_GdipAddPathLine2(p2, zz, 4);
                                 t_GdipDrawPath(g, pen, p2);
@@ -596,11 +709,12 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
         iconBlit(hdc, &g_battDib, x, y);
         return;
     }
-    // GDI fallback: outline + plain rect fill
+    // GDI fallback: outline + plain rect fill (same inner box as the GDI+ path)
     float s = (float)g_scale / 2;
-    int ix0 = x + (int)(4.9f * s + 0.5f), iy0 = y + (int)(9.7f * s + 0.5f);
-    int iy1 = y + (int)(14.3f * s + 0.5f);
-    float fw = ac ? 12.2f : (pct <= 0 ? 0.0f : 12.2f * (float)pct / 100.0f);
+    int ix0 = x + (int)(4.3f * s + 0.5f), iy0 = y + (int)(9.7f * s + 0.5f);
+    int iy1 = y + (int)(14.8f * s + 0.5f);
+    float fw = ac ? 12.4f : (pct <= 0 ? 0.0f : 12.4f * (float)pct / 100.0f);
+    if (fw < 0.9f) fw = 0.9f;
     int ix1 = ix0 + (int)(fw * s);
     if (ix1 > ix0) {
         HBRUSH br = CreateSolidBrush(pct <= 10 && !ac ? warn : accent);
@@ -609,16 +723,16 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
         DeleteObject(br);
     }
     if (ac) {
-        LOGBRUSH lb; lb.lbStyle = BS_SOLID; lb.lbColor = lineCr; lb.lbHatch = 0;
+        LOGBRUSH lb; lb.lbStyle = BS_SOLID; lb.lbColor = accent; lb.lbHatch = 0;
         HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
-                                (DWORD)(g_scale >= 1.5 ? 2 : 1), &lb, 0, NULL);
+                                (DWORD)((1.8 / 2.2) * 1.1 * g_scale + 0.5), &lb, 0, NULL);
         if (pen) {
             HGDIOBJ old = SelectObject(hdc, pen);
             POINT zz[4] = {
-                { x + (int)(11.9f * s), y + (int)(9.2f * s) },
-                { x + (int)(9.3f * s), y + (int)(12.6f * s) },
-                { x + (int)(11.6f * s), y + (int)(12.6f * s) },
-                { x + (int)(9.9f * s), y + (int)(15.2f * s) },
+                { x + (int)(12.2f * s), y + (int)(8.9f * s) },
+                { x + (int)(9.6f * s), y + (int)(12.4f * s) },
+                { x + (int)(12.0f * s), y + (int)(12.4f * s) },
+                { x + (int)(9.9f * s), y + (int)(15.7f * s) },
             };
             Polyline(hdc, zz, 4);
             SelectObject(hdc, old);
