@@ -260,6 +260,7 @@ static GpStatus (WINAPI *t_GdipDrawPath)(GpGraphics *, GpPen *, GpPath *);
 static GpStatus (WINAPI *t_GdipDrawArc)(GpGraphics *, GpPen *, float, float, float, float, float, float);
 static GpStatus (WINAPI *t_GdipDrawEllipse)(GpGraphics *, GpPen *, float, float, float, float);
 static GpStatus (WINAPI *t_GdipFillEllipse)(GpGraphics *, GpBrush *, float, float, float, float);
+static GpStatus (WINAPI *t_GdipFillRectangleI)(GpGraphics *, GpBrush *, int, int, int, int);
 static GpStatus (WINAPI *t_GdipFillPath)(GpGraphics *, GpBrush *, GpPath *);
 static GpStatus (WINAPI *t_GdipAddPathArc)(GpPath *, float, float, float, float, float, float);
 static GpStatus (WINAPI *t_GdipCloseFigure)(GpPath *);
@@ -289,6 +290,7 @@ static void gdipInit(void) {
     GBIND(GdipDrawArc, "GdipDrawArc");
     GBIND(GdipDrawEllipse, "GdipDrawEllipse");
     GBIND(GdipFillEllipse, "GdipFillEllipse");
+    GBIND(GdipFillRectangleI, "GdipFillRectangleI");
     GBIND(GdipFillPath, "GdipFillPath");
     GBIND(GdipAddPathArc, "GdipAddPathArc");
     GBIND(GdipCloseFigure, "GdipClosePathFigure"); // flat API has no GdipCloseFigure
@@ -302,7 +304,7 @@ static void gdipInit(void) {
         (void *)t_GdipClosePathFigure, (void *)t_GdipCreatePen1, (void *)t_GdipDeletePen,
         (void *)t_GdipSetPenStartCap, (void *)t_GdipSetPenEndCap, (void *)t_GdipSetPenLineJoin,
         (void *)t_GdipDrawPath, (void *)t_GdipDrawArc, (void *)t_GdipDrawEllipse,
-        (void *)t_GdipFillEllipse, (void *)t_GdipFillPath, (void *)t_GdipAddPathArc,
+        (void *)t_GdipFillEllipse, (void *)t_GdipFillRectangleI, (void *)t_GdipFillPath, (void *)t_GdipAddPathArc,
         (void *)t_GdipCloseFigure, (void *)t_GdipCreateSolidFill, (void *)t_GdipDeleteBrush };
     for (int i = 0; i < (int)(sizeof(tabs) / sizeof(tabs[0])); i++) {
         if (!tabs[i]) { writeLogA("gdiplus bind missing, falling back to GDI"); return; }
@@ -563,17 +565,8 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                         GpBrush *br = NULL;
                         COLORREF fc = (pct <= 10 && !ac) ? warn : accent;
                         if (t_GdipCreateSolidFill(GDIP_ARGB(fc), &br) == 0) {
-                            GpPath *p = NULL;
-                            if (t_GdipCreatePath(0, &p) == 0) {
-                                float fx = 4.9f * s, fy = 9.7f * s;
-                                float fww = fw * s, fhh = 4.6f * s;
-                                t_GdipAddPathArc(p, fx, fy, fww, fhh, 90, 90);
-                                t_GdipAddPathArc(p, fx + fww - fhh, fy, fhh, fhh, 0, 180);
-                                t_GdipAddPathArc(p, fx, fy, fww, fhh, 270, 90);
-                                t_GdipCloseFigure(p);
-                                t_GdipFillPath(g, br, p);
-                                t_GdipDeletePath(p);
-                            }
+                            t_GdipFillRectangleI(g, br, (int)(4.9f * s + 0.5f), (int)(9.7f * s + 0.5f),
+                                                 (int)(fw * s + 0.5f), (int)(4.6f * s + 0.5f));
                             t_GdipDeleteBrush(br);
                         }
                     }
