@@ -1385,7 +1385,7 @@ static void paintDash(HWND hwnd) {
             int provN = 0;
             int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
             for (int i = 0; i < pn; i++) {
-                if (!subsProvEnabled(i)) continue;
+                if (!g_cfg.subsEnabled || !subsProvEnabled(i)) continue;
                 SubsWin tmp[4];
                 int wn = subsProvWins(i, tmp, 4);
                 if (wn < 0) wn = -wn;
@@ -1757,7 +1757,7 @@ static void paintDash(HWND hwnd) {
         int colW2 = (innerW - gap) / 2;
         int panelH = (h - DX(30) - y - gap * (rows - 1)) / rows;
         for (int pi2 = 0; pi2 < pn; pi2++) {
-            if (!subsProvEnabled(pi2)) continue; // disabled: no panel (Electron parity)
+            if (!g_cfg.subsEnabled || !subsProvEnabled(pi2)) continue; // master off or disabled: no panel (Electron parity)
             wchar_t label[48];
             subsProvLabel(pi2, label, 48);
             SubsWin wins[4];
@@ -1872,7 +1872,7 @@ static void paintDash(HWND hwnd) {
                 SelectObject(dc, f13);
                 SetTextColor(dc, t.fg);
                 SetTextCharacterExtra(dc, DX(0.7));
-                RECT mr3 = { mx, ky + DX(24), mx + colW2 - DX(14) - mx, ky + DX(24) + DX(20) };
+                RECT mr3 = { mx, ky + DX(24), px2 + colW2 - DX(14), ky + DX(24) + DX(20) };
                 DrawTextW(dc, up, -1, &mr3, DT_SINGLELINE | DT_LEFT);
                 SetTextCharacterExtra(dc, 0);
                 wchar_t usedLine[72];

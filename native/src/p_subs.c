@@ -427,20 +427,20 @@ unsigned subsFetchedAgoSec(void) {
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
     for (;;) {
-        int any = 0, anyEnabled = 0;
-        int n = g_cfg.subsProviderCount;
-        if (n > MAX_SUBS) n = MAX_SUBS;
-        for (int i = 0; i < n; i++) {
-            if (!g_cfg.subsProviders[i].enabled) continue;
-            anyEnabled = 1;
-            int ok = g_cfg.subsProviders[i].type == 0 ? subsFetchChatgpt(i) : subsFetchZai(i);
-            any |= ok;
+        if (g_cfg.subsEnabled) { // master switch off: no polls, no requests
+            int anyEnabled = 0;
+            int n = g_cfg.subsProviderCount;
+            if (n > MAX_SUBS) n = MAX_SUBS;
+            for (int i = 0; i < n; i++) {
+                if (!g_cfg.subsProviders[i].enabled) continue;
+                anyEnabled = 1;
+                if (g_cfg.subsProviders[i].type == 0) subsFetchChatgpt(i); else subsFetchZai(i);
+            }
+            if (!anyEnabled) {
+                for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
+            }
+            g_subsFetchedTick = GetTickCount64();
         }
-        (void)any; // per-provider state now lives in g_subsProvRem/g_subsProvStale
-        if (!anyEnabled) {
-            for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
-        }
-        g_subsFetchedTick = GetTickCount64();
         // sleep the interval, but a kick (refresh button) breaks out early
         int ivl = g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000;
         for (int waited = 0; waited < ivl; waited += 250) {
