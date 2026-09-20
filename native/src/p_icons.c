@@ -381,7 +381,7 @@ typedef struct {
 } IconDib;
 static IconDib g_iconDib[SVG_COUNT];
 static IconDib g_battDib;         // battery cache (charge bucket + ac + colors)
-static int g_battKey[6];          // pct bucket, ac, accent, warn, line, valid
+static int g_battKey[7];          // pct bucket, ac, accent, warn, line, valid, warn-fill
 
 static void iconDrop(IconDib *d) {
     if (d->dc) { DeleteDC(d->dc); d->dc = NULL; }
@@ -449,7 +449,6 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
         t_GdipDeletePath(gp);
     }
     t_GdipDeleteGraphics(g);
-    iconDibPremultiply(d);
     return 1;
 }
 
@@ -531,6 +530,7 @@ static void svgDraw(HDC hdc, int id, COLORREF color, int x, int y) {
         IconDib *d = &g_iconDib[id];
         if (!d->valid || d->color != color || d->w != bw) {
             if (!iconRenderGdip(d, id, color, bw, bw)) return;
+            iconDibPremultiply(d); // once: render pass wrote straight ARGB
             d->color = color;
             d->valid = 1;
         }
@@ -546,7 +546,10 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                         COLORREF lineCr, int x, int y) {
     int bw = (int)(12 * g_scale + 0.5);
     int bucket = (pct < 0 ? 0 : (pct > 100 ? 100 : pct)) / 2;
-    int key[6] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, (int)lineCr, 1 };
+    // the fill color switches on the raw pct (not the 2% bucket): key on the
+    // warn fact too or 10/11% share bucket 5 and the color goes stale
+    int key[7] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, (int)lineCr, 1,
+                   (pct <= 10 && !ac) ? 1 : 0 };
     if (g_gdipOk) {
         if (!g_battKey[5] || memcmp(g_battKey, key, sizeof(key)) != 0 || g_battDib.w != bw) {
             if (iconRenderGdip(&g_battDib, SVG_BAT, accent, bw, bw)) {
@@ -598,7 +601,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
             }
         }
         iconBlit(hdc, &g_battDib, x, y);
-            return;
+        return;
     }
     // GDI fallback: outline + plain rect fill
     float s = (float)g_scale / 2;

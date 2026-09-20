@@ -387,7 +387,10 @@ static void scanTokenCache(void) {
             mv = mp + 9;
             const char *me = mv;
             while (me < recEnd && *me != '"' && *me && me - mv < 40) me++;
-            if (me < recEnd && *me == '"') mlen = (int)(me - mv);
+            // ids longer than the 40-char cap keep their prefix: aggRecord's
+            // room clamp truncates the key, dropping the record would silently
+            // de-sync BY MODEL from every other section
+            if (me > mv) mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
         aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, midnight);
@@ -1034,13 +1037,14 @@ static void dashCard(HDC dc, int x, int y, int w, int h, COLORREF fill, COLORREF
         return;
     }
     int r = DX(10);
-    HBRUSH b = CreateSolidBrush(fill);
+    HBRUSH b = fill ? CreateSolidBrush(fill) : NULL; // fill 0 = border-only ring
     LOGBRUSH lb1; lb1.lbStyle = BS_SOLID; lb1.lbColor = border; lb1.lbHatch = 0;
     HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb1, 0, NULL);
-    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, b ? b : GetStockObject(NULL_BRUSH)), op = SelectObject(dc, pen);
     RoundRect(dc, x, y, x + w, y + h, r * 2, r * 2);
     SelectObject(dc, ob); SelectObject(dc, op);
-    DeleteObject(b); DeleteObject(pen);
+    if (b) DeleteObject(b);
+    DeleteObject(pen);
 }
 
 static void dashStr(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT f) {
@@ -1428,7 +1432,6 @@ static void paintDash(HWND hwnd) {
             int cell = DX(11), cgap = DX(3), pitch = cell + cgap;
             int rowLabW = DX(16) + DX(5);
             int weeks = 26;
-            int hmW = rowLabW + weeks * pitch;
             int secPadX = DX(12);
             SYSTEMTIME nowSt; GetLocalTime(&nowSt);
             int endDow = nowSt.wDayOfWeek; // 0 = Sun
@@ -1440,9 +1443,15 @@ static void paintDash(HWND hwnd) {
             if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
             int hmH = 7 * pitch - cgap;
             int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS && g_dayTot[DASH_MAX_DAYS - 1 - g_daySel] > 0;
-            int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(17) : 0;
-            int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10) + ddH;
+            int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(13) + DX(17) : 0;
+            int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10);
             if (y + secH < h - DX(26)) {
+                // fit gate stays on the no-selection height: the detail expands
+                // the card only while the expansion fits, else it is clipped -
+                // a selection must never collapse the section (the hit rects
+                // would go stale and keep firing)
+                if (hasSel && y + secH + ddH < h - DX(26)) secH += ddH;
+                else hasSel = 0;
                 dashCard(dc, padL, y, innerW, secH, t.card, t.divider);
                 int hx = padL + secPadX;
                 int hy = y + DX(10) + DX(11) + DX(8) + DX(13);
@@ -1514,10 +1523,18 @@ static void paintDash(HWND hwnd) {
                              DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear, dnum);
                     dashStr(dc, padL + secPadX, ddy, dtitle, t.fg, fBody);
                     ddy += DX(15);
+                    // per-day cache presence from g_dayApp (Electron hasCacheData):
+                    // cache columns + header only while the day carries cache
+                    TokAgg *dayRows = g_dayApp[DASH_MAX_DAYS - 1 - g_daySel];
+                    int cache = 0;
+                    for (int i = 0; i < g_appCount; i++)
+                        if (dayRows[i].cr + dayRows[i].cw > 0) { cache = 1; break; }
                     int xs[5];
-                    dashTableCols(padL + innerW - secPadX, 0, xs);
+                    dashTableCols(padL + innerW - secPadX, cache, xs);
+                    dashTableHead(dc, padL + secPadX, innerW, ddy, cache, xs, &t, fS9, L"APP");
+                    ddy += DX(13);
                     for (int i = 0; i < g_appCount && ddy + DX(17) < y + secH; i++) {
-                        TokAgg *a = &g_dayApp[DASH_MAX_DAYS - 1 - g_daySel][i];
+                        TokAgg *a = &dayRows[i];
                         if (a->req == 0) continue;
                         wchar_t an[24];
                         MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
@@ -1529,11 +1546,17 @@ static void paintDash(HWND hwnd) {
                         wchar_t vs[32];
                         fmtTokens(a->in, vs, 32); dashStrR(dc, xs[4], ddy, vs, t.fg, fBody);
                         fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], ddy, vs, t.fg, fBody);
+                        if (cache) {
+                            fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], ddy, vs, t.fg, fBody);
+                            fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody);
+                        }
                         swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
                         ddy += DX(17);
                     }
                 }
                 y += secH + gap;
+            } else {
+                memset(g_hmRect, 0, sizeof(g_hmRect)); // no section: no live hit rects
             }
 
             // tables: By app + By model (2-col grid). Electron sorts by total
@@ -1652,10 +1675,7 @@ static void paintDash(HWND hwnd) {
         }
         // footer: last scan time, right-aligned
         {
-            SYSTEMTIME now2; GetLocalTime(&now2);
-            wchar_t ft3[16], ftxt[40];
-            swprintf(ft3, 15, L"%02lu:%02lu:%02lu", (unsigned long)now2.wHour, (unsigned long)now2.wMinute, (unsigned long)now2.wSecond);
-            (void)ft3;
+            wchar_t ftxt[40];
             if (g_lastScanMs) {
                 unsigned ago = (unsigned)((GetTickCount64() - (unsigned long long)g_lastScanMs) / 1000);
                 dashFmtTime(dashLocalNowMs() - (long long)ago * 1000, ftxt, 39);
@@ -1722,7 +1742,6 @@ static void paintDash(HWND hwnd) {
             }
             // pies
             int bodyY = py2 + headH + DX(14);
-            int bodyH = panelH - headH - DX(14) - DX(30);
             if (wn == 0) {
                 dashStr(dc, px2 + DX(14), bodyY + DX(12), stale ? L"stale \x2014 no data yet" : L"no windows reported", t.dim, fBody);
             }
@@ -1874,6 +1893,14 @@ static void dashTipCell(HWND hwnd, POINT p) {
 
 static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_CREATE:
+        // subs fetches land 0.2-0.7s after a refresh click (and on the periodic
+        // cycle): repaint while the board is open so the pies never go stale
+        SetTimer(hwnd, 1, 500, NULL);
+        return 0;
+    case WM_TIMER:
+        if (g_dashType == 1) InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
@@ -1945,6 +1972,7 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        KillTimer(hwnd, 1);
         g_dash = NULL;
         g_dashPainted = -1;
         g_daySel = -1;
@@ -2290,7 +2318,7 @@ static const char *g_template =
     "            \"radius\": 8 },\r\n"
     "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#E8C7D0\", \"pinkDeep\": \"#D493AA\",\r\n"
     "              \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
-    "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 100,\r\n"
+    "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 840, \"height\": 580 },\r\n"
     "  \"tokens\": { \"appFilter\": [], \"cachePath\": \"\" },\r\n"
@@ -2351,6 +2379,7 @@ void loadConfig(void) {
     freeConfig(&g_cfg);
     g_cfg = next;
     g_cfgLoaded = 1;
+    g_iconOpacity = g_cfg.iconOpacity / 100.0; // p_icons AlphaBlend constant
 }
 
 // --------------------------------------------------------------- wWinMain ----
