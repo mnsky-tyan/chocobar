@@ -20,9 +20,10 @@ static CRITICAL_SECTION g_subsLock;
 static int g_subsLockInit = 0;
 // Per-provider state: a provider that fails keeps its last good numbers
 // marked stale; one provider failing must never blank or stale the others.
-typedef struct { wchar_t label[16]; int pct; int rem; int used; int total; } SubsWin;
+typedef struct { wchar_t label[16]; int pct; int rem; int used; int total; long long resetAt; } SubsWin;
 static SubsWin g_subsWin[MAX_SUBS][4];  // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
+static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
 static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
 static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
@@ -264,6 +265,16 @@ static void subsSetWins(int idx, const SubsWin *w, int n) {
     LeaveCriticalSection(&g_subsLock);
 }
 
+// plan display name (Electron p.plan); kept across a failed cycle, like the
+// windows, so a transient fetch error never blanks the panel head
+static void subsSetPlan(int idx, const wchar_t *plan) {
+    if (idx < 0 || idx >= MAX_SUBS) return;
+    EnterCriticalSection(&g_subsLock);
+    if (plan && *plan) lstrcpynW(g_subsPlan[idx], plan, 24);
+    else g_subsPlan[idx][0] = 0;
+    LeaveCriticalSection(&g_subsLock);
+}
+
 static int subsFetchChatgpt(int idx) {
     wchar_t *tok = subsChatgptToken(idx);
     if (!tok) { writeLogA("subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(idx, 0, 0); return 0; }
@@ -284,10 +295,12 @@ static int subsFetchChatgpt(int idx) {
         return 0;
     }
     double rem = 100;
+    wchar_t *pt = NULL;
     jsmntok_t t[512];
     jsmn_parser p;
     jsmn_init(&p);
     if (jsmn_parse(&p, body, len, t, 512) > 0 && t[0].type == JSMN_OBJECT) {
+        pt = subsJstr(body, t, 0, "plan_type");
         int rl = jobjGet(body, t, 0, "rate_limit");
         rem = 100;
         if (rl >= 0 && t[rl].type == JSMN_OBJECT) {
@@ -308,9 +321,11 @@ static int subsFetchChatgpt(int idx) {
                 memset(&wins[nwin], 0, sizeof(SubsWin));
                 lstrcpynW(wins[nwin].label, wlabels[i], 16);
                 wins[nwin].pct = (int)(used + 0.5);
-                wins[nwin].rem = 100 - (int)(used + 0.5);
+                wins[nwin].rem = (int)(100.0 - used + 0.5);
                 wins[nwin].used = -1;
                 wins[nwin].total = -1;
+                double ra = subsJdouble(body, t, w, "reset_at", 0);
+                if (ra > 0) wins[nwin].resetAt = (long long)(ra * 1000.0);
                 nwin++;
             }
             rem = found ? lo : 100;
@@ -320,6 +335,8 @@ static int subsFetchChatgpt(int idx) {
     HeapFree(GetProcessHeap(), 0, body);
     subsSetWins(idx, wins, nwin);
     subsSetState(idx, (int)(rem + 0.5), 1);
+    subsSetPlan(idx, pt && *pt ? pt : L"chatgpt");
+    wideFree(&pt);
     return 1;
 }
 
@@ -369,6 +386,7 @@ static int subsFetchZai(int idx) {
     int nwin = 0;
     double lo = 100;
     int limits = jobjGet(body, t, 0, "data");
+    int dataObj = limits;
     if (limits >= 0 && t[limits].type == JSMN_OBJECT) {
         limits = jobjGet(body, t, limits, "limits");
         if (limits >= 0 && t[limits].type == JSMN_ARRAY) {
@@ -395,9 +413,11 @@ static int subsFetchZai(int idx) {
                         else if (unit == 2) lstrcpynW(wins[nwin].label, L"day", 16);
                         else swprintf(wins[nwin].label, 16, L"unit%d", unit);
                         wins[nwin].pct = (int)(pct + 0.5);
-                        wins[nwin].rem = 100 - (int)(pct + 0.5);
-                        wins[nwin].used = (int)used;
-                        wins[nwin].total = (int)total;
+                        wins[nwin].rem = (int)(100.0 - pct + 0.5);
+                        wins[nwin].used = (int)(used + 0.5);
+                        wins[nwin].total = (int)(total + 0.5);
+                        double nr = subsJdouble(body, t, k, "nextResetTime", 0);
+                        if (nr > 0) wins[nwin].resetAt = (long long)nr;
                         nwin++;
                     }
                 }
@@ -408,9 +428,12 @@ static int subsFetchZai(int idx) {
             else lo = 100;
         }
     }
+    wchar_t *pt = dataObj >= 0 ? subsJstr(body, t, dataObj, "level") : NULL;
     HeapFree(GetProcessHeap(), 0, body);
     subsSetWins(idx, wins, nwin);
     subsSetState(idx, (int)(lo + 0.5), 1);
+    subsSetPlan(idx, pt && *pt ? pt : L"coding");
+    wideFree(&pt);
     return 1;
 }
 
@@ -493,6 +516,14 @@ static void subsProvLabel(int i, wchar_t *out, int cb) {
                            ? g_cfg.subsProviders[i].label : NULL;
     if (!l) l = (i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].type == 1) ? L"Z.ai" : L"ChatGPT";
     lstrcpynW(out, l, cb);
+}
+// provider plan name (Electron p.plan); empty until the first successful fetch
+static void subsProvPlan(int i, wchar_t *out, int cb) {
+    out[0] = 0;
+    if (i < 0 || i >= MAX_SUBS || !g_subsLockInit) return;
+    EnterCriticalSection(&g_subsLock);
+    lstrcpynW(out, g_subsPlan[i], cb);
+    LeaveCriticalSection(&g_subsLock);
 }
 static int subsProvEnabled(int i) {
     return i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].enabled;

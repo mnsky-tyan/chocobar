@@ -209,6 +209,8 @@ static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day de
 static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
 static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
 static long long g_lastScanMs = 0;
+static unsigned long long g_tokDataVersion = 0;   // moves on every completed scan
+static unsigned long long g_dashTokVersion = 0;   // version the open board shows
 static int g_daySel = -1; // selected heatmap cell (daysBack), -1 = none
 
 // blend two opaque colors, num/256 of the foreground
@@ -331,7 +333,9 @@ static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack) {
 
 // today's raw (cache-exclusive) input+output, mirroring tokens.js; the
 // Electron app rewrites this cache every rescan, we just read it
-static void scanTokenCache(void) {
+// every completed scan (data OR no-data) moves the version, so the open
+// dashboard can repaint on change instead of on a fixed heartbeat
+static void scanTokenCacheInner(void) {
     wchar_t path[MAX_PATH];
     path[0] = 0;
     if (g_cfg.tokenCachePath && *g_cfg.tokenCachePath) {
@@ -436,12 +440,40 @@ static void scanTokenCache(void) {
     g_lastScanMs = (long long)GetTickCount64();
 }
 
+static void scanTokenCache(void) {
+    scanTokenCacheInner();
+    g_tokDataVersion++;
+}
+
+// token counts (renderer/dash.js fmt): B / M / k tiers
 static void fmtTokens(long long n2, wchar_t *out, int cb) {
     if (n2 < 0) { lstrcpynW(out, L"\u2014", cb); return; }
     if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
     else if (n2 >= 1000000) swprintf(out, cb, L"%.1fM", n2 / 1e6);
     else if (n2 >= 1000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
     else swprintf(out, cb, L"%lld", n2);
+}
+
+// renderer/subs.js fmtNum: M and k tiers only (no B), values rounded
+static void fmtNum(long long n2, wchar_t *out, int cb) {
+    if (n2 < 0) { lstrcpynW(out, L"\u2014", cb); return; }
+    if (n2 >= 1000000LL) swprintf(out, cb, L"%.1fM", n2 / 1e6);
+    else if (n2 >= 1000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
+    else swprintf(out, cb, L"%lld", n2);
+}
+
+// renderer/subs.js fmtReset: relative countdown to the window reset
+// (resetAt is a true UTC epoch ms, as Date.now() is)
+static void fmtReset(long long ms, wchar_t *out, int cb) {
+    if (ms <= 0) { lstrcpynW(out, L"reset \u2014", cb); return; }
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);
+    long long now = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
+    long long delta = ms - now;
+    if (delta <= 0) { lstrcpynW(out, L"reset now", cb); return; }
+    long long h = delta / 3600000LL, m = (delta % 3600000LL) / 60000LL, d = h / 24;
+    if (d >= 1) swprintf(out, cb, L"reset in %lldd %lldh", d, h % 24);
+    else if (h >= 1) swprintf(out, cb, L"reset in %lldh %lldm", h, m);
+    else swprintf(out, cb, L"reset in %lldm", m);
 }
 
 static void buildChips(void) {
@@ -960,6 +992,8 @@ static void followTick(void) {
     }
 }
 
+static void uiFontFamily(wchar_t *fam, int cb); // defined with the dashboard fonts
+
 static void configCheckTick(void) {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!GetFileAttributesExW(g_cfgPath, GetFileExInfoStandard, &fa)) return;
@@ -968,10 +1002,12 @@ static void configCheckTick(void) {
         loadConfig();
         // font may change with the config: rebuild it
         if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); g_font = NULL; }
+        wchar_t fam[64];
+        uiFontFamily(fam, 64);
         HFONT nf = CreateFontW(-(int)(g_cfg.fontSize * g_scale + 0.5), 0, 0, 0, FW_NORMAL,
                                FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                               DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
         if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
         clockFmtReload();
         followTick();
@@ -1403,12 +1439,24 @@ static void paintDash(HWND hwnd) {
             if (provN > 0) {
                 int secPadX = DX(12);
                 int headH = DX(11) + DX(8);
-                planH = DX(10) + headH + provN * DX(30) + DX(4) + DX(10);
+                // dash.css .plan-row: first row 32 CSS px, every following row
+                // +17 (dashed border-top + margin/padding) = 49
+                planH = DX(10) + headH + DX(32) + (provN - 1) * DX(49) + DX(4) + DX(10);
                 if (y + planH < h - DX(30)) {
                     dashCard(dc, padL, y, innerW, planH, t.card, t.divider);
                     dashHead(dc, padL + secPadX, y + DX(10), L"PLAN USAGE", t.dim, fHead);
                     int ry = y + DX(10) + headH;
                     for (int i = 0; i < provN; i++) {
+                        if (i > 0) {
+                            // .plan-row + .plan-row: 1px dashed divider
+                            HPEN dp = CreatePen(PS_DOT, 1, t.divider);
+                            HGDIOBJ od = SelectObject(dc, dp);
+                            MoveToEx(dc, padL + secPadX, ry, NULL);
+                            LineTo(dc, padL + innerW - secPadX, ry);
+                            SelectObject(dc, od);
+                            DeleteObject(dp);
+                            ry += DX(16); // border + margin-top 7 + padding-top 9
+                        }
                         wchar_t label[48];
                         subsProvLabel(provIdx[i], label, 48);
                         SubsWin tmp[4];
@@ -1459,7 +1507,7 @@ static void paintDash(HWND hwnd) {
                                 DeleteObject(b);
                             }
                         }
-                        ry += DX(30);
+                        ry += (i == 0) ? DX(32) : DX(49);
                     }
                     y += planH + gap;
                 } else planH = 0;
@@ -1658,11 +1706,15 @@ static void paintDash(HWND hwnd) {
                 if (g_modelAgg[mdlOrder[i]].cr + g_modelAgg[mdlOrder[i]].cw > 0) { modelCache = 1; break; }
             int rows = appN > mdlN ? appN : mdlN;
             if (rows < 1) rows = 1;
-            // never drop the section on a 1px miss: clip the row count to the
-            // height that is actually left, so the section always renders
-            int avail = (h - DX(24) - y - secPad - th2 - secPad) / rowH;
-            if (rows > avail) rows = avail;
+            // fit EVERY row: tighten the row pitch (17..19 CSS px) before
+            // dropping one, so the model table never loses a row silently
+            int budget = h - DX(24) - y - secPad - th2 - secPad;
+            int fitMax = budget / DX(17);
+            if (rows > fitMax) rows = fitMax;
             if (rows < 1) rows = 1;
+            rowH = budget / rows;
+            if (rowH > DX(19)) rowH = DX(19);
+            if (rowH < DX(17)) rowH = DX(17);
             int tblH = secPad + th2 + rows * rowH + secPad;
             if (y + tblH <= h - DX(24)) {
                 for (int side = 0; side < 2; side++) {
@@ -1787,10 +1839,18 @@ static void paintDash(HWND hwnd) {
             COLORREF dotc = t.ramp[pi2 % 5];
             dashDot(dc, px2 + DX(14), py2 + (headH - DX(9)) / 2, DX(9), dotc);
             dashStr(dc, px2 + DX(14) + DX(9) + DX(8), py2 + DX(11), label, t.fg, f13);
+            // .panel-plan: plan name beside the provider label (subs.css)
+            {
+                wchar_t plan[24];
+                subsProvPlan(pi2, plan, 24);
+                if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
+                int lx = px2 + DX(14) + DX(9) + DX(8) + dashStrW(dc, label, f13) + DX(8);
+                dashStr(dc, lx, py2 + DX(14), plan, t.dim, fS10);
+            }
             // status pill (subs.css .pill): stale / capped / near cap / ok
             {
                 int lowest = 1000, anyw = 0;
-                for (int k = 0; k < wn; k++) { int r2 = 100 - wins[k].pct; if (r2 < lowest) lowest = r2; anyw = 1; }
+                for (int k = 0; k < wn; k++) { if (wins[k].rem < lowest) lowest = wins[k].rem; anyw = 1; }
                 const wchar_t *ps2 = NULL; COLORREF pc = t.dim, pbg = blendCr(t.head, t.dim, 31);
                 if (stale) { ps2 = L"STALE"; pc = t.yellow; pbg = blendCr(t.head, t.yellow, 31); }
                 else if (!anyw) ps2 = NULL;
@@ -1831,7 +1891,7 @@ static void paintDash(HWND hwnd) {
                 int ky = bodyY + k * (pieD + DX(16));
                 if (ky + pieD > py2 + panelH - DX(34)) break;
                 int kx = px2 + DX(14);
-                int rem = 100 - wins[k].pct;
+                int rem = wins[k].rem;
                 if (rem < 0) rem = 0; if (rem > 100) rem = 100;
                 // track + arc (rotate -90: start at 12 o'clock, clockwise)
                 COLORREF track = blendCr(t.card, t.dim, 31);
@@ -1884,11 +1944,15 @@ static void paintDash(HWND hwnd) {
                 wchar_t usedLine[72];
                 if (wins[k].used >= 0 && wins[k].total > 0) {
                     wchar_t us2[24], ts3[24];
-                    fmtTokens(wins[k].used, us2, 24);
-                    fmtTokens(wins[k].total, ts3, 24);
+                    fmtNum(wins[k].used, us2, 24);
+                    fmtNum(wins[k].total, ts3, 24);
                     swprintf(usedLine, 71, L"%ls / %ls used", us2, ts3);
                 } else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
                 dashStr(dc, mx, ky + DX(50), usedLine, t.dim, fS10);
+                // third line: relative reset time (subs.js fmtReset)
+                wchar_t rst[40];
+                fmtReset(wins[k].resetAt, rst, 40);
+                dashStr(dc, mx, ky + DX(66), rst, t.dim, fS10);
             }
             // panel foot: dashed top + fetched time right
             int fy = py2 + panelH - DX(26);
@@ -1919,6 +1983,7 @@ static void paintDash(HWND hwnd) {
     HDC wdc = GetDC(hwnd);
     BitBlt(wdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     ReleaseDC(hwnd, wdc);
+    if (g_dashType == 0) g_dashTokVersion = g_tokDataVersion;
 }
 
 static int dashPtInBtn(POINT p, int *which) {
@@ -1974,12 +2039,13 @@ static void dashTipCell(HWND hwnd, POINT p) {
 static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
-        // subs fetches land 0.2-0.7s after a refresh click (and on the periodic
-        // cycle): repaint while the board is open so the pies never go stale
+        // subs fetches land asynchronously (0.2-0.7s after a refresh click,
+        // and on the periodic cycle); the token board only changes when a
+        // scan produces new numbers, so the tick repaints on data change
         SetTimer(hwnd, 1, 500, NULL);
         return 0;
     case WM_TIMER:
-        InvalidateRect(hwnd, NULL, FALSE);
+        if (g_dashType == 1 || g_tokDataVersion != g_dashTokVersion) InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;

@@ -638,8 +638,10 @@ static void svgDraw(HDC hdc, int id, COLORREF color, int x, int y) {
     }
 }
 
-// battery with a charge-level fill: icon color (warn red under 10%), full +
-// zigzag bolt on AC. Body outline comes from the static SVG_BAT part.
+// battery with a charge-level fill: the fill width tracks pct and turns
+// warn red under 10% exactly as Electron ICONS.batBody does (charging only
+// adds the zigzag bolt, it never widens the fill). Body outline comes from
+// the static SVG_BAT part.
 static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn,
                         COLORREF lineCr, int x, int y) {
     int bw = (int)(12 * g_scale + 0.5);
@@ -647,7 +649,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
     // the fill color switches on the raw pct (not the 2% bucket): key on the
     // warn fact too or 10/11% share bucket 5 and the color goes stale
     int key[7] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, (int)lineCr, 1,
-                   (pct <= 10 && !ac) ? 1 : 0 };
+                   (pct < 10) ? 1 : 0 };
     if (g_gdipOk) {
         if (!g_battKey[5] || memcmp(g_battKey, key, sizeof(key)) != 0 || g_battDib.w != bw) {
             if (iconRenderGdip(&g_battDib, SVG_BAT, accent, bw, bw)) {
@@ -657,9 +659,9 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                 GpGraphics *g = NULL;
                 if (t_GdipCreateFromHDC(g_battDib.dc, &g) == 0) {
                     t_GdipSetSmoothingMode(g, 6);
-                    float fw = ac ? 12.4f : (pct <= 0 ? 0.0f : 12.4f * (float)(bucket * 2) / 100.0f);
+                    float fw = pct <= 0 ? 0.0f : 12.4f * (float)(bucket * 2) / 100.0f;
                     if (fw < 0.9f) fw = 0.9f; // never zero-width sliver floor
-                    int low = (pct < 10 && !ac);
+                    int low = (pct < 10);
                     COLORREF fc = low ? warn : accent;
                     unsigned int alpha = low ? 230u : 191u; // 0.9 / 0.75
                     GpPath *fp = NULL;
@@ -713,11 +715,11 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
     float s = (float)g_scale / 2;
     int ix0 = x + (int)(4.3f * s + 0.5f), iy0 = y + (int)(9.7f * s + 0.5f);
     int iy1 = y + (int)(14.8f * s + 0.5f);
-    float fw = ac ? 12.4f : (pct <= 0 ? 0.0f : 12.4f * (float)pct / 100.0f);
+    float fw = pct <= 0 ? 0.0f : 12.4f * (float)pct / 100.0f;
     if (fw < 0.9f) fw = 0.9f;
     int ix1 = ix0 + (int)(fw * s);
     if (ix1 > ix0) {
-        HBRUSH br = CreateSolidBrush(pct <= 10 && !ac ? warn : accent);
+        HBRUSH br = CreateSolidBrush(pct < 10 ? warn : accent);
         RECT fr = { ix0, iy0, ix1, iy1 };
         FillRect(hdc, &fr, br);
         DeleteObject(br);
