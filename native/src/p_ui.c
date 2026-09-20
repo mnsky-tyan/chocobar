@@ -1205,12 +1205,13 @@ static int dashHasCache(void) {
 
 // format a FILETIME (already local) as HH:MM:SS
 static void dashFmtTime(long long msUtc, wchar_t *out, int cb) {
+    if (msUtc < 0) { lstrcpynW(out, L"\x2014", cb); return; }
     FILETIME ft;
     long long v = msUtc * 10000LL;
     ft.dwHighDateTime = (DWORD)(v >> 32);
     ft.dwLowDateTime = (DWORD)v;
     SYSTEMTIME st;
-    FileTimeToSystemTime(&ft, &st);
+    if (!FileTimeToSystemTime(&ft, &st)) { lstrcpynW(out, L"\x2014", cb); return; }
     swprintf(out, cb, L"%02lu:%02lu:%02lu", (unsigned long)st.wHour, (unsigned long)st.wMinute, (unsigned long)st.wSecond);
 }
 
@@ -1353,10 +1354,10 @@ static void paintDash(HWND hwnd) {
 
             // plan usage section (when subs providers report windows)
             int planH = 0;
-            int provIdx[2];
+            int provIdx[MAX_SUBS];
             int provN = 0;
             int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
-            for (int i = 0; i < pn && provN < 2; i++) {
+            for (int i = 0; i < pn; i++) {
                 if (!subsProvEnabled(i)) continue;
                 SubsWin tmp[4];
                 int wn = subsProvWins(i, tmp, 4);
@@ -1439,7 +1440,14 @@ static void paintDash(HWND hwnd) {
             if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
             int hmH = 7 * pitch - cgap;
             int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS;
-            int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(13) + DX(17) : 0;
+            int ddRows = 0;
+            if (hasSel) {
+                TokAgg *selRows = g_dayApp[DASH_MAX_DAYS - 1 - g_daySel];
+                for (int i = 0; i < g_appCount; i++)
+                    if (selRows[i].req > 0) ddRows++;
+                if (ddRows > 6) ddRows = 6;
+            }
+            int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(13) + ddRows * DX(17) : 0;
             int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10);
             if (y + secH < h - DX(26)) {
                 // fit gate stays on the no-selection height: the detail expands
@@ -1513,9 +1521,7 @@ static void paintDash(HWND hwnd) {
                     dashColDate(g_daySel, &d2);
                     TokAgg *dayRows = g_dayApp[DASH_MAX_DAYS - 1 - g_daySel];
                     long long tot = g_dayTot[DASH_MAX_DAYS - 1 - g_daySel];
-                    int anyRec = 0;
-                    for (int i = 0; i < g_appCount; i++)
-                        if (dayRows[i].req > 0) { anyRec = 1; break; }
+                    int anyRec = ddRows > 0;
                     wchar_t dtitle[96];
                     if (anyRec) {
                         wchar_t dnum[24];
@@ -1598,10 +1604,10 @@ static void paintDash(HWND hwnd) {
                     int u = mdlOrder[j];
                     long long ut = g_modelAgg[u].in + g_modelAgg[u].out + g_modelAgg[u].cr + g_modelAgg[u].cw;
                     if (ut >= vt) break;
-                    if (j + 1 < DASH_MAX_MODELS) mdlOrder[j + 1] = mdlOrder[j];
+                    mdlOrder[j + 1] = mdlOrder[j];
                     j--;
                 }
-                if (j + 1 < DASH_MAX_MODELS) mdlOrder[j + 1] = v;
+                mdlOrder[j + 1] = v;
             }
             int rows = appN > mdlN ? appN : mdlN;
             if (rows < 1) rows = 1;
