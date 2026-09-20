@@ -117,6 +117,7 @@ typedef struct {
     const wchar_t *colorOverride;
     unsigned iconCp;     // Nerd Font codepoint drawn before text (0 = none)
     int iconSvg;         // vector icon id (p_icons) - preferred over iconCp
+    const wchar_t *iconColorOverride; // per-chip icon color (bar.css .ico rules)
     int align;           // 1 = right group (metrics), 2 = left pinned group
 } Chip;
 
@@ -467,6 +468,8 @@ static void buildChips(void) {
         addChipI(CT_CUSTOM, -1, txt, 0, g_cfg.fgDim, 0);
         g_chips[g_chipCount - 1].align = 2;
         g_chips[g_chipCount - 1].iconSvg = SVG_DIAMOND;
+        // bar.css #seg-tokens .ico { color: var(--yellow) }
+        g_chips[g_chipCount - 1].iconColorOverride = g_cfg.yellow;
     }
     if (g_cfg.subsEnabled) {
         // Electron subs chip: percent with good/dim/warn, "stale" after a
@@ -743,8 +746,11 @@ static void repaintBar(HWND hwnd) {
         int tx = c->r.left;
         SetTextColor(g_memDc, vc);
         if (c->iconSvg >= 0) {
-            // single-color icon set; theme.iconColor, else pinkDeep
-            const wchar_t *icol = (g_cfg.iconColor && *g_cfg.iconColor) ? g_cfg.iconColor : g_cfg.pinkDeep;
+            // single-color icon set; per-chip override, else theme.iconColor,
+            // else pinkDeep (bar.css #seg-tokens .ico = yellow)
+            const wchar_t *icol = (c->iconColorOverride && *c->iconColorOverride)
+                ? c->iconColorOverride
+                : ((g_cfg.iconColor && *g_cfg.iconColor) ? g_cfg.iconColor : g_cfg.pinkDeep);
             COLORREF acc = colorrefFromHex(icol, 255);
             int iy = (g_dibH - svgBox) / 2;
             if (c->iconSvg == SVG_BAT)
