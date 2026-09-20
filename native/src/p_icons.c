@@ -14,9 +14,9 @@
 // color, warn red under 10%, full + zigzag bolt on AC). Drawn by
 // svgDrawBatt, not from the static table.
 //
-// Path primitives supported by the flattener: M m L l H h V v A a Z z
+// Path primitives supported by the flattener: M m L l H h V v A a C c S s Z z
 // (+ implicit lineto after M/m). Arcs sample every 5 degrees so circles
-// stay round at 2x DPI.
+// stay round at 2x DPI; C/c/S/s cubics are sampled too (the bow's loops).
 //
 // The facade below (gdip*) is also used by the dashboard painter for the
 // donut pies and anti-aliased rounded cards.

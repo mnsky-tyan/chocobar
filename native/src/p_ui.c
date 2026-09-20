@@ -180,6 +180,7 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
     c->type = type; c->customIdx = customIdx; c->warn = warn;
     c->colorOverride = colorOverride; c->iconCp = iconCp;
     c->iconSvg = -1;
+    c->iconColorOverride = NULL;
     c->align = 1;
     lstrcpynW(c->text, text ? text : L"", 96);
     c->r.left = c->r.right = c->r.top = c->r.bottom = 0;
@@ -1528,12 +1529,12 @@ static void paintDash(HWND hwnd) {
             if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
             int hmH = 7 * pitch - cgap;
             int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS;
-            int ddRows = 0;
+            int ddRows = 0, ddAll = 0;
             if (hasSel) {
                 TokAgg *selRows = g_dayApp[DASH_MAX_DAYS - 1 - g_daySel];
                 for (int i = 0; i < g_appCount; i++)
-                    if (selRows[i].req > 0) ddRows++;
-                if (ddRows > 6) ddRows = 6;
+                    if (selRows[i].req > 0) ddAll++;
+                ddRows = ddAll > 6 ? 6 : ddAll;
             }
             int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(13) + ddRows * DX(17) : 0;
             int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10);
@@ -1633,7 +1634,13 @@ static void paintDash(HWND hwnd) {
                         dashTableHead(dc, padL + secPadX, innerW, ddy, cache, xs, &t, fS9, L"APP");
                         ddy += DX(13);
                     }
-                    for (int i = 0; i < g_appCount && ddy + DX(17) < y + secH; i++) {
+                    // the reserve holds 6 rows: when the day has more
+                    // apps, the last slot carries an overflow line instead of
+                    // a silently dropped row
+                    int ddLimit = ddAll > ddRows ? ddRows - 1 : ddRows;
+                    int ddDrawn = 0;
+                    for (int i = 0; i < g_appCount && ddDrawn < ddLimit
+                         && ddy + DX(17) < y + secH; i++) {
                         TokAgg *a = &dayRows[i];
                         if (a->req == 0) continue;
                         wchar_t an[24];
@@ -1651,7 +1658,13 @@ static void paintDash(HWND hwnd) {
                             fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody);
                         }
                         swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
+                        ddDrawn++;
                         ddy += DX(17);
+                    }
+                    if (ddDrawn < ddAll) {
+                        wchar_t more[32];
+                        swprintf(more, 31, L"+%d more", ddAll - ddDrawn);
+                        dashStr(dc, padL + secPadX + 2 + DX(14), ddy, more, t.dim, fS10);
                     }
                 }
                 y += secH + gap;
@@ -1938,7 +1951,10 @@ static void paintDash(HWND hwnd) {
                 SelectObject(dc, f13);
                 SetTextColor(dc, t.fg);
                 SetTextCharacterExtra(dc, DX(0.7));
-                RECT mr3 = { mx, ky + DX(24), px2 + colW2 - DX(14), ky + DX(24) + DX(20) };
+                // meta text tracks the pie: the same fractions of pieD the
+                // uncompressed board (pieD 96) lays out at 24 / 50 / 66
+                int metaY = ky + (int)(pieD * 0.25f);
+                RECT mr3 = { mx, metaY, px2 + colW2 - DX(14), metaY + DX(20) };
                 DrawTextW(dc, up, -1, &mr3, DT_SINGLELINE | DT_LEFT);
                 SetTextCharacterExtra(dc, 0);
                 wchar_t usedLine[72];
@@ -1948,11 +1964,11 @@ static void paintDash(HWND hwnd) {
                     fmtNum(wins[k].total, ts3, 24);
                     swprintf(usedLine, 71, L"%ls / %ls used", us2, ts3);
                 } else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
-                dashStr(dc, mx, ky + DX(50), usedLine, t.dim, fS10);
+                dashStr(dc, mx, ky + (int)(pieD * 0.52f), usedLine, t.dim, fS10);
                 // third line: relative reset time (subs.js fmtReset)
                 wchar_t rst[40];
                 fmtReset(wins[k].resetAt, rst, 40);
-                dashStr(dc, mx, ky + DX(66), rst, t.dim, fS10);
+                dashStr(dc, mx, ky + (int)(pieD * 0.69f), rst, t.dim, fS10);
             }
             // panel foot: dashed top + fetched time right
             int fy = py2 + panelH - DX(26);
