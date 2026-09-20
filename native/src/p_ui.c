@@ -220,7 +220,7 @@ static COLORREF blendCr(COLORREF bg, COLORREF fg, int num) {
 
 static void aggRecord(const char *app, int alen, long long ts,
                       long long vin, long long vout, long long vcr, long long vcw,
-                      const char *model, int mlen, long long midnight) {
+                      const char *model, int mlen, const long long *bnd) {
     if (alen <= 0) alen = 1;
     if (alen > 19) alen = 19;
     // tokens.appFilter: when set, only the listed harness apps are tracked
@@ -235,9 +235,6 @@ static void aggRecord(const char *app, int alen, long long ts,
         if (!ok) return;
     }
     long long sum = vin + vout + vcr + vcw;
-    long long off = ts - midnight;
-    long long day = off / 86400000LL; // 0 = today, -n = n days ago
-    if (off % 86400000LL != 0 && off < 0) day--;
     int ai = -1;
     for (int i = 0; i < g_appCount; i++)
         if (memcmp(g_appName[i], app, alen) == 0 && g_appName[i][alen] == 0) { ai = i; break; }
@@ -283,8 +280,15 @@ static void aggRecord(const char *app, int alen, long long ts,
             g_modelAgg[mi].req++;
         }
     }
-    if (day >= -(DASH_MAX_DAYS - 1) && day <= 0) {
-        int di = DASH_MAX_DAYS - 1 + (int)day;
+    // first boundary at or before ts: bnd[1] is today, bnd[DASH_MAX_DAYS] the
+    // oldest bucket, bnd[0] (tomorrow) rejects later-dated records
+    int lo = 0, hi = DASH_MAX_DAYS, j = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (bnd[mid] <= ts) { j = mid; hi = mid - 1; } else lo = mid + 1;
+    }
+    if (j >= 1) {
+        int di = DASH_MAX_DAYS - j;
         g_dayTot[di] += sum;
         if (ai >= 0) {
             g_dayApp[di][ai].in += vin; g_dayApp[di][ai].out += vout;
@@ -309,6 +313,19 @@ static long long parseLL(const char *p, const char *end) {
     long long v = 0;
     while (p < end && *p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
     return neg ? -v : v;
+}
+
+// true epoch-ms of local midnight, daysBack days ago. The subtraction runs in
+// the local wall-clock frame (exact calendar arithmetic, as dashColDate does);
+// only the last step applies the time zone, so every day gets its own
+// DST-correct boundary instead of a fixed 24h multiple of today's.
+static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack) {
+    long long v = ((((long long)localMidnight->dwHighDateTime) << 32) | localMidnight->dwLowDateTime)
+                - (long long)daysBack * 864000000000LL;
+    FILETIME sub; sub.dwHighDateTime = (DWORD)(v >> 32); sub.dwLowDateTime = (DWORD)v;
+    FILETIME ft;
+    LocalFileTimeToFileTime(&sub, &ft);
+    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
 }
 
 // today's raw (cache-exclusive) input+output, mirroring tokens.js; the
@@ -354,10 +371,15 @@ static void scanTokenCache(void) {
 
     SYSTEMTIME st; GetLocalTime(&st);
     st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
-    FILETIME lft, ft;
-    SystemTimeToFileTime(&st, &lft);        // treats fields as UTC
-    LocalFileTimeToFileTime(&lft, &ft);     // apply the real TZ bias
-    long long midnight = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
+    FILETIME localMidnight;
+    SystemTimeToFileTime(&st, &localMidnight);
+    long long midnight = dashMidnightMs(&localMidnight, 0);
+    // one DST-exact boundary per heatmap bucket: bnd[j] opens the bucket that
+    // holds day j-1, so a bucket never straddles a calendar day
+    long long bnd[DASH_MAX_DAYS + 1];
+    for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
+    FILETIME nowFt; GetSystemTimeAsFileTime(&nowFt);
+    long long nowMs = ((((long long)nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime) / 10000 - 11644473600000LL;
     long long total = 0;
     memset(g_dayTot, 0, sizeof(g_dayTot));
     memset(g_appAgg, 0, sizeof(g_appAgg));
@@ -402,9 +424,9 @@ static void scanTokenCache(void) {
             if (me > mv) mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
-        aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, midnight);
-        if (ts >= midnight - 6LL * 86400000LL) g_tokWeek += sum;
-        if (ts >= midnight - 29LL * 86400000LL) g_tokMonth += sum;
+        aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, bnd);
+        if (ts >= nowMs - 7LL * 86400000LL) g_tokWeek += sum;
+        if (ts >= nowMs - 30LL * 86400000LL) g_tokMonth += sum;
         g_tokAll += sum;
         p = next ? next : end;
     }
