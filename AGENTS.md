@@ -11,6 +11,22 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 
+## Sharp edges
+
+- A dead stdout sink (start-wizbar.vbs redirect) makes every `console.*`
+  throw EPIPE, and Electron pops an "A JavaScript error occurred" dialog
+  PER LINE - the app logs every scan, so the dialogs never stop until the
+  pipe reader comes back. main.js swallows stream EPIPE; keep it.
+- The native icons are a 1:1 port of `ICONS` in renderer/bar.js (viewBox 24,
+  stroke-width 2.2, bow 2). Never hand-redraw them again: port the exact path
+  data (rect/circle -> path syntax), and render through the 2x supersample
+  pass in iconRenderGdip - 1:1 GDI+ AA reads blocky next to Chromium.
+  Per-chip icon colors live in bar.css (#seg-tokens .ico = yellow, all
+  others pinkDeep).
+- pw_native.ps1-style PrintWindow captures of the LAYERED bar return the raw
+  premultiplied DIB at LOGICAL size if the bitmap is not rect x2; analyze at
+  x2 physical or every position reads wrong.
+
 ## Tests & checks
 
 - `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
