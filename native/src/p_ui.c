@@ -1153,13 +1153,14 @@ static void dashHead(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT 
     SetTextCharacterExtra(dc, 0);
 }
 
-// app dot color table (dash.css .app-*)
+// app dot color table (dash.css .app-*): EXACT names, like Electron's
+// app-${app} class - any other harness falls through to the default dim dot
 static COLORREF appDotColor(const char *app, DashTheme *t) {
-    if (!strncmp(app, "zcode", 5)) return t->pinkDeep;
-    if (!strncmp(app, "zai", 3)) return RGB(0xB8, 0xA9, 0x6A);
-    if (!strncmp(app, "opencode", 8)) return RGB(0x7F, 0xA8, 0xA0);
-    if (!strncmp(app, "mimo", 4)) return RGB(0xB7, 0x9C, 0xE0);
-    if (!strncmp(app, "pi", 2)) return RGB(0x8F, 0xA8, 0xD4);
+    if (!strcmp(app, "zcode")) return t->pinkDeep;
+    if (!strcmp(app, "zai")) return RGB(0xB8, 0xA9, 0x6A);
+    if (!strcmp(app, "opencode")) return RGB(0x7F, 0xA8, 0xA0);
+    if (!strcmp(app, "mimo")) return RGB(0xB7, 0x9C, 0xE0);
+    if (!strcmp(app, "pi")) return RGB(0x8F, 0xA8, 0xD4);
     return blendCr(t->card, t->dim, 140);
 }
 static void dashDot(HDC dc, int cx, int cy, int d, COLORREF cr) {
@@ -1352,6 +1353,10 @@ static void paintDash(HWND hwnd) {
     HFONT fHead = dashFont(11, FW_BOLD);
     HFONT f13 = dashFont(13, FW_BOLD);
     HFONT f18 = dashFont(18, FW_BOLD);
+    // CSS-700 elements that share a size with a CSS-600 one need their own
+    // bold handle (Chromium maps 600 to Regular for Cascadia Mono)
+    HFONT fPlan = dashFont(11, FW_BOLD);   // .plan-name, #day-detail .d-title
+    HFONT fS10b = dashFont(10, FW_BOLD);   // .pill
 
     int padL = DX(18), padT = DX(14), gap = DX(12);
     COLORREF white = RGB(255, 255, 255);
@@ -1448,6 +1453,10 @@ static void paintDash(HWND hwnd) {
                     dashHead(dc, padL + secPadX, y + DX(10), L"PLAN USAGE", t.dim, fHead);
                     int ry = y + DX(10) + headH;
                     for (int i = 0; i < provN; i++) {
+                        // one advance per row: first DX(32), every following row
+                        // DX(49) total, the dashed divider sitting at the row's
+                        // top edge inside that pitch
+                        int cy = ry + (i > 0 ? DX(16) : 0);
                         if (i > 0) {
                             // .plan-row + .plan-row: 1px dashed divider
                             HPEN dp = CreatePen(PS_DOT, 1, t.divider);
@@ -1456,7 +1465,6 @@ static void paintDash(HWND hwnd) {
                             LineTo(dc, padL + innerW - secPadX, ry);
                             SelectObject(dc, od);
                             DeleteObject(dp);
-                            ry += DX(16); // border + margin-top 7 + padding-top 9
                         }
                         wchar_t label[48];
                         subsProvLabel(provIdx[i], label, 48);
@@ -1472,8 +1480,8 @@ static void paintDash(HWND hwnd) {
                         }
                         int pct = tot > 0 ? (int)((double)used / tot * 100.0 + 0.5) : maxPct;
                         if (pct > 100) pct = 100;
-                        SelectObject(dc, fBody);
-                        dashStr(dc, padL + secPadX, ry, label, t.fg, fBody);
+                        SelectObject(dc, fPlan);
+                        dashStr(dc, padL + secPadX, cy, label, t.fg, fPlan);
                         wchar_t us[24], ts2[24], nums[72];
                         if (tot > 0) {
                             fmtTokens(used, us, 24);
@@ -1482,8 +1490,8 @@ static void paintDash(HWND hwnd) {
                         } else {
                             swprintf(nums, 71, L"%d%% used", pct);
                         }
-                        dashStrR(dc, padL + innerW - secPadX, ry, nums, t.dim, fS10);
-                        int barY = ry + DX(15);
+                        dashStrR(dc, padL + innerW - secPadX, cy, nums, t.dim, fS10);
+                        int barY = cy + DX(15);
                         int barW = innerW - 2 * secPadX;
                         COLORREF track = blendCr(t.card, white, 141);
                         dashCard(dc, padL + secPadX, barY, barW, DX(7), track, t.divider);
@@ -1621,7 +1629,7 @@ static void paintDash(HWND hwnd) {
                         swprintf(dtitle, 95, L"%ls, %ls %lu, %lu \x2014 no usage", DASH_DAYS[d2.wDayOfWeek % 7],
                                  DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear);
                     }
-                    dashStr(dc, padL + secPadX, ddy, dtitle, t.fg, fBody);
+                    dashStr(dc, padL + secPadX, ddy, dtitle, t.fg, fPlan);
                     ddy += DX(15);
                     // per-day cache presence from g_dayApp (Electron hasCacheData):
                     // cache columns + header only while the day carries cache
@@ -1874,11 +1882,11 @@ static void paintDash(HWND hwnd) {
                 else if (lowest <= 10) { ps2 = L"NEAR CAP"; pc = t.warn; pbg = blendCr(t.head, t.warn, 20); }
                 else { ps2 = L"OK"; pc = t.good; pbg = blendCr(t.head, t.good, 20); }
                 if (ps2) {
-                    int pw2 = dashStrW(dc, ps2, fS10) + DX(16);
+                    int pw2 = dashStrW(dc, ps2, fS10b) + DX(16);
                     int ph2 = DX(18);
                     int plx = px2 + colW2 - DX(14) - pw2;
                     dashCard(dc, plx, py2 + (headH - ph2) / 2, pw2, ph2, pbg, pc);
-                    SelectObject(dc, fS10);
+                    SelectObject(dc, fS10b);
                     SetTextColor(dc, pc);
                     SetTextCharacterExtra(dc, DX(0.4));
                     RECT pr3 = { plx, py2 + (headH - ph2) / 2 + DX(2), plx + pw2, py2 + (headH - ph2) / 2 + ph2 };
@@ -1998,6 +2006,7 @@ static void paintDash(HWND hwnd) {
     DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal);
     DeleteObject(fS10); DeleteObject(fS9); DeleteObject(fBtn);
     DeleteObject(fHead); DeleteObject(f13); DeleteObject(f18);
+    DeleteObject(fPlan); DeleteObject(fS10b);
 
     HDC wdc = GetDC(hwnd);
     BitBlt(wdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
