@@ -11,8 +11,13 @@
 const { screen } = require('electron');
 const native = require('./native');
 
-const FOLLOW_INTERVAL_MS = 16;   // 60Hz follow while attached (matches display refresh;
-                                 // 120Hz doubled tracker cost for sub-DWM-pixel gains)
+const FOLLOW_DRAG_MS = 8;      // 120Hz while the pane is being dragged: the bar
+                                // tracks the mouse instead of lagging a frame behind.
+const FOLLOW_ACTIVE_MS = 16;    // 60Hz just after a move (settling tail).
+const FOLLOW_IDLE_MS = 100;     // 10Hz when nothing moves: the only thing left to
+                                // notice is minimize/restore, and 10Hz hides the bar
+                                // imperceptibly fast while costing a fraction of the
+                                // old fixed 60Hz poll.
 const SCAN_INTERVAL_MS = 400;   // look for new terminal windows while unattached
 
 // Window-class tracking is a Win32 capability. On other platforms there is no
@@ -69,6 +74,7 @@ class TerminalTracker extends require('events') {
     this.seen = new Set();     // hwnds observed while unattached (only NEW ones retrigger)
     this._timer = null;
     this._hidden = false;
+    this._lastMoveAt = 0;
     this._screenListeners = null;
   }
 
@@ -123,7 +129,7 @@ class TerminalTracker extends require('events') {
   setCfgBar(config) { this.cfgBar = config.bar; }
 
   stop() {
-    clearInterval(this._timer);
+    clearTimeout(this._timer);
     this._timer = null;
     this.hwnd = null;
     if (this._screenListeners) {
@@ -148,7 +154,7 @@ class TerminalTracker extends require('events') {
     if (probeChanged) {
       this.seen.clear();
       this.hwnd = null;
-      clearInterval(this._timer);
+      clearTimeout(this._timer);
       this._timer = null;
       this._ensureScan();
     }
@@ -207,18 +213,32 @@ class TerminalTracker extends require('events') {
 
   _attach(hwnd) {
     this.hwnd = hwnd;
-    clearInterval(this._timer);
-    this._timer = setInterval(() => this._followTick(), FOLLOW_INTERVAL_MS);
+    clearTimeout(this._timer);
+    this._timer = null;
     this._hidden = false;
+    this._lastMoveAt = Date.now();
     this.emit('attached', hwnd);
     this._followTick();
+  }
+
+  // Adaptive poll rate: full 120Hz only while the user is actually dragging
+  // the pane (that is where latency is visible), 60Hz for the settling tail
+  // after a move, 10Hz otherwise. Self-rescheduling setTimeout rather than a
+  // fixed setInterval so the rate can follow the activity.
+  _scheduleFollow() {
+    if (!this.hwnd) return;
+    clearTimeout(this._timer);
+    let delay = FOLLOW_IDLE_MS;
+    if (native.inMoveSize()) delay = FOLLOW_DRAG_MS;
+    else if (Date.now() - (this._lastMoveAt || 0) < 500) delay = FOLLOW_ACTIVE_MS;
+    this._timer = setTimeout(() => this._followTick(), delay);
   }
 
   _detach() {
     if (!this.hwnd) return;
     const wasHwnd = this.hwnd;
     this.hwnd = null;
-    clearInterval(this._timer);
+    clearTimeout(this._timer);
     this._timer = null;
     this.emit('detached', wasHwnd);
     // Everything that currently exists is now "old" - only a NEW window retriggers.
@@ -244,39 +264,41 @@ class TerminalTracker extends require('events') {
     // Visible frame (DWM extended bounds), not GetWindowRect which includes
     // the invisible resize borders and makes the bar wider than the terminal.
     const rect = native.getFrameBounds(hwnd);
-    if (!rect) return;
-
-    if (native.isIconic(hwnd) || native.isCloaked(hwnd)) {
-      if (!this._hidden) {
-        this._hidden = true;
-        this.emit('visibility', false);
+    if (rect) {
+      if (native.isIconic(hwnd) || native.isCloaked(hwnd)) {
+        if (!this._hidden) {
+          this._hidden = true;
+          this.emit('visibility', false);
+        }
+        this._scheduleFollow();
+        return;
       }
-      return;
+      if (this._hidden) {
+        this._hidden = false;
+        this.emit('visibility', true);
+      }
+      // Follow LIVE through interactive drags (move AND border resize): the bar
+      // tracks the pane every tick instead of freezing until mouse-up - freezing
+      // is what made drags read as latency. Only the cheap geometry emit runs
+      // here; the expensive z-order re-insert stays throttled in main.js syncZ.
+      const dragging = native.inMoveSize();
+      if (dragging) this._wasDrag = true;
+      if (this._wasDrag && !dragging) {
+        this._wasDrag = false;
+        this._lastRectKey = ''; // force one emit after the drag
+      }
+      // Only emit when the terminal actually moved or resized - identical
+      // rects must not touch the bar window at all.
+      const key = rect.left + ',' + rect.top + ',' + rect.right + ',' + rect.bottom;
+      if (key !== this._lastRectKey) {
+        this._lastRectKey = key;
+        this._lastMoveAt = Date.now();
+        this.emit('geometry', {
+          left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom
+        });
+      }
     }
-    if (this._hidden) {
-      this._hidden = false;
-      this.emit('visibility', true);
-    }
-    // Hands-off during any interactive drag: a 60Hz SetWindowPos flood (bar
-    // reposition + z-order re-insert) starves the dragged window's modal
-    // move/size loop and border drags never engage. On drag end the next
-    // tick falls through and re-syncs the bar to wherever the window landed.
-    if (native.inMoveSize()) {
-      this._wasDrag = true;
-      return;
-    }
-    if (this._wasDrag) {
-      this._wasDrag = false;
-      this._lastRectKey = ''; // force one emit after the drag
-    }
-    // Only emit when the terminal actually moved or resized - identical
-    // rects must not touch the bar window 60 times a second.
-    const key = rect.left + ',' + rect.top + ',' + rect.right + ',' + rect.bottom;
-    if (key === this._lastRectKey) return;
-    this._lastRectKey = key;
-    this.emit('geometry', {
-      left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom
-    });
+    this._scheduleFollow();
   }
 
   // Convert a physical-pixel terminal rect into the bar's DIP bounds.

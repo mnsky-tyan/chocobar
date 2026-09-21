@@ -189,6 +189,7 @@ function openSubs() {
     }
   });
   subsWin.loadFile(path.join(__dirname, 'renderer', 'subs.html'));
+  lockWindowNavigation(subsWin);
   subsWin.once('ready-to-show', () => raiseDash(subsWin));
   subsWin.webContents.on('did-finish-load', () => {
     if (subsWin && !subsWin.isDestroyed()) {
@@ -236,6 +237,7 @@ function openDashboard() {
     }
   });
   dashWin.loadFile(path.join(__dirname, 'renderer', 'dash.html'));
+  lockWindowNavigation(dashWin);
   dashWin.once('ready-to-show', () => raiseDash());
   // Data rides on did-finish-load (not ready-to-show, which only fires once
   // per window): a Reload chocobar re-fires this and re-seeds the fresh page.
@@ -530,6 +532,24 @@ function spawnBar() {
 
 let shuttingDown = false;
 
+// A Chocobar window renders exactly one local file: the bar, the token dash or
+// the subs board. None of them has any legitimate destination, so navigation
+// is refused outright. This also closes the door on a debug-port (CDP) client
+// driving a navigation into an app window - the bar is thin and always on
+// screen, so a hijacked one reads as the whole bar being replaced by a page.
+function lockWindowNavigation(win) {
+  const wc = win && win.webContents;
+  if (!wc) return;
+  // Each hook is optional: a partial webContents must never break a window.
+  if (typeof wc.on === 'function') {
+    wc.on('will-navigate', (e) => e.preventDefault());
+    wc.on('will-redirect', (e) => e.preventDefault());
+  }
+  if (typeof wc.setWindowOpenHandler === 'function') {
+    wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  }
+}
+
 let lastZSync = 0;
 const syncZ = (hwnd, force) => {
   const now = Date.now();
@@ -543,12 +563,12 @@ const syncZ = (hwnd, force) => {
 // the two drift apart. The foreground hook is the earliest possible signal
 // of that (it fires inside the activation), so it re-inserts immediately
 // and unconditionally - one SetWindowPos, no enumeration on the hot path.
-// A slow zGluedTo sweep is the safety net for anything the hook misses.
-// Hands-off during interactive drags.
+// A slow zGluedTo sweep is the safety net for anything the hook misses -
+// including mid-drag layer changes (a dragged pane keeps its z-band, and the
+// bar must stay glued to that band, not freeze behind it).
 const zDriftCheck = () => {
   if (process.platform !== 'win32') return;
   if (!tracker.hwnd || !bar || !bar.hwnd || !bar.win || bar.win.isDestroyed()) return;
-  if (native.inMoveSize()) return;
   if (!native.zGluedTo(bar.hwnd, tracker.hwnd)) syncZ(tracker.hwnd, true);
 };
 native.hookForegroundChange(() => {
@@ -605,6 +625,19 @@ function wireBar() {
 
   // renderer -> main
   ipcMain.handle('get-config', () => configManager.config);
+  // Content-fit height for the subscription board: the board is not
+  // user-resizable, so the renderer asks for a taller box when its panels
+  // need one (any number of wired plans). Registered once, not per open.
+  ipcMain.on('fit-subs-height', (e, h) => {
+    const w = e.sender.getOwnerBrowserWindow();
+    if (!w || w.isDestroyed()) return;
+    const want = Math.max(240, Math.min(900, Math.round(h) || 0));
+    const b = w.getBounds();
+    if (want === b.height) return;
+    const wa = screen.getDisplayMatching(b).workArea;
+    const newH = Math.min(want, wa.height - 80);
+    w.setBounds({ ...b, height: newH }, false);
+  });
   ipcMain.handle('get-theme', () => themePayload(configManager.config));
   ipcMain.handle('get-tokens', () => tokens ? tokens.aggregate() : null);
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
