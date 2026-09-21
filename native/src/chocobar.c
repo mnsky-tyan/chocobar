@@ -71,11 +71,12 @@ typedef struct {
 
 // subscription provider (chip fetcher; mirrors config.subs.providers)
 typedef struct {
-    int type;            // 0 = chatgpt, 1 = zai
+    int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity
     int enabled;
     wchar_t *label;
-    wchar_t *authPath;     // chatgpt auth.json
+    wchar_t *authPath;     // chatgpt auth.json, antigravity pi auth.json
     wchar_t *configPath;   // zai config.json
+    wchar_t *vscdbPath;    // antigravity IDE fallback token store
     wchar_t *providerName; // zai provider key
 } SubsProvider;
 
@@ -413,11 +414,12 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     memset(sp, 0, sizeof(*sp));
                     int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
                     wchar_t *ty = subs == -1 ? NULL : jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
-                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1 : 0;
+                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1 : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2 : 0;
                     wideFree(&ty);
                     sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
                     sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
                     sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
+                    sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                     sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
                     c->subsProviderCount++;
                 }
