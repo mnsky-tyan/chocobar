@@ -1001,10 +1001,6 @@ static void configCheckTick(void) {
     if (CompareFileTime(&fa.ftLastWriteTime, &g_cfgMtime) != 0) {
         g_cfgMtime = fa.ftLastWriteTime;
         loadConfig();
-        // loadConfig freed every g_cfg string: the chip array still points at
-        // the old allocations (colorOverride / iconColorOverride), so rebuild
-        // it now - before any paint can read a dangling pointer
-        buildChips();
         // font may change with the config: rebuild it
         if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); g_font = NULL; }
         wchar_t fam[64];
@@ -2026,16 +2022,18 @@ static void dashTipCell(HWND hwnd, POINT p) {
             long long tot = g_dayTot[di];
             SYSTEMTIME d2;
             dashColDate(daysBack, &d2);
-            wchar_t head[64], body[160];
+            wchar_t head[64], body[640];
             swprintf(head, 63, L"%ls, %ls %lu, %lu", DASH_DAYS[d2.wDayOfWeek % 7],
                      DASH_MONTHS[(d2.wMonth - 1) % 12], (unsigned long)d2.wDay, (unsigned long)d2.wYear);
             if (tot > 0) {
                 wchar_t tn[24];
                 fmtTokens(tot, tn, 24);
-                lstrcpynW(body, tn, 159);
+                lstrcpynW(body, tn, 639);
                 lstrcatW(body, L" tokens");
-                int left = 150;
-                for (int i = 0; i < g_appCount && left > 0; i++) {
+                // 12 apps max, but keep room for a trailing "+N more" so a
+                // long list is never silently cut short
+                int cap = 640 - 24, skipped = 0;
+                for (int i = 0; i < g_appCount; i++) {
                     TokAgg *a = &g_dayApp[di][i];
                     if (a->req == 0) continue;
                     wchar_t an[24], line[56];
@@ -2043,14 +2041,19 @@ static void dashTipCell(HWND hwnd, POINT p) {
                     wchar_t tn2[24];
                     fmtTokens(a->in + a->out + a->cr + a->cw, tn2, 24);
                     swprintf(line, 55, L"\n%ls: %ls (%lld)", an, tn2, a->req);
-                    if (lstrlenW(body) + lstrlenW(line) < 150) lstrcatW(body, line);
-                    left--;
+                    if (lstrlenW(body) + lstrlenW(line) >= cap) { skipped++; continue; }
+                    lstrcatW(body, line);
+                }
+                if (skipped) {
+                    wchar_t more[24];
+                    swprintf(more, 23, L"\n+%d more", skipped);
+                    lstrcatW(body, more);
                 }
             } else {
-                lstrcpynW(body, L"no usage", 159);
+                lstrcpynW(body, L"no usage", 639);
             }
-            static wchar_t tipBuf[192];
-            swprintf(tipBuf, 191, L"%ls\n%ls", head, body);
+            static wchar_t tipBuf[704];
+            swprintf(tipBuf, 703, L"%ls\n%ls", head, body);
             POINT sp = p;
             ClientToScreen(hwnd, &sp);
             tipShow(tipBuf, sp.x, sp.y);
@@ -2554,6 +2557,9 @@ void loadConfig(void) {
     g_cfg = next;
     g_cfgLoaded = 1;
     g_iconOpacity = g_cfg.iconOpacity / 100.0; // p_icons AlphaBlend constant
+    // freeConfig above freed every string the chip array points at
+    // (colorOverride / iconColorOverride): rebuild before any paint reads them
+    buildChips();
 }
 
 // --------------------------------------------------------------- wWinMain ----
