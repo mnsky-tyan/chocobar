@@ -557,7 +557,9 @@ static void buildChips(void) {
         if (g_m.battValid) {
             int low = g_m.battPct <= 20;
             swprintf(v, 48, L"%d%%", g_m.battPct);
-            addChipI(CT_BATTERY, 0, v, low, low ? g_cfg.warn : NULL, 0);
+            // charging reads green (theme.good), like the Electron bar's
+            // .seg-battery.on value; low still wins with warn red
+            addChipI(CT_BATTERY, 0, v, low, low ? g_cfg.warn : (g_m.battAc ? g_cfg.good : NULL), 0);
             g_chips[g_chipCount - 1].iconSvg = SVG_BAT; // fill tracks the charge
         } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0);
     }
@@ -711,10 +713,12 @@ static void repaintBar(HWND hwnd) {
     SetBkMode(g_memDc, TRANSPARENT);
     int textH = g_dibH;
 
-    // Electron geometry: bar padding 8px left / 12px right, 14px between
-    // segments, 5px between icon and value (CSS px, x2 at this DPI)
+    // Electron geometry: bar padding 16px left / 18px right, 14px between
+    // segments, 5px between icon and value (CSS px, x2 at this DPI). The
+    // padding is what keeps the first/last chip off the window edge - the
+    // rounded corners need it too.
     FLOAT hf = (FLOAT)g_dibH;
-    FLOAT padL = 8.0f * (FLOAT)g_scale, padR = 12.0f * (FLOAT)g_scale;
+    FLOAT padL = 16.0f * (FLOAT)g_scale, padR = 18.0f * (FLOAT)g_scale;
     FLOAT segGap = 14.0f * (FLOAT)g_scale, icoGap = 5.0f * (FLOAT)g_scale;
     int iconW[MAX_CHIPS];
     int svgBox = (int)(12 * g_scale + 0.5);
@@ -1431,100 +1435,6 @@ static void paintDash(HWND hwnd) {
             }
             y += chh + gap;
 
-            // plan usage section (when subs providers report windows)
-            int planH = 0;
-            int provIdx[MAX_SUBS];
-            int provN = 0;
-            int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
-            for (int i = 0; i < pn; i++) {
-                if (!g_cfg.subsEnabled || !subsProvEnabled(i)) continue;
-                SubsWin tmp[4];
-                int wn = subsProvWins(i, tmp, 4);
-                if (wn < 0) wn = -wn;
-                if (wn > 0) { // any reported window: absolute totals OR percent-only
-                    provIdx[provN] = i;
-                    provN++;
-                }
-            }
-            if (provN > 0) {
-                int secPadX = DX(12);
-                int headH = DX(11) + DX(8);
-                // dash.css .plan-row: first row 32 CSS px, every following row
-                // +17 (dashed border-top + margin/padding) = 49
-                planH = DX(10) + headH + DX(32) + (provN - 1) * DX(49) + DX(4) + DX(10);
-                if (y + planH < h - DX(30)) {
-                    dashCard(dc, padL, y, innerW, planH, t.card, t.divider);
-                    dashHead(dc, padL + secPadX, y + DX(10), L"PLAN USAGE", t.dim, fHead);
-                    int ry = y + DX(10) + headH;
-                    for (int i = 0; i < provN; i++) {
-                        // one advance per row: first DX(32), every following row
-                        // DX(49) total, the dashed divider sitting at the row's
-                        // top edge inside that pitch
-                        int cy = ry + (i > 0 ? DX(16) : 0);
-                        if (i > 0) {
-                            // .plan-row + .plan-row: 1px dashed divider
-                            HPEN dp = CreatePen(PS_DOT, 1, t.divider);
-                            HGDIOBJ od = SelectObject(dc, dp);
-                            MoveToEx(dc, padL + secPadX, ry, NULL);
-                            LineTo(dc, padL + innerW - secPadX, ry);
-                            SelectObject(dc, od);
-                            DeleteObject(dp);
-                        }
-                        wchar_t label[48];
-                        subsProvLabel(provIdx[i], label, 48);
-                        SubsWin tmp[4];
-                        int wn = subsProvWins(provIdx[i], tmp, 4);
-                        if (wn < 0) wn = -wn;
-                        long long used = 0, tot = 0;
-                        int maxPct = 0;
-                        for (int k = 0; k < wn; k++) {
-                            if (tmp[k].used > 0) used += tmp[k].used;
-                            if (tmp[k].total > 0) tot += tmp[k].total;
-                            else if (tmp[k].pct > maxPct) maxPct = tmp[k].pct;
-                        }
-                        int pct = tot > 0 ? (int)((double)used / tot * 100.0 + 0.5) : maxPct;
-                        if (pct > 100) pct = 100;
-                        SelectObject(dc, fPlan);
-                        dashStr(dc, padL + secPadX, cy, label, t.fg, fPlan);
-                        wchar_t us[24], ts2[24], nums[72];
-                        if (tot > 0) {
-                            fmtTokens(used, us, 24);
-                            fmtTokens(tot, ts2, 24);
-                            swprintf(nums, 71, L"%ls / %ls \x00b7 %d%%", us, ts2, pct);
-                        } else {
-                            swprintf(nums, 71, L"%d%% used", pct);
-                        }
-                        dashStrR(dc, padL + innerW - secPadX, cy, nums, t.dim, fS10);
-                        int barY = cy + DX(15);
-                        int barW = innerW - 2 * secPadX;
-                        COLORREF track = blendCr(t.card, white, 141);
-                        dashCard(dc, padL + secPadX, barY, barW, DX(7), track, t.divider);
-                        if (pct > 0) {
-                            int fw = (int)((double)barW * pct / 100.0);
-                            COLORREF c1 = blendCr(track, t.yellow, 141);
-                            COLORREF c2 = blendCr(track, t.pinkDeep, 141);
-                            if (pct >= 90) { c1 = c2 = blendCr(track, t.warn, 115); }
-                            if (g_gdipOk && fw > 4) {
-                                GRADIENT_RECT gr = { 0, 1 };
-                                TRIVERTEX tv[2];
-                                memset(tv, 0, sizeof(tv));
-                                tv[0].x = padL + secPadX; tv[0].y = barY;
-                                tv[0].Red = GetRValue(c1) << 8; tv[0].Green = GetGValue(c1) << 8; tv[0].Blue = GetBValue(c1) << 8; tv[0].Alpha = 0xFF00;
-                                tv[1].x = padL + secPadX + fw; tv[1].y = barY + DX(7);
-                                tv[1].Red = GetRValue(c2) << 8; tv[1].Green = GetGValue(c2) << 8; tv[1].Blue = GetBValue(c2) << 8; tv[1].Alpha = 0xFF00;
-                                GradientFill(dc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
-                            } else {
-                                HBRUSH b = CreateSolidBrush(c1);
-                                RECT fr2 = { padL + secPadX, barY, padL + secPadX + fw, barY + DX(7) };
-                                FillRect(dc, &fr2, b);
-                                DeleteObject(b);
-                            }
-                        }
-                        ry += (i == 0) ? DX(32) : DX(49);
-                    }
-                    y += planH + gap;
-                } else planH = 0;
-            }
 
             // daily usage section: heatmap + legend (+ optional day detail)
             int cell = DX(11), cgap = DX(3), pitch = cell + cgap;
@@ -2448,6 +2358,10 @@ static void chipClick(int idx) {
 
 static void showTrayMenu(HWND hwnd) {
     HMENU m = CreatePopupMenu();
+    // Same items as the Electron bar menu (main.js buildChocobarMenu)
+    AppendMenuW(m, MF_STRING, 10, L"Token dashboard");
+    AppendMenuW(m, MF_STRING, 11, L"Subscription dashboard");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, 1, L"Edit config");
     AppendMenuW(m, MF_STRING, 2, L"Open config folder");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -2458,7 +2372,11 @@ static void showTrayMenu(HWND hwnd) {
     int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, NULL);
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
-    if (id == 1) {
+    if (id == 10) {
+        dashToggle(0);
+    } else if (id == 11) {
+        dashToggle(1);
+    } else if (id == 1) {
         if (GetFileAttributesW(g_cfgPath) == INVALID_FILE_ATTRIBUTES) writeTemplate();
         SHELLEXECUTEINFOW sei; memset(&sei, 0, sizeof(sei)); sei.cbSize = sizeof(sei);
         sei.lpVerb = L"open"; sei.lpFile = g_cfgPath; sei.nShow = SW_SHOWNORMAL;
@@ -2568,6 +2486,12 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    // Right-click on the bar itself opens the same menu the tray icon does
+    // (Electron: bar.js 'contextmenu' -> buildChocobarMenu). Without this the
+    // bar is the only Chocobar surface with no menu at all.
+    case WM_RBUTTONUP:
+        showTrayMenu(hwnd);
+        return 0;
     case WM_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) showTrayMenu(hwnd);
         return 0;
