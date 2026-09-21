@@ -261,6 +261,18 @@ static COLORREF blendCr(COLORREF bg, COLORREF fg, int num) {
     return RGB(r, g2, b);
 }
 
+// first boundary at or before ts: bnd[1] is today, bnd[DASH_MAX_DAYS] the
+// oldest bucket, bnd[0] (tomorrow) rejects later-dated records. Returns 1 for
+// today and one more per day back, or -1 outside the span.
+static int aggDayIndex(long long ts, const long long *bnd) {
+    int lo = 0, hi = DASH_MAX_DAYS, j = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (bnd[mid] <= ts) { j = mid; hi = mid - 1; } else lo = mid + 1;
+    }
+    return j;
+}
+
 static void aggRecord(const char *app, int alen, long long ts,
                       long long vin, long long vout, long long vcr, long long vcw,
                       const char *model, int mlen, const long long *bnd) {
@@ -323,13 +335,7 @@ static void aggRecord(const char *app, int alen, long long ts,
             g_modelAgg[mi].req++;
         }
     }
-    // first boundary at or before ts: bnd[1] is today, bnd[DASH_MAX_DAYS] the
-    // oldest bucket, bnd[0] (tomorrow) rejects later-dated records
-    int lo = 0, hi = DASH_MAX_DAYS, j = -1;
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (bnd[mid] <= ts) { j = mid; hi = mid - 1; } else lo = mid + 1;
-    }
+    int j = aggDayIndex(ts, bnd);
     if (j >= 1) {
         int di = DASH_MAX_DAYS - j;
         g_dayTot[di] += sum;
@@ -1552,6 +1558,12 @@ static void dashColDate(int daysBack, SYSTEMTIME *out) {
     FileTimeToSystemTime(&ft, out);
 }
 
+// the board must never grow past the screen: the create path, the
+// size-toggle path and the content-fit resize all bound the height here
+static int dashMaxH(void) {
+    return GetSystemMetrics(SM_CYSCREEN) - 40;
+}
+
 static void paintDash(HWND hwnd) {
     if (!g_dashDc) {
         g_dashDc = CreateCompatibleDC(NULL);
@@ -2046,8 +2058,23 @@ static void paintDash(HWND hwnd) {
         // show every window the provider reports.
         int headH = DX(40), footH = DX(26), bodyH = DX(112);
         int panelH = headH + bodyH + footH;
+        // the stack is bounded by the SCREEN, not the window: the content-fit
+        // grows the board to its content, so a panel that fits on screen must
+        // still be drawn (clipping by the current height would drop panels the
+        // board was about to grow enough to show)
+        int maxPanels = (dashMaxH() - y - DX(24)) / (panelH + gap);
+        if (maxPanels < 1) maxPanels = 1;
         for (int pi2 = 0; pi2 < pn; pi2++) {
             if (!g_cfg.subsEnabled || !subsProvEnabled(pi2)) continue; // master off or disabled: no panel (Electron parity)
+            if (shown >= maxPanels) {
+                if (g_cfg.debug) {
+                    char lb[128];
+                    sprintf(lb, "[wizbar] subs board: %d of %d panels fit the screen (%d px body)",
+                            maxPanels, pn, dashMaxH() - y - DX(24));
+                    writeLogA(lb);
+                }
+                break;
+            }
             wchar_t label[48];
             subsProvLabel(pi2, label, 48);
             SubsWin wins[4];
@@ -2312,9 +2339,17 @@ static void dashFitToContent(void) {
     int want = g_dashContentH;
     int lo = (int)(g_dashType == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale * 45 / 100;
     if (want < lo) want = lo;
-    if (want < curH - DX(4) || want > curH + DX(4))
-        SetWindowPos(g_dash, NULL, 0, 0, dr.right - dr.left, want,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    // never leave the screen: a board that grows past the bottom edge has no
+    // size grip and no scroll, so its last panel would be unreachable
+    int hi = dashMaxH();
+    if (want > hi) want = hi;
+    if (want < curH - DX(4) || want > curH + DX(4)) {
+        // re-centre with the new height: the create path centres too, and
+        // growing a centred popup downward put its bottom off screen
+        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        SetWindowPos(g_dash, NULL, (sw - (dr.right - dr.left)) / 2, (sh - want) / 2,
+                     dr.right - dr.left, want, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     if (g_cfg.debug && !g_dbgFitLogged) {
         char lb[160];
         sprintf(lb, "[wizbar] dash fit: type=%d contentH=%d cfgH=%d curH=%d want=%d lo=%d",
@@ -2450,10 +2485,10 @@ static void dashToggle(int type) {
         // the other board has its own configured size: adopt it in place
         int tw = (int)((double)(type == 0 ? g_cfg.dashW : g_cfg.subsW) * g_scale + 0.5);
         int th2 = (int)((double)(type == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale + 0.5);
-        int tsw = GetSystemMetrics(SM_CXSCREEN), tsh = GetSystemMetrics(SM_CYSCREEN);
+        int tsw = GetSystemMetrics(SM_CXSCREEN);
         if (tw > tsw - 40) tw = tsw - 40;
-        if (th2 > tsh - 40) th2 = tsh - 40;
-        SetWindowPos(g_dash, NULL, (tsw - tw) / 2, (tsh - th2) / 2, tw, th2, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (th2 > dashMaxH()) th2 = dashMaxH();
+        SetWindowPos(g_dash, NULL, (tsw - tw) / 2, (dashMaxH() + 40 - th2) / 2, tw, th2, SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
         UpdateWindow(g_dash); // repaint + content-fit at the new size, once
         SetForegroundWindow(g_dash);
@@ -2463,9 +2498,9 @@ static void dashToggle(int type) {
     g_dbgFitLogged = 0;
     int cw = (int)((double)(type == 0 ? g_cfg.dashW : g_cfg.subsW) * g_scale + 0.5);
     int ch = (int)((double)(type == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale + 0.5);
-    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
     if (cw > sw - 40) cw = sw - 40;
-    if (ch > sh - 40) ch = sh - 40;
+    if (ch > dashMaxH()) ch = dashMaxH();
     WNDCLASSW wc; memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = dashProc;
     wc.hInstance = GetModuleHandleW(NULL);
@@ -2480,7 +2515,7 @@ static void dashToggle(int type) {
     // captain sees ONE window at its final size instead of a board that grows
     // into place.
     g_dash = CreateWindowExW(WS_EX_APPWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
-                             WS_POPUP, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
+                             WS_POPUP, (sw - cw) / 2, (dashMaxH() + 40 - ch) / 2, cw, ch,
                              NULL, NULL, GetModuleHandleW(NULL), NULL);
     if (!g_dash) return;
     dashRoundCorners(g_dash);
