@@ -199,6 +199,16 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   headers - check the body `code`, not just HTTP status.
 - Fetches run on a worker thread (WinHTTP, AUTOMATIC_PROXY); the UI timer
   only reads the latest state. HTTP failures log one line to native.log.
+- Antigravity (type 2) reads the pi auth store `~/.pi/agent/auth.json` key
+  `antigravity` ({access, refresh, expires(epoch MS), projectId}) and
+  refreshes with Google's public desktop-client pair; grouped quota summary
+  first, per-model `fetchAvailableModels` on 403 SUBSCRIPTION_REQUIRED
+  (free tier - NOT an auth failure). ISO-8601 reset times go through
+  `subsIsoToMs` (civil-days, no libc date code). The models body is ~150KB,
+  so it parses through a grown token array (`subsParseBig`), never a fixed
+  one. The refresh-token write-back is targeted text surgery inside the
+  `"antigravity"` object and ABORTS on any doubt - a corrupted auth.json
+  breaks the captain's whole toolchain, not just this bar.
 
 ## Dev bar etiquette
 
@@ -213,14 +223,45 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - `terminal.className` in config is AUTHORITATIVE: when set, the probe tries
   only that class and never falls back to the generic terminal class list.
 
+## Never leave an Electron debug port open (cost the captain his bar once)
+
+- 2026-09-21: an agent relaunched the app with `--remote-debugging-port=9222`
+  to dump the renderer DOM and left it open. Another agent's browser
+  automation (playwright) found the open port, attached to the FIRST page
+  target - the bar - and `Page.navigate`d it to a GitHub issue. The bar then
+  rendered a thin web page in its exact frame, which reads as "the bar
+  became a website". CDP is browser tooling and will happily drive any port
+  it finds; a status bar is the most exposed window on screen.
+- Defense in depth now: every app window refuses `will-navigate` /
+  `will-redirect` and denies `window.open` (`lockWindowNavigation` in
+  main.js, `lockNav` in src/bar.js) - verified live, both a CDP
+  `Page.navigate` and a renderer `window.location=` are refused.
+- The REAL fix is operational: close the port when done. His canonical
+  launch is `~/.wizbar/runbar.ps1` (personal.json, no debug port) - always
+  end a debugging session by relaunching through it, and never leave
+  `--remote-debugging-port` in a long-running instance.
+- Restore recipe if it ever happens again: with the port up,
+  `curl -s 127.0.0.1:9222/json/list`, find the target whose url is NOT
+  `file:///.../bar.html`, and `Page.navigate` it back to
+  `file:///C:/Users/tyanw/review/chocobar/renderer/bar.html`. Dependency-
+  free CDP client recipe: raw `net` + `crypto` websocket handshake
+  (Runtime.enable / Runtime.evaluate / Page.navigate).
+
 ## Perf invariants (do not reintroduce)
 
 - Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);
   no fixed heartbeat, and `snapshot()` has no always-different `now` field. The bar/
   visibility gates run BEFORE `consumeDirty()` so changes observed while the bar is
   hidden stay pending and flush on restore.
-- Follow loop is 16ms (60Hz) and the unchanged-bounds fast path touches nothing
-  (no isVisible()/assertNoTaskbar per tick); `assertNoTaskbar` has a 2s re-assert floor.
+- Follow loop is ADAPTIVE (src/tracker.js `_scheduleFollow`): 8ms while the
+  terminal is in a modal move/size (120Hz - drag latency is the only place it
+  shows), 16ms for 500ms after a move, 100ms idle. It FOLLOWS LIVE through a
+  drag (the old hands-off freeze made drags read as broken) and the zGluedTo
+  sweep no longer skips mid-drag, so the bar keeps the pane's layer while it
+  moves. Measured 2026-09-21: CPU 10.3% -> ~5% of one core vs the fixed 60Hz
+  loop, RSS ~414 MB (Chromium-baseline dominated).
+- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
+  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
 - Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
   never a tasklist.exe spawn (~164ms/spawn measured; ~290ms in older notes).
 - The bar's heal interval must die with its window (see `BarWindow` closed/destroy) —

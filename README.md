@@ -103,7 +103,7 @@ The bar ships with three toggle chips visible, leftmost. Each is a button; hide 
 |---|---|---|---|
 | Bolt (shortcut) | Runs `modules.shortcut.command` | One-click launch of anything: an app, a script, a URL. With no command set it does nothing - set `modules.shortcut.command` (and optionally `label`) to wire it up | `modules.shortcut.enabled: false` |
 | Diamond (tokens) | Token usage dashboard | Local LLM/harness usage at a glance: today / 7 days / 30 days / all time, a daily heatmap, per-app and per-model breakdowns. Shows `–` until you enable a usage source under `tokens.sources` | `tokens.showOnBar: false` (or master `tokens.enabled: false` to also stop all scans) |
-| Gauge (subs) | Subscription plan board | Live rate-limit / quota windows for plans you wire under `subs.providers` (ChatGPT via a Codex CLI login, Z.ai coding plan via the zcode credential - both ship disabled). The chip reads `—` until one is enabled | `subs.enabled: false` |
+| Gauge (subs) | Subscription plan board | Live rate-limit / quota windows for plans you wire under `subs.providers` (ChatGPT via a Codex CLI login, Z.ai coding plan via the zcode credential, Google Antigravity via its Cloud Code login - all ship disabled). The chip reads `—` until one is enabled | `subs.enabled: false` |
 
 A fourth chip, the bow (pet), is opt-in: set `modules.pet` (`enabled`, `exePath`, optional `label`) and it launches/stops a Windows companion exe, reading on/off from the live process.
 
@@ -146,7 +146,9 @@ Keep the file local and do not place secrets in the repository.
 
 ### Subscription plans board (live quotas)
 
-Separately from the plan-usage file above, the subscription board shows live rate-limit / quota windows for plans you wire up under `subs.providers`. Each entry picks an adapter `type` (`chatgpt` reads a Codex CLI login, `zai` reads a Z.ai coding-plan credential), a display `label`, and where the credential lives. The two examples ship disabled; nothing is pre-wired to any vendor. The poll interval (`intervalMinutes`), per-provider request deadline (`fetchTimeoutMs`), and board window size are configurable. A provider whose request fails or times out keeps its last good windows on the board, marked stale, until the next successful poll.
+Separately from the plan-usage file above, the subscription board shows live rate-limit / quota windows for plans you wire up under `subs.providers`. Each entry picks an adapter `type` (`chatgpt` reads a Codex CLI login, `zai` reads a Z.ai coding-plan credential, `antigravity` reads a Google Antigravity Cloud Code login), a display `label`, and where the credential lives. The examples ship disabled; nothing is pre-wired to any vendor. The poll interval (`intervalMinutes`), per-provider request deadline (`fetchTimeoutMs`), and board window size are configurable. A provider whose request fails or times out keeps its last good windows on the board, marked stale, until the next successful poll.
+
+Any number of providers may be wired - the board lays out one row for up to three and grows its window to fit the content. The `antigravity` adapter refreshes its own access token from the stored refresh credential (no browser, no IDE required) and reads the grouped quota windows; on a free-tier plan, where the grouped summary endpoint is gated, it falls back to the per-model quota endpoint. A `403 SUBSCRIPTION_REQUIRED` therefore never looks like an expired login - only a token problem asks you to re-authenticate.
 
 ### Harness names and dashboard sections
 
