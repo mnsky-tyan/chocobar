@@ -1398,7 +1398,10 @@ static int subsFetchAntigravity(int idx) {
                                 if (minRem < 0 || rem < minRem) {
                                     minRem = rem;
                                     char *rt = subsJstrRaw(resp, t, q, "resetTime");
-                                    minReset = rt ? subsIsoToMs(rt, (int)strlen(rt)) : 0;
+                                    if (rt) {
+                                        minReset = subsIsoToMs(rt, (int)strlen(rt));
+                                        HeapFree(GetProcessHeap(), 0, rt);
+                                    } else minReset = 0;
                                 }
                             }
                         }

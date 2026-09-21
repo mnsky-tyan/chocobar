@@ -445,8 +445,6 @@ static void scanTokenCacheInner(void) {
     // holds day j-1, so a bucket never straddles a calendar day
     long long bnd[DASH_MAX_DAYS + 1];
     for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
-    FILETIME nowFt; GetSystemTimeAsFileTime(&nowFt);
-    long long nowMs = ((((long long)nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime) / 10000 - 11644473600000LL;
     long long total = 0;
     long long tsScanMax = 0; // newest ts in the cache (the live scan's boundary)
     memset(g_dayTot, 0, sizeof(g_dayTot));
@@ -494,8 +492,8 @@ static void scanTokenCacheInner(void) {
         if (ts >= midnight) total += sum;
         aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, bnd);
         if (ts > tsScanMax) tsScanMax = ts;
-        if (ts >= nowMs - 7LL * 86400000LL) g_tokWeek += sum;
-        if (ts >= nowMs - 30LL * 86400000LL) g_tokMonth += sum;
+        if (ts >= bnd[7]) g_tokWeek += sum;
+        if (ts >= bnd[30]) g_tokMonth += sum;
         g_tokAll += sum;
         p = next ? next : end;
     }
@@ -2344,11 +2342,15 @@ static void dashFitToContent(void) {
     int hi = dashMaxH();
     if (want > hi) want = hi;
     if (want < curH - DX(4) || want > curH + DX(4)) {
-        // re-centre with the new height: the create path centres too, and
-        // growing a centred popup downward put its bottom off screen
-        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-        SetWindowPos(g_dash, NULL, (sw - (dr.right - dr.left)) / 2, (sh - want) / 2,
-                     dr.right - dr.left, want, SWP_NOZORDER | SWP_NOACTIVATE);
+        int nx = dr.left, ny = dr.top;
+        HMONITOR mon = MonitorFromWindow(g_dash, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi; mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(mon, &mi)) {
+            int bottom = ny + want;
+            if (bottom > mi.rcWork.bottom) ny = mi.rcWork.bottom - want;
+            if (ny < mi.rcWork.top) ny = mi.rcWork.top;
+        }
+        SetWindowPos(g_dash, NULL, nx, ny, dr.right - dr.left, want, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (g_cfg.debug && !g_dbgFitLogged) {
         char lb[160];
