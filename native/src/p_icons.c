@@ -264,19 +264,26 @@ static const SvgPart SVG_P[][3] = {
     { { L"M13 2L4.5 13.5H11L9.5 22L19 10H12.5L13 2Z", 1.0f } },
     // clock (time): ring + hands
     { { L"M3.5 12A8.5 8.5 0 1 0 20.5 12A8.5 8.5 0 1 0 3.5 12Z", 1.0f }, { L"M12 7.5V12L15 14", 1.0f } },
-    // gpu: card + fan + two vents + pins (Electron ICONS.gpu)
+    // gpu: card + big fan + two vents + pins (Electron ICONS.gpu). The fan is
+    // the silhouette that reads as "graphics card" - it was 2.4r and got lost
+    // next to the ram stick, so it is now 3.3r and the vents are wider apart.
     { { L"M4.5 7H17.5A1.5 1.5 0 0 1 19 8.5V15.5A1.5 1.5 0 0 1 17.5 17H4.5A1.5 1.5 0 0 1 3 15.5V8.5A1.5 1.5 0 0 1 4.5 7Z"
-        L"M6.6 12A2.4 2.4 0 1 0 11.4 12A2.4 2.4 0 1 0 6.6 12Z"
-        L"M14 9.5V14.5M17 9.5V14.5M19 10V14M6 17V20M10 17V20", 1.0f } },
+        L"M5.1 12A3.3 3.3 0 1 0 11.7 12A3.3 3.3 0 1 0 5.1 12Z"
+        L"M14 9.6V14.4M16.8 9.6V14.4"
+        L"M6.5 17V20M10.5 17V20", 1.0f } },
     // cpu: body + pins 2 per side (Electron ICONS.cpu)
     { { L"M7.5 6H16.5A1.5 1.5 0 0 1 18 7.5V16.5A1.5 1.5 0 0 1 16.5 18H7.5A1.5 1.5 0 0 1 6 16.5V7.5A1.5 1.5 0 0 1 7.5 6Z"
         L"M9 2V5M15 2V5M9 19V22M15 19V22M2 9H5M2 15H5M19 9H22M19 15H22", 1.0f } },
     // cpu temp: thermometer + stem (Electron ICONS.temp)
     { { L"M10 4A2 2 0 1 1 14 4V13.3A4.5 4.5 0 1 1 10 13.3Z", 1.0f },
       { L"M12 9.5V16", 1.0f } },
-    // ram: stick + three chips + pins (Electron ICONS.ram)
+    // ram: stick + two chips + pins (Electron ICONS.ram). The bare vertical
+    // lines are replaced by two filled-looking chip rectangles: "a stick with
+    // chips on it" is what makes it read as memory next to the gpu card.
     { { L"M4.5 8H19.5A1.5 1.5 0 0 1 21 9.5V15.5A1.5 1.5 0 0 1 19.5 17H4.5A1.5 1.5 0 0 1 3 15.5V9.5A1.5 1.5 0 0 1 4.5 8Z"
-        L"M7 17V20M12 17V20M17 17V20M7 11V14M11 11V14M15 11V14", 1.0f } },
+        L"M6.8 10.3H11.4V13.7H6.8Z"
+        L"M13.2 10.3H17.8V13.7H13.2Z"
+        L"M7 17V20.2M12 17V20.2M17 17V20.2", 1.0f } },
     // volume: speaker + waves (Electron ICONS.vol)
     { { L"M11 5L6.5 9H3V15H6.5L11 19Z", 1.0f },
       { L"M15.5 9.5A4 4 0 0 1 15.5 14.5M18 7A7.5 7.5 0 0 1 18 17", 1.0f } },
