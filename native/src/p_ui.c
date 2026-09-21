@@ -91,6 +91,7 @@ static HWND g_bar;
 // UpdateLayeredWindow. No D2D/DComp - both fail to present on this machine.
 static HDC g_memDc = NULL;
 static HBITMAP g_dib = NULL;
+static HGDIOBJ g_dibOld = NULL;
 static void *g_bits = NULL;
 static LONG g_dibW = 0, g_dibH = 0;
 static HFONT g_font = NULL;
@@ -654,7 +655,10 @@ static void repaintBar(HWND hwnd) {
     if (w < 1 || h < 1) return;
 
     if (w != g_dibW || h != g_dibH || !g_dib) { // (re)size the DIB
-        if (g_dib) { DeleteObject(g_dib); g_dib = NULL; g_bits = NULL; }
+        if (g_dib) {
+            if (g_dibOld) { SelectObject(g_memDc, g_dibOld); g_dibOld = NULL; }
+            DeleteObject(g_dib); g_dib = NULL; g_bits = NULL;
+        }
         BITMAPINFO bi;
         memset(&bi, 0, sizeof(bi));
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -666,7 +670,7 @@ static void repaintBar(HWND hwnd) {
         void *bits = NULL;
         g_dib = CreateDIBSection(g_memDc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
         if (!g_dib || !bits) return;
-        SelectObject(g_memDc, g_dib);    // memDc keeps the font selected? reselect below
+        g_dibOld = SelectObject(g_memDc, g_dib);
         SelectObject(g_memDc, g_font);
         g_bits = bits;
         g_dibW = w; g_dibH = h;
@@ -2352,6 +2356,12 @@ static void tipShow(const wchar_t *text, int cx, int cy, int dark) {
         SetTextColor(g_tipDc, RGB(31, 31, 31));
         DrawTextW(g_tipDc, text, -1, &tr, DT_LEFT | DT_NOPREFIX); // \n breaks lines
     }
+    // GDI leaves ALPHA=0 on pixels it draws: repair them so the text is
+    // opaque while the rounded corners stay transparent
+    for (LONG i = 0; i < w * h; i++) {
+        DWORD v = px[i];
+        if ((v & 0xFF000000u) == 0 && (v & 0x00FFFFFFu) != 0) px[i] = v | 0xFF000000u;
+    }
     // clamp to the screen, then place below-right of the cursor
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     int x = cx + (int)(6 * g_scale), y = cy + (int)(16 * g_scale);
@@ -2361,7 +2371,7 @@ static void tipShow(const wchar_t *text, int cx, int cy, int dark) {
     SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
     POINT ptSrc = { 0, 0 };
     SIZE sz = { w, h };
-    BLENDFUNCTION bl = { AC_SRC_OVER, 0, 255, 0 };
+    BLENDFUNCTION bl = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(g_tip, NULL, NULL, &sz, g_tipDc, &ptSrc, 0, &bl, ULW_ALPHA);
     ShowWindow(g_tip, SW_SHOWNOACTIVATE);
     g_tipOn = 1;

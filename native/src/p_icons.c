@@ -513,8 +513,7 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
     if (!iconDibMake(d, w, h)) return 0;
     memset(d->bits, 0, (size_t)w * h * 4);
     float s = (float)g_scale / 2; // 24-unit box -> 12 CSS px
-    int wpen = (int)(1.1f * g_scale + 0.5);
-    if (wpen < 1) wpen = 1;
+    float wpen = 1.1f * (float)g_scale; // exact CSS stroke: 2.2 units / 24-unit viewBox
     // Supersample 2x: GDI+ edge AA at 1:1 reads blocky next to Chromium's
     // SVG renderer. One color per icon, so the downscale only averages the
     // coverage (alpha); the RGB stays the icon color.
@@ -524,7 +523,7 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
         GpGraphics *g = NULL;
         if (t_GdipCreateFromHDC(g_ssDib.dc, &g) == 0) {
             t_GdipSetSmoothingMode(g, 6); // AntiAlias8x8
-            iconStrokeAll(g, id, color, s * SS, (float)wpen * SS);
+            iconStrokeAll(g, id, color, s * SS, wpen * SS);
             t_GdipDeleteGraphics(g);
             unsigned *src = (unsigned *)g_ssDib.bits;
             unsigned *dst = (unsigned *)d->bits;
@@ -545,7 +544,7 @@ static int iconRenderGdip(IconDib *d, int id, COLORREF color, int w, int h) {
     GpGraphics *g = NULL;
     if (t_GdipCreateFromHDC(d->dc, &g) != 0) return 0;
     t_GdipSetSmoothingMode(g, 6); // AntiAlias8x8
-    iconStrokeAll(g, id, color, s, (float)wpen);
+    iconStrokeAll(g, id, color, s, wpen);
     t_GdipDeleteGraphics(g);
     return 1;
 }
