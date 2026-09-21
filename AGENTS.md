@@ -232,20 +232,34 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   rendered a thin web page in its exact frame, which reads as "the bar
   became a website". CDP is browser tooling and will happily drive any port
   it finds; a status bar is the most exposed window on screen.
-- Defense in depth now: every app window refuses `will-navigate` /
-  `will-redirect` and denies `window.open` (`lockWindowNavigation` in
-  main.js, `lockNav` in src/bar.js) - verified live, both a CDP
-  `Page.navigate` and a renderer `window.location=` are refused.
+- Defense in depth now, THREE layers (one is not enough - verified the hard
+  way): (1) `will-navigate`/`will-redirect` stop RENDERER-initiated navigations
+  only; (2) a session `webRequest` handler refuses any non-file request from a
+  renderer, which is the only thing that covers a browser-side CDP
+  `Page.navigate`; (3) because a network-blocked request leaves the renderer
+  on an error page WITHOUT firing any navigation event, a 1s URL poll reloads
+  the window's own document if it is ever not its file (`_urlHealTimer` in
+  src/bar.js, dies with the window). Verified live: a CDP navigation now
+  fails ERR_BLOCKED_BY_CLIENT and the bar is back with all chips live within
+  two seconds.
+- `session.defaultSession` throws "Session can only be received when app is
+  ready" at module load - register the handler via `app.isReady()` /
+  `app.once('ready')`, never at require time.
 - The REAL fix is operational: close the port when done. His canonical
   launch is `~/.wizbar/runbar.ps1` (personal.json, no debug port) - always
   end a debugging session by relaunching through it, and never leave
-  `--remote-debugging-port` in a long-running instance.
+  `--remote-debugging-port` in a long-running instance. A stale instance also
+  holds the single-instance lock, so a "relaunch" that silently quits is
+  usually an old process still alive - kill the whole tree first.
 - Restore recipe if it ever happens again: with the port up,
   `curl -s 127.0.0.1:9222/json/list`, find the target whose url is NOT
   `file:///.../bar.html`, and `Page.navigate` it back to
   `file:///C:/Users/tyanw/review/chocobar/renderer/bar.html`. Dependency-
   free CDP client recipe: raw `net` + `crypto` websocket handshake
-  (Runtime.enable / Runtime.evaluate / Page.navigate).
+  (Runtime.enable / Runtime.evaluate / Page.navigate). ALWAYS read the
+  webSocketDebuggerUrl from the LIVE /json/list - a hardcoded/stale page id
+  makes Page.navigate time out and reads as "the attack failed" when nothing
+  was ever tested.
 
 ## Perf invariants (do not reintroduce)
 
