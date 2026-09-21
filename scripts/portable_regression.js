@@ -472,6 +472,130 @@ const native = require('../src/native');
     .finally(asyncFinished);
 }
 
+// --- 10b. antigravity adapter: pi OAuth refresh + summary/models fallback -----
+{
+  const { SubsTracker } = require('../src/subs');
+  const { DEFAULTS } = require('../src/config');
+
+  check('subs: antigravity provider example ships disabled',
+    DEFAULTS.subs.providers.some((p) => p.type === 'antigravity' && p.enabled === false));
+
+  const agyCfg = (providers) => ({ ...DEFAULTS, subs: {
+    enabled: true, intervalMinutes: 2, fetchTimeoutMs: 20000, providers
+  } });
+
+  const authFile = path.join(FAKE_HOME, 'pi-auth.json');
+  const writeAgyAuth = (over) => W(authFile, JSON.stringify({
+    antigravity: { type: 'oauth', access: 'ya29.stale', refresh: 'r1',
+      expires: Date.now() - 60000, projectId: 'p1', email: 'u@example.com', ...over }
+  }));
+  const agyProvider = (over) => ({ type: 'antigravity', enabled: true, label: 'AGY', authPath: authFile, ...over });
+
+  const SUMMARY = { groups: [
+    { displayName: 'Gemini Models', buckets: [
+      { bucketId: 'gemini-5h', window: '5h', remainingFraction: 1, resetTime: '2026-09-21T16:00:00Z' },
+      { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5, resetTime: '2026-09-28T11:00:00Z' } ] },
+    { displayName: 'Claude and GPT models', buckets: [
+      { bucketId: '3p-5h', window: '5h', remainingFraction: 0.2, resetTime: '2026-09-21T14:00:00Z' } ] }
+  ] };
+  const MODELS = { models: {
+    'gemini-3-pro': { quotaInfo: { remainingFraction: 1, resetTime: '2026-09-21T16:00:00Z' } },
+    'gemini-3-flash': { quotaInfo: { remainingFraction: 0.25, resetTime: '2026-09-21T15:00:00Z' } },
+    'chat_internal': { quotaInfo: { remainingFraction: 0 } },
+    'ide_model': { isInternal: true, quotaInfo: { remainingFraction: 0 } },
+    'no_quota': {}
+  } };
+  const ASSIST = { paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, currentTier: { name: 'Antigravity' },
+    cloudaicompanionProject: 'discovered-project' };
+
+  // Routes by URL: token refresh, loadCodeAssist, summary (or 403), models.
+  // The adapter reads .text() then parses (a 403 body may not be JSON), so the
+  // fake provides both shapes.
+  const jsonish = (status, obj) => ({ ok: status >= 200 && status < 300, status,
+    json: async () => obj, text: async () => JSON.stringify(obj) });
+  const routeFetch = (opts) => async (u, o) => {
+    const body = o && o.body ? JSON.parse(o.body) : {};
+    if (String(u).includes('oauth2.googleapis.com/token')) {
+      if (opts.refreshFails) return jsonish(400, { error: 'invalid_grant' });
+      return jsonish(200, { access_token: 'ya29.fresh', expires_in: 3599, refresh_token: 'r2' });
+    }
+    if (String(u).includes('loadCodeAssist')) return jsonish(200, ASSIST);
+    if (String(u).includes('retrieveUserQuotaSummary')) {
+      if (opts.summary403) return jsonish(403, { error: { code: 403, message: 'SUBSCRIPTION_REQUIRED', status: 'PERMISSION_DENIED' } });
+      if (opts.summary401) return jsonish(401, { error: 'nope' });
+      return jsonish(200, SUMMARY);
+    }
+    if (String(u).includes('fetchAvailableModels')) return jsonish(200, MODELS);
+    return jsonish(404, {});
+  };
+
+  pendingAsync++;
+  (async () => {
+    // Expired token -> refreshed before any quota call; summary groups become
+    // windows; plan label comes from loadCodeAssist paidTier.name.
+    writeAgyAuth();
+    const t = new SubsTracker(agyCfg([agyProvider()]), routeFetch({}));
+    const p = (await t.rescan()).providers['antigravity:0'];
+    check('subs/agy: expired token refreshes; summary groups -> windows; plan from paidTier',
+      p.ok === true && p.plan === 'Google AI Pro' && p.status === 'ok' &&
+      p.windows.length === 3 &&
+      p.windows[0].label === 'Gemini 5h' && p.windows[0].remainingPercent === 100 &&
+      p.windows[1].label === 'Gemini week' && p.windows[1].remainingPercent === 50 &&
+      p.windows[2].label === 'Claude and GPT 5h' && p.windows[2].remainingPercent === 20 &&
+      typeof p.windows[0].resetAt === 'number',
+      JSON.stringify(p.windows.map((w) => w.label + ':' + w.remainingPercent)));
+
+    // A rotated refresh token is persisted so the next scan starts valid.
+    const saved = JSON.parse(fs.readFileSync(authFile, 'utf8')).antigravity;
+    check('subs/agy: rotated refresh token + new access persisted to auth.json',
+      saved.access === 'ya29.fresh' && saved.refresh === 'r2' && saved.expires > Date.now());
+
+    // Free tier: 403 SUBSCRIPTION_REQUIRED on the summary is NOT an auth
+    // failure - fall back to per-model quotas, ignoring internal/chat_* keys
+    // and models without quotaInfo.
+    writeAgyAuth();
+    const f = new SubsTracker(agyCfg([agyProvider()]), routeFetch({ summary403: true }));
+    const fp = (await f.rescan()).providers['antigravity:0'];
+    check('subs/agy: 403 SUBSCRIPTION_REQUIRED falls back to per-model quota',
+      fp.ok === true && fp.windows.length === 1 && fp.windows[0].key === 'models' &&
+      fp.windows[0].remainingPercent === 25 && fp.status === 'ok' &&
+      fp.notes[0] === '2 models',
+      JSON.stringify(fp.windows) + ' notes=' + JSON.stringify(fp.notes));
+
+    // A token that cannot refresh is an auth-expired state, never a crash.
+    writeAgyAuth();
+    const r = new SubsTracker(agyCfg([agyProvider()]), routeFetch({ refreshFails: true }));
+    const rp = (await r.rescan()).providers['antigravity:0'];
+    check('subs/agy: failed refresh -> auth-expired with a re-login note',
+      rp.ok === false && rp.status === 'auth-expired' && rp.notes.join('').includes('re-login'));
+
+    // Summary 401 IS an auth failure (distinct from the paid-gate 403).
+    writeAgyAuth();
+    const u = new SubsTracker(agyCfg([agyProvider()]), routeFetch({ summary401: true }));
+    const up = (await u.rescan()).providers['antigravity:0'];
+    check('subs/agy: summary 401 -> auth-expired',
+      up.ok === false && up.status === 'auth-expired');
+
+    // No stored login at all -> no-auth (the board says so, no fetch storm).
+    let calls = 0;
+    const counting = async () => { calls++; return { ok: true, json: async () => ({}) }; };
+    const n = new SubsTracker(agyCfg([agyProvider({ authPath: path.join(FAKE_HOME, 'nope.json') })]), counting);
+    const np = (await n.rescan()).providers['antigravity:0'];
+    check('subs/agy: no stored login -> no-auth, zero fetches',
+      np.ok === false && np.status === 'no-auth' && calls === 0);
+
+    // IDE fallback: no pi store -> the vscdb token needle-scan still works
+    // (ya29. prefix preserved, ObjectRef noise dropped).
+    const vscdb = path.join(FAKE_HOME, 'state.vscdb');
+    W(vscdb, Buffer.from('garbage\x00{"apiKey":"ya29.abc-123_XYZ"}\x00tail', 'latin1'));
+    const v = new SubsTracker(agyCfg([agyProvider({ authPath: path.join(FAKE_HOME, 'nope.json'), vscdbPath: vscdb })]), routeFetch({}));
+    const vp = (await v.rescan()).providers['antigravity:0'];
+    check('subs/agy: IDE vscdb token needle-scan fallback works',
+      vp.ok === true && vp.plan === 'Google AI Pro');
+  })().catch((e) => check('subs/agy: block', false, e.message))
+    .finally(asyncFinished);
+}
+
 // --- 11. dashboard section toggles -------------------------------------------
 {
   const { DEFAULTS } = require('../src/config');
