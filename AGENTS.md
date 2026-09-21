@@ -356,3 +356,30 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 - The experimental herdr agents-chip wiring was removed (no renderer ever drew it);
   `modules.agents` no longer exists in the config. History: commit b9c9f8d removed the
   chip, the 2026-09 public-release pass removed the polling/socket wiring.
+
+## Native bar cosmetics (captain pass, 2026-09-21)
+
+- The bar window needs its own `WM_RBUTTONUP` -> `showTrayMenu`. The tray icon
+  path (WM_TRAY) is the only one that existed, so right-clicking the BAR itself
+  did nothing. The menu mirrors main.js `buildChocobarMenu` (token dashboard,
+  subscription dashboard, edit config, open config folder, reload, quit).
+- Bar edge padding is 16/18 CSS px (`padL`/`padR` in repaintBar), matching
+  `#bar { padding: 0 18px 0 16px }`. The rounded corners need it too.
+- Battery value color: `low ? warn : (battAc ? good : NULL)` - green while
+  charging, red only when low.
+- **Verifying the native bar without a screen**: CopyFromScreen dies the moment
+  the session is locked (`OpenInputDesktop` returns 0 and you capture the lock
+  screen - it reads as "the bar went black"), and PrintWindow on the LAYERED
+  bar returns an all-black bitmap (a layered window renders through
+  UpdateLayeredWindow, so it has nothing to paint into a DC). What DOES work:
+  (a) `Get-Process LogonUI` tells you whether you are looking at a lock screen
+  at all - check it BEFORE trusting any capture; (b) PrintWindow works on the
+  NON-layered dash/subs popups (ChocobarDash), so dashboard changes are still
+  visually verifiable; (c) for the bar itself, a `-DDBG_CHIPS` build that dumps
+  the chip table (align/L/R/w/ico/cp/text) after layout is the only ground
+  truth - strip it again afterwards, it logs once per paint.
+- Config gotchas found in his `~/.wizbar/config.json`: the shortcut module key
+  was missing entirely (bolt chip silently absent) and the pet lived under
+  `modules.remielle`, a name the parser no longer reads - it must be
+  `modules.pet`. A missing/renamed module key disables that chip with no error,
+  so when a chip is "gone", diff the config keys against the parser first.
