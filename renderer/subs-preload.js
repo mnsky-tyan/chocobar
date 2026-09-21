@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('wizbar', {
   getTheme: () => ipcRenderer.invoke('get-theme'),
   getSubs: () => ipcRenderer.invoke('get-subs'),
   rescanSubs: () => ipcRenderer.invoke('rescan-subs'),
+  fitHeight: (h) => ipcRenderer.send('fit-subs-height', h),
   close: () => ipcRenderer.send('close-subs')
 });

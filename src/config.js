@@ -188,7 +188,11 @@ const DEFAULTS = {
       { type: 'chatgpt', enabled: false, label: 'ChatGPT', authPath: '~/.codex/auth.json' },
       // Z.ai coding plan via the zcode credential (5h + weekly quota windows):
       { type: 'zai', enabled: false, label: 'Z.ai', configPath: '~/.zcode/v2/config.json',
-        provider: 'builtin:zai-coding-plan' }
+        provider: 'builtin:zai-coding-plan' },
+      // Google Antigravity plan (Cloud Code quota; token auto-refreshes from
+      // the pi OAuth store, or the IDE token when vscdbPath is set):
+      { type: 'antigravity', enabled: false, label: 'Antigravity',
+        authPath: '~/.pi/agent/auth.json' }
     ]
   },
   general: {
@@ -346,9 +350,10 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
     }
   },
   // Subscription board: live plan-quota windows for whatever subscriptions
-  // you wire up. Each entry names an adapter "type" (chatgpt | zai), a display
-  // label and where its credential lives. The board ships on with both
-  // examples disabled: the gauge chip reads "—" until you enable one.
+  // you wire up. Each entry names an adapter "type" (chatgpt | zai |
+  // antigravity), a display label and where its credential lives. The board
+  // ships on with all examples disabled: the gauge chip reads "—" until you
+  // enable one. Add or remove entries freely - any number of plans renders.
   "subs": {
     "enabled": true,
     "intervalMinutes": 2,
@@ -363,7 +368,11 @@ const TEMPLATE = `// Chocobar config — edit any value and save; changes apply 
       { "type": "chatgpt", "enabled": false, "label": "ChatGPT", "authPath": "~/.codex/auth.json" },
       // Z.ai coding plan via the zcode credential (5h + weekly windows)
       { "type": "zai", "enabled": false, "label": "Z.ai", "configPath": "~/.zcode/v2/config.json",
-        "provider": "builtin:zai-coding-plan" }
+        "provider": "builtin:zai-coding-plan" },
+      // Google Antigravity plan (Cloud Code quota; the pi OAuth token
+      // auto-refreshes, or set "vscdbPath" for the IDE's stored token)
+      { "type": "antigravity", "enabled": false, "label": "Antigravity",
+        "authPath": "~/.pi/agent/auth.json" }
     ]
   },
   "general": {
