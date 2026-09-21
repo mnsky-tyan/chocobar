@@ -22,6 +22,7 @@
 // helpers that live in the later parts of the assembled translation unit
 static void aggRecord(const char *app, int alen, long long ts, long long in, long long out,
                       long long cr, long long cw, const char *model, int mlen, const long long *bnd);
+static int aggDayIndex(long long ts, const long long *bnd);
 static long long parseLL(const char *p, const char *end);
 static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack);
 static char *readFileUtf8(const wchar_t *path, DWORD *outLen);
@@ -32,6 +33,12 @@ static void writeLogA(const char *s);
 // live-scan totals, added to the Electron cache's numbers by p_ui.c
 long long g_tokTodayLive = 0, g_tokWeekLive = 0, g_tokMonthLive = 0, g_tokAllLive = 0;
 long long g_tokMidnight = 0;
+// live per-day sums, index = days back (0 = today). The day/week/month
+// windows are DERIVED from this histogram on every scan, so a record ages out
+// of a window when its day does instead of being counted forever.
+#define TOK_LIVE_DAYS 190 // must match DASH_MAX_DAYS (p_ui.c): the heatmap span
+static long long g_tokDayLive[TOK_LIVE_DAYS];
+static long long g_tokHistMidnight = 0; // midnight the histogram was last shifted at
 // scan diagnostics (one log line per rescan while general.debug is on)
 int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
 static long long g_tokLiveCount = 0; // records folded in (for the log line)
@@ -193,9 +200,8 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                 long long sum = fld[0] + fld[1] + fld[2] + fld[3];
                 aggRecord(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
                           r.model, r.modelLen, bnd);
-                if (r.ts >= g_tokMidnight) g_tokTodayLive += sum;
-                if (r.ts >= tokNowMs() - 7LL * 86400000LL) g_tokWeekLive += sum;
-                if (r.ts >= tokNowMs() - 30LL * 86400000LL) g_tokMonthLive += sum;
+                int di = aggDayIndex(r.ts, bnd) - 1; // 0 = today
+                if (di >= 0 && di < TOK_LIVE_DAYS) g_tokDayLive[di] += sum;
                 g_tokAllLive += sum;
             }
         }
@@ -362,6 +368,17 @@ long tokLiveScan(void) {
     st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
     FILETIME fm; SystemTimeToFileTime(&st, &fm);
     g_tokMidnight = dashMidnightMs(&fm, 0);
+    // a new day makes every bucket one day older: shift the histogram so a
+    // record counted yesterday is today's "yesterday" and ages out on schedule
+    if (g_tokHistMidnight && g_tokMidnight > g_tokHistMidnight) {
+        int days = (int)((g_tokMidnight - g_tokHistMidnight + 43200000LL) / 86400000LL);
+        if (days >= TOK_LIVE_DAYS) memset(g_tokDayLive, 0, sizeof(g_tokDayLive));
+        else if (days > 0) {
+            memmove(g_tokDayLive + days, g_tokDayLive, (TOK_LIVE_DAYS - days) * sizeof(g_tokDayLive[0]));
+            memset(g_tokDayLive, 0, (size_t)days * sizeof(g_tokDayLive[0]));
+        }
+    }
+    g_tokHistMidnight = g_tokMidnight;
     for (int j = 0; j <= 190; j++) bnd[j] = dashMidnightMs(&fm, j - 1);
     long long before = g_tokAllLive;
     // Self-heal: if the in-memory set was lost (an early config reload used to
@@ -380,6 +397,16 @@ long tokLiveScan(void) {
         // pi nests its sessions one directory per project; zai keeps them flat
         int recursive = (s->app && lstrcmpA(s->app, "pi") == 0);
         tokScanDir(dir, recursive, s->app ? s->app : "app", bnd);
+    }
+    // the windowed totals are derived, never accumulated: day 0 feeds Today,
+    // days 0-6 the week window, days 0-29 the month window
+    g_tokTodayLive = g_tokDayLive[0];
+    g_tokWeekLive = g_tokMonthLive = 0;
+    for (int d = 0; d < TOK_LIVE_DAYS; d++) {
+        long long v = g_tokDayLive[d];
+        if (!v) continue;
+        if (d < 7) g_tokWeekLive += v;
+        if (d < 30) g_tokMonthLive += v;
     }
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
     if (g_cfg.debug) {

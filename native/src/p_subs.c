@@ -1096,14 +1096,8 @@ static int subsFetchAgyLocal(int idx, int fam) {
         }
         // absolute prompt credits (dashboard only, per the captain's rule)
         double avail = -1, monthly = -1;
-        if (ps >= 0) {
-            int av = jobjGet(resp, t, ps, "availablePromptCredits");
-            if (av >= 0 && t[av].type == JSMN_PRIMITIVE) avail = wcstod(jstrTok(resp, t, av, NULL), NULL);
-            if (pi2 >= 0) {
-                int mo = jobjGet(resp, t, pi2, "monthlyPromptCredits");
-                if (mo >= 0) { wchar_t *ms = jstrTok(resp, t, mo, NULL); if (ms) { monthly = wcstod(ms, NULL); wideFree(&ms); } }
-            }
-        }
+        if (ps >= 0) avail = subsJdouble(resp, t, ps, "availablePromptCredits", -1);
+        if (pi2 >= 0) monthly = subsJdouble(resp, t, pi2, "monthlyPromptCredits", -1);
         if (avail >= 0 && monthly > 0 && fam == 0) {
             int left = (int)(avail + 0.5);
             subsSetCredits(idx, left, (int)(monthly + 0.5));
@@ -1126,19 +1120,11 @@ static int subsFetchAgyLocal(int idx, int fam) {
             wideFree(&label);
             int qi = jobjGet(resp, t, k, "quotaInfo");
             if (qi < 0) continue;
-            int rf = jobjGet(resp, t, qi, "remainingFraction");
-            if (rf < 0 || t[rf].type != JSMN_PRIMITIVE) continue;
-            wchar_t *rs = jstrTok(resp, t, rf, NULL);
-            if (!rs) continue;
-            double f = wcstod(rs, NULL);
-            wideFree(&rs);
+            double f = subsJdouble(resp, t, qi, "remainingFraction", -1);
             if (f < 0 || f > 1) continue;
             long long rms = 0;
-            int rt = jobjGet(resp, t, qi, "resetTime");
-            if (rt >= 0) {
-                char *iso = subsJstrRaw(resp, t, rt, NULL);
-                if (iso) { rms = subsIsoToMs(iso, (int)strlen(iso)); HeapFree(GetProcessHeap(), 0, iso); }
-            }
+            char *iso = subsJstrRaw(resp, t, qi, "resetTime");
+            if (iso) { rms = subsIsoToMs(iso, (int)strlen(iso)); HeapFree(GetProcessHeap(), 0, iso); }
             if (frac[fam] < 0 || f < frac[fam]) { frac[fam] = f; reset[fam] = rms; }
         }
     }
@@ -1146,7 +1132,6 @@ static int subsFetchAgyLocal(int idx, int fam) {
     HeapFree(GetProcessHeap(), 0, resp);
     // one window: this panel's family quota, the window the IDE calls weekly
     int f = fam ? 1 : 0;
-    if (frac[f] < 0) f = f ? 0 : 1; // fall back to whatever the IDE reports
     if (frac[f] < 0) return 0;
     memset(&wins[0], 0, sizeof(wins[0]));
     lstrcpynW(wins[0].label, L"week", 24);
@@ -1170,6 +1155,7 @@ static int subsFetchAntigravity(int idx) {
     // The provider pool holds TWO slots per antigravity entry (family 0 =
     // Gemini, 1 = GPT/Claude); each reports only its own family's quota.
     int fam = (idx >= 0 && idx < MAX_SUBS) ? g_cfg.subsProviders[idx].family : 0;
+    subsSetCredits(idx, -1, -1);
     // The local language server is the authoritative source (it is what the
     // IDE's own quota UI shows). Only fall back to the cloud endpoints when it
     // is not running, e.g. the IDE is closed.
@@ -1271,7 +1257,7 @@ static int subsFetchAntigravity(int idx) {
             if (groups >= 0 && t[groups].type == JSMN_ARRAY) {
                 int cnt = t[groups].size;
                 int k = groups + 1;
-                for (int i = 0; i < cnt && nwin < 4; i++) {
+                for (int i = 0; i < cnt && nwin < 4; i++, k += jtokSpan(t, k)) {
                     jsmntok_t *e = &t[k];
                     if (e->type == JSMN_OBJECT) {
                         // "Gemini Models" -> "Gemini"; "Claude and GPT models"
@@ -1342,6 +1328,7 @@ static int subsFetchAntigravity(int idx) {
                                             memcpy(raw, rt, rl);
                                             raw[rl] = 0;
                                             wins[nwin].resetAt = subsIsoToMs(raw, rl);
+                                            HeapFree(GetProcessHeap(), 0, rt);
                                         } else {
                                             wins[nwin].resetAt = 0;
                                         }
@@ -1352,7 +1339,6 @@ static int subsFetchAntigravity(int idx) {
                             }
                         }
                     }
-                    k += jtokSpan(t, k);
                 }
             }
         }
