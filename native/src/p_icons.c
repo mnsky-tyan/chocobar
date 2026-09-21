@@ -301,6 +301,61 @@ typedef struct { SvgPath path; float w; } SvgFlat;
 static SvgFlat g_flat[SVG_COUNT][SVG_MAXPARTS];
 static int g_flatN[SVG_COUNT];
 
+// ---- config-defined icons -------------------------------------------------
+// The bar's own icons are a static table, but the captain wants NEW icons from
+// the config (the buttons he can add by name). A user icon keeps the same
+// flattened-path representation, so it renders through the identical GDI+ AA
+// path and the same per-icon DIB cache - only the id is shifted past SVG_COUNT.
+#define SVG_USER_MAX 16
+#define SVG_USER_BASE 1000
+#define SVG_ID_MAX (SVG_COUNT + SVG_USER_MAX)
+static SvgFlat g_user[SVG_USER_MAX][SVG_MAXPARTS];
+static int g_userN[SVG_USER_MAX];
+static wchar_t g_userName[SVG_USER_MAX][24];
+static int g_userCount = 0;
+
+// flatten one config icon (name | SVG path data | stroke width). The path data
+// may hold several subpaths in one "d" string - svgWalk starts a new subpath
+// on every M. Returns the icon id, or -1 when the table is full.
+int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
+    if (g_userCount >= SVG_USER_MAX || !name || !*name || !d || !*d) return -1;
+    int slot = -1;
+    for (int i = 0; i < g_userCount; i++)
+        if (lstrcmpiW(g_userName[i], name) == 0) { slot = i; break; } // redefine = replace
+    if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, 24); }
+    int n = 0;
+    for (int j = 0; j < SVG_MAXPARTS; j++) {
+        memset(&g_user[slot][j], 0, sizeof(SvgFlat));
+    }
+    // one part: the whole d string (svgWalk splits on M into subpaths)
+    memset(&g_user[slot][0].path, 0, sizeof(SvgPath));
+    svgWalk(&g_user[slot][0].path, d);
+    g_user[slot][0].w = w > 0 ? w : 2.2f;
+    n = 1;
+    g_userN[slot] = n;
+    return SVG_USER_BASE + slot;
+}
+
+// name -> id among the config icons, -1 when not defined
+int iconUserFind(const wchar_t *name) {
+    if (!name || !*name) return -1;
+    for (int i = 0; i < g_userCount; i++)
+        if (lstrcmpiW(g_userName[i], name) == 0) return SVG_USER_BASE + i;
+    return -1;
+}
+
+// id -> (parts, count) for BOTH tables; NULL for an out-of-range id
+static SvgFlat *flatSlot(int id, int *np) {
+    if (id >= 0 && id < SVG_COUNT) { if (np) *np = g_flatN[id]; return g_flat[id]; }
+    if (id >= SVG_USER_BASE && id < SVG_USER_BASE + SVG_USER_MAX) {
+        int s = id - SVG_USER_BASE;
+        if (np) *np = g_userN[s];
+        return g_user[s];
+    }
+    if (np) *np = 0;
+    return NULL;
+}
+
 // ---- GDI+ flat API (loaded once, optional) -----------------------------------
 typedef int GpStatus;
 typedef void GpGraphics;
@@ -451,7 +506,7 @@ typedef struct {
     int w, h;
     COLORREF color; int valid;
 } IconDib;
-static IconDib g_iconDib[SVG_COUNT];
+static IconDib g_iconDib[SVG_ID_MAX];
 static IconDib g_battDib;         // battery cache (charge bucket + ac + colors)
 static IconDib g_ssDib;           // 2x supersample scratch (AA quality)
 static int g_battKey[7];          // pct bucket, ac, accent, warn, line, valid, warn-fill
@@ -486,8 +541,11 @@ static void iconDibPremultiply(IconDib *d);
 // Draw the icon into `g` at supersample factor ss (path units -> pixels).
 static void iconStrokeAll(GpGraphics *g, int id, COLORREF color, float s, float penW) {
     unsigned argb = GDIP_ARGB(color);
-    for (int j = 0; j < g_flatN[id]; j++) {
-        SvgPath *sp = &g_flat[id][j].path;
+    int nparts = 0;
+    SvgFlat *fl = flatSlot(id, &nparts);
+    if (!fl) return;
+    for (int j = 0; j < nparts; j++) {
+        SvgPath *sp = &fl[j].path;
         GpPath *gp = NULL;
         if (t_GdipCreatePath(0, &gp) != 0) continue;
         for (int si = 0; si < sp->nsub; si++) {
@@ -505,7 +563,7 @@ static void iconStrokeAll(GpGraphics *g, int id, COLORREF color, float s, float 
             if (ss->closed) t_GdipClosePathFigure(gp);
         }
         GpPen *pen = NULL;
-        if (t_GdipCreatePen1(argb, (float)(penW * (g_flat[id][j].w ? g_flat[id][j].w : 1.0f)), 2 /*pixel*/, &pen) == 0) {
+        if (t_GdipCreatePen1(argb, (float)(penW * (fl[j].w ? fl[j].w : 1.0f)), 2 /*pixel*/, &pen) == 0) {
             t_GdipSetPenStartCap(pen, 2); // LineCapRound
             t_GdipSetPenEndCap(pen, 2);
             t_GdipSetPenLineJoin(pen, 2); // LineJoinRound
@@ -579,14 +637,17 @@ static void iconStrokeGdi(HDC hdc, int id, COLORREF color, int x, int y) {
     int wpen = (int)(1.1f * g_scale + 0.5);
     if (wpen < 1) wpen = 1;
     LOGBRUSH lb; lb.lbStyle = BS_SOLID; lb.lbColor = color; lb.lbHatch = 0;
-    for (int j = 0; j < g_flatN[id]; j++) {
-        int w = (int)(wpen * (g_flat[id][j].w ? g_flat[id][j].w : 1.0f) + 0.5);
+    int nparts = 0;
+    SvgFlat *fl = flatSlot(id, &nparts);
+    if (!fl) return;
+    for (int j = 0; j < nparts; j++) {
+        int w = (int)(wpen * (fl[j].w ? fl[j].w : 1.0f) + 0.5);
         if (w < 1) w = 1;
         HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, (DWORD)w, &lb, 0, NULL);
         if (!pen) return;
         HGDIOBJ old = SelectObject(hdc, pen);
         HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        SvgPath *p = &g_flat[id][j].path;
+        SvgPath *p = &fl[j].path;
         for (int si = 0; si < p->nsub; si++) {
             SvgSub *ss = &p->s[si];
             if (ss->n < 2) continue;
@@ -627,11 +688,20 @@ static void iconBlit(HDC hdc, IconDib *d, int x, int y) {
 }
 
 // stroke one icon in `color` into the premultiplied DIB at (x, ytop), 12*scale box
+// id -> DIB cache slot: user icons live past the built-in id range but
+// share one cache array (their slots follow the built-ins)
+static IconDib *dibSlot(int id) {
+    if (id >= 0 && id < SVG_COUNT) return &g_iconDib[id];
+    if (id >= SVG_USER_BASE && id < SVG_USER_BASE + SVG_USER_MAX)
+        return &g_iconDib[SVG_COUNT + (id - SVG_USER_BASE)];
+    return NULL;
+}
 static void svgDraw(HDC hdc, int id, COLORREF color, int x, int y) {
-    if (id < 0 || id >= SVG_COUNT || id == SVG_BAT) return;
+    int nparts = 0;
+    IconDib *d = dibSlot(id);
+    if (!d || !flatSlot(id, &nparts) || !nparts || id == SVG_BAT) return; // bat is dynamic (svgDrawBatt)
     int bw = (int)(12 * g_scale + 0.5);
     if (g_gdipOk) {
-        IconDib *d = &g_iconDib[id];
         if (!d->valid || d->color != color || d->w != bw) {
             if (!iconRenderGdip(d, id, color, bw, bw)) return;
             iconDibPremultiply(d); // once: render pass wrote straight ARGB

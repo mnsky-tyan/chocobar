@@ -383,3 +383,59 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   `modules.remielle`, a name the parser no longer reads - it must be
   `modules.pet`. A missing/renamed module key disables that chip with no error,
   so when a chip is "gone", diff the config keys against the parser first.
+
+## Native token live scan (p_tokens.c) - sharp edges
+
+- The bar reads the Electron app's `~/.wizbar/token-cache.json` as the HISTORY
+  SEED, then folds in everything newer from the live JSONL session stores
+  (`~/.pi/agent/sessions/**`, `~/.zai/agent/sessions/*`) via a per-file BYTE
+  cursor in `~/.wizbar/token-cursors.json`. Only records with `ts > cacheMaxTs`
+  are counted, so nothing is double counted. The Electron app is retired, so
+  this is now the only thing keeping "Today" non-zero.
+- **`tokLiveInit()` MUST run before `loadConfig()`** in wWinMain. loadConfig
+  rebuilds the chips, which runs the FIRST token scan, and that scan is what
+  populates the cursors; loading them afterwards wiped the in-memory set, so the
+  very next rescan re-read every active file from byte 0 and DOUBLED every live
+  record (today jumped 2x within a minute - "the token usage fluctuates").
+  `tokLiveScan` also self-heals (`if (!g_tokCursorN) tokCursorLoad();`).
+- The live counters are CUMULATIVE across rescans (a warm scan only reads
+  appends), while the cache-only half (`g_tokBaseToday/Week/Month/All`) is
+  refreshed only on a full cache read. Never add the live counters to
+  `g_tokensToday` on the unchanged-cache fast path - that value already contains
+  them. Recompute `g_tokens* = base + live` every rescan instead.
+- **Opening one file over the WSL redirector costs ~25ms, and a
+  `FindFirstFileW` per project dir ~25ms too.** A warm rescan that re-opens all
+  21 active files costs ~550ms and blocks the bar. Skip a file when the cursor
+  already covers it (`c->size == fsz && c->mtimeMs == mt`, both taken from the
+  directory enumeration - never a separate `GetFileAttributesExW`), and read
+  mtime+size from `WIN32_FIND_DATAW`, not a second stat.
+- `tokens.rescanMinutes` was silently ignored (the tick was hard-coded to 30 =
+  30s, twice what his config asks). It is now `tokensRescanSec`, clamped 1..60
+  minutes. If a native config key seems to do nothing, grep the parser.
+- Measured (2026-09-22, captain's box): CPU ~4.5% of one core, RSS ~27.6 MB,
+  commit ~15.9 MB, 348 handles, 11 threads. The cold scan (cursor file absent)
+  reads ~148MB over UNC and takes ~3.3s once.
+
+## Native dashboards - layout sharp edges
+
+- Both dash windows are created HIDDEN, painted once (`UpdateWindow`), content-
+  fitted, and only then shown. Resizing a visible board reads as "bolted
+  together" (the top appears, the lower part lags in). `dashFitToContent()`
+  latches the window to `g_dashContentH` with a 45%-of-config-height floor.
+- **`GetTextExtentPoint32W` ignores `SetTextCharacterExtra`.** Any label drawn
+  with character extra must be measured with the same extra (`dashStrWEx`) or it
+  loses its last character. This clipped "CLAUDE/GPT WEEK" to "CLAUDE/GPT WEE".
+- The subs panel pie is sized from the WIDEST window label (`cellW - labNeed -
+  DX(20)`), never by fixed tiers: a pie that takes the whole cell clips the
+  label. Providers with 4 windows get a smaller pie, never a dropped window.
+- Table name columns must end at the first numeric column (`xs[4] - DX(6)`),
+  not a hard-coded width - a fixed `DX(150)` ellipsized real model ids
+  ("xiaomi/mimo-x-flash-preview") even in a 500px card.
+- The board footers must render a STORED wall-clock stamp, never
+  `wallNow - truncatedTickAge`: mixing `GetSystemTimeAsFileTime` with a
+  truncated `GetTickCount64` age made the seconds field oscillate (41 -> 42 ->
+  41) on every repaint. The stamp is in dashFmtTime's frame (local fields
+  reinterpreted as UTC), which is NOT a true UTC epoch - `subsNowMs()` would
+  print 8 hours off in HKT.
+- The heatmap cell is now adaptive (`(innerW - rowLabW)/weeks - gap`, capped
+  DX(16)); 26 fixed DX(11) cells left the right half of the card blank.
