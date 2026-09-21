@@ -1073,7 +1073,7 @@ static HFONT dashFont(int cssPx, int weight) {
 // renders as the Regular face in Chromium too).
 
 static void tipHide(void);
-static void tipShow(const wchar_t *text, int cx, int cy);
+static void tipShow(const wchar_t *text, int cx, int cy, int dark);
 
 static const wchar_t *DASH_MONTHS[12] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
                                           L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec" };
@@ -1096,7 +1096,7 @@ static void dashResolveTheme(DashTheme *t) {
     t->pink = colorrefFromHex(g_cfg.pink, 255);
     t->warn = colorrefFromHex(g_cfg.warn, 255);
     t->good = colorrefFromHex(g_cfg.good, 255);
-    t->yellow = colorrefFromHex(L"#B8A96A", 255);
+    t->yellow = colorrefFromHex(g_cfg.yellow, 255);
     t->card = blendCr(t->bg, RGB(255, 255, 255), 64);  // rgba(255,255,255,.25)
     t->head = blendCr(t->card, RGB(255, 255, 255), 64); // stacked head tint
     t->zebra = blendCr(t->card, t->bg, 128);            // rgba(pinkBg,.5)
@@ -1157,7 +1157,7 @@ static void dashHead(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT 
 // app-${app} class - any other harness falls through to the default dim dot
 static COLORREF appDotColor(const char *app, DashTheme *t) {
     if (!strcmp(app, "zcode")) return t->pinkDeep;
-    if (!strcmp(app, "zai")) return RGB(0xB8, 0xA9, 0x6A);
+    if (!strcmp(app, "zai")) return t->yellow;
     if (!strcmp(app, "opencode")) return RGB(0x7F, 0xA8, 0xA0);
     if (!strcmp(app, "mimo")) return RGB(0xB7, 0x9C, 0xE0);
     if (!strcmp(app, "pi")) return RGB(0x8F, 0xA8, 0xD4);
@@ -1544,8 +1544,17 @@ static void paintDash(HWND hwnd) {
                     if (selRows[i].req > 0) ddAll++;
                 ddRows = ddAll > 6 ? 6 : ddAll;
             }
-            int ddH = hasSel ? DX(10) + DX(8) + DX(15) + DX(13) + ddRows * DX(17) : 0;
+            int ddFixed = DX(10) + DX(8) + DX(15) + DX(13);
+            int tblReserve = DX(10) + DX(13) + 2 * DX(17) + DX(10);
             int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10);
+            if (hasSel) {
+                int room = h - DX(24) - gap - tblReserve - y - secH;
+                int fitRows = (room - ddFixed) / DX(17);
+                if (fitRows < 0) fitRows = 0;
+                if (ddRows > fitRows) ddRows = fitRows;
+                if (ddRows <= 0) hasSel = 0;
+            }
+            int ddH = hasSel ? ddFixed + ddRows * DX(17) : 0;
             if (y + secH < h - DX(26)) {
                 // fit gate stays on the no-selection height: the detail expands
                 // the card only while the expansion fits, else it is clipped -
@@ -1805,7 +1814,8 @@ static void paintDash(HWND hwnd) {
                                 FillRect(dc, &fr2, b);
                                 DeleteObject(b);
                             }
-                            COLORREF dc2 = bar ? appDotColor(mk, &t) : t.dim;
+                            if (bar) *bar = 0;
+                            COLORREF dc2 = appDotColor(mk, &t);
                             dashTableRow(dc, sx + DX(12), inner, ry, rowH, cache, xs, mn,
                                          dc2, (double)s / maxAll, &a2, &t, fBody, fS9);
                             ry += rowH;
@@ -2065,7 +2075,7 @@ static void dashTipCell(HWND hwnd, POINT p) {
             swprintf(tipBuf, 703, L"%ls\n%ls", head, body);
             POINT sp = p;
             ClientToScreen(hwnd, &sp);
-            tipShow(tipBuf, sp.x, sp.y);
+            tipShow(tipBuf, sp.x, sp.y, 1);
             return;
         }
     tipHide();
@@ -2207,6 +2217,8 @@ static void dashToggle(int type) {
 static HWND g_tip = NULL;
 static int g_tipOn = 0;
 static HFONT g_tipFont = NULL;
+static HFONT g_tipHeat = NULL;
+static HFONT g_tipHeatB = NULL;
 static HDC g_tipDc = NULL;
 static HBITMAP g_tipDib = NULL;
 static HGDIOBJ g_tipOldBmp = NULL;
@@ -2218,9 +2230,23 @@ static void tipHide(void) {
     g_tipOn = 0;
 }
 
-static void tipShow(const wchar_t *text, int cx, int cy) {
+// dark = the dashboard's #heat-tip card (dash.css), light = a browser-style
+// title tooltip for the bar chips
+static void tipShow(const wchar_t *text, int cx, int cy, int dark) {
     if (!text || !*text) { tipHide(); return; }
-    if (!g_tipFont) {
+    if (dark) {
+        if (!g_tipHeat) {
+            wchar_t fam[LF_FACESIZE];
+            uiFontFamily(fam, LF_FACESIZE);
+            int px = -(int)(10 * g_scale);
+            g_tipHeat = CreateFontW(px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                    DEFAULT_PITCH | FF_DONTCARE, fam);
+            g_tipHeatB = CreateFontW(px, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                     DEFAULT_PITCH | FF_DONTCARE, fam);
+        }
+    } else if (!g_tipFont) {
         g_tipFont = CreateFontW(-(int)(12 * g_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -2236,13 +2262,39 @@ static void tipShow(const wchar_t *text, int cx, int cy) {
         if (!g_tip) return;
     }
     if (!g_tipDc) g_tipDc = CreateCompatibleDC(NULL);
-    HFONT of = (HFONT)SelectObject(g_tipDc, g_tipFont);
-    // multi-line aware measure: DrawText with DT_CALCRECT expands on \n
-    RECT mr = { 0, 0, 8000, 0 };
-    DrawTextW(g_tipDc, text, -1, &mr, DT_CALCRECT | DT_NOPREFIX);
+    HFONT mf = dark ? g_tipHeat : g_tipFont;
+    HFONT of = (HFONT)SelectObject(g_tipDc, mf);
+    int padX = (int)((dark ? 9 : 7) * g_scale), padY = (int)((dark ? 6 : 4) * g_scale);
+    int lineH = (int)(15 * g_scale);
+    LONG w = 0, h = 0;
+    if (dark) {
+        // 10px font, 1.5 line-height (dash.css #heat-tip)
+        int n = 1;
+        for (const wchar_t *p = text; *p; p++) if (*p == L'\n') n++;
+        wchar_t ln[512];
+        int maxW = 0;
+        const wchar_t *p = text;
+        while (p) {
+            const wchar_t *nl = wcschr(p, L'\n');
+            int len = nl ? (int)(nl - p) : (int)wcslen(p);
+            if (len > 511) len = 511;
+            memcpy(ln, p, (size_t)len * sizeof(wchar_t));
+            ln[len] = 0;
+            RECT lm = { 0, 0, 8000, 0 };
+            DrawTextW(g_tipDc, ln, -1, &lm, DT_CALCRECT | DT_NOPREFIX);
+            if (lm.right > maxW) maxW = lm.right;
+            p = nl ? nl + 1 : NULL;
+        }
+        w = maxW + 2 * padX;
+        h = n * lineH + 2 * padY;
+    } else {
+        // multi-line aware measure: DrawText with DT_CALCRECT expands on \n
+        RECT mr = { 0, 0, 8000, 0 };
+        DrawTextW(g_tipDc, text, -1, &mr, DT_CALCRECT | DT_NOPREFIX);
+        w = mr.right + 2 * padX;
+        h = mr.bottom + 2 * padY;
+    }
     SelectObject(g_tipDc, of);
-    int padX = (int)(7 * g_scale), padY = (int)(4 * g_scale);
-    LONG w = mr.right + 2 * padX, h = mr.bottom + 2 * padY;
     if (w != g_tipW || h != g_tipH || !g_tipDib) {
         if (g_tipDib) { SelectObject(g_tipDc, g_tipOldBmp); DeleteObject(g_tipDib); g_tipDib = NULL; g_tipBits = NULL; }
         BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
@@ -2258,17 +2310,48 @@ static void tipShow(const wchar_t *text, int cx, int cy) {
         g_tipW = w; g_tipH = h;
     }
     DWORD *px = (DWORD *)g_tipBits;
-    // opaque white tooltip, gray hairline border, opaque alpha
-    for (LONG yy = 0; yy < h; yy++)
-        for (LONG xx = 0; xx < w; xx++) {
-            int border = (xx == 0 || yy == 0 || xx == w - 1 || yy == h - 1);
-            px[yy * w + xx] = border ? 0xFFC8C8C8 : 0xFFFFFFFF;
+    if (dark) {
+        // dark card, rounded 6px, no border (dash.css #heat-tip)
+        int rr = (int)(6 * g_scale);
+        if (rr > w / 2) rr = w / 2;
+        if (rr > h / 2) rr = h / 2;
+        for (LONG yy = 0; yy < h; yy++)
+            for (LONG xx = 0; xx < w; xx++) {
+                int ex = xx < rr ? rr - (int)xx : (xx >= w - rr ? (int)xx - (int)w + rr + 1 : 0);
+                int ey = yy < rr ? rr - (int)yy : (yy >= h - rr ? (int)yy - (int)h + rr + 1 : 0);
+                int corner = (ex > 0 && ey > 0 && ex * ex + ey * ey > rr * rr);
+                px[yy * w + xx] = corner ? 0 : 0xFF241F16;
+            }
+        wchar_t ln[512];
+        const wchar_t *p = text;
+        int li = 0;
+        while (p) {
+            const wchar_t *nl = wcschr(p, L'\n');
+            int len = nl ? (int)(nl - p) : (int)wcslen(p);
+            if (len > 511) len = 511;
+            memcpy(ln, p, (size_t)len * sizeof(wchar_t));
+            ln[len] = 0;
+            SelectObject(g_tipDc, li == 0 ? g_tipHeatB : g_tipHeat);
+            SetBkMode(g_tipDc, TRANSPARENT);
+            SetTextColor(g_tipDc, li == 0 ? RGB(0xF6, 0xD8, 0xE0) : RGB(0xF5, 0xF0, 0xD8));
+            RECT tr = { padX, padY + li * lineH, w - padX, padY + (li + 1) * lineH };
+            DrawTextW(g_tipDc, ln, -1, &tr, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+            p = nl ? nl + 1 : NULL;
+            li++;
         }
-    RECT tr = { padX, padY, w - padX, h };
-    SelectObject(g_tipDc, g_tipFont);
-    SetBkMode(g_tipDc, TRANSPARENT);
-    SetTextColor(g_tipDc, RGB(31, 31, 31));
-    DrawTextW(g_tipDc, text, -1, &tr, DT_LEFT | DT_NOPREFIX); // \n breaks lines
+    } else {
+        // opaque white tooltip, gray hairline border, opaque alpha
+        for (LONG yy = 0; yy < h; yy++)
+            for (LONG xx = 0; xx < w; xx++) {
+                int border = (xx == 0 || yy == 0 || xx == w - 1 || yy == h - 1);
+                px[yy * w + xx] = border ? 0xFFC8C8C8 : 0xFFFFFFFF;
+            }
+        RECT tr = { padX, padY, w - padX, h };
+        SelectObject(g_tipDc, g_tipFont);
+        SetBkMode(g_tipDc, TRANSPARENT);
+        SetTextColor(g_tipDc, RGB(31, 31, 31));
+        DrawTextW(g_tipDc, text, -1, &tr, DT_LEFT | DT_NOPREFIX); // \n breaks lines
+    }
     // clamp to the screen, then place below-right of the cursor
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     int x = cx + (int)(6 * g_scale), y = cy + (int)(16 * g_scale);
@@ -2449,7 +2532,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         const wchar_t *tt = chipTitle(h);
         if (tt) {
             POINT sp; GetCursorPos(&sp);
-            tipShow(tt, sp.x, sp.y);
+            tipShow(tt, sp.x, sp.y, 0);
         } else tipHide();
         if (!g_trackingMouse) {
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
