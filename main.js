@@ -1,6 +1,32 @@
 'use strict';
 // WizBar — slim acrylic status bar floating above the terminal + token tracker.
-const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
+const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut, session } = require('electron');
+
+// --- network lockdown ---------------------------------------------------------
+// Every Chocobar window renders exactly one local file, so a network request
+// from any renderer is either a bug or a hijack attempt. The will-navigate
+// guard in lockWindowNavigation only stops RENDERER-initiated navigations: a
+// browser-side navigation (a CDP Page.navigate against a debug port) goes
+// around it entirely, which is how the bar got replaced by a web page twice.
+// Refusing the request at the network layer covers that path too - the window
+// keeps its own document. Main-process fetches (token/subs scans) use node,
+// not this session, so they are unaffected.
+//
+// Registered the moment the app allows it: session.defaultSession throws
+// "Session can only be received when app is ready" at module load, and the
+// guard must be in place BEFORE the first window loads anything.
+let _netLocked = false;
+function lockNetwork() {
+  if (_netLocked) return;
+  const s = session && (session.defaultSession || null);
+  if (!s || !s.webRequest || typeof s.webRequest.onBeforeRequest !== 'function') return;
+  _netLocked = true;
+  s.webRequest.onBeforeRequest((details, cb) => {
+    cb({ cancel: !String(details.url).startsWith('file://') });
+  });
+}
+if (app.isReady()) lockNetwork();
+else app.once('ready', lockNetwork);
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
@@ -189,7 +215,7 @@ function openSubs() {
     }
   });
   subsWin.loadFile(path.join(__dirname, 'renderer', 'subs.html'));
-  lockWindowNavigation(subsWin);
+  lockWindowNavigation(subsWin, path.join(__dirname, "renderer", "subs.html"));
   subsWin.once('ready-to-show', () => raiseDash(subsWin));
   subsWin.webContents.on('did-finish-load', () => {
     if (subsWin && !subsWin.isDestroyed()) {
@@ -237,7 +263,7 @@ function openDashboard() {
     }
   });
   dashWin.loadFile(path.join(__dirname, 'renderer', 'dash.html'));
-  lockWindowNavigation(dashWin);
+  lockWindowNavigation(dashWin, path.join(__dirname, "renderer", "dash.html"));
   dashWin.once('ready-to-show', () => raiseDash());
   // Data rides on did-finish-load (not ready-to-show, which only fires once
   // per window): a Reload chocobar re-fires this and re-seeds the fresh page.
@@ -533,17 +559,30 @@ function spawnBar() {
 let shuttingDown = false;
 
 // A Chocobar window renders exactly one local file: the bar, the token dash or
-// the subs board. None of them has any legitimate destination, so navigation
-// is refused outright. This also closes the door on a debug-port (CDP) client
+// the subs board. None of them has any legitimate destination, so navigation is
+// refused outright. This also closes the door on a debug-port (CDP) client
 // driving a navigation into an app window - the bar is thin and always on
 // screen, so a hijacked one reads as the whole bar being replaced by a page.
-function lockWindowNavigation(win) {
+// Three layers, because one is not enough:
+//   1. will-navigate / will-redirect stop RENDERER-initiated navigations.
+//   2. lockNetwork() refuses the request at the network layer, which is the
+//      only thing that covers a browser-side (CDP Page.navigate) navigation.
+//   3. A navigation that still lands (blocked requests end on an error page)
+//      is undone here: the window reloads its own document.
+function lockWindowNavigation(win, ownFile) {
   const wc = win && win.webContents;
   if (!wc) return;
+  const isOwn = (u) => String(u).startsWith('file://');
+  const heal = () => {
+    try { wc.loadFile(ownFile); } catch (_) {}
+  };
   // Each hook is optional: a partial webContents must never break a window.
   if (typeof wc.on === 'function') {
-    wc.on('will-navigate', (e) => e.preventDefault());
-    wc.on('will-redirect', (e) => e.preventDefault());
+    wc.on('will-navigate', (e, u) => { if (!isOwn(u)) e.preventDefault(); });
+    wc.on('will-redirect', (e, u) => { if (!isOwn(u)) e.preventDefault(); });
+    wc.on('did-navigate', (e, u) => { if (!isOwn(u)) heal(); });
+    wc.on('did-navigate-in-page', (e, u) => { if (!isOwn(u)) heal(); });
+    wc.on('did-fail-navigate', () => heal());
   }
   if (typeof wc.setWindowOpenHandler === 'function') {
     wc.setWindowOpenHandler(() => ({ action: 'deny' }));
