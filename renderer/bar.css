@@ -39,7 +39,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 0 12px 0 8px;
+  /* Real end padding: the first chip (pet toggle) and the last (clock) must
+     not hug the window edge - the pill reads as inset, not flush. */
+  padding: 0 18px 0 16px;
   background: var(--bg);
   /* The page IS the paint: translucent tint over a transparent window.
      Corners come from here too (CSS), since DWM rounding needs an opaque rect. */
@@ -91,7 +93,7 @@ body {
 }
 
 .seg .ico { color: var(--pink-deep); display: inline-flex; }
-.seg .val { color: var(--fg); }
+.seg .val { color: var(--fg-dim); }
 .seg .val.dim { color: var(--fg-dim); }
 .seg .val.warn { color: var(--warn); }
 .seg .val.good { color: var(--good); }
