@@ -2,3 +2,6 @@
 # This trusted declaration tells the no-mistakes pipeline to conclude checks-passed
 # instead of waiting for checks that will never register.
 no_ci: true
+allow_repo_commands: true
+commands:
+  test: npm test
