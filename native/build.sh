@@ -10,10 +10,11 @@ utils = open('src/p_utils.c').read()      # logging, string/config helpers
 metrics = open('src/p_metrics.c').read()  # cpu/ram/temp/volume/battery/gpu/pet polls
 subs = open('src/p_subs.c').read()        # subscription quota fetchers (WinHTTP thread)
 icons = open('src/p_icons.c').read()        # chip icons: flattened renderer SVG paths
+tokens = open('src/p_tokens.c').read()      # live JSONL session scan (pi/zai) + cursors
 ui = open('src/p_ui.c').read()            # GDI render, window, follow, tray
 marker = '// --------------------------------------------------------------- config ----'
 full = base.replace(marker, utils + '\n' + marker, 1)
-full += '\n' + metrics + '\n' + subs + '\n' + icons + '\n' + ui
+full += '\n' + metrics + '\n' + subs + '\n' + icons + '\n' + tokens + '\n' + ui
 open('src/chocobar_full.c', 'w').write(full)
 PY
 . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true

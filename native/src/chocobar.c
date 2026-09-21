@@ -53,8 +53,23 @@
 #define TIMER_METRICS 1
 #define TIMER_FOLLOW  2
 #define TIMER_CONFIG  3
+// a live token source: the JSONL session store the in-process scan reads
+typedef struct {
+    int enabled;            // source flag inside tokens.sources.<name>
+    const char *app;        // aggregate key ("pi", "zai") - matches the cache
+    wchar_t *sessionsDir;   // ~ prefixed = profile relative, else absolute/UNC
+} TokSource;
+
 #define MAX_CUSTOM 16
 #define MAX_SUBS 4
+#define MAX_USER_ICONS 16
+
+// a config-defined icon: name (referenced by modules.custom[].icon), SVG path
+// data in the 24-unit viewBox the built-in icons use, and a stroke width.
+typedef struct {
+    wchar_t *name, *d;
+    double w;
+} UserIcon;
 
 // ---------------------------------------------------------------- util ----
 static void dbg(const char *fmt, ...) {
@@ -102,8 +117,9 @@ typedef struct {
     wchar_t *terminalTitle;   // substring match on the terminal's window title
     wchar_t *clockFormat;
     int showTray;
+    int debug;                 // general.debug: extra scan logging
 
-    int subsEnabled, subsIntervalMin, subsTimeoutMs;
+    int subsEnabled, subsIntervalMin, subsTimeoutMs, subsRotateSec;
     SubsProvider subsProviders[MAX_SUBS];
     int subsProviderCount;
 
@@ -117,6 +133,12 @@ typedef struct {
     wchar_t *tokenCachePath;    // override for ~/.wizbar/token-cache.json
     wchar_t tokensApps[16][20]; // harness allowlist for token stats (empty = all)
     int tokensAppCount;
+    int tokensEnabled;            // master switch: off = zero scans
+    int tokensRescanSec;          // tokens.rescanMinutes -> seconds between scans
+    TokSource tokSrc[4];          // JSONL session stores for the live scan
+    int tokSrcCount;
+    UserIcon icons[MAX_USER_ICONS]; // theme.icons[]: new named icons
+    int iconCount;
 } Config;
 
 double g_scale = 1.0;        // display scale (dpi/96): config values are in DIPs (shared)
@@ -203,6 +225,16 @@ static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
     return atoi(b);
 }
 
+// a JSON number read as a double (theme.icons[].w); atof is locale-stable
+// enough for the plain decimals a config can carry
+static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def) {
+    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return def;
+    char b[32]; int len = t[i].end - t[i].start;
+    if (len <= 0 || len >= (int)sizeof(b)) return def;
+    memcpy(b, js + t[i].start, len); b[len] = 0;
+    return atof(b);
+}
+
 static wchar_t *jstrTok(const char *js, const jsmntok_t *t, int i, const wchar_t *def) {
     if (i >= 0 && t[i].type == JSMN_STRING) {
         wchar_t *w = jdup(js, &t[i]);
@@ -235,6 +267,12 @@ static void freeConfig(Config *c) {
         wideFree(&c->custom[i].command);
     }
     c->customCount = 0;
+    for (int i = 0; i < c->tokSrcCount; i++) wideFree(&c->tokSrc[i].sessionsDir);
+    c->tokSrcCount = 0;
+    for (int i = 0; i < c->iconCount; i++) {
+        wideFree(&c->icons[i].name); wideFree(&c->icons[i].d);
+    }
+    c->iconCount = 0;
 }
 
 static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
@@ -249,17 +287,26 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     lstrcpynW(c->heatmap[0], L"#F1ECD8", 12); lstrcpynW(c->heatmap[1], L"#F6D8E0", 12);
     lstrcpynW(c->heatmap[2], L"#EFB7C7", 12); lstrcpynW(c->heatmap[3], L"#E28FB0", 12);
     lstrcpynW(c->heatmap[4], L"#C95E8F", 12);
-    c->dashW = 840; c->dashH = 580; c->subsW = 820; c->subsH = 480;
+    // sized to the captain's 1440x900 CSS desktop: wide enough that the two
+    // tables are not squeezed into half-width columns, tall enough that the
+    // content-fit never has to grow it past the screen
+    c->dashW = 1060; c->dashH = 620; c->subsW = 900; c->subsH = 520;
     c->tokenCachePath = wideDup(L"");
     c->tokensAppCount = 0;
+    c->tokensEnabled = 1;
+    c->tokensRescanSec = 60;
+    c->tokSrcCount = 0;
+    c->iconCount = 0;
     c->divider = wideDup(L"#D9CCB2"); c->warn = wideDup(L"#A00000");
     c->pinkBg = wideDup(L"#FEF7F9");
     c->yellow = wideDup(L"#B8A96A"); c->good = wideDup(L"#006400");
     c->mGpu = c->mCpu = c->mCpuTemp = c->mRam = c->mVolume = c->mBattery = c->mClock = 1;
     c->cpuWarnAt = 85; c->ramWarnAt = 90; c->tempWarnAt = 85;
     c->showTray = 1;
+    c->debug = 0;
     c->clockFormat = wideDup(L"{MMM} {dd} ({Wkk}) {HH}:{mm}");
     c->subsEnabled = 0; c->subsIntervalMin = 2; c->subsTimeoutMs = 20000; c->subsProviderCount = 0;
+    c->subsRotateSec = 60;
 
     if (root < 0 || t[root].type != JSMN_OBJECT) return;
     int bar = jobjGet(js, t, root, "bar");
@@ -298,6 +345,28 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     }
                     k += jtokSpan(t, k);
                 }
+            }
+        }
+        // theme.icons[]: new named icons, referenced by modules.custom[].icon.
+        // Each entry is {name, d, w}: an SVG path in the same 24-unit viewBox
+        // the built-in icons use, stroked with width w. Defining a name twice
+        // replaces it (hot-reload friendly).
+        c->iconCount = 0;
+        int ic = jobjGet(js, t, theme, "icons");
+        if (ic >= 0 && t[ic].type == JSMN_ARRAY) {
+            int cnt = t[ic].size; if (cnt > MAX_USER_ICONS) cnt = MAX_USER_ICONS;
+            int k = ic + 1;
+            for (int i = 0; i < cnt; i++) {
+                if (t[k].type == JSMN_OBJECT && c->iconCount < MAX_USER_ICONS) {
+                    UserIcon *ui = &c->icons[c->iconCount];
+                    memset(ui, 0, sizeof(*ui));
+                    ui->name = jstrTok(js, t, jobjGet(js, t, k, "name"), NULL);
+                    ui->d = jstrTok(js, t, jobjGet(js, t, k, "d"), NULL);
+                    ui->w = jdoubleTok(js, t, jobjGet(js, t, k, "w"), 2.2);
+                    if (ui->name && *ui->name && ui->d && *ui->d) c->iconCount++;
+                    else { wideFree(&ui->name); wideFree(&ui->d); }
+                }
+                k += jtokSpan(t, k);
             }
         }
         wideFree(&c->pinkDeep); c->pinkDeep = jstrTok(js, t, jobjGet(js, t, theme, "pinkDeep"), c->pinkDeep);
@@ -368,6 +437,10 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->subsEnabled = jboolDefault(js, t, jobjGet(js, t, subs, "enabled"), 0);
         c->subsIntervalMin = jintTok(js, t, jobjGet(js, t, subs, "intervalMinutes"), c->subsIntervalMin);
         c->subsTimeoutMs = jintTok(js, t, jobjGet(js, t, subs, "fetchTimeoutMs"), c->subsTimeoutMs);
+        // how long each plan stays on the gauge chip before rotating
+        c->subsRotateSec = jintTok(js, t, jobjGet(js, t, subs, "rotateSec"), c->subsRotateSec);
+        if (c->subsRotateSec < 5) c->subsRotateSec = 5;
+        if (c->subsRotateSec > 3600) c->subsRotateSec = 3600;
         c->subsW = jintTok(js, t, jobjGet(js, t, subs, "width"), c->subsW);
         c->subsH = jintTok(js, t, jobjGet(js, t, subs, "height"), c->subsH);
         if (c->subsW < 280) c->subsW = 280; if (c->subsH < 180) c->subsH = 180;
@@ -375,6 +448,13 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     // token stats surface: which cache file + which harness apps to count
     int toks = jobjGet(js, t, root, "tokens");
     if (toks >= 0 && t[toks].type == JSMN_OBJECT) {
+        c->tokensEnabled = jboolDefault(js, t, jobjGet(js, t, toks, "enabled"), 1);
+        // minutes -> seconds, clamped 5..3600: the metrics tick is 1s, so this
+        // is the tick count between token scans
+        int rm = jintTok(js, t, jobjGet(js, t, toks, "rescanMinutes"), 1);
+        if (rm < 1) rm = 1;
+        if (rm > 60) rm = 60;
+        c->tokensRescanSec = rm * 60;
         wideFree(&c->tokenCachePath);
         c->tokenCachePath = jstrTok(js, t, jobjGet(js, t, toks, "cachePath"), c->tokenCachePath);
         int af = jobjGet(js, t, toks, "appFilter");
@@ -392,6 +472,26 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     }
                 }
                 k += jtokSpan(t, k);
+            }
+        }
+        // tokens.sources[]: the session stores the live scan reads. Only the
+        // JSONL ones are scanned in-process (pi nests per project, zai is flat);
+        // the SQLite stores (zcode/opencode) keep coming from the cache seed.
+        int srcs = jobjGet(js, t, toks, "sources");
+        if (srcs >= 0 && t[srcs].type == JSMN_OBJECT) {
+            static const struct { const char *key; const char *app; } known[] = {
+                { "zai", "zai" }, { "pi", "pi" },
+            };
+            for (unsigned s = 0; s < sizeof(known) / sizeof(known[0]) && c->tokSrcCount < 4; s++) {
+                int se = jobjGet(js, t, srcs, known[s].key);
+                if (se < 0 || t[se].type != JSMN_OBJECT) continue;
+                TokSource *ts = &c->tokSrc[c->tokSrcCount];
+                memset(ts, 0, sizeof(*ts));
+                ts->app = known[s].app;
+                ts->enabled = jboolDefault(js, t, jobjGet(js, t, se, "enabled"), 1);
+                ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, se, "sessionsDir"), NULL);
+                if (ts->sessionsDir && *ts->sessionsDir) c->tokSrcCount++;
+                else wideFree(&ts->sessionsDir);
             }
         }
     }
@@ -433,5 +533,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->terminalTitle = jstrTok(js, t, jobjGet(js, t, term, "title"), L"");
     }
     int general = jobjGet(js, t, root, "general");
-    if (general >= 0) c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
+    if (general >= 0) {
+        c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
+        c->debug = jboolDefault(js, t, jobjGet(js, t, general, "debug"), 0);
+    }
 }

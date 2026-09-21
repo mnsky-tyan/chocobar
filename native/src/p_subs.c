@@ -20,7 +20,10 @@ static CRITICAL_SECTION g_subsLock;
 static int g_subsLockInit = 0;
 // Per-provider state: a provider that fails keeps its last good numbers
 // marked stale; one provider failing must never blank or stale the others.
-typedef struct { wchar_t label[16]; int pct; int rem; int used; int total; long long resetAt; } SubsWin;
+// label needs 24 wchars: "Claude/GPT week" is 15 but the group prefix is
+// truncated before the window is appended, which used to garble every row of
+// the antigravity panel ("CLAUDE AND GPT" lost its window suffix).
+typedef struct { wchar_t label[24]; int pct; int rem; int used; int total; long long resetAt; } SubsWin;
 static SubsWin g_subsWin[MAX_SUBS][4];  // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
 static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
@@ -29,6 +32,10 @@ static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value 
 static int g_subsThreadStarted = 0;
 
 static const wchar_t *subsNz(const wchar_t *s) { return (s && *s) ? s : NULL; }
+// readers defined further down (the fetch thread logs what it stored)
+static void subsProvLabel(int i, wchar_t *out, int cb);
+static void subsProvPlan(int i, wchar_t *out, int cb);
+static int subsProvWins(int i, SubsWin *out, int max);
 
 static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
     // "~" -> %USERPROFILE%, keep absolute paths as-is
@@ -812,41 +819,50 @@ static int subsFetchAntigravity(int idx) {
     subsAgyHeaders(hdrs, 4600, auth.access);
     const wchar_t *hosts[2] = { L"cloudcode-pa.googleapis.com", L"daily-cloudcode-pa.sandbox.googleapis.com" };
     wchar_t plan[24] = L"Antigravity";
-    // plan label + project discovery
-    if (!*auth.projectId) {
-        for (int h = 0; h < 2 && !*auth.projectId; h++) {
-            int st = 0, bl = 0;
-            char *resp = subsHttpPost("assist", hosts[h], L"/v1internal:loadCodeAssist", hdrs,
-                "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}",
-                92, g_cfg.subsTimeoutMs, &st, &bl);
-            if (!resp) continue;
-            if (st == 200) {
-                jsmntok_t *t = NULL;
-                int n = subsParseBig(resp, bl, &t);
-                if (n > 0 && t[0].type == JSMN_OBJECT) {
-                    int paid = jobjGet(resp, t, 0, "paidTier");
-                    if (paid >= 0 && t[paid].type == JSMN_OBJECT) {
-                        wchar_t *nm = subsJstr(resp, t, paid, "name");
+    // Plan label + project discovery. loadCodeAssist runs on EVERY cycle:
+    // the stored projectId used to short-circuit it, so the panel kept the
+    // fallback label instead of the account's real tier ("Google AI Pro").
+    for (int h = 0; h < 2; h++) {
+        int st = 0, bl = 0;
+        // the length MUST be the full literal: a hard-coded count that was 4
+        // short truncated the JSON, so Google answered 400 on every call
+        const char *assistBody = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
+        char *resp = subsHttpPost("assist", hosts[h], L"/v1internal:loadCodeAssist", hdrs,
+            assistBody, (int)strlen(assistBody), g_cfg.subsTimeoutMs, &st, &bl);
+        if (g_cfg.debug) {
+            char lb[160];
+            sprintf(lb, "[wizbar] subs agy loadCodeAssist host=%d st=%d bl=%d resp=%s", h, st, bl, resp ? "ok" : "NULL");
+            writeLogA(lb);
+        }
+        if (!resp) continue;
+        if (st == 200) {
+            jsmntok_t *t = NULL;
+            int n = subsParseBig(resp, bl, &t);
+            if (n > 0 && t[0].type == JSMN_OBJECT) {
+                int paid = jobjGet(resp, t, 0, "paidTier");
+                if (g_cfg.debug && paid < 0)
+                    writeLogA("[wizbar] subs agy loadCodeAssist: 200 but no paidTier (plan stays generic)");
+                if (paid >= 0 && t[paid].type == JSMN_OBJECT) {
+                    wchar_t *nm = subsJstr(resp, t, paid, "name");
+                    if (nm && *nm) lstrcpynW(plan, nm, 24);
+                    wideFree(&nm);
+                }
+                if (!*plan) {
+                    int cur = jobjGet(resp, t, 0, "currentTier");
+                    if (cur >= 0 && t[cur].type == JSMN_OBJECT) {
+                        wchar_t *nm = subsJstr(resp, t, cur, "name");
                         if (nm && *nm) lstrcpynW(plan, nm, 24);
                         wideFree(&nm);
                     }
-                    if (!*plan) {
-                        int cur = jobjGet(resp, t, 0, "currentTier");
-                        if (cur >= 0 && t[cur].type == JSMN_OBJECT) {
-                            wchar_t *nm = subsJstr(resp, t, cur, "name");
-                            if (nm && *nm) lstrcpynW(plan, nm, 24);
-                            wideFree(&nm);
-                        }
-                    }
-                    wchar_t *pid = subsJstr(resp, t, 0, "cloudaicompanionProject");
-                    if (pid && *pid) lstrcpynW(auth.projectId, pid, 128);
-                    wideFree(&pid);
                 }
-                HeapFree(GetProcessHeap(), 0, t);
+                wchar_t *pid = subsJstr(resp, t, 0, "cloudaicompanionProject");
+                if (pid && *pid) lstrcpynW(auth.projectId, pid, 128);
+                wideFree(&pid);
             }
-            HeapFree(GetProcessHeap(), 0, resp);
-            if (st == 200 || st == 403) break; // definitive answer
+            HeapFree(GetProcessHeap(), 0, t);
         }
+        HeapFree(GetProcessHeap(), 0, resp);
+        if (st == 200 || st == 403) break; // definitive answer
     }
     if (!*auth.projectId) {
         writeLogA("subs agy: no project id");
@@ -882,14 +898,30 @@ static int subsFetchAntigravity(int idx) {
                 for (int i = 0; i < cnt && nwin < 4; i++) {
                     jsmntok_t *e = &t[k];
                     if (e->type == JSMN_OBJECT) {
-                        wchar_t shortName[16] = L"Models";
+                        // "Gemini Models" -> "Gemini"; "Claude and GPT models"
+                        // -> "Claude/GPT". Keep the prefix short but complete so
+                        // the appended window never truncates it.
+                        wchar_t shortName[24] = L"Models";
                         wchar_t *dn = subsJstr(resp, t, k, "displayName");
                         if (dn && *dn) {
-                            lstrcpynW(shortName, dn, 16);
-                            // "Gemini Models" -> "Gemini"
+                            lstrcpynW(shortName, dn, 24);
                             wchar_t *sp = wcsstr(shortName, L" Models");
                             if (!sp) sp = wcsstr(shortName, L" models");
                             if (sp) *sp = 0;
+                            // "Claude and GPT" -> "Claude/GPT" (the group is
+                            // two vendors; /quota-style naming, 1:1)
+                            wchar_t *and = wcsstr(shortName, L" and ");
+                            if (and) {
+                                wchar_t tmp[24];
+                                lstrcpynW(tmp, shortName, 24);
+                                wchar_t *ta = wcsstr(tmp, L" and ");
+                                if (ta) {
+                                    *ta = 0;
+                                    wchar_t tail[24];
+                                    lstrcpynW(tail, ta + 5, 24); // skip " and "
+                                    swprintf(shortName, 24, L"%ls/%ls", tmp, tail);
+                                }
+                            }
                         }
                         wideFree(&dn);
                         int buckets = jobjGet(resp, t, k, "buckets");
@@ -905,13 +937,19 @@ static int subsFetchAntigravity(int idx) {
                                         double rem = rf * 100.0;
                                         if (rem < lo) lo = rem;
                                         memset(&wins[nwin], 0, sizeof(SubsWin));
+                                        // the bucketId ("gemini-5h", "3p-weekly")
+                                        // is the most precise label available, but
+                                        // it is an internal code: "3p" means
+                                        // nothing to a human. Use the group name
+                                        // plus the window, which is what the
+                                        // vendor's own quota UI calls it.
                                         wchar_t *win = subsJstr(resp, t, bk, "window");
                                         if (win && lstrcmpiW(win, L"weekly") == 0)
-                                            swprintf(wins[nwin].label, 16, L"%ls week", shortName);
+                                            swprintf(wins[nwin].label, 24, L"%ls week", shortName);
                                         else if (win)
-                                            swprintf(wins[nwin].label, 16, L"%ls %ls", shortName, win);
+                                            swprintf(wins[nwin].label, 24, L"%ls %ls", shortName, win);
                                         else
-                                            swprintf(wins[nwin].label, 16, L"%ls win", shortName);
+                                            swprintf(wins[nwin].label, 24, L"%ls win", shortName);
                                         wideFree(&win);
                                         wins[nwin].pct = (int)(100.0 - rem + 0.5);
                                         wins[nwin].rem = (int)(rem + 0.5);
@@ -1020,13 +1058,29 @@ static int subsFetchAntigravity(int idx) {
 
 static LONG g_subsKick = 0; // board refresh button wakes the cycle early
 static volatile unsigned long long g_subsFetchedTick = 0; // cycle end (GetTickCount64)
+// wall clock of the cycle end. The board footer renders THIS directly: mixing a
+// truncated GetTickCount64 age with the wall clock made the footer's seconds
+// field oscillate (41 -> 42 -> 41) on every repaint.
+static volatile long long g_subsFetchedEpoch = 0;
+
+// Local wall clock in the frame dashFmtTime renders (it reinterprets its input
+// as UTC), so the board footer shows the captain's local time. subsNowMs() is a
+// TRUE UTC epoch and would print UTC - 8 hours off in HKT.
+static long long subsLocalStampMs(void) {
+    SYSTEMTIME now; GetLocalTime(&now);
+    FILETIME ft;
+    SystemTimeToFileTime(&now, &ft);
+    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
+}
 void subsRefetchNow(void) { InterlockedExchange(&g_subsKick, 1); }
-// seconds since the last completed fetch cycle (for the board footer)
+// seconds since the last completed fetch cycle (kept for callers that want an age)
 unsigned subsFetchedAgoSec(void) {
     unsigned long long t = g_subsFetchedTick;
     if (!t) return 0xFFFFFFFFu;
     return (unsigned)((GetTickCount64() - t) / 1000ull);
 }
+// wall-clock epoch ms of the last completed cycle, 0 = never fetched
+long long subsFetchedEpochMs(void) { return g_subsFetchedEpoch; }
 
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
@@ -1046,6 +1100,24 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                 for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
             }
             g_subsFetchedTick = GetTickCount64();
+            g_subsFetchedEpoch = subsLocalStampMs();
+            if (g_cfg.debug) { // one line per provider: what the board will show
+                for (int i = 0; i < n; i++) {
+                    if (!g_cfg.subsProviders[i].enabled) continue;
+                    wchar_t lb[64]; SubsWin w[4];
+                    int wn = subsProvWins(i, w, 4);
+                    int stale = wn < 0; if (wn < 0) wn = -wn;
+                    wchar_t plan[24]; subsProvPlan(i, plan, 24);
+                    if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
+                    char line[400];
+                    int off = sprintf(line, "[wizbar] subs[%d] %ls plan=%ls wins=%d stale=%d ::", i,
+                                      g_cfg.subsProviders[i].label ? g_cfg.subsProviders[i].label : L"?", plan, wn, stale);
+                    for (int k = 0; k < wn && off < 360; k++)
+                        off += sprintf(line + off, " [%ls rem=%d pct=%d used=%d total=%d]",
+                                       w[k].label, w[k].rem, w[k].pct, w[k].used, w[k].total);
+                    writeLogA(line);
+                }
+            }
         }
         // sleep the interval, but a kick (refresh button) breaks out early
         int ivl = g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000;

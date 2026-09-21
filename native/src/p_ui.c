@@ -99,6 +99,12 @@ static HFONT g_fontOld = NULL;
 static NOTIFYICONDATAW g_nid;
 static int g_trayAdded = 0;
 static int g_barVisible = 0;
+static HWND g_owner = NULL; // the bar's owner window (the followed terminal)
+static int g_subsRotIdx = 0;    // rotating subs chip position
+static DWORD g_subsRotTick = 0; // last rotation (GetTickCount)
+static int g_subsRotSec = 60;   // subs.rotateSec, applied by loadConfig
+static wchar_t g_subsRotTip[96]; // tooltip for the rotating subs chip
+static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb);
 static HWND g_term = NULL;
 static RECT g_lastTarget;
 static int g_haveTarget = 0;
@@ -112,6 +118,7 @@ static void clockFmtReload(void) { wideFree(&g_clockFmt); g_clockFmt = wideDup(g
 typedef struct {
     int type;            // CT_*
     int customIdx;
+    const wchar_t *tipOverride; // per-chip tooltip (rotating subs chip)
     RECT r;
     wchar_t text[96];
     int warn;
@@ -190,6 +197,19 @@ static void addChip(int type, int customIdx, const wchar_t *text, int warn, cons
     addChipI(type, customIdx, text, warn, colorOverride, 0);
 }
 
+// live totals folded in from the JSONL session stores (p_tokens.c)
+extern long long g_tokTodayLive, g_tokWeekLive, g_tokMonthLive, g_tokAllLive;
+extern long long g_tokMidnight;
+void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
+long tokLiveScan(void);
+long long subsFetchedEpochMs(void);
+void tokLiveInit(void);
+
+// newest ts + mtime seen in the cache file, for the live scan's seed boundary
+static long long g_cacheMaxTsScan = 0;
+static long long g_cacheMtimeScan = 0;
+static DWORD g_cacheStamp[4];      // cache mtime+size stamp of the last full read
+static int g_cacheReadDone = 0;    // a full read has completed at least once
 static long long g_tokensToday = -1;
 static int g_tokensTick = 0;
 
@@ -197,6 +217,9 @@ static int g_tokensTick = 0;
 #define DASH_MAX_APPS 12
 #define DASH_MAX_MODELS 64
 #define DASH_MAX_DAYS 190
+// displayed by-model rows (Electron capped at 7; this store has 13 models and
+// the captain asked for the space to be used, so the table reaches further)
+#define DASH_MODEL_ROWS 13
 // token-cache record fields kept separately: the Electron dash shows the
 // input/output/cache R/cache W/calls table columns, not one lumped sum
 typedef struct { long long in, out, cr, cw, req; } TokAgg;
@@ -210,7 +233,21 @@ static int g_modelCount = 0;
 static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day detail)
 static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
 static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
-static long long g_lastScanMs = 0;
+// wall clock as the epoch ms dashFmtTime renders back as local time
+static long long dashWallNowMs(void) {
+    SYSTEMTIME now; GetLocalTime(&now);
+    FILETIME ft;
+    SystemTimeToFileTime(&now, &ft); // treats fields as UTC: matches dashFmtTime
+    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
+}
+
+static long long g_lastScanMs = 0;      // GetTickCount64 of the last scan
+static long long g_lastScanEpoch = 0;   // wall clock of the last scan (dashLocalNowMs)
+// cache-only totals. The live scan adds its own counters to these ONCE per
+// rescan; without a separate base, an unchanged cache (the fast path that
+// skips the 10MB re-read) would keep the COMBINED value and the live part
+// would be added again, doubling the number every rescan.
+static long long g_tokBaseToday = 0, g_tokBaseWeek = 0, g_tokBaseMonth = 0, g_tokBaseAll = 0;
 static unsigned long long g_tokDataVersion = 0;   // moves on every completed scan
 static unsigned long long g_dashTokVersion = 0;   // version the open board shows
 static int g_daySel = -1; // selected heatmap cell (daysBack), -1 = none
@@ -355,8 +392,24 @@ static void scanTokenCacheInner(void) {
         lstrcatW(path, L"\\.wizbar\\token-cache.json");
     }
     if (!path[0]) { g_tokensToday = -1; return; }
+    // The Electron cache is a 10MB JSON: re-reading and needle-walking it on
+    // every rescan is the single biggest CPU line in the whole bar. It only
+    // changes when the Electron app writes it (rarely, now that it is retired),
+    // so remember its size+mtime and skip the read while they are unchanged -
+    // the live session scan below is the cheap incremental half that still
+    // runs every rescan.
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; return; }
+    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; g_tokBaseToday = g_tokBaseWeek = g_tokBaseMonth = g_tokBaseAll = 0; return; }
+    BY_HANDLE_FILE_INFORMATION fi;
+    if (GetFileInformationByHandle(h, &fi)) {
+        g_cacheMtimeScan = (((long long)fi.ftLastWriteTime.dwHighDateTime) << 32 | fi.ftLastWriteTime.dwLowDateTime) / 10000 - 11644473600000LL;
+        if (g_cacheReadDone && fi.ftLastWriteTime.dwLowDateTime == g_cacheStamp[0]
+            && fi.ftLastWriteTime.dwHighDateTime == g_cacheStamp[1]
+            && fi.nFileSizeLow == g_cacheStamp[2] && fi.nFileSizeHigh == g_cacheStamp[3]) {
+            CloseHandle(h);
+            return; // unchanged: keep the aggregate from the last full read
+        }
+    }
     DWORD size = GetFileSize(h, NULL), got = 0;
     if (size == INVALID_FILE_SIZE || !size) { CloseHandle(h); g_tokensToday = -1; return; }
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
@@ -388,6 +441,7 @@ static void scanTokenCacheInner(void) {
     FILETIME nowFt; GetSystemTimeAsFileTime(&nowFt);
     long long nowMs = ((((long long)nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime) / 10000 - 11644473600000LL;
     long long total = 0;
+    long long tsScanMax = 0; // newest ts in the cache (the live scan's boundary)
     memset(g_dayTot, 0, sizeof(g_dayTot));
     memset(g_appAgg, 0, sizeof(g_appAgg));
     memset(g_dayApp, 0, sizeof(g_dayApp));
@@ -432,6 +486,7 @@ static void scanTokenCacheInner(void) {
         }
         if (ts >= midnight) total += sum;
         aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, bnd);
+        if (ts > tsScanMax) tsScanMax = ts;
         if (ts >= nowMs - 7LL * 86400000LL) g_tokWeek += sum;
         if (ts >= nowMs - 30LL * 86400000LL) g_tokMonth += sum;
         g_tokAll += sum;
@@ -439,12 +494,56 @@ static void scanTokenCacheInner(void) {
     }
     HeapFree(GetProcessHeap(), 0, buf);
     g_tokensToday = total;
+    g_tokBaseToday = total; g_tokBaseWeek = g_tokWeek; g_tokBaseMonth = g_tokMonth; g_tokBaseAll = g_tokAll;
     g_lastScanMs = (long long)GetTickCount64();
+    g_lastScanEpoch = dashWallNowMs();
+    // remember the seed boundary so the live session scan only counts records
+    // NEWER than anything the cache already holds (no double counting)
+    g_cacheMaxTsScan = tsScanMax;
+    g_cacheStamp[0] = fi.ftLastWriteTime.dwLowDateTime;
+    g_cacheStamp[1] = fi.ftLastWriteTime.dwHighDateTime;
+    g_cacheStamp[2] = fi.nFileSizeLow;
+    g_cacheStamp[3] = fi.nFileSizeHigh;
+    g_cacheReadDone = 1;
 }
 
+
+
+static DWORD g_tokScanStart = 0;
 static void scanTokenCache(void) {
+    g_tokScanStart = GetTickCount();
+    // the Electron cache is the history seed: read it, then fold in whatever
+    // the live session stores hold that is NEWER (p_tokens.c). Without the
+    // live half every number freezes the moment the Electron app stops
+    // writing the file - which is exactly what the captain saw.
     scanTokenCacheInner();
+    if (g_cfg.tokensEnabled && g_cfg.tokSrcCount) {
+        tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
+        long added = tokLiveScan();
+        // cache-only base + live contribution, recomputed every rescan (the
+        // bases survive the unchanged-cache fast path, the live counters only
+        // grow with real appends)
+        g_tokensToday = g_tokBaseToday + g_tokTodayLive;
+        g_tokWeek = g_tokBaseWeek + g_tokWeekLive;
+        g_tokMonth = g_tokBaseMonth + g_tokMonthLive;
+        g_tokAll = g_tokBaseAll + g_tokAllLive;
+        if (added > 0) {
+            char lb[128];
+            sprintf(lb, "[wizbar] token live scan: +%lld tokens (live all-time %lld), today=%lld", added, g_tokAllLive, g_tokensToday);
+            writeLogA(lb);
+        }
+    }
     g_tokDataVersion++;
+    if (g_cfg.debug) { // how long the UI thread was blocked by this scan
+        DWORD dt = GetTickCount() - g_tokScanStart;
+        if (dt >= 15) {
+            SYSTEMTIME nst; GetLocalTime(&nst);
+            char lb[140];
+            sprintf(lb, "[wizbar] token scan took %lu ms (blocked the bar) tick=%d period=%d at %02d:%02d:%02d",
+                    dt, g_tokensTick, g_cfg.tokensRescanSec, nst.wHour, nst.wMinute, nst.wSecond);
+            writeLogA(lb);
+        }
+    }
 }
 
 // token counts (renderer/dash.js fmt): B / M / k tiers
@@ -464,6 +563,16 @@ static void fmtNum(long long n2, wchar_t *out, int cb) {
     else swprintf(out, cb, L"%lld", n2);
 }
 
+// uppercased window label, as the panel head shows it (subs.css text-transform)
+static void subsWinUpper(const SubsWin *w, wchar_t *up, int cb) {
+    int i;
+    for (i = 0; w->label[i] && i < cb - 1; i++) {
+        wchar_t ch = w->label[i];
+        up[i] = (ch >= L'a' && ch <= L'z') ? (wchar_t)(ch - 32) : ch;
+    }
+    up[i] = 0;
+}
+
 // renderer/subs.js fmtReset: relative countdown to the window reset
 // (resetAt is a true UTC epoch ms, as Date.now() is)
 static void fmtReset(long long ms, wchar_t *out, int cb) {
@@ -478,9 +587,36 @@ static void fmtReset(long long ms, wchar_t *out, int cb) {
     else swprintf(out, cb, L"reset in %lldm", m);
 }
 
+// short type name for the debug chip dump. tokens/subs are CT_CUSTOM chips
+// distinguished by their icon, exactly like the click handler does.
+static const char *chipTypeName(const Chip *c) {
+    if (c->type == CT_CUSTOM) {
+        if (c->iconSvg == SVG_DIAMOND) return "tokens";
+        if (c->iconSvg == SVG_GAUGE) return "subs";
+        if (c->customIdx >= 0) return "custom";
+        return "custom?";
+    }
+    switch (c->type) {
+    case CT_SHORTCUT: return "shortcut";
+    case CT_PET: return "pet";
+    case CT_GPU: return "gpu";
+    case CT_CPU: return "cpu";
+    case CT_CPUTEMP: return "cputemp";
+    case CT_RAM: return "ram";
+    case CT_VOLUME: return "volume";
+    case CT_BATTERY: return "battery";
+    case CT_CLOCK: return "clock";
+    default: return "?";
+    }
+}
+
+static int g_dbgChipsN = -1; // re-dump whenever the chip set changes
+
 static void buildChips(void) {
     g_chipCount = 0;
-    if (++g_tokensTick >= 30) { g_tokensTick = 0; scanTokenCache(); }
+    // the scan period comes from tokens.rescanMinutes (seconds, 60..3600):
+    // a hard-coded 30 ignored the config and scanned twice as often as asked
+    if (++g_tokensTick >= g_cfg.tokensRescanSec) { g_tokensTick = 0; scanTokenCache(); }
     if (g_tokensToday < 0 && g_tokensTick == 1) scanTokenCache();
     // left pinned group: shortcut, pet, tokens, subs (Electron order)
     if (g_cfg.shortcutEnabled) {
@@ -506,12 +642,15 @@ static void buildChips(void) {
         g_chips[g_chipCount - 1].iconColorOverride = g_cfg.yellow;
     }
     if (g_cfg.subsEnabled) {
-        // Electron subs chip: percent with good/dim/warn, "stale" after a
-        // failed cycle, em dash when there is no data at all.
+        // The gauge chip is the bar's meter for the PLAN WEEK LIMITS: it shows
+        // one plan's weekly remaining % at a time and rotates every
+        // subs.rotateSec (default 60s), so "8% chatgpt" becomes "3% zcode"
+        // becomes "100% gemini" without opening the board. The lowest
+        // remaining window wins when a provider reports no weekly window.
         int stale = subsChipStale();
-        int rem = subsChipRem();
         wchar_t txt[16];
         const wchar_t *col;
+        int rem = subsChipRem();
         if (rem == -1) {
             lstrcpynW(txt, L"\u2014", 16);
             col = g_cfg.fgDim;
@@ -519,12 +658,56 @@ static void buildChips(void) {
             lstrcpynW(txt, L"stale", 16);
             col = g_cfg.fgDim;
         } else {
-            swprintf(txt, 16, L"%d%%", rem);
+            rem = subsChipRotated(&txt[0], 16, g_subsRotTip, 96);
             col = rem > 70 ? g_cfg.good : rem > 30 ? g_cfg.fgDim : g_cfg.warn;
         }
         addChipI(CT_CUSTOM, -1, txt, 0, col, 0);
         g_chips[g_chipCount - 1].align = 2;
         g_chips[g_chipCount - 1].iconSvg = SVG_GAUGE;
+        g_chips[g_chipCount - 1].tipOverride = g_subsRotTip;
+    }
+    // user-defined buttons: modules.custom[] entries become clickable chips
+    // in the same left pinned group. Their icon resolves by name against the
+    // built-in set first, then the config's theme.icons[]; a single character
+    // falls back to a font glyph (a nerd-font codepoint still works).
+    for (int ci = 0; ci < g_cfg.customCount; ci++) {
+        CustomChip *cc = &g_cfg.custom[ci];
+        if (!cc->enabled) continue;
+        wchar_t txt[96];
+        int st = customStateGet(ci);
+        if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
+        else lstrcpynW(txt, cc->label ? cc->label : L"", 96);
+        addChipI(CT_CUSTOM, ci, txt, 0, cc->color && *cc->color ? cc->color : NULL, 0);
+        Chip *c = &g_chips[g_chipCount - 1];
+        c->align = 2;
+        // built-in name -> id
+        int svg = -1;
+        const wchar_t *ic = cc->icon ? cc->icon : L"";
+        struct { const wchar_t *n; int id; } named[] = {
+            { L"bolt", SVG_BOLT }, { L"bow", SVG_BOW }, { L"diamond", SVG_DIAMOND },
+            { L"gauge", SVG_GAUGE }, { L"clock", SVG_CLOCK }, { L"gpu", SVG_GPU },
+            { L"cpu", SVG_CPU }, { L"temp", SVG_TEMP }, { L"ram", SVG_RAM },
+            { L"vol", SVG_VOL }, { L"mute", SVG_MUTE },
+        };
+        for (unsigned k = 0; k < sizeof(named) / sizeof(named[0]); k++)
+            if (lstrcmpiW(ic, named[k].n) == 0) { svg = named[k].id; break; }
+        if (svg < 0) svg = iconUserFind(ic); // config-defined icon
+        if (svg >= 0) c->iconSvg = svg;
+        else if (ic[0]) { // one glyph (or a U+XXXX codepoint) as a font icon
+            wchar_t ch[2] = { ic[0], 0 };
+            if (ic[0] == L'U' && ic[1] == L'+') {
+                unsigned long cp = wcstoul(ic + 2, NULL, 16);
+                if (cp >= 0x10000 && cp <= 0x10FFFF) {
+                    unsigned v2 = cp - 0x10000;
+                    ch[0] = (wchar_t)(0xD800 + (v2 >> 10));
+                    ch[1] = (wchar_t)(0xDC00 + (v2 & 0x3FF));
+                } else if (cp) ch[0] = (wchar_t)cp;
+            }
+            // a surrogate pair occupies one code point: encode via iconCp
+            unsigned cp2 = ch[1] ? ((unsigned)(ch[0] - 0xD800) << 10) + (ch[1] - 0xDC00) + 0x10000
+                                 : (unsigned)ch[0];
+            c->iconCp = cp2;
+        }
     }
     // right metric group: icon + bare value, like the Electron bar
     wchar_t v[48];
@@ -753,6 +936,13 @@ static void repaintBar(HWND hwnd) {
         c->r.top = 0; c->r.bottom = (LONG)hf;
         xl += cw + segGap;
     }
+    if (g_cfg.debug && g_chipCount != g_dbgChipsN) { // chip rects, for a click poster
+        char lb[900]; int off = sprintf(lb, "[wizbar] chips:");
+        for (int q = 0; q < g_chipCount && off < 860; q++)
+            off += sprintf(lb + off, " [%s %d..%d]", chipTypeName(&g_chips[q]), g_chips[q].r.left, g_chips[q].r.right);
+        writeLogA(lb);
+        g_dbgChipsN = g_chipCount;
+    }
 
     // hover pill (bar.css .seg.clickable:hover): pink at 50% over the tint,
     // rounded 5px, inflated 5px horizontally / 2px vertically beyond the chip.
@@ -961,7 +1151,22 @@ static void followTick(void) {
         else if (!g_term) g_term = findTerminalByProbe();
     }
     if (!g_term) { hideBar(); return; }
-    if (!IsWindow(g_term)) { g_term = NULL; g_haveTarget = 0; return; }
+    if (!IsWindow(g_term)) {
+        g_term = NULL; g_haveTarget = 0;
+        // the owner window died: drop the pointer so the bar is never left
+        // owned by a dead hwnd (it is hidden anyway)
+        if (g_owner) { SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, 0); g_owner = NULL; }
+        return;
+    }
+
+    // Own the bar by the terminal: an owned window rides in its owner's band,
+    // stays out of the taskbar/Alt+Tab, and is hidden when the owner is
+    // minimized. Only re-parent on an actual change - it is an expensive
+    // cross-process operation that also repositions in z.
+    if (g_owner != g_term) {
+        LONG_PTR prev = SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, (LONG_PTR)g_term);
+        if (prev || GetLastError() == 0) g_owner = g_term; // a failed set leaves the old owner
+    }
 
     // hands-off during the terminal's modal move/size loop
     GUITHREADINFO gi; memset(&gi, 0, sizeof(gi)); gi.cbSize = sizeof(gi);
@@ -988,11 +1193,20 @@ static void followTick(void) {
     if (y < mi.rcWork.top || bh > mi.rcWork.bottom - mi.rcWork.top) { hideBar(); return; }
 
     RECT target = { ef.left, y, ef.left + (ef.right - ef.left), y + bh };
-    if (!g_haveTarget || memcmp(&target, &g_lastTarget, sizeof(RECT)) != 0 || !g_barVisible) {
+    // The bar is pinned directly above the terminal in z so the two move
+    // together: raise the terminal and the bar rides with it, cover the
+    // terminal and the bar is covered too. Re-insert on drift (raising the
+    // terminal walks it over the bar) - a plain z-order probe, no extra work
+    // on the unchanged fast path.
+    int drifted = !g_haveTarget || memcmp(&target, &g_lastTarget, sizeof(RECT)) != 0 || !g_barVisible;
+    if (!drifted) {
+        HWND below = GetWindow(g_bar, GW_HWNDPREV);
+        drifted = (below != g_term);
+    }
+    if (drifted) {
         g_lastTarget = target;
         g_haveTarget = 1;
-        // insertAfter semantics: the bar sits DIRECTLY BELOW the terminal in z
-        SetWindowPos(g_bar, HWND_TOPMOST, target.left, target.top, // keep always-on-top (Electron 'floating'); inserting after a normal window would clear it
+        SetWindowPos(g_bar, g_term, target.left, target.top, // insertAfter = the terminal: same band, immediately above it
                      target.right - target.left, target.bottom - target.top,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g_barVisible = 1;
@@ -1035,6 +1249,7 @@ static HBITMAP g_dashDib = NULL;
 static HDC g_dashDc = NULL;
 static HGDIOBJ g_dashOldBmp = NULL;
 static LONG g_dashW = 0, g_dashH = 0;
+static int g_dashContentH = 0;   // painted content bottom (device px) -> content-fit resize
 static int g_dashPainted = -1;      // which type the current DIB shows
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
@@ -1151,6 +1366,17 @@ static int dashStrW(HDC dc, const wchar_t *s, HFONT f) {
     SelectObject(dc, of);
     return ts.cx;
 }
+// width of s as it will actually be DRAWN: GetTextExtentPoint32W ignores
+// SetTextCharacterExtra, so measuring without it under-reports by
+// len * extra and clips the last character of the widest label.
+static int dashStrWEx(HDC dc, const wchar_t *s, HFONT f, int extra) {
+    HGDIOBJ of = SelectObject(dc, f);
+    int oe = SetTextCharacterExtra(dc, extra);
+    SIZE ts; GetTextExtentPoint32W(dc, s, lstrlenW(s), &ts);
+    SetTextCharacterExtra(dc, oe);
+    SelectObject(dc, of);
+    return ts.cx;
+}
 // 11px bold uppercase section head with 0.06em letter spacing
 static void dashHead(HDC dc, int x, int y, const wchar_t *s, COLORREF cr, HFONT f) {
     SelectObject(dc, f);
@@ -1208,25 +1434,21 @@ static int g_tbBottom = 0;            // titlebar bottom (physical px) for drag
 #define COL_OUT 56
 #define COL_IN 56
 
-static void dashTableCols(int innerRight, int cache, int *xs) {
-    // xs[0]=calls, xs[1]=cacheW, xs[2]=cacheR, xs[3]=output, xs[4]=input (right edges)
-    xs[0] = innerRight;
-    if (cache) {
-        xs[1] = xs[0] - DX(COL_CALLS);
-        xs[2] = xs[1] - DX(COL_CW);
-        xs[3] = xs[2] - DX(COL_CR);
-        xs[4] = xs[3] - DX(COL_OUT);
-    } else {
-        // no cache data: collapse only the cache R/W columns; input and
-        // output stay on screen (calls remain rightmost)
-        xs[3] = xs[0] - DX(COL_CALLS);
-        xs[4] = xs[3] - DX(COL_OUT);
-        xs[1] = xs[2] = 0;
-    }
+static void dashTableCols(int innerRight, int cacheR, int cacheW, int *xs) {
+    // xs[0]=calls, xs[1]=cacheW, xs[2]=cacheR, xs[3]=output, xs[4]=input (right
+    // edges). Each cache column is INDEPENDENT: a table whose cacheW is all
+    // zeros drops that column and hands its width back to the rest (the by-model
+    // table is pure cacheR on this machine and was squeezed by an empty cacheW).
+    int x = innerRight;
+    xs[0] = x; x -= DX(COL_CALLS);
+    if (cacheW) { xs[1] = x; x -= DX(COL_CW); } else xs[1] = 0;
+    if (cacheR) { xs[2] = x; x -= DX(COL_CR); } else xs[2] = 0;
+    xs[3] = x; x -= DX(COL_OUT);
+    xs[4] = x;
 }
 
 // one table row: share bar behind the first cell, dot, numbers right-aligned
-static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH, int cache,
+static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
                          const int *xs, const wchar_t *label, COLORREF dot,
                          double share, TokAgg *a, DashTheme *t, HFONT f11, HFONT f9) {
     // zebra-less; share bar behind the label (dash.css .share i)
@@ -1257,30 +1479,27 @@ static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH, int cache,
     dashDot(dc, x0 + 2, y + (rowH - DX(8)) / 2, DX(8), dot);
     SelectObject(dc, f11);
     SetTextColor(dc, t->fg);
-    RECT lr = { x0 + 2 + DX(14), y, x0 + DX(150), y + rowH + 1 };
+    // the name takes every pixel left of the INPUT column: a fixed DX(150)
+    // ellipsized real model ids ("xiaomi/mimo-x-flash...") even in a 500px card
+    RECT lr = { x0 + 2 + DX(14), y, xs[4] - DX(6), y + rowH + 1 };
     DrawTextW(dc, label, -1, &lr, DT_SINGLELINE | DT_LEFT | DT_END_ELLIPSIS);
     wchar_t vs[32];
     fmtTokens(a->in, vs, 32); dashStrR(dc, xs[4], y, vs, t->fg, f11);
     fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], y, vs, t->fg, f11);
-    if (cache) {
-        fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], y, vs, t->fg, f11);
-        fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], y, vs, t->fg, f11);
-    }
+    if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], y, vs, t->fg, f11); }
+    if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], y, vs, t->fg, f11); }
     swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], y, vs, t->fg, f11);
 }
 
-static void dashTableHead(HDC dc, int x0, int innerW, int y, int cache,
+static void dashTableHead(HDC dc, int x0, int y,
                           const int *xs, DashTheme *t, HFONT f9, const wchar_t *firstCol) {
     dashStr(dc, x0 + 2, y, firstCol, t->dim, f9);
     wchar_t *in = L"INPUT", *out = L"OUTPUT", *cr = L"CACHE R", *cw = L"CACHE W", *ca = L"CALLS";
     dashStrR(dc, xs[4], y, in, t->dim, f9);
     dashStrR(dc, xs[3], y, out, t->dim, f9);
-    if (cache) {
-        dashStrR(dc, xs[2], y, cr, t->dim, f9);
-        dashStrR(dc, xs[1], y, cw, t->dim, f9);
-    }
+    if (xs[2]) dashStrR(dc, xs[2], y, cr, t->dim, f9);
+    if (xs[1]) dashStrR(dc, xs[1], y, cw, t->dim, f9);
     dashStrR(dc, xs[0], y, ca, t->dim, f9);
-    (void)innerW;
 }
 
 // format a FILETIME (already local) as HH:MM:SS
@@ -1409,6 +1628,11 @@ static void paintDash(HWND hwnd) {
     }
 
     int y = g_tbBottom + gap;
+    // Content-fit: every fit decision measures against the CONFIG height, not
+    // the window's actual height, so the window can later shrink to its
+    // painted content (g_dashContentH) without the shrink dropping a row and
+    // oscillating.
+    int vh = (int)((double)(g_dashType == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale + 0.5);
 
     if (g_dashType == 0) {
         // ---- token usage panel
@@ -1437,10 +1661,18 @@ static void paintDash(HWND hwnd) {
 
 
             // daily usage section: heatmap + legend (+ optional day detail)
-            int cell = DX(11), cgap = DX(3), pitch = cell + cgap;
             int rowLabW = DX(16) + DX(5);
-            int weeks = 26;
+            int weeks = 26; // heatmapWeeks is Electron-only; the native board is fixed at 26
             int secPadX = DX(12);
+            // Fill the card: 26 cells at a fixed DX(11) left the right half of
+            // the card blank, which is most of why the board read as cramped.
+            // Grow the cell to the available width, capped so it never turns
+            // into chunky bricks.
+            int cgap = DX(3);
+            int cell = (innerW - 2 * secPadX - rowLabW) / weeks - cgap;
+            if (cell > DX(16)) cell = DX(16);
+            if (cell < DX(9)) cell = DX(9);
+            int pitch = cell + cgap;
             SYSTEMTIME nowSt; GetLocalTime(&nowSt);
             int endDow = nowSt.wDayOfWeek; // 0 = Sun
             // quantile thresholds over nonzero days (dash.js renderHeatmap)
@@ -1462,19 +1694,19 @@ static void paintDash(HWND hwnd) {
             int tblReserve = DX(10) + DX(13) + 2 * DX(17) + DX(10);
             int secH = DX(10) + DX(11) + DX(8) + DX(13) + hmH + DX(2) + DX(10);
             if (hasSel) {
-                int room = h - DX(24) - gap - tblReserve - y - secH;
+                int room = vh - DX(24) - gap - tblReserve - y - secH;
                 int fitRows = (room - ddFixed) / DX(17);
                 if (fitRows < 0) fitRows = 0;
                 if (ddRows > fitRows) ddRows = fitRows;
                 if (ddRows <= 0) hasSel = 0;
             }
             int ddH = hasSel ? ddFixed + ddRows * DX(17) : 0;
-            if (y + secH < h - DX(26)) {
+            if (y + secH < vh - DX(26)) {
                 // fit gate stays on the no-selection height: the detail expands
                 // the card only while the expansion fits, else it is clipped -
                 // a selection must never collapse the section (the hit rects
                 // would go stale and keep firing)
-                if (hasSel && y + secH + ddH < h - DX(26)) secH += ddH;
+                if (hasSel && y + secH + ddH < vh - DX(26)) secH += ddH;
                 else hasSel = 0;
                 dashCard(dc, padL, y, innerW, secH, t.card, t.divider);
                 int hx = padL + secPadX;
@@ -1555,14 +1787,16 @@ static void paintDash(HWND hwnd) {
                     dashStr(dc, padL + secPadX, ddy, dtitle, t.fg, fPlan);
                     ddy += DX(15);
                     // per-day cache presence from g_dayApp (Electron hasCacheData):
-                    // cache columns + header only while the day carries cache
-                    int cache = 0;
-                    for (int i = 0; i < g_appCount; i++)
-                        if (dayRows[i].cr + dayRows[i].cw > 0) { cache = 1; break; }
+                    // each cache column only while THAT column has data
+                    int cacheR = 0, cacheW = 0;
+                    for (int i = 0; i < g_appCount; i++) {
+                        if (dayRows[i].cr > 0) cacheR = 1;
+                        if (dayRows[i].cw > 0) cacheW = 1;
+                    }
                     int xs[5];
-                    dashTableCols(padL + innerW - secPadX, cache, xs);
+                    dashTableCols(padL + innerW - secPadX, cacheR, cacheW, xs);
                     if (anyRec) {
-                        dashTableHead(dc, padL + secPadX, innerW, ddy, cache, xs, &t, fS9, L"APP");
+                        dashTableHead(dc, padL + secPadX, ddy, xs, &t, fS9, L"APP");
                         ddy += DX(13);
                     }
                     // the reserve holds 6 rows: when the day has more
@@ -1584,10 +1818,8 @@ static void paintDash(HWND hwnd) {
                         wchar_t vs[32];
                         fmtTokens(a->in, vs, 32); dashStrR(dc, xs[4], ddy, vs, t.fg, fBody);
                         fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], ddy, vs, t.fg, fBody);
-                        if (cache) {
-                            fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], ddy, vs, t.fg, fBody);
-                            fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody);
-                        }
+                        if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], ddy, vs, t.fg, fBody); }
+                        if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody); }
                         swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
                         ddDrawn++;
                         ddy += DX(17);
@@ -1604,7 +1836,9 @@ static void paintDash(HWND hwnd) {
             }
 
             // tables: By app + By model (2-col grid). Electron sorts by total
-            // desc and caps the model table at 7 rows - mirror that.
+            // desc and caps the model table at 7 rows; this store carries 13
+            // distinct models, so the cap is DASH_MODEL_ROWS and the freed
+            // rows fill what used to be blank space.
             int colW2 = (innerW - DX(10)) / 2;
             int secPad = DX(10);
             int th2 = DX(9) + DX(4);
@@ -1624,9 +1858,9 @@ static void paintDash(HWND hwnd) {
                 appOrder[j + 1] = v;
             }
             int mdlOrder[DASH_MAX_MODELS], mdlN = g_modelCount;
-            if (mdlN > 7) mdlN = 7;
+            if (mdlN > DASH_MODEL_ROWS) mdlN = DASH_MODEL_ROWS;
             // every slot the sort loop touches must be defined: init ALL
-            // entries, sort the full set, cap only the displayed rows at 7
+            // entries, sort the full set, cap only the displayed rows
             for (int i = 0; i < g_modelCount; i++) mdlOrder[i] = i;
             for (int i = 1; i < g_modelCount; i++) {
                 int v = i, j = i - 1;
@@ -1640,20 +1874,25 @@ static void paintDash(HWND hwnd) {
                 }
                 mdlOrder[j + 1] = v;
             }
-            // cache columns are per table (Electron appCache vs modelCache):
-            // apps over every app, models over the displayed top-7 only
-            int appCache = 0;
-            for (int i = 0; i < g_appCount; i++)
-                if (g_appAgg[i].cr + g_appAgg[i].cw > 0) { appCache = 1; break; }
-            int modelCache = 0;
-            for (int i = 0; i < mdlN; i++)
-                if (g_modelAgg[mdlOrder[i]].cr + g_modelAgg[mdlOrder[i]].cw > 0) { modelCache = 1; break; }
+            // cache columns are per TABLE and per COLUMN (Electron appCache vs
+            // modelCache): an all-zero cacheW column is dropped, never drawn
+            // empty. apps over every app, models over the displayed rows only
+            int appCacheR = 0, appCacheW = 0;
+            for (int i = 0; i < g_appCount; i++) {
+                if (g_appAgg[i].cr > 0) appCacheR = 1;
+                if (g_appAgg[i].cw > 0) appCacheW = 1;
+            }
+            int modelCacheR = 0, modelCacheW = 0;
+            for (int i = 0; i < mdlN; i++) {
+                if (g_modelAgg[mdlOrder[i]].cr > 0) modelCacheR = 1;
+                if (g_modelAgg[mdlOrder[i]].cw > 0) modelCacheW = 1;
+            }
             int rows = appN > mdlN ? appN : mdlN;
             // fit EVERY row: tighten the row pitch (17..19 CSS px) before
             // dropping one, so the model table never loses a row silently.
             // Zero rows is allowed: the section header alone still fits and
             // draws, so the tables never vanish without a trace.
-            int budget = h - DX(24) - y - secPad - th2 - secPad;
+            int budget = vh - DX(24) - y - secPad - th2 - secPad;
             int fitMax = budget / DX(17);
             if (rows > fitMax) rows = fitMax;
             if (rows < 0) rows = 0;
@@ -1663,17 +1902,18 @@ static void paintDash(HWND hwnd) {
                 if (rowH < DX(17)) rowH = DX(17);
             }
             int tblH = secPad + th2 + rows * rowH + secPad;
-            if (y + tblH <= h - DX(24)) {
+            if (y + tblH <= vh - DX(24)) {
                 for (int side = 0; side < 2; side++) {
                     int sx = padL + side * (colW2 + DX(10));
                     dashCard(dc, sx, y, colW2, tblH, t.card, t.divider);
                     dashHead(dc, sx + DX(12), y + secPad, side == 0 ? L"BY APP" : L"BY MODEL", t.dim, fHead);
                     int inner = colW2 - DX(24);
                     int xs[5];
-                    int cache = side == 0 ? appCache : modelCache;
-                    dashTableCols(sx + DX(12) + inner, cache, xs);
+                    int cacheR = side == 0 ? appCacheR : modelCacheR;
+                    int cacheW = side == 0 ? appCacheW : modelCacheW;
+                    dashTableCols(sx + DX(12) + inner, cacheR, cacheW, xs);
                     int ry = y + secPad + th2;
-                    dashTableHead(dc, sx + DX(12), inner, ry, cache, xs, &t, fS9,
+                    dashTableHead(dc, sx + DX(12), ry, xs, &t, fS9,
                                   side == 0 ? L"APP" : L"MODEL");
                     ry += th2;
                     if (side == 0) {
@@ -1696,7 +1936,7 @@ static void paintDash(HWND hwnd) {
                                 FillRect(dc, &fr2, b);
                                 DeleteObject(b);
                             }
-                            dashTableRow(dc, sx + DX(12), inner, ry, rowH, cache, xs, an,
+                            dashTableRow(dc, sx + DX(12), inner, ry, rowH, xs, an,
                                          appDotColor(g_appName[ai], &t), (double)s / maxAll, &a2, &t, fBody, fS9);
                             ry += rowH;
                         }
@@ -1730,38 +1970,53 @@ static void paintDash(HWND hwnd) {
                             }
                             if (bar) *bar = 0;
                             COLORREF dc2 = appDotColor(mk, &t);
-                            dashTableRow(dc, sx + DX(12), inner, ry, rowH, cache, xs, mn,
+                            dashTableRow(dc, sx + DX(12), inner, ry, rowH, xs, mn,
                                          dc2, (double)s / maxAll, &a2, &t, fBody, fS9);
                             ry += rowH;
                         }
                         if (mdlN == 0 && rows > 0) {
                             dashStr(dc, sx + DX(12), ry + DX(2), L"No model data.", t.dim, fBody);
+                        } else if (g_modelCount > mdlRows) {
+                            wchar_t more[32];
+                            swprintf(more, 31, L"+%d more models", g_modelCount - mdlRows);
+                            dashStr(dc, sx + DX(12), ry + DX(2), more, t.dim, fS10);
                         }
                     }
                 }
                 y += tblH + gap;
             }
         }
-        // footer: last scan time, right-aligned
+        // footer: last scan time, right-aligned under the content (not glued
+        // to the window's bottom edge, which the content-fit resize moves).
         {
             wchar_t ftxt[40];
-            if (g_lastScanMs) {
-                unsigned ago = (unsigned)((GetTickCount64() - (unsigned long long)g_lastScanMs) / 1000);
-                dashFmtTime(dashLocalNowMs() - (long long)ago * 1000, ftxt, 39);
-            } else lstrcpynW(ftxt, L"\x2014", 39);
+            // render the stored stamp directly: subtracting a TRUNCATED
+            // GetTickCount64 age from the wall clock made the seconds field
+            // oscillate (41 -> 42 -> 41) every repaint
+            if (g_lastScanEpoch) dashFmtTime(g_lastScanEpoch, ftxt, 39);
+            else lstrcpynW(ftxt, L"\x2014", 39);
             wchar_t fl[64];
             swprintf(fl, 63, L"last scan %ls", ftxt);
-            dashStrR(dc, w - padL, h - DX(10) - DX(12), fl, t.dim, fS9);
+            int fy = y;
+            if (fy > h - DX(16)) fy = h - DX(16);
+            dashStrR(dc, w - padL, fy, fl, t.dim, fS9);
+            g_dashContentH = fy + DX(10) + DX(12);
         }
     } else {
         // ---- subscriptions board: donut pies per plan window (subs.css)
         int innerW = w - 2 * padL;
         int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
-        int shown = 0, enabledN = 0;
-        for (int i = 0; i < pn; i++) if (subsProvEnabled(i)) enabledN++;
-        int rows = (enabledN + 1) / 2; if (rows < 1) rows = 1;
-        int colW2 = (innerW - gap) / 2;
-        int panelH = (h - DX(30) - y - gap * (rows - 1)) / rows;
+        int shown = 0;
+        // ---- subscriptions board: one full-width panel per provider, that
+        // provider's windows laid out left-to-right inside it.
+        //
+        // The old 2-column grid gave a 4-window provider (antigravity) half the
+        // window's width and then silently DROPPED its last window when the
+        // stacked pies stopped fitting - which is exactly why only three
+        // antigravity rows appeared. Full-width rows with horizontal cells
+        // show every window the provider reports.
+        int headH = DX(40), footH = DX(26), bodyH = DX(112);
+        int panelH = headH + bodyH + footH;
         for (int pi2 = 0; pi2 < pn; pi2++) {
             if (!g_cfg.subsEnabled || !subsProvEnabled(pi2)) continue; // master off or disabled: no panel (Electron parity)
             wchar_t label[48];
@@ -1769,18 +2024,17 @@ static void paintDash(HWND hwnd) {
             SubsWin wins[4];
             int wn = subsProvWins(pi2, wins, 4);
             int stale = wn < 0; if (wn < 0) wn = -wn;
-            int px2 = padL + (shown % 2) * (colW2 + gap);
-            int py2 = y + (shown / 2) * (panelH + gap);
-            if (py2 + panelH > h - DX(30)) break;
-            // panel: card + head (dot, name, pill) + body (pies) + foot
-            dashCard(dc, px2, py2, colW2, panelH, t.card, t.divider);
+            int px2 = padL;
+            int py2 = y + shown * (panelH + gap);
+            // panel: card + head (dot, name, pill) + body (cells) + foot
+            dashCard(dc, px2, py2, innerW, panelH, t.card, t.divider);
             int headH = DX(40);
-            dashCard(dc, px2, py2, colW2, headH, t.head, 0);
+            dashCard(dc, px2, py2, innerW, headH, t.head, 0);
             // dashed head underline
             HPEN dpen = CreatePen(PS_DOT, 1, t.divider);
             HGDIOBJ op = SelectObject(dc, dpen);
             MoveToEx(dc, px2, py2 + headH, NULL);
-            LineTo(dc, px2 + colW2, py2 + headH);
+            LineTo(dc, px2 + innerW, py2 + headH);
             SelectObject(dc, op);
             DeleteObject(dpen);
             // dot (heatmap ramp color per provider index)
@@ -1808,7 +2062,7 @@ static void paintDash(HWND hwnd) {
                 if (ps2) {
                     int pw2 = dashStrW(dc, ps2, fS10b) + DX(16);
                     int ph2 = DX(18);
-                    int plx = px2 + colW2 - DX(14) - pw2;
+                    int plx = px2 + innerW - DX(14) - pw2;
                     dashCard(dc, plx, py2 + (headH - ph2) / 2, pw2, ph2, pbg, pc);
                     SelectObject(dc, fS10b);
                     SetTextColor(dc, pc);
@@ -1818,27 +2072,36 @@ static void paintDash(HWND hwnd) {
                     SetTextCharacterExtra(dc, 0);
                 }
             }
-            // pies
-            int bodyY = py2 + headH + DX(14);
+            // body: one cell per window, left to right
+            int bodyY = py2 + headH + DX(4);
             if (wn == 0) {
-                dashStr(dc, px2 + DX(14), bodyY + DX(12), stale ? L"stale \x2014 no data yet" : L"no windows reported", t.dim, fBody);
+                dashStr(dc, px2 + DX(14), bodyY + DX(14), stale ? L"stale \x2014 no data yet" : L"no windows reported", t.dim, fBody);
             }
-            // every window gets a pie: shrink the pie to the body height the
-            // way the provider rows compress (never drop the later windows)
-            int bodyAvail = py2 + panelH - DX(34) - bodyY;
-            int pieD = DX(96);
-            if (wn > 0) {
-                int fit = (bodyAvail - (wn - 1) * DX(16)) / wn;
-                if (fit < pieD) pieD = fit;
+            int cols = wn > 0 ? wn : 1;
+            int cellW = (innerW - DX(28)) / cols;
+            // The pie takes only what is LEFT of the label: measure the widest
+            // window label ("CLAUDE/GPT WEEK") and reserve exactly that plus a
+            // gutter. A fixed pie size clipped antigravity's four windows to
+            // "CLAUDE/C"; the pie then scales its pen and text off pieD.
+            int labNeed = 0;
+            for (int k = 0; k < wn; k++) {
+                wchar_t up[20];
+                subsWinUpper(&wins[k], up, 20);
+                // the label is drawn with DX(0.7) character extra: measure the
+                // same way or the widest label loses its last character
+                int w2 = dashStrWEx(dc, up, f13, DX(0.7));
+                if (w2 > labNeed) labNeed = w2;
             }
+            int pieD = cellW - labNeed - DX(20);
+            if (pieD > DX(96)) pieD = DX(96);
+            if (pieD > bodyH - DX(8)) pieD = bodyH - DX(8);
             // legible floor: pen width and text geometry derive from pieD
             if (pieD < DX(24)) pieD = DX(24);
             float pieScale = (float)pieD / (float)DX(96);
             HFONT fPct = pieD >= DX(56) ? f18 : (pieD >= DX(38) ? f13 : fS10);
             for (int k = 0; k < wn; k++) {
-                int ky = bodyY + k * (pieD + DX(16));
-                if (ky + pieD > py2 + panelH - DX(34)) break;
-                int kx = px2 + DX(14);
+                int kx = px2 + DX(14) + k * cellW;
+                int ky = bodyY + (bodyH - pieD) / 2;
                 int rem = wins[k].rem;
                 if (rem < 0) rem = 0; if (rem > 100) rem = 100;
                 // track + arc (rotate -90: start at 12 o'clock, clockwise)
@@ -1870,34 +2133,30 @@ static void paintDash(HWND hwnd) {
                 dashStr(dc, cx0, ky + pieD / 2 - DX(15), pctS, t.pinkDeep, fPct);
                 dashStr(dc, cx0 + dashStrW(dc, pctS, fPct) + DX(1), ky + pieD / 2 - DX(11), L"%", t.pinkDeep, fS10);
                 dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, ky + pieD / 2 + DX(6), L"left", t.dim, fS9);
-                // meta right of the pie
-                int mx = kx + pieD + DX(14);
-                wchar_t up[40];
-                // uppercase label
-                {
-                    wchar_t ul[20];
-                    for (int ci = 0; wins[k].label[ci] && ci < 19; ci++) {
-                        wchar_t ch = wins[k].label[ci];
-                        ul[ci] = (ch >= L'a' && ch <= L'z') ? ch - 32 : ch;
-                        ul[ci + 1] = 0;
-                    }
-                    lstrcpynW(up, ul, 39);
-                }
+                // meta right of the pie, clipped to its own cell
+                int mx = kx + pieD + DX(12);
+                wchar_t up[20];
+                subsWinUpper(&wins[k], up, 20);
                 SelectObject(dc, f13);
                 SetTextColor(dc, t.fg);
                 SetTextCharacterExtra(dc, DX(0.7));
                 // meta text tracks the pie: the same fractions of pieD the
                 // uncompressed board (pieD 96) lays out at 24 / 50 / 66
                 int metaY = ky + (int)(pieD * 0.25f);
-                RECT mr3 = { mx, metaY, px2 + colW2 - DX(14), metaY + DX(20) };
+                RECT mr3 = { mx, metaY, kx + cellW - DX(4), metaY + DX(20) };
                 DrawTextW(dc, up, -1, &mr3, DT_SINGLELINE | DT_LEFT);
                 SetTextCharacterExtra(dc, 0);
                 wchar_t usedLine[72];
                 if (wins[k].used >= 0 && wins[k].total > 0) {
-                    wchar_t us2[24], ts3[24];
-                    fmtNum(wins[k].used, us2, 24);
+                    // the vendor reports absolute credits (zcode quota/limit):
+                    // show what is LEFT, which is the number that matters, and
+                    // not just the percentage of it
+                    wchar_t lf[24], ts3[24];
+                    long long left = (long long)wins[k].total - wins[k].used;
+                    if (left < 0) left = 0;
+                    fmtNum(left, lf, 24);
                     fmtNum(wins[k].total, ts3, 24);
-                    swprintf(usedLine, 71, L"%ls / %ls used", us2, ts3);
+                    swprintf(usedLine, 71, L"%ls left of %ls", lf, ts3);
                 } else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
                 dashStr(dc, mx, ky + (int)(pieD * 0.52f), usedLine, t.dim, fS10);
                 // third line: relative reset time (subs.js fmtReset)
@@ -1906,25 +2165,29 @@ static void paintDash(HWND hwnd) {
                 dashStr(dc, mx, ky + (int)(pieD * 0.69f), rst, t.dim, fS10);
             }
             // panel foot: dashed top + fetched time right
-            int fy = py2 + panelH - DX(26);
+            int fy = py2 + panelH - footH;
             HPEN fpen = CreatePen(PS_DOT, 1, t.divider);
             HGDIOBJ op2 = SelectObject(dc, fpen);
             MoveToEx(dc, px2 + DX(14), fy, NULL);
-            LineTo(dc, px2 + colW2 - DX(14), fy);
+            LineTo(dc, px2 + innerW - DX(14), fy);
             SelectObject(dc, op2);
             DeleteObject(fpen);
-            unsigned ago = subsFetchedAgoSec();
+            // render the stored cycle stamp directly (see subsFetchedEpochMs):
+            // deriving it from a truncated tick age made it oscillate
+            long long fepoch = subsFetchedEpochMs();
             wchar_t ftim[16];
-            if (ago != 0xFFFFFFFFu) dashFmtTime(dashLocalNowMs() - (long long)ago * 1000, ftim, 15);
+            if (fepoch) dashFmtTime(fepoch, ftim, 15);
             else lstrcpynW(ftim, L"\x2014", 15);
             wchar_t fl2[32];
             swprintf(fl2, 31, L"%ls", ftim);
-            dashStrR(dc, px2 + colW2 - DX(14), fy + DX(6), fl2, t.dim, fS10);
+            dashStrR(dc, px2 + innerW - DX(14), fy + DX(6), fl2, t.dim, fS10);
             shown++;
         }
         if (!shown) {
             dashStr(dc, padL, y, g_cfg.subsEnabled ? L"No providers enabled." : L"Subscriptions are off (subs.enabled).", t.dim, fBody);
         }
+        // panels are fixed-height rows, so the stack's bottom is the content edge
+        if (shown) g_dashContentH = y + shown * panelH + (shown - 1) * gap;
     }
 
     DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal);
@@ -1995,6 +2258,32 @@ static void dashTipCell(HWND hwnd, POINT p) {
     tipHide();
 }
 
+// Latch the dash window to its painted content. The window is created at the
+// config height and the content is laid out from the top, so a board shorter
+// than that leaves a trailing blank. Resizing AFTER the window is on screen
+// reads as "bolted together" (the top appears, then the lower part lags in),
+// so the create path paints while hidden and fits before ShowWindow.
+static int g_dbgFitLogged = 0;
+static void dashFitToContent(void) {
+    if (!g_dash || !IsWindow(g_dash) || g_dashContentH <= 0) return;
+    RECT dr; GetWindowRect(g_dash, &dr);
+    int curH = dr.bottom - dr.top;
+    int want = g_dashContentH;
+    int lo = (int)(g_dashType == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale * 45 / 100;
+    if (want < lo) want = lo;
+    if (want < curH - DX(4) || want > curH + DX(4))
+        SetWindowPos(g_dash, NULL, 0, 0, dr.right - dr.left, want,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (g_cfg.debug && !g_dbgFitLogged) {
+        char lb[160];
+        sprintf(lb, "[wizbar] dash fit: type=%d contentH=%d cfgH=%d curH=%d want=%d lo=%d",
+                g_dashType, g_dashContentH, (int)((g_dashType == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale),
+                curH, want, lo);
+        writeLogA(lb);
+        g_dbgFitLogged = 1;
+    }
+}
+
 static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
@@ -2011,6 +2300,7 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         BeginPaint(hwnd, &ps);
         paintDash(hwnd);
         EndPaint(hwnd, &ps);
+        dashFitToContent(); // the window is on screen: shrink now, not on a tick
         return 0;
     }
     case WM_KEYDOWN:
@@ -2091,6 +2381,7 @@ static void dashToggle(int type) {
     if (g_dash) {
         if (g_dashType == type) { DestroyWindow(g_dash); g_dash = NULL; return; }
         g_dashType = type;
+        g_dbgFitLogged = 0;
         SetWindowTextW(g_dash, type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions");
         // the other board has its own configured size: adopt it in place
         int tw = (int)((double)(type == 0 ? g_cfg.dashW : g_cfg.subsW) * g_scale + 0.5);
@@ -2100,10 +2391,12 @@ static void dashToggle(int type) {
         if (th2 > tsh - 40) th2 = tsh - 40;
         SetWindowPos(g_dash, NULL, (tsw - tw) / 2, (tsh - th2) / 2, tw, th2, SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
+        UpdateWindow(g_dash); // repaint + content-fit at the new size, once
         SetForegroundWindow(g_dash);
         return;
     }
     scanTokenCache(); // fresh numbers for the panel
+    g_dbgFitLogged = 0;
     int cw = (int)((double)(type == 0 ? g_cfg.dashW : g_cfg.subsW) * g_scale + 0.5);
     int ch = (int)((double)(type == 0 ? g_cfg.dashH : g_cfg.subsH) * g_scale + 0.5);
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
@@ -2118,13 +2411,19 @@ static void dashToggle(int type) {
     g_dashType = type;
     // APPWINDOW: the Electron dash is a NORMAL window on purpose (taskbar +
     // Alt-Tab entry) so activation never falls through to the terminal.
+    // WS_VISIBLE is deliberately absent: the first paint (and the content-fit
+    // resize it triggers) happens while the window is still hidden, so the
+    // captain sees ONE window at its final size instead of a board that grows
+    // into place.
     g_dash = CreateWindowExW(WS_EX_APPWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
-                             WS_POPUP | WS_VISIBLE | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
+                             WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
                              NULL, NULL, GetModuleHandleW(NULL), NULL);
     if (!g_dash) return;
     dashRoundCorners(g_dash);
-    SetForegroundWindow(g_dash);
     InvalidateRect(g_dash, NULL, FALSE);
+    UpdateWindow(g_dash); // forces the WM_PAINT -> paint + fit, off screen
+    ShowWindow(g_dash, SW_SHOW);
+    SetForegroundWindow(g_dash);
 }
 
 // ---- hover tooltips (Electron: seg.title) -----------------------------------
@@ -2303,7 +2602,7 @@ static const wchar_t *chipTitle(int idx) {
         return NULL;
     case CT_CUSTOM:
         if (c->iconSvg == SVG_DIAMOND) return L"Token usage today";
-        if (c->iconSvg == SVG_GAUGE) return L"Subscription plan remaining";
+        if (c->iconSvg == SVG_GAUGE) return c->tipOverride && *c->tipOverride ? c->tipOverride : L"Subscription plan remaining";
         if (c->customIdx >= 0 && c->customIdx < MAX_CUSTOM) {
             CustomChip *cc = &g_cfg.custom[c->customIdx];
             if (cc->title && *cc->title) return cc->title;
@@ -2356,17 +2655,93 @@ static void chipClick(int idx) {
     }
 }
 
+// ---- themed context menu --------------------------------------------------
+// A stock TrackPopupMenu paints with the system menu colours and font, which
+// reads as a stale gray window next to the beige/pink bar. Owner-drawing the
+// rows and giving the menu a background brush themes the whole popup with the
+// bar's palette and font (the same tokens the dashboards use).
+typedef struct { const wchar_t *label; int cmd; } MenuItem;
+
+// Build the chip's rotation list: one entry per enabled provider, that
+// provider's WEEKLY window when it reports one (the vendor's own headline
+// quota), else its lowest window. Advances one entry per subs.rotateSec.
+// Returns the entry's remaining % and writes "<plan> <window> N% left".
+static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
+    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
+    int pick[MAX_SUBS]; // (provider << 8) | window
+    int n = 0;
+    for (int i = 0; i < pn; i++) {
+        if (!subsProvEnabled(i)) continue;
+        SubsWin w[4];
+        int wn = subsProvWins(i, w, 4);
+        if (wn < 0) wn = -wn;
+        if (wn <= 0) continue;
+        int best = -1;
+        for (int k = 0; k < wn; k++) {
+            if (wcsstr(w[k].label, L"week") || wcsstr(w[k].label, L"WEEK")) { best = k; break; }
+            if (best < 0 || w[k].rem < w[best].rem) best = k;
+        }
+        if (best >= 0 && n < MAX_SUBS) pick[n++] = (i << 8) | best;
+    }
+    if (!n) { if (tip) lstrcpynW(tip, L"No subscription windows", tipCb); if (txt) lstrcpynW(txt, L"\u2014", cb); return -1; }
+    if (g_subsRotSec < 5) g_subsRotSec = 5;
+    DWORD now = GetTickCount();
+    if (now - g_subsRotTick >= (DWORD)g_subsRotSec * 1000u) {
+        g_subsRotTick = now;
+        g_subsRotIdx = (g_subsRotIdx + 1) % n;
+    }
+    int pi2 = pick[g_subsRotIdx] >> 8, k = pick[g_subsRotIdx] & 0xFF;
+    SubsWin w[4];
+    int wn = subsProvWins(pi2, w, 4);
+    if (wn < 0) wn = -wn;
+    if (k >= wn) k = 0;
+    int rem = w[k].rem;
+    // The chip stays a percentage (it is a meter); the absolute credit
+    // count belongs on the board rows and in this tooltip, which is where the
+    // captain asked to see it.
+    int hasNum = (w[k].used >= 0 && w[k].total > 0);
+    long long left = hasNum ? ((long long)w[k].total - w[k].used) : 0;
+    if (left < 0) left = 0;
+    if (tip) {
+        wchar_t plan[24]; subsProvPlan(pi2, plan, 24);
+        if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
+        if (hasNum) {
+            wchar_t lf[24], ts3[24];
+            fmtNum(left, lf, 24);
+            fmtNum(w[k].total, ts3, 24);
+            swprintf(tip, tipCb, L"%ls %ls: %d%% left (%ls of %ls credits)", plan, w[k].label, rem, lf, ts3);
+        } else {
+            swprintf(tip, tipCb, L"%ls %ls: %d%% left", plan, w[k].label, rem);
+        }
+    }
+    if (txt) swprintf(txt, cb, L"%d%%", rem);
+    return rem;
+}
+
+static const MenuItem kMenuItems[] = {
+    { L"Token dashboard",        10 }, { L"Subscription dashboard", 11 }, { NULL, 0 },
+    { L"Edit config",              1 }, { L"Open config folder",      2 }, { NULL, 0 },
+    { L"Reload chocobar",          3 }, { L"Quit chocobar",           4 }, { NULL, 0 },
+};
+#define MENU_N ((int)(sizeof(kMenuItems) / sizeof(kMenuItems[0])))
+
 static void showTrayMenu(HWND hwnd) {
     HMENU m = CreatePopupMenu();
-    // Same items as the Electron bar menu (main.js buildChocobarMenu)
-    AppendMenuW(m, MF_STRING, 10, L"Token dashboard");
-    AppendMenuW(m, MF_STRING, 11, L"Subscription dashboard");
-    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, 1, L"Edit config");
-    AppendMenuW(m, MF_STRING, 2, L"Open config folder");
-    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, 3, L"Reload chocobar");
-    AppendMenuW(m, MF_STRING, 4, L"Quit chocobar");
+    // Same items as the Electron bar menu (main.js buildChocobarMenu); each row
+    // carries its index as itemData so WM_MEASUREITEM/WM_DRAWITEM can theme it.
+    for (int i = 0; i < MENU_N; i++) {
+        if (kMenuItems[i].label)
+            AppendMenuW(m, MF_OWNERDRAW | MF_STRING, (UINT_PTR)kMenuItems[i].cmd, (LPCWSTR)(UINT_PTR)i);
+        else
+            AppendMenuW(m, MF_OWNERDRAW | MF_SEPARATOR, 0, (LPCWSTR)(UINT_PTR)i);
+    }
+    DashTheme dt; dashResolveTheme(&dt);
+    MENUINFO mi; memset(&mi, 0, sizeof(mi)); mi.cbSize = sizeof(mi);
+    mi.fMask = MIM_BACKGROUND;
+    mi.hbrBack = CreateSolidBrush(dt.bg); // leaks the brush by design: the
+    // menu must keep a valid brush until dismissal (deleting it earlier paints
+    // with a garbage handle). One 4-byte GDI object per opened menu.
+    SetMenuInfo(m, &mi);
     POINT p; GetCursorPos(&p);
     SetForegroundWindow(hwnd); // required for correct menu dismissal
     int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, NULL);
@@ -2446,6 +2821,12 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         } else if (wp == TIMER_CONFIG) {
             configCheckTick();
+            // content-fit: the dash windows are created at the config height and
+            // paint their content from the top, so a data change that shrinks
+            // the content leaves a trailing blank. Latch the window to the
+            // painted content (measured against the config height, so this
+            // cannot drop a row and re-shrink forever).
+            dashFitToContent();
         }
         return 0;
     case WM_MOUSEMOVE: {
@@ -2475,6 +2856,72 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         tipHide();
         repaintBar(hwnd);
         return 0;
+    // owner-drawn menu rows: same palette + font as the bar and dashboards
+    case WM_MEASUREITEM: {
+        MEASUREITEMSTRUCT *mi = (MEASUREITEMSTRUCT *)lp;
+        if (mi->CtlType != ODT_MENU) break;
+        int idx = (int)mi->itemData;
+        if (idx < 0 || idx >= MENU_N) { mi->itemWidth = DX(210); mi->itemHeight = DX(24); return TRUE; }
+        if (!kMenuItems[idx].label) { mi->itemWidth = DX(210); mi->itemHeight = DX(7); }
+        else { mi->itemWidth = DX(210); mi->itemHeight = DX(28); }
+        return TRUE;
+    }
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *di = (DRAWITEMSTRUCT *)lp;
+        if (di->CtlType != ODT_MENU) break;
+        int idx = (int)di->itemData;
+        if (idx < 0 || idx >= MENU_N) break;
+        DashTheme t; dashResolveTheme(&t);
+        RECT r = di->rcItem;
+        if (!kMenuItems[idx].label) { // separator: divider hairline
+            HBRUSH bd = CreateSolidBrush(t.divider);
+            RECT lr = { r.left + DX(10), r.top + r.bottom / 2 - 1, r.right - DX(10), r.top + r.bottom / 2 + 1 };
+            FillRect(di->hDC, &lr, bd);
+            DeleteObject(bd);
+            return TRUE;
+        }
+        int sel = (di->itemState & ODS_SELECTED) ? 1 : 0;
+        HBRUSH b = CreateSolidBrush(sel ? blendCr(t.bg, t.pink, 96) : t.bg);
+        FillRect(di->hDC, &r, b);
+        DeleteObject(b);
+        if (sel) { // leading marker ties the row to the bar's own hover pill
+            HBRUSH mb = CreateSolidBrush(t.pinkDeep);
+            RECT mr = { r.left, r.top + DX(5), r.left + DX(3), r.bottom - DX(5) };
+            FillRect(di->hDC, &mr, mb);
+            DeleteObject(mb);
+        }
+        HFONT f = dashFont(12, FW_NORMAL);
+        HGDIOBJ of = SelectObject(di->hDC, f);
+        SetBkMode(di->hDC, TRANSPARENT);
+        SetTextColor(di->hDC, sel ? t.pinkDeep : t.fg);
+        RECT tr = { r.left + DX(16), r.top, r.right - DX(12), r.bottom };
+        DrawTextW(di->hDC, kMenuItems[idx].label, -1, &tr,
+                  DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        SelectObject(di->hDC, of);
+        DeleteObject(f);
+        return TRUE;
+    }
+    // A hand cursor over the chips that actually do something (the pinned
+    // toggles and the two dashboard openers); the plain arrow everywhere else.
+    // Electron gets this from CSS cursor:pointer on .seg.clickable.
+    case WM_SETCURSOR: {
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p);
+            ScreenToClient(hwnd, &p);
+            int ci = chipAt(p);
+            int clickable = 0;
+            if (ci >= 0) {
+                Chip *c = &g_chips[ci];
+                clickable = c->type == CT_SHORTCUT || c->type == CT_PET
+                    || (c->type == CT_CUSTOM && (c->iconSvg == SVG_DIAMOND
+                                              || c->iconSvg == SVG_GAUGE
+                                              || c->customIdx >= 0));
+            }
+            SetCursor(LoadCursor(NULL, clickable ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
     case WM_LBUTTONDOWN: {
         POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int h = chipAt(p);
@@ -2584,6 +3031,11 @@ void loadConfig(void) {
     g_cfg = next;
     g_cfgLoaded = 1;
     g_iconOpacity = g_cfg.iconOpacity / 100.0; // p_icons AlphaBlend constant
+    g_subsRotSec = g_cfg.subsRotateSec;
+    // theme.icons[] -> the icon engine (a name defined again replaces its slot,
+    // and a removed name simply stops resolving)
+    for (int i = 0; i < g_cfg.iconCount; i++)
+        iconUserAdd(g_cfg.icons[i].name, g_cfg.icons[i].d, (float)g_cfg.icons[i].w);
     // freeConfig above freed every string the chip array points at
     // (colorOverride / iconColorOverride): rebuild before any paint reads them
     buildChips();
@@ -2631,6 +3083,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     if (g_scale <= 0) g_scale = 1.0;
 
     resolveConfigPath();
+    // The cursor file MUST be loaded before the config: loadConfig() rebuilds
+    // the chips, which runs the first token scan, and that scan is what
+    // populates the cursors. Loading them afterwards wiped the in-memory set,
+    // so the very next rescan re-read every active file from byte 0 and
+    // DOUBLE COUNTED every live record (today jumped 2x within a minute).
+    tokLiveInit();
     loadConfig();
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(g_cfgPath, GetFileExInfoStandard, &fa)) g_cfgMtime = fa.ftLastWriteTime;
@@ -2646,11 +3104,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     RegisterClassW(&wc);
 
-    // WS_EX_TOPMOST: the Electron bar is always-on-top ('floating'); without
-    // it the followed terminal raises over the bar and swallows every
-    // click/hover meant for the chips
+    // NO WS_EX_TOOLWINDOW and NO WS_EX_TOPMOST. A tool window sits in a
+    // band above ordinary windows, so it would keep floating over unrelated
+    // windows no matter where SetWindowPos put it (the captain's screenshot
+    // showed the bar painted across a Brave window while its terminal sat
+    // behind it). Making the bar an OWNED window of the terminal instead keeps
+    // it out of the taskbar/Alt+Tab and pins it in the terminal's own band.
     g_bar = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+        WS_EX_NOACTIVATE | WS_EX_LAYERED,
         APP_CLASS, L"Chocobar", WS_POPUP,
         -2000, -2000, 800, (int)(g_cfg.height * g_scale + 0.5),
         NULL, NULL, hInst, NULL);
