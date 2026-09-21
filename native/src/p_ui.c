@@ -203,6 +203,7 @@ extern long long g_tokMidnight;
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
 long tokLiveScan(void);
 long long subsFetchedEpochMs(void);
+void subsCredits(int i, int *avail, int *total);
 void tokLiveInit(void);
 
 // newest ts + mtime seen in the cache file, for the live scan's seed boundary
@@ -1424,27 +1425,36 @@ static void dashDot(HDC dc, int cx, int cy, int d, COLORREF cr) {
 static RECT g_hmRect[26][7];
 static int g_hmBack[26][7];
 static RECT g_btnRefresh, g_btnClose; // physical px
+// refresh-button debounce: while set the button reads "..." and ignores
+// clicks, so a restless double-click cannot fire two scans in a row
+static unsigned long long g_btnBusyUntil = 0;
+static long long g_subsBusyEpoch = 0;
 static int g_btnHover = 0;            // 0 none, 1 refresh, 2 close
 static int g_tbBottom = 0;            // titlebar bottom (physical px) for drag
 
-// table column x positions (right-aligned edge offsets, CSS px)
-#define COL_CALLS 36
-#define COL_CW 56
-#define COL_CR 56
-#define COL_OUT 56
-#define COL_IN 56
-
-static void dashTableCols(int innerRight, int cacheR, int cacheW, int *xs) {
-    // xs[0]=calls, xs[1]=cacheW, xs[2]=cacheR, xs[3]=output, xs[4]=input (right
-    // edges). Each cache column is INDEPENDENT: a table whose cacheW is all
-    // zeros drops that column and hands its width back to the rest (the by-model
-    // table is pure cacheR on this machine and was squeezed by an empty cacheW).
+// table columns: sized from the MEASURED widest value per column, not fixed
+// CSS widths - the fixed widths were tuned on the old wide board and the
+// narrower one let "10063" (calls) run into "2.84B" (cache R). need[] is
+// indexed like xs: [0]=calls [1]=cacheW [2]=cacheR [3]=output [4]=input, in
+// physical px, pre-measured by dashTableRowNeeds.
+static void dashTableCols(int innerRight, int cacheR, int cacheW, const int *need, int *xs) {
     int x = innerRight;
-    xs[0] = x; x -= DX(COL_CALLS);
-    if (cacheW) { xs[1] = x; x -= DX(COL_CW); } else xs[1] = 0;
-    if (cacheR) { xs[2] = x; x -= DX(COL_CR); } else xs[2] = 0;
-    xs[3] = x; x -= DX(COL_OUT);
+    xs[0] = x; x -= need[0] + DX(12);
+    if (cacheW && need[1] > 0) { xs[1] = x; x -= need[1] + DX(12); } else xs[1] = 0;
+    if (cacheR && need[2] > 0) { xs[2] = x; x -= need[2] + DX(12); } else xs[2] = 0;
+    xs[3] = x; x -= need[3] + DX(12);
     xs[4] = x;
+}
+
+// fold one row's formatted values into need[] (max width per column)
+static void dashTableRowNeeds(HDC dc, HFONT f, const TokAgg *a, int *need) {
+    wchar_t vs[32];
+    int w;
+    fmtTokens(a->in, vs, 32); w = dashStrW(dc, vs, f); if (w > need[4]) need[4] = w;
+    fmtTokens(a->out, vs, 32); w = dashStrW(dc, vs, f); if (w > need[3]) need[3] = w;
+    if (a->cr > 0) { fmtTokens(a->cr, vs, 32); w = dashStrW(dc, vs, f); if (w > need[2]) need[2] = w; }
+    if (a->cw > 0) { fmtTokens(a->cw, vs, 32); w = dashStrW(dc, vs, f); if (w > need[1]) need[1] = w; }
+    swprintf(vs, 32, L"%lld", a->req); w = dashStrW(dc, vs, f); if (w > need[0]) need[0] = w;
 }
 
 // one table row: share bar behind the first cell, dot, numbers right-aligned
@@ -1603,8 +1613,10 @@ static void paintDash(HWND hwnd) {
         g_btnClose.right = bx; g_btnClose.left = bx - cw;
         g_btnClose.top = ty - DX(3); g_btnClose.bottom = ty + DX(11) + DX(6);
         bx -= cw + DX(6);
-        const wchar_t *rf = L"refresh";
-        int rw = dashStrW(dc, rf, fBtn) + DX(18);
+        // "..." while a refresh is in flight; keep the SAME measured width so
+        // the button never reflows under the cursor mid-click
+        const wchar_t *rf = GetTickCount64() < g_btnBusyUntil ? L"..." : L"refresh";
+        int rw = dashStrW(dc, L"refresh", fBtn) + DX(18);
         g_btnRefresh.right = bx; g_btnRefresh.left = bx - rw;
         g_btnRefresh.top = ty - DX(3); g_btnRefresh.bottom = ty + DX(11) + DX(6);
         bx -= rw + DX(6);
@@ -1794,7 +1806,9 @@ static void paintDash(HWND hwnd) {
                         if (dayRows[i].cw > 0) cacheW = 1;
                     }
                     int xs[5];
-                    dashTableCols(padL + innerW - secPadX, cacheR, cacheW, xs);
+                    int need[5] = { 0, 0, 0, 0, 0 };
+                    for (int i = 0; i < g_appCount; i++) dashTableRowNeeds(dc, fBody, &dayRows[i], need);
+                    dashTableCols(padL + innerW - secPadX, cacheR, cacheW, need, xs);
                     if (anyRec) {
                         dashTableHead(dc, padL + secPadX, ddy, xs, &t, fS9, L"APP");
                         ddy += DX(13);
@@ -1911,7 +1925,13 @@ static void paintDash(HWND hwnd) {
                     int xs[5];
                     int cacheR = side == 0 ? appCacheR : modelCacheR;
                     int cacheW = side == 0 ? appCacheW : modelCacheW;
-                    dashTableCols(sx + DX(12) + inner, cacheR, cacheW, xs);
+                    int need[5] = { 0, 0, 0, 0, 0 };
+                    if (side == 0) {
+                        for (int i = 0; i < g_appCount; i++) dashTableRowNeeds(dc, fBody, &g_appAgg[i], need);
+                    } else {
+                        for (int i = 0; i < g_modelCount; i++) dashTableRowNeeds(dc, fBody, &g_modelAgg[i], need);
+                    }
+                    dashTableCols(sx + DX(12) + inner, cacheR, cacheW, need, xs);
                     int ry = y + secPad + th2;
                     dashTableHead(dc, sx + DX(12), ry, xs, &t, fS9,
                                   side == 0 ? L"APP" : L"MODEL");
@@ -2046,8 +2066,18 @@ static void paintDash(HWND hwnd) {
                 wchar_t plan[24];
                 subsProvPlan(pi2, plan, 24);
                 if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
+                // absolute credits ride the head line (dashboard only): the chip
+                // stays a percentage per the captain's rule
+                wchar_t head2[80];
+                int cav = 0, ctot = 0;
+                subsCredits(pi2, &cav, &ctot);
+                if (cav >= 0 && ctot > 0) {
+                    wchar_t a2[24], b2[24];
+                    fmtNum(cav, a2, 24); fmtNum(ctot, b2, 24);
+                    swprintf(head2, 79, L"%ls \u00b7 %ls of %ls credits", plan, a2, b2);
+                } else lstrcpynW(head2, plan, 79);
                 int lx = px2 + DX(14) + DX(9) + DX(8) + dashStrW(dc, label, f13) + DX(8);
-                dashStr(dc, lx, py2 + DX(14), plan, t.dim, fS10);
+                dashStr(dc, lx, py2 + DX(14), head2, t.dim, fS10);
             }
             // status pill (subs.css .pill): stale / capped / near cap / ok
             {
@@ -2125,14 +2155,16 @@ static void paintDash(HWND hwnd) {
                     }
                     if (rem > 0) gdipArcStroke(dc, t.pinkDeep, wpen, cx2 - rr, cy2 - rr, 2 * rr, 2 * rr, -90.0f, rem * 3.6f);
                 }
-                // center: "N%" pinkDeep + "left"
+                // center: "N%" pinkDeep + "left", the ink centered in the ring
                 wchar_t pctS[8];
                 swprintf(pctS, 7, L"%d", rem);
-                int pw2 = dashStrW(dc, pctS, fPct) + DX(8);
-                int cx0 = kx + (pieD - pw2) / 2;
-                dashStr(dc, cx0, ky + pieD / 2 - DX(15), pctS, t.pinkDeep, fPct);
-                dashStr(dc, cx0 + dashStrW(dc, pctS, fPct) + DX(1), ky + pieD / 2 - DX(11), L"%", t.pinkDeep, fS10);
-                dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, ky + pieD / 2 + DX(6), L"left", t.dim, fS9);
+                int nw = dashStrW(dc, pctS, fPct);
+                int inkW = nw + DX(1) + dashStrW(dc, L"%", fS10);
+                int cx0 = kx + (pieD - inkW) / 2;
+                int cyc = ky + pieD / 2;
+                dashStr(dc, cx0, cyc - DX(15), pctS, t.pinkDeep, fPct);
+                dashStr(dc, cx0 + nw + DX(1), cyc - DX(11), L"%", t.pinkDeep, fS10);
+                dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, cyc + DX(6), L"left", t.dim, fS9);
                 // meta right of the pie, clipped to its own cell
                 int mx = kx + pieD + DX(12);
                 wchar_t up[20];
@@ -2187,7 +2219,7 @@ static void paintDash(HWND hwnd) {
             dashStr(dc, padL, y, g_cfg.subsEnabled ? L"No providers enabled." : L"Subscriptions are off (subs.enabled).", t.dim, fBody);
         }
         // panels are fixed-height rows, so the stack's bottom is the content edge
-        if (shown) g_dashContentH = y + shown * panelH + (shown - 1) * gap;
+        if (shown) g_dashContentH = y + shown * panelH + (shown - 1) * gap + DX(14);
     }
 
     DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal);
@@ -2293,6 +2325,11 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTimer(hwnd, 1, 500, NULL);
         return 0;
     case WM_TIMER:
+        if (g_btnBusyUntil && (subsFetchedEpochMs() != g_subsBusyEpoch
+                               || GetTickCount64() > g_btnBusyUntil)) {
+            g_btnBusyUntil = 0;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
         if (g_dashType == 1 || g_tokDataVersion != g_dashTokVersion) InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_PAINT: {
@@ -2346,9 +2383,27 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int bi2;
+        if (g_cfg.debug) {
+            char lb[200];
+            sprintf(lb, "[wizbar] dash click p=(%ld,%ld) rf=(%ld..%ld, %ld..%ld) cl=(%ld..%ld)",
+                    p.x, p.y, g_btnRefresh.left, g_btnRefresh.right, g_btnRefresh.top, g_btnRefresh.bottom,
+                    g_btnClose.left, g_btnClose.right);
+            writeLogA(lb);
+        }
         if (dashPtInBtn(p, &bi2)) {
             if (bi2 == 1) { // refresh: rescan tokens / refetch subs (Electron parity)
-                if (g_dashType == 0) scanTokenCache(); else subsRefetchNow();
+                unsigned long long nowt = GetTickCount64();
+                if (nowt < g_btnBusyUntil) return 0; // already refreshing
+                g_subsBusyEpoch = subsFetchedEpochMs();
+                // subs completes on its worker thread (epoch change clears the
+                // busy state); tokens runs inline, so it needs a cooldown FLOOR
+                // - a warm scan finishes in ~150 ms and without the floor the
+                // very next click would re-scan
+                g_btnBusyUntil = nowt + (g_dashType == 0 ? 1500ull : 12000ull);
+                InvalidateRect(hwnd, NULL, FALSE);
+                UpdateWindow(hwnd); // paint the "..." before the blocking scan
+                if (g_dashType == 0) scanTokenCache();
+                else subsRefetchNow();
                 InvalidateRect(hwnd, NULL, FALSE);
             } else DestroyWindow(hwnd);
             return 0;
@@ -2416,7 +2471,7 @@ static void dashToggle(int type) {
     // captain sees ONE window at its final size instead of a board that grows
     // into place.
     g_dash = CreateWindowExW(WS_EX_APPWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
-                             WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
+                             WS_POPUP, (sw - cw) / 2, (sh - ch) / 2, cw, ch,
                              NULL, NULL, GetModuleHandleW(NULL), NULL);
     if (!g_dash) return;
     dashRoundCorners(g_dash);
@@ -2991,7 +3046,8 @@ static const char *g_template =
     "             \"providers\": [\r\n"
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
-    "               { \"type\": \"antigravity\", \"enabled\": false, \"label\": \"Antigravity\", \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
+    "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
+    "                                                  -- one entry renders two panels: Antigravity (Gemini) + Antigravity (GPT/Claude)\r\n"
     "             ] },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
     "  \"general\": { \"showTray\": true }\r\n"

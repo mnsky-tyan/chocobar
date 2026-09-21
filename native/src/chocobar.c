@@ -61,7 +61,7 @@ typedef struct {
 } TokSource;
 
 #define MAX_CUSTOM 16
-#define MAX_SUBS 4
+#define MAX_SUBS 6
 #define MAX_USER_ICONS 16
 
 // a config-defined icon: name (referenced by modules.custom[].icon), SVG path
@@ -87,6 +87,7 @@ typedef struct {
 // subscription provider (chip fetcher; mirrors config.subs.providers)
 typedef struct {
     int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity
+    int family;          // antigravity only: 0 = Gemini, 1 = GPT/Claude
     int enabled;
     wchar_t *label;
     wchar_t *authPath;     // chatgpt auth.json, antigravity pi auth.json
@@ -290,7 +291,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     // sized to the captain's 1440x900 CSS desktop: wide enough that the two
     // tables are not squeezed into half-width columns, tall enough that the
     // content-fit never has to grow it past the screen
-    c->dashW = 1060; c->dashH = 620; c->subsW = 900; c->subsH = 520;
+    c->dashW = 900; c->dashH = 520; c->subsW = 880; c->subsH = 580;
     c->tokenCachePath = wideDup(L"");
     c->tokensAppCount = 0;
     c->tokensEnabled = 1;
@@ -522,6 +523,17 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                     sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
                     c->subsProviderCount++;
+                    // one antigravity entry feeds TWO panels: the IDE reports
+                    // one quota per model FAMILY (Gemini vs Claude/GPT), and a
+                    // four-pies-in-a-row panel was too cramped to read
+                    if (sp->type == 2 && c->subsProviderCount < MAX_SUBS) {
+                        SubsProvider *sp2 = &c->subsProviders[c->subsProviderCount];
+                        memset(sp2, 0, sizeof(*sp2));
+                        *sp2 = *sp;               // share the parsed strings
+                        sp2->label = NULL;        // canonical names below
+                        sp2->family = 1;
+                        c->subsProviderCount++;
+                    }
                 }
                 // advance k past this element
                 k += jtokSpan(t, k);

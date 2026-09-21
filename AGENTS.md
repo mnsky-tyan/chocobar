@@ -210,6 +210,24 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `"antigravity"` object and ABORTS on any doubt - a corrupted auth.json
   breaks the captain's whole toolchain, not just this bar.
 
+## Antigravity local quota source (p_subs.c, 2026-09-22)
+
+- The IDE's own /quota numbers come from its LOCAL language server, not the
+  cloud: find `language_server_windows_x64.exe`, read `--csrf_token` from its
+  command line, POST `{}` to `http://127.0.0.1:<port>/exa.language_server_pb.
+  LanguageServerService/GetUserStatus` with header `X-Codeium-Csrf-Token`.
+  Port/token are NOT persisted: the command line is read via
+  NtQueryInformationProcess -> PEB -> ProcessParameters. PebBaseAddress and the
+  CommandLine UNICODE_STRING offsets VARY per boot/build - every candidate is
+  validated (page-aligned PEB, path-like decoded string); never hard-code one.
+  Listening ports come from GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)
+  (build.sh links iphlpapi). Prefer the non-daily endpoint instance.
+- One quota per model FAMILY (Gemini vs Claude/GPT): group clientModelConfigs
+  by family, take the min remainingFraction. One config entry expands into two
+  providers (family 0/1) = two board panels; window labels drop the family
+  prefix (the panel name carries it). Cloud fallback (grouped summary ->
+  per-model) stays for when the IDE is closed.
+
 ## Dev bar etiquette
 
 - The native dev bar runs on its OWN shell: spawn a `wt` window titled

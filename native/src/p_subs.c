@@ -11,6 +11,9 @@
 //  - Local midnight TZ: nothing here uses midnight (tokens does; see p_ui).
 
 #include <winhttp.h>
+#include <winsock2.h>
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
 
 static void writeLogA(const char *s); // p_ui
 
@@ -27,6 +30,10 @@ typedef struct { wchar_t label[24]; int pct; int rem; int used; int total; long 
 static SubsWin g_subsWin[MAX_SUBS][4];  // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
 static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
+// absolute prompt credits where the vendor reports them (Antigravity's local
+// GetUserStatus does: availablePromptCredits / monthlyPromptCredits). The chip
+// stays a percentage; the board head shows the numbers.
+static int g_subsCredAvail[MAX_SUBS]; static int g_subsCredTotal[MAX_SUBS];
 static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
 static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
@@ -292,6 +299,21 @@ static void subsSetPlan(int idx, const wchar_t *plan) {
     EnterCriticalSection(&g_subsLock);
     if (plan && *plan) lstrcpynW(g_subsPlan[idx], plan, 24);
     else g_subsPlan[idx][0] = 0;
+    LeaveCriticalSection(&g_subsLock);
+}
+
+// store the credit pair; -1 = unknown (the head then shows no numbers)
+static void subsSetCredits(int idx, int avail, int total) {
+    if (idx < 0 || idx >= MAX_SUBS) return;
+    EnterCriticalSection(&g_subsLock);
+    g_subsCredAvail[idx] = avail; g_subsCredTotal[idx] = total;
+    LeaveCriticalSection(&g_subsLock);
+}
+
+void subsCredits(int i, int *avail, int *total) {
+    if (i < 0 || i >= MAX_SUBS) { *avail = *total = -1; return; }
+    EnterCriticalSection(&g_subsLock);
+    *avail = g_subsCredAvail[i]; *total = g_subsCredTotal[i];
     LeaveCriticalSection(&g_subsLock);
 }
 
@@ -797,7 +819,361 @@ static void subsAgyHeaders(wchar_t *hdrs, int cch, const wchar_t *token) {
         token);
 }
 
+
+// ------------------------------------------------- local language server ----
+// The quota the IDE itself shows lives on Antigravity's LOCAL language server,
+// not on the cloud summary endpoint: GetUserStatus reports one fraction per
+// model FAMILY (Gemini vs Claude/GPT) and its numbers are exactly what the
+// captain's /quota prints. The server is spawned by the IDE with the port and
+// CSRF token on its command line - neither is persisted anywhere - so the bar
+// reads them the way a debugger would: PEB -> ProcessParameters -> CommandLine,
+// then the owning PID's listening ports from the TCP table.
+#define AGY_LS_EXE L"language_server_windows_x64.exe"
+
+typedef struct {
+    DWORD pid;
+    int port;
+    int daily;                // command line pointed at the sandbox endpoint
+    wchar_t token[80];
+} AgyLocal;
+
+// another process's command line: PEB -> ProcessParameters -> CommandLine.
+// PEB/UNICODE_STRING offsets vary across Windows builds, so every candidate is
+// validated: only a decoded path-like string is accepted, and one containing
+// the needle (e.g. "--csrf_token") always wins over a bare ImagePathName.
+static BOOL subsAgyCmdLine(DWORD pid, const wchar_t *needle, wchar_t *out, int cb) {
+    out[0] = 0;
+    typedef LONG (WINAPI *NtQIP)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    if (!nt) return FALSE;
+    NtQIP q = (NtQIP)(void *)GetProcAddress(nt, "NtQueryInformationProcess");
+    if (!q) return FALSE;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!h) return FALSE;
+    BOOL ok = FALSE;
+    BYTE pbi[64];
+    if (q(h, 0 /*ProcessBasicInformation*/, pbi, sizeof(pbi), NULL) == 0) {
+        static const DWORD pebOffs[2] = { 0x10, 0x08 }; // PebBaseAddress candidates
+        for (int po = 0; po < 2 && !ok; po++) {
+            DWORD_PTR peb = *(DWORD_PTR *)(pbi + pebOffs[po]);
+            if (!peb || (peb & 0xFFF)) continue; // a PEB is page aligned
+            DWORD_PTR pp = 0;
+            if (!ReadProcessMemory(h, (LPCVOID)(peb + 0x20), &pp, sizeof(pp), NULL) || !pp) continue;
+            BYTE blk[0x100];
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(h, (LPCVOID)pp, blk, sizeof(blk), &got) || got < 0xA0) continue;
+            static const DWORD cmdOffs[5] = { 0x70, 0x78, 0x80, 0x88, 0x68 };
+            for (int co = 0; co < 5 && !ok; co++) {
+                DWORD o = cmdOffs[co];
+                USHORT ln = *(USHORT *)(blk + o);
+                DWORD_PTR bp = *(DWORD_PTR *)(blk + o + 8);
+                if (!ln || ln > 8000 || !bp) continue;
+                wchar_t tmp[2048];
+                SIZE_T rd = 0;
+                int want = ln < (int)sizeof(tmp) - 2 ? ln : (int)sizeof(tmp) - 2;
+                if (!ReadProcessMemory(h, (LPCVOID)bp, tmp, (SIZE_T)want, &rd) || rd < 8) continue;
+                tmp[rd / 2] = 0;
+                // validate: looks like a command line (quoted path or drive letter)
+                BOOL pathlike = (tmp[0] == L'"') ||
+                                ((tmp[0] >= L'A' && tmp[0] <= L'Z') || (tmp[0] >= L'a' && tmp[0] <= L'z')) &&
+                                (tmp[1] == L':') && (tmp[2] == L'\\' || tmp[2] == L'/');
+                if (!pathlike) continue;
+                if (needle && wcsstr(tmp, needle)) {
+                    int n = (int)(rd / 2);
+                    if (n > cb - 1) n = cb - 1;
+                    memcpy(out, tmp, (size_t)n * 2);
+                    out[n] = 0;
+                    ok = TRUE; // the needle decides: ImagePathName also matches
+                } else if (!out[0]) {
+                    int n = (int)(rd / 2);
+                    if (n > cb - 1) n = cb - 1;
+                    memcpy(out, tmp, (size_t)n * 2);
+                    out[n] = 0; // first path-like candidate as the fallback
+                }
+            }
+        }
+    }
+    CloseHandle(h);
+    return out[0] != 0;
+}
+
+// listening TCP ports owned by pid (GetExtendedTcpTable, not a netstat spawn)
+static int subsAgyListenPorts(DWORD pid, int *ports, int max) {
+    DWORD size = 0;
+    if (GetExtendedTcpTable(NULL, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) != ERROR_INSUFFICIENT_BUFFER)
+        return 0;
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, size);
+    if (!buf) return 0;
+    int n = 0;
+    if (GetExtendedTcpTable(buf, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) == ERROR_SUCCESS) {
+        MIB_TCPTABLE_OWNER_PID *t = (MIB_TCPTABLE_OWNER_PID *)buf;
+        DWORD i2;
+        for (i2 = 0; i2 < t->dwNumEntries && n < max; i2++) {
+            if (t->table[i2].dwOwningPid != pid) continue;
+            DWORD lp = t->table[i2].dwLocalPort & 0xFFFF;
+            ports[n] = (int)(((lp & 0xFF) << 8) | ((lp >> 8) & 0xFF));
+            n++;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    return n;
+}
+
+// find the language server + its csrf token. Prefers the PRODUCTION endpoint
+// (the sandbox/daily instance reports the same shapes but different numbers).
+static BOOL subsAgyLocalFind(AgyLocal *out) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return FALSE;
+    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
+    DWORD pids[8]; int np = 0, total = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            total++;
+            if (np < 8 && lstrcmpiW(pe.szExeFile, AGY_LS_EXE) == 0) pids[np++] = pe.th32ProcessID;
+            else if (g_cfg.debug && total < 400 && (wcsstr(pe.szExeFile, L"anguage") || wcsstr(pe.szExeFile, L"ntigravity"))) {
+                char lb[300];
+                WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, lb, 200, NULL, NULL);
+                char lb2[260];
+                sprintf(lb2, "[wizbar] subs agy: sees \"%s\" pid=%lu", lb, (unsigned long)pe.th32ProcessID);
+                writeLogA(lb2);
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    if (g_cfg.debug) {
+        char lb[96];
+        sprintf(lb, "[wizbar] subs agy find: %d of %d processes are the language server", np, total);
+        writeLogA(lb);
+    }
+    AgyLocal best; memset(&best, 0, sizeof(best));
+    BOOL have = FALSE;
+    for (int i = 0; i < np; i++) {
+        wchar_t cl[4096];
+        if (!subsAgyCmdLine(pids[i], L"--csrf_token", cl, 4096)) {
+            if (g_cfg.debug) writeLogA("[wizbar] subs agy: cmd line read failed");
+            continue;
+        }
+        wchar_t *tk = wcsstr(cl, L"--csrf_token");
+        if (!tk) continue;
+        tk += 12;
+        while (*tk == L' ') tk++;
+        if (*tk == L'"') tk++;
+        AgyLocal c; memset(&c, 0, sizeof(c));
+        c.pid = pids[i];
+        int j = 0;
+        while (tk[j] && !wcschr(L" \"", tk[j]) && j < 78) { c.token[j] = tk[j]; j++; }
+        c.token[j] = 0;
+        if (!c.token[0]) continue;
+        c.daily = wcsstr(cl, L"daily-cloudcode") != NULL;
+        int ports[16];
+        int npo = subsAgyListenPorts(c.pid, ports, 16);
+        for (int k = 0; k < npo; k++) if (ports[k] > 0) { c.port = ports[k]; break; }
+        if (g_cfg.debug) {
+            char lb[220];
+            sprintf(lb, "[wizbar] subs agy cand pid=%lu daily=%d tok=%.8s ports=%d port=%d",
+                    (unsigned long)c.pid, c.daily, c.token, npo, c.port);
+            writeLogA(lb);
+        }
+        if (!c.port) continue;
+        if (!have || (!c.daily && best.daily)) { best = c; have = TRUE; }
+    }
+    if (!have) return FALSE;
+    *out = best;
+    return TRUE;
+}
+
+// POST to 127.0.0.1:<port> over plain HTTP with the csrf header
+static char *subsAgyLocalPost(const AgyLocal *c, const char *body, int bodyLen,
+                              int timeoutMs, int *outStatus, int *outLen) {
+    *outStatus = 0; *outLen = 0;
+    HINTERNET ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    if (!ses) return NULL;
+    char *result = NULL;
+    HINTERNET con = NULL, req = NULL;
+    wchar_t hdrs[160];
+    swprintf(hdrs, 159, L"X-Codeium-Csrf-Token: %ls\r\nContent-Type: application/json\r\n", c->token);
+    do {
+        WinHttpSetTimeouts(ses, 2000, timeoutMs, 2000, timeoutMs);
+        con = WinHttpConnect(ses, L"127.0.0.1", (INTERNET_PORT)c->port, 0);
+        if (!con) break;
+        req = WinHttpOpenRequest(con, L"POST",
+            L"/exa.language_server_pb.LanguageServerService/GetUserStatus", NULL,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0); // plain HTTP
+        if (!req) break;
+        WinHttpAddRequestHeaders(req, hdrs, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)body,
+                                (DWORD)bodyLen, (DWORD)bodyLen, 0)) break;
+        if (!WinHttpReceiveResponse(req, NULL)) break;
+        DWORD status = 0, sz = sizeof(status);
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+        *outStatus = (int)status;
+        int cap = 64 * 1024, len = 0;
+        result = (char *)HeapAlloc(GetProcessHeap(), 0, cap);
+        if (!result) break;
+        for (;;) {
+            DWORD rd = 0;
+            if (len + 8192 > cap) {
+                int ncap = cap * 2;
+                char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, result, ncap);
+                if (!nb) break;
+                result = nb; cap = ncap;
+            }
+            if (!WinHttpReadData(req, result + len, 8192, &rd)) break;
+            if (!rd) break;
+            len += (int)rd;
+        }
+        if (result) result[len] = 0;
+        *outLen = len;
+    } while (0);
+    if (req) WinHttpCloseHandle(req);
+    if (con) WinHttpCloseHandle(con);
+    WinHttpCloseHandle(ses);
+    return result;
+}
+
+
+// ---- the LOCAL source: GetUserStatus on Antigravity's language server -------
+// Groups clientModelConfigs by family the way the IDE's own status bar does:
+// "Gemini" vs everything else (Claude/GPT). Every model in a family shares the
+// same fraction and reset, so the group fraction IS the model quota.
+static int subsAgyQuotaKeyN(const char *label) {
+    char lo[80];
+    int i;
+    for (i = 0; label[i] && i < 79; i++)
+        lo[i] = (label[i] >= 'A' && label[i] <= 'Z') ? (char)(label[i] + 32) : label[i];
+    lo[i] = 0;
+    return strstr(lo, "gemini") ? 0 : 1;
+}
+
+static int subsAgyQuotaKey(const wchar_t *label) {
+    // 0 = Gemini family, 1 = Claude/GPT (and any other non-Gemini model)
+    wchar_t lo[80];
+    int i;
+    for (i = 0; label[i] && i < 79; i++) {
+        wchar_t ch = label[i];
+        lo[i] = (ch >= L'A' && ch <= L'Z') ? (wchar_t)(ch + 32) : ch;
+    }
+    lo[i] = 0;
+    return wcsstr(lo, L"gemini") ? 0 : 1;
+}
+
+static int subsFetchAgyLocal(int idx, int fam) {
+    AgyLocal lc;
+    if (!subsAgyLocalFind(&lc)) return 0; // not running: caller falls back
+    static const char *body = "{}";
+    int st = 0, bl = 0;
+    char *resp = subsAgyLocalPost(&lc, body, 2, g_cfg.subsTimeoutMs, &st, &bl);
+    if (!resp || st != 200) {
+        if (g_cfg.debug) {
+            char lb[128];
+            sprintf(lb, "[wizbar] subs agy local: port %d st=%d (%s)", lc.port, st, resp ? "ok" : "null");
+            writeLogA(lb);
+        }
+        if (resp) HeapFree(GetProcessHeap(), 0, resp);
+        return 0;
+    }
+    jsmntok_t *t = NULL;
+    int n = subsParseBig(resp, bl, &t);
+    if (n <= 0 || t[0].type != JSMN_OBJECT) {
+        HeapFree(GetProcessHeap(), 0, resp);
+        if (t) HeapFree(GetProcessHeap(), 0, t);
+        return 0;
+    }
+    int us = jobjGet(resp, t, 0, "userStatus");
+    if (us < 0 || t[us].type != JSMN_OBJECT) {
+        HeapFree(GetProcessHeap(), 0, resp); HeapFree(GetProcessHeap(), 0, t);
+        return 0;
+    }
+    wchar_t plan[24] = L"Antigravity";
+    {
+        int ps = jobjGet(resp, t, us, "planStatus");
+        int pi2 = ps >= 0 ? jobjGet(resp, t, ps, "planInfo") : -1;
+        if (pi2 >= 0) {
+            wchar_t *nm = subsJstr(resp, t, pi2, "planName");
+            if (nm && *nm) { lstrcpynW(plan, nm, 24); }
+            wideFree(&nm);
+        }
+        // absolute prompt credits (dashboard only, per the captain's rule)
+        double avail = -1, monthly = -1;
+        if (ps >= 0) {
+            int av = jobjGet(resp, t, ps, "availablePromptCredits");
+            if (av >= 0 && t[av].type == JSMN_PRIMITIVE) avail = wcstod(jstrTok(resp, t, av, NULL), NULL);
+            if (pi2 >= 0) {
+                int mo = jobjGet(resp, t, pi2, "monthlyPromptCredits");
+                if (mo >= 0) { wchar_t *ms = jstrTok(resp, t, mo, NULL); if (ms) { monthly = wcstod(ms, NULL); wideFree(&ms); } }
+            }
+        }
+        if (avail >= 0 && monthly > 0 && fam == 0) {
+            int left = (int)(avail + 0.5);
+            subsSetCredits(idx, left, (int)(monthly + 0.5));
+        }
+    }
+    // two family windows: Gemini and Claude/GPT
+    SubsWin wins[2];
+    double frac[2] = { -1, -1 };
+    long long reset[2] = { 0, 0 };
+    int cmd = jobjGet(resp, t, us, "cascadeModelConfigData");
+    cmd = cmd >= 0 ? jobjGet(resp, t, cmd, "clientModelConfigs") : -1;
+    if (cmd >= 0 && t[cmd].type == JSMN_ARRAY) {
+        int cnt = t[cmd].size;
+        int k = cmd + 1;
+        for (int i = 0; i < cnt; i++, k += jtokSpan(t, k)) {
+            if (t[k].type != JSMN_OBJECT) continue;
+            wchar_t *label = subsJstr(resp, t, k, "label");
+            if (!label) continue;
+            int fam = subsAgyQuotaKey(label);
+            wideFree(&label);
+            int qi = jobjGet(resp, t, k, "quotaInfo");
+            if (qi < 0) continue;
+            int rf = jobjGet(resp, t, qi, "remainingFraction");
+            if (rf < 0 || t[rf].type != JSMN_PRIMITIVE) continue;
+            wchar_t *rs = jstrTok(resp, t, rf, NULL);
+            if (!rs) continue;
+            double f = wcstod(rs, NULL);
+            wideFree(&rs);
+            if (f < 0 || f > 1) continue;
+            long long rms = 0;
+            int rt = jobjGet(resp, t, qi, "resetTime");
+            if (rt >= 0) {
+                char *iso = subsJstrRaw(resp, t, rt, NULL);
+                if (iso) { rms = subsIsoToMs(iso, (int)strlen(iso)); HeapFree(GetProcessHeap(), 0, iso); }
+            }
+            if (frac[fam] < 0 || f < frac[fam]) { frac[fam] = f; reset[fam] = rms; }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, t);
+    HeapFree(GetProcessHeap(), 0, resp);
+    // one window: this panel's family quota, the window the IDE calls weekly
+    int f = fam ? 1 : 0;
+    if (frac[f] < 0) f = f ? 0 : 1; // fall back to whatever the IDE reports
+    if (frac[f] < 0) return 0;
+    memset(&wins[0], 0, sizeof(wins[0]));
+    lstrcpynW(wins[0].label, L"week", 24);
+    wins[0].rem = (int)(frac[f] * 100.0 + 0.5);
+    wins[0].pct = 100 - wins[0].rem;
+    wins[0].used = -1; wins[0].total = -1;
+    wins[0].resetAt = reset[f];
+    subsSetWins(idx, wins, 1);
+    subsSetState(idx, wins[0].rem, 1);
+    subsSetPlan(idx, plan);
+    if (g_cfg.debug) {
+        char lb[240];
+        sprintf(lb, "[wizbar] subs agy local: port=%d fam=%d rem=%d gemini=%.3f claude=%.3f",
+                lc.port, fam, wins[0].rem, frac[0] < 0 ? -1 : frac[0], frac[1] < 0 ? -1 : frac[1]);
+        writeLogA(lb);
+    }
+    return 1;
+}
+
 static int subsFetchAntigravity(int idx) {
+    // The provider pool holds TWO slots per antigravity entry (family 0 =
+    // Gemini, 1 = GPT/Claude); each reports only its own family's quota.
+    int fam = (idx >= 0 && idx < MAX_SUBS) ? g_cfg.subsProviders[idx].family : 0;
+    // The local language server is the authoritative source (it is what the
+    // IDE's own quota UI shows). Only fall back to the cloud endpoints when it
+    // is not running, e.g. the IDE is closed.
+    if (subsFetchAgyLocal(idx, fam)) return 1;
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(idx, &auth, authPath, MAX_PATH)) {
@@ -924,6 +1300,9 @@ static int subsFetchAntigravity(int idx) {
                             }
                         }
                         wideFree(&dn);
+                        // family filter: this slot only renders its own family
+                        // (the outer loop's jtokSpan already spans the buckets)
+                        if (subsAgyQuotaKey(shortName) != fam) continue;
                         int buckets = jobjGet(resp, t, k, "buckets");
                         if (buckets >= 0 && t[buckets].type == JSMN_ARRAY) {
                             int bc = t[buckets].size;
@@ -945,11 +1324,11 @@ static int subsFetchAntigravity(int idx) {
                                         // vendor's own quota UI calls it.
                                         wchar_t *win = subsJstr(resp, t, bk, "window");
                                         if (win && lstrcmpiW(win, L"weekly") == 0)
-                                            swprintf(wins[nwin].label, 24, L"%ls week", shortName);
+                                            lstrcpynW(wins[nwin].label, L"week", 24);
                                         else if (win)
-                                            swprintf(wins[nwin].label, 24, L"%ls %ls", shortName, win);
+                                            lstrcpynW(wins[nwin].label, win, 24);
                                         else
-                                            swprintf(wins[nwin].label, 24, L"%ls win", shortName);
+                                            lstrcpynW(wins[nwin].label, L"win", 24);
                                         wideFree(&win);
                                         wins[nwin].pct = (int)(100.0 - rem + 0.5);
                                         wins[nwin].rem = (int)(rem + 0.5);
@@ -1020,7 +1399,12 @@ static int subsFetchAntigravity(int idx) {
                         int isChat = klen > 5 && strncmp(resp + t[k].start, "chat_", 5) == 0;
                         int isInternal = subsJint(resp, t, k + 1, "isInternal", 0);
                         int q = jobjGet(resp, t, k + 1, "quotaInfo");
-                        if (!isChat && !isInternal && q >= 0 && t[q].type == JSMN_OBJECT) {
+                        char mkey[80];
+                        int mkl = klen < 79 ? klen : 79;
+                        memcpy(mkey, resp + t[k].start, mkl);
+                        mkey[mkl] = 0;
+                        if (!isChat && !isInternal && subsAgyQuotaKeyN(mkey) == fam
+                            && q >= 0 && t[q].type == JSMN_OBJECT) {
                             double rf = subsJdouble(resp, t, q, "remainingFraction", -1);
                             if (rf >= 0) {
                                 if (rf > 1) rf = 1;
@@ -1110,8 +1494,9 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                     wchar_t plan[24]; subsProvPlan(i, plan, 24);
                     if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
                     char line[400];
+                    wchar_t lab[64]; subsProvLabel(i, lab, 64);
                     int off = sprintf(line, "[wizbar] subs[%d] %ls plan=%ls wins=%d stale=%d ::", i,
-                                      g_cfg.subsProviders[i].label ? g_cfg.subsProviders[i].label : L"?", plan, wn, stale);
+                                      lab, plan, wn, stale);
                     for (int k = 0; k < wn && off < 360; k++)
                         off += sprintf(line + off, " [%ls rem=%d pct=%d used=%d total=%d]",
                                        w[k].label, w[k].rem, w[k].pct, w[k].used, w[k].total);
@@ -1169,9 +1554,10 @@ static int subsChipStale(void) {
 static void subsProvLabel(int i, wchar_t *out, int cb) {
     const wchar_t *l = i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].label
                            ? g_cfg.subsProviders[i].label : NULL;
-    if (!l) l = (i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].type == 1) ? L"Z.ai"
-              : (i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].type == 2) ? L"Antigravity"
-              : L"ChatGPT";
+    int fam = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].family : 0;
+    int it = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].type : 0;
+    if (it == 2) l = fam ? L"Antigravity (GPT/Claude)" : L"Antigravity (Gemini)";
+    else if (!l || !*l) l = it == 1 ? L"Z.ai" : L"ChatGPT";
     lstrcpynW(out, l, cb);
 }
 // provider plan name (Electron p.plan); empty until the first successful fetch
