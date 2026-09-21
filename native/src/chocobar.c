@@ -510,7 +510,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
             int k = arr + 1;
             for (int j = 0; j < n2; j++) {
                 jsmntok_t *e = &t[k];
-                if (e->type == JSMN_OBJECT) {
+                if (e->type == JSMN_OBJECT && c->subsProviderCount < MAX_SUBS) {
                     SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
                     memset(sp, 0, sizeof(*sp));
                     int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);

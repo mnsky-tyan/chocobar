@@ -1456,6 +1456,13 @@ static void dashTableRowNeeds(HDC dc, HFONT f, const TokAgg *a, int *need) {
     if (a->cw > 0) { fmtTokens(a->cw, vs, 32); w = dashStrW(dc, vs, f); if (w > need[1]) need[1] = w; }
     swprintf(vs, 32, L"%lld", a->req); w = dashStrW(dc, vs, f); if (w > need[0]) need[0] = w;
 }
+static void dashTableHeadNeeds(HDC dc, HFONT f, int *need) {
+    static const wchar_t *hd[5] = { L"CALLS", L"CACHE W", L"CACHE R", L"OUTPUT", L"INPUT" };
+    for (int i = 0; i < 5; i++) {
+        int w = dashStrW(dc, hd[i], f);
+        if (w > need[i]) need[i] = w;
+    }
+}
 
 // one table row: share bar behind the first cell, dot, numbers right-aligned
 static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
@@ -1808,6 +1815,7 @@ static void paintDash(HWND hwnd) {
                     int xs[5];
                     int need[5] = { 0, 0, 0, 0, 0 };
                     for (int i = 0; i < g_appCount; i++) dashTableRowNeeds(dc, fBody, &dayRows[i], need);
+                    dashTableHeadNeeds(dc, fS9, need);
                     dashTableCols(padL + innerW - secPadX, cacheR, cacheW, need, xs);
                     if (anyRec) {
                         dashTableHead(dc, padL + secPadX, ddy, xs, &t, fS9, L"APP");
@@ -1931,6 +1939,7 @@ static void paintDash(HWND hwnd) {
                     } else {
                         for (int i = 0; i < g_modelCount; i++) dashTableRowNeeds(dc, fBody, &g_modelAgg[i], need);
                     }
+                    dashTableHeadNeeds(dc, fS9, need);
                     dashTableCols(sx + DX(12) + inner, cacheR, cacheW, need, xs);
                     int ry = y + secPad + th2;
                     dashTableHead(dc, sx + DX(12), ry, xs, &t, fS9,
@@ -3025,7 +3034,7 @@ static const char *g_template =
     "              \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
     "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
-    "  \"dashboard\": { \"width\": 840, \"height\": 580 },\r\n"
+    "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
     "  \"tokens\": { \"appFilter\": [], \"cachePath\": \"\" },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"
@@ -3042,12 +3051,12 @@ static const char *g_template =
     "    ]\r\n"
     "  },\r\n"
     "  \"subs\": { \"enabled\": false, \"intervalMinutes\": 2, \"fetchTimeoutMs\": 20000,\r\n"
-    "             \"width\": 820, \"height\": 480,\r\n"
+    "             \"width\": 880, \"height\": 580,\r\n"
     "             \"providers\": [\r\n"
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
     "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
-    "                                                  -- one entry renders two panels: Antigravity (Gemini) + Antigravity (GPT/Claude)\r\n"
+    "               // one entry renders two panels: Antigravity (Gemini) + Antigravity (GPT/Claude)\r\n"
     "             ] },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
     "  \"general\": { \"showTray\": true }\r\n"
