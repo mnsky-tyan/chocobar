@@ -54,6 +54,25 @@ class BarWindow {
       }
     });
 
+    // Navigation lockdown: the bar renders ONE local file and nothing else.
+    // A debug port (CDP) or a stray renderer navigation that points this
+    // window at a web URL would replace the bar with a web page - the bar is
+    // the most exposed window on screen (always visible, thin, top of the
+    // screen), so it must refuse to leave its own document.
+    const lockNav = (wc) => {
+      if (!wc) return;
+      // Each hook is optional: a stubbed/partial webContents (tests, future
+      // Electron API drift) must never break window creation.
+      if (typeof wc.on === 'function') {
+        wc.on('will-navigate', (e) => e.preventDefault());
+        wc.on('will-redirect', (e) => e.preventDefault());
+      }
+      if (typeof wc.setWindowOpenHandler === 'function') {
+        wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+      }
+    };
+    lockNav(this.win.webContents);
+
     this.hwnd = native.hwndNumberFromBuffer(this.win.getNativeWindowHandle());
     // Structural taskbar exclusion: WS_EX_TOOLWINDOW makes the shell skip the
     // window on EVERY enumeration, so no taskbar rebuild (explorer restart,
