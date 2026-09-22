@@ -717,7 +717,14 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
     char *out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 8192);
     if (!out) { HeapFree(GetProcessHeap(), 0, buf); return; }
     int o = 0;
-    char *p = buf;
+    // Copy the prefix before the antigravity object verbatim, then start the
+    // search AT the object (ob, never buf): a sibling provider stored earlier
+    // in the file (openai-codex also has access/refresh/expires) must never be
+    // touched - only the antigravity object's own keys are replaced.
+    int pre = (int)(ob - buf);
+    memcpy(out, buf, (size_t)pre);
+    o = pre;
+    char *p = ob;
     while (p < oe) {
         // find the next value for one of the three keys within the span
         const char *names[3] = { "\"access\"", "\"refresh\"", "\"expires\"" };
@@ -778,10 +785,18 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
     HANDLE h = CreateFileW(tmp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD wr = 0;
-        WriteFile(h, out, o, &wr, NULL);
+        BOOL wrote = WriteFile(h, out, (DWORD)o, &wr, NULL);
         CloseHandle(h);
-        if (!MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
-            writeLogA("subs agy: auth token write-back failed (store locked or read-only)");
+        // rename only when the temp holds the COMPLETE payload: a partial or
+        // failed write must leave the live store untouched, not replace it
+        // with a truncated file.
+        if (wrote && wr == (DWORD)o) {
+            if (!MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+                writeLogA("subs agy: auth token write-back failed (store locked or read-only)");
+                DeleteFileW(tmp);
+            }
+        } else {
+            writeLogA("subs agy: auth temp file write incomplete");
             DeleteFileW(tmp);
         }
     } else {
