@@ -1,6 +1,6 @@
 'use strict';
 // WizBar — slim acrylic status bar floating above the terminal + token tracker.
-const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut, session } = require('electron');
+const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut, session, screen } = require('electron');
 
 // --- network lockdown ---------------------------------------------------------
 // Every Chocobar window renders exactly one local file, so a network request
