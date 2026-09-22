@@ -224,6 +224,21 @@ static int g_tokensTick = 0;
 typedef struct { long long in, out, cr, cw, req; } TokAgg;
 static TokAgg g_appAgg[DASH_MAX_APPS];
 static char g_appName[DASH_MAX_APPS][20];
+// tokens.labels maps a raw source key to its dashboard display name (e.g.
+// "pi" -> "pi-wsl" when the store lives on WSL). The aggregation keys stay
+// raw; only rendered text is swapped, and the row dot colour still keys on
+// the raw name so an app keeps its colour.
+static void appLabelW(int ai, wchar_t *out, int cb) {
+    wchar_t key[24];
+    MultiByteToWideChar(CP_UTF8, 0, g_appName[ai], -1, key, 24);
+    for (int i = 0; i < g_cfg.tokLabelCount; i++) {
+        if (lstrcmpiW(key, g_cfg.tokLabelKeys[i]) == 0) {
+            lstrcpynW(out, g_cfg.tokLabelVals[i], cb);
+            return;
+        }
+    }
+    lstrcpynW(out, key, cb);
+}
 static int g_appCount = 0;
 static char g_modelName[DASH_MAX_MODELS][48]; // "app|model", Electron byModel key
 static char g_modelLabel[DASH_MAX_MODELS][48]; // first-seen raw model id (display)
@@ -1878,7 +1893,7 @@ static void paintDash(HWND hwnd) {
                         TokAgg *a = &dayRows[i];
                         if (a->req == 0) continue;
                         wchar_t an[24];
-                        MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
+                        appLabelW(i, an, 24);
                         dashDot(dc, padL + secPadX + 2, ddy + (DX(15) - DX(8)) / 2, DX(8), appDotColor(g_appName[i], &t));
                         SelectObject(dc, fBody);
                         SetTextColor(dc, t.fg);
@@ -2002,7 +2017,7 @@ static void paintDash(HWND hwnd) {
                         for (int i = 0; i < appRows; i++) {
                             int ai = appOrder[i];
                             wchar_t an[24];
-                            MultiByteToWideChar(CP_UTF8, 0, g_appName[ai], -1, an, 24);
+                            appLabelW(ai, an, 24);
                             long long s = g_appAgg[ai].in + g_appAgg[ai].out + g_appAgg[ai].cr + g_appAgg[ai].cw;
                             TokAgg a2 = g_appAgg[ai];
                             // even rows get the zebra wash (dash.css nth-child(even))
@@ -2336,7 +2351,7 @@ static void dashTipCell(HWND hwnd, POINT p) {
                     TokAgg *a = &g_dayApp[di][i];
                     if (a->req == 0) continue;
                     wchar_t an[24], line[56];
-                    MultiByteToWideChar(CP_UTF8, 0, g_appName[i], -1, an, 24);
+                    appLabelW(i, an, 24);
                     wchar_t tn2[24];
                     fmtTokens(a->in + a->out + a->cr + a->cw, tn2, 24);
                     swprintf(line, 55, L"\n%ls: %ls (%lld)", an, tn2, a->req);
@@ -3133,8 +3148,10 @@ static const char *g_template =
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
     "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
-    "               // one entry renders two panels: Antigravity (Gemini) + Antigravity (GPT/Claude)\r\n"
+    "               // one entry = one panel: the 5h window across Gemini + Claude/GPT (no weekly quota exists)\r\n"
     "             ] },\r\n"
+    "  \"tokens\": { \"enabled\": false,\r\n"
+    "             \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
     "  \"general\": { \"showTray\": true }\r\n"
     "}\r\n";

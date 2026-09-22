@@ -134,6 +134,11 @@ typedef struct {
     wchar_t *tokenCachePath;    // override for ~/.wizbar/token-cache.json
     wchar_t tokensApps[16][20]; // harness allowlist for token stats (empty = all)
     int tokensAppCount;
+    // tokens.labels: display-name overrides for the dashboard rows, keyed by
+    // the raw source key (e.g. "pi" -> "pi-wsl" when the store is on WSL)
+    wchar_t tokLabelKeys[16][20];
+    wchar_t tokLabelVals[16][40];
+    int tokLabelCount;
     int tokensEnabled;            // master switch: off = zero scans
     int tokensRescanSec;          // tokens.rescanMinutes -> seconds between scans
     TokSource tokSrc[4];          // JSONL session stores for the live scan
@@ -294,6 +299,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->dashW = 900; c->dashH = 520; c->subsW = 880; c->subsH = 580;
     c->tokenCachePath = wideDup(L"");
     c->tokensAppCount = 0;
+    c->tokLabelCount = 0;
     c->tokensEnabled = 1;
     c->tokensRescanSec = 60;
     c->tokSrcCount = 0;
@@ -475,6 +481,28 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 k += jtokSpan(t, k);
             }
         }
+        // tokens.labels: { "pi": "pi-wsl" } - dashboard display names. The
+        // aggregation keys stay raw (cursors, cache records, the app filter all
+        // match on them); only the rendered row text is swapped.
+        int lb = jobjGet(js, t, toks, "labels");
+        c->tokLabelCount = 0; // re-parsed on every reload
+        if (lb >= 0 && t[lb].type == JSMN_OBJECT) {
+            int cnt = t[lb].size; if (cnt > 16) cnt = 16;
+            int k = lb + 1;
+            for (int i = 0; i < cnt; i++) {
+                if (t[k].type == JSMN_STRING && t[k + 1].type == JSMN_STRING) {
+                    wchar_t *key = jdup(js, &t[k]);
+                    wchar_t *val = jdup(js, &t[k + 1]);
+                    if (key && val) {
+                        lstrcpynW(c->tokLabelKeys[c->tokLabelCount], key, 20);
+                        lstrcpynW(c->tokLabelVals[c->tokLabelCount], val, 40);
+                        c->tokLabelCount++;
+                    }
+                    wideFree(&key); wideFree(&val);
+                }
+                k += 1 + jtokSpan(t, k + 1); // key + whole value subtree
+            }
+        }
         // tokens.sources[]: the session stores the live scan reads. Only the
         // JSONL ones are scanned in-process (pi nests per project, zai is flat);
         // the SQLite stores (zcode/opencode) keep coming from the cache seed.
@@ -523,17 +551,6 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                     sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
                     c->subsProviderCount++;
-                    // one antigravity entry feeds TWO panels: the IDE reports
-                    // one quota per model FAMILY (Gemini vs Claude/GPT), and a
-                    // four-pies-in-a-row panel was too cramped to read
-                    if (sp->type == 2 && c->subsProviderCount < MAX_SUBS) {
-                        SubsProvider *sp2 = &c->subsProviders[c->subsProviderCount];
-                        memset(sp2, 0, sizeof(*sp2));
-                        *sp2 = *sp;               // share the parsed strings
-                        sp2->label = NULL;        // canonical names below
-                        sp2->family = 1;
-                        c->subsProviderCount++;
-                    }
                 }
                 // advance k past this element
                 k += jtokSpan(t, k);
