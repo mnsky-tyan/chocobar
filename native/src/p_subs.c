@@ -866,7 +866,12 @@ static void subsAgyHeaders(wchar_t *hdrs, int cch, const wchar_t *token) {
 // CSRF token on its command line - neither is persisted anywhere - so the bar
 // reads them the way a debugger would: PEB -> ProcessParameters -> CommandLine,
 // then the owning PID's listening ports from the TCP table.
-#define AGY_LS_EXE L"language_server_windows_x64.exe"
+// Prefix, not a full name: the installed IDE ships language_server.exe (from
+// resources\bin), older/secondary builds ship language_server_windows_x64.exe.
+// A case-insensitive prefix match accepts both; a candidate is still confirmed
+// by its --csrf_token command line and a live GetUserStatus before it is trusted.
+#define AGY_LS_EXE L"language_server"
+#define AGY_LS_EXE_LEN 15
 
 typedef struct {
     DWORD pid;
@@ -967,7 +972,7 @@ static BOOL subsAgyLocalFind(AgyLocal *out) {
     if (Process32FirstW(snap, &pe)) {
         do {
             total++;
-            if (np < 8 && lstrcmpiW(pe.szExeFile, AGY_LS_EXE) == 0) pids[np++] = pe.th32ProcessID;
+            if (np < 8 && _wcsnicmp(pe.szExeFile, AGY_LS_EXE, AGY_LS_EXE_LEN) == 0) pids[np++] = pe.th32ProcessID;
             else if (g_cfg.debug && total < 400 && (wcsstr(pe.szExeFile, L"anguage") || wcsstr(pe.szExeFile, L"ntigravity"))) {
                 char lb[300];
                 WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, lb, 200, NULL, NULL);
