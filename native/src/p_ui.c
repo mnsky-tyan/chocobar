@@ -193,10 +193,6 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
     lstrcpynW(c->text, text ? text : L"", 96);
     c->r.left = c->r.right = c->r.top = c->r.bottom = 0;
 }
-static void addChip(int type, int customIdx, const wchar_t *text, int warn, const wchar_t *colorOverride) {
-    addChipI(type, customIdx, text, warn, colorOverride, 0);
-}
-
 // live totals folded in from the JSONL session stores (p_tokens.c)
 extern long long g_tokTodayLive, g_tokWeekLive, g_tokMonthLive, g_tokAllLive;
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
@@ -243,7 +239,7 @@ static long long dashWallNowMs(void) {
 }
 
 static long long g_lastScanMs = 0;      // GetTickCount64 of the last scan
-static long long g_lastScanEpoch = 0;   // wall clock of the last scan (dashLocalNowMs)
+static long long g_lastScanEpoch = 0;   // wall clock of the last scan (dashWallNowMs)
 // cache-only totals. The live scan adds its own counters to these ONCE per
 // rescan; without a separate base, an unchanged cache (the fast path that
 // skips the 10MB re-read) would keep the COMBINED value and the live part
@@ -806,17 +802,6 @@ static FLOAT textWidth(const wchar_t *s) {
     GetTextExtentPoint32W(g_memDc, s, (int)wcslen(s), &sz);
     return (FLOAT)sz.cx;
 }
-
-static D2D1_COLOR_F colorFromHex(const wchar_t *hex, FLOAT alpha) {
-    int c = hexToColorref(hex);
-    if (c < 0) c = 0;
-    D2D1_COLOR_F col;
-    FLOAT r = (FLOAT)(c & 0xFF) / 255.0f, g = (FLOAT)((c >> 8) & 0xFF) / 255.0f, b = (FLOAT)((c >> 16) & 0xFF) / 255.0f;
-    col.r = r * alpha; col.g = g * alpha; col.b = b * alpha; col.a = alpha; // premultiplied
-    return col;
-}
-
-static int g_inPaint = 0;
 
 static COLORREF colorrefFromHex(const wchar_t *hex, int alpha) {
     int c = hexToColorref(hex);
@@ -1577,15 +1562,6 @@ static void dashFmtTime(long long msUtc, wchar_t *out, int cb) {
     swprintf(out, cb, L"%02lu:%02lu:%02lu", (unsigned long)st.wHour, (unsigned long)st.wMinute, (unsigned long)st.wSecond);
 }
 
-// current local wall-clock as an epoch-ms value that dashFmtTime (which
-// reads a UTC FILETIME) renders back as local time-of-day
-static long long dashLocalNowMs(void) {
-    SYSTEMTIME now; GetLocalTime(&now);
-    FILETIME ft;
-    SystemTimeToFileTime(&now, &ft); // treats fields as UTC: matches dashFmtTime
-    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
-}
-
 // day date for a heatmap column start (daysBack of the dow=0 cell)
 static void dashColDate(int daysBack, SYSTEMTIME *out) {
     SYSTEMTIME now; GetLocalTime(&now);
@@ -1655,7 +1631,6 @@ static void paintDash(HWND hwnd) {
     HFONT fS10b = dashFont(10, FW_BOLD);   // .pill
 
     int padL = DX(18), padT = DX(14), gap = DX(12);
-    COLORREF white = RGB(255, 255, 255);
 
     // ---- titlebar: logo + title, refresh/close buttons, hairline divider
     int ty = padT;
@@ -1716,6 +1691,7 @@ static void paintDash(HWND hwnd) {
                 ? L"No token data. The token cache file could not be read \x2014 start Chocobar, or check tokens.cachePath."
                 : L"Token usage is off. Set tokens.enabled to true in the config to scan again.";
             dashStr(dc, padL + DX(14), y + DX(10), why, t.dim, fBody);
+            g_dashContentH = y + DX(38) + DX(14); // fit the empty board to its single card
         } else {
             // stat cards: Today / Last 7 / Last 30 / All time
             int cw2 = (innerW - 3 * DX(10)) / 4;
