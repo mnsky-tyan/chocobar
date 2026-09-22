@@ -16,13 +16,16 @@
 //   * a file is skipped entirely while its mtime is older than the cache's,
 //     and a per-file byte cursor means a warm rescan reads only appends.
 //
+// Every record lands in the dashboard's own per-day buckets (aggRecord), so
+// the cards, heatmap and tables are one set of numbers - this file only
+// decides WHICH records reach them and how many bytes to skip next time.
+//
 // The cursor file is ~/.wizbar/token-cursors.json (best-effort: losing it only
 // costs a re-read, never a wrong number, because the ts filter still applies).
 
 // helpers that live in the later parts of the assembled translation unit
 static void aggRecord(const char *app, int alen, long long ts, long long in, long long out,
                       long long cr, long long cw, const char *model, int mlen, const long long *bnd);
-static int aggDayIndex(long long ts, const long long *bnd);
 static long long parseLL(const char *p, const char *end);
 static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack);
 static char *readFileUtf8(const wchar_t *path, DWORD *outLen);
@@ -30,13 +33,10 @@ static void stripLineComments(char *s);
 static int jtokSpan(const jsmntok_t *t, int i);
 static void writeLogA(const char *s);
 
-// live-scan totals, added to the Electron cache's numbers by p_ui.c
-long long g_tokTodayLive = 0, g_tokWeekLive = 0, g_tokMonthLive = 0, g_tokAllLive = 0;
-// live per-day sums, index = days back (0 = today). The day/week/month
-// windows are DERIVED from this histogram on every scan, so a record ages out
-// of a window when its day does instead of being counted forever.
-#define TOK_LIVE_DAYS 190 // must match DASH_MAX_DAYS (p_ui.c): the heatmap span
-static long long g_tokDayLive[TOK_LIVE_DAYS];
+// how many tokens the live scan folded in (the "+N" log line). Every number
+// the bar shows is derived in p_ui.c from the shared per-day buckets, so this
+// scan keeps no totals of its own to drift out of step with them.
+long long g_tokAllLive = 0;
 // scan diagnostics (one log line per rescan while general.debug is on)
 int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
 
@@ -177,8 +177,6 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                 long long sum = fld[0] + fld[1] + fld[2] + fld[3];
                 aggRecord(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
                           r.model, r.modelLen, bnd);
-                int di = aggDayIndex(r.ts, bnd) - 1; // 0 = today
-                if (di >= 0 && di < TOK_LIVE_DAYS) g_tokDayLive[di] += sum;
                 g_tokAllLive += sum;
             }
         }
@@ -329,15 +327,15 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, c
 }
 
 // --------------------------------------------------------------- driver ----
-// Day rollover, driven by p_ui.c's dashDayRollover (which owns the clock and
-// shifts the heatmap arrays in the same step): every bucket moves one day
-// older so a record counted yesterday is today's "yesterday" and ages out.
-void tokLiveDayShift(int days) {
-    if (days >= TOK_LIVE_DAYS) memset(g_tokDayLive, 0, sizeof(g_tokDayLive));
-    else if (days > 0) {
-        memmove(g_tokDayLive + days, g_tokDayLive, (TOK_LIVE_DAYS - days) * sizeof(g_tokDayLive[0]));
-        memset(g_tokDayLive, 0, (size_t)days * sizeof(g_tokDayLive[0]));
-    }
+// tokens.enabled flipped off: forget every cursor, in memory AND on disk, so
+// the next enable is one clean full re-read instead of resuming from cursors
+// that silently skipped everything written to the session stores while off.
+void tokLiveReset(void) {
+    memset(g_tokCursor, 0, sizeof(g_tokCursor));
+    g_tokCursorN = 0;
+    g_tokCursorDirty = 0;
+    g_tokAllLive = 0;
+    if (g_tokCursorPath[0]) DeleteFileW(g_tokCursorPath);
 }
 
 // Record the seed (the Electron cache) so the live scan only counts what is
@@ -373,16 +371,6 @@ long tokLiveScan(void) {
         // pi nests its sessions one directory per project; zai keeps them flat
         int recursive = (s->app && lstrcmpA(s->app, "pi") == 0);
         tokScanDir(dir, recursive, s->app ? s->app : "app", bnd);
-    }
-    // the windowed totals are derived, never accumulated: day 0 feeds Today,
-    // days 0-6 the week window, days 0-29 the month window
-    g_tokTodayLive = g_tokDayLive[0];
-    g_tokWeekLive = g_tokMonthLive = 0;
-    for (int d = 0; d < TOK_LIVE_DAYS; d++) {
-        long long v = g_tokDayLive[d];
-        if (!v) continue;
-        if (d < 7) g_tokWeekLive += v;
-        if (d < 30) g_tokMonthLive += v;
     }
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
     if (g_cfg.debug) {
