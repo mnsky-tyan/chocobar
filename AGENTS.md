@@ -207,6 +207,13 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   global state did exactly that via a never-set `any` flag); chip states:
   em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
   board reads the same per-provider window arrays (label/pct/used/total).
+- **Local-API reading wins forever**: a successful local fetch persists the
+  slot's windows/plan/credits to `~/.wizbar/subs-cache.json` (tmp+MoveFileW
+  swap) and restores at startup, so a closed IDE keeps showing the IDE's own
+  last numbers marked STALE instead of the cloud summary's lagging value
+  (cloud kept gemini 5h at 100% while /quota showed 89.4%). Cloud is used only
+  by a slot that was NEVER read locally. `subsStart` initializes the
+  CRITICAL_SECTION FIRST - the restore calls subsSetWins.
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.
