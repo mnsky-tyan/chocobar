@@ -35,6 +35,133 @@ static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
 // stays a percentage; the board head shows the numbers.
 static int g_subsCredAvail[MAX_SUBS]; static int g_subsCredTotal[MAX_SUBS];
 static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
+static int g_agyLocalOk[MAX_SUBS];      // this slot has a live local-API reading
+static wchar_t g_subsCachePath[MAX_PATH]; // ~/.wizbar/subs-cache.json
+static int subsParseBig(const char *js, int len, jsmntok_t **outTok); // fwd
+static long long subsNowMs(void);
+static void subsSetWins(int idx, const SubsWin *w, int n);
+static char *readFileUtf8(const wchar_t *path, DWORD *outLen);
+
+// a JSON number as a long long (resetAt is epoch ms; jintTok is 32-bit)
+static long long subsJll(const char *js, const jsmntok_t *t, int i) {
+    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return 0;
+    char b[32];
+    int len = t[i].end - t[i].start;
+    if (len <= 0 || len >= (int)sizeof(b)) return 0;
+    memcpy(b, js + t[i].start, len);
+    b[len] = 0;
+    return atoll(b);
+}
+
+static void subsCachePathInit(void) {
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", g_subsCachePath, MAX_PATH);
+    if (!n) { g_subsCachePath[0] = 0; return; }
+    lstrcatW(g_subsCachePath, L"\\.wizbar\\subs-cache.json");
+}
+
+// JSON-escape into a narrow buffer; labels are simple vendor words, so this is
+// deliberately minimal (quotes and backslashes).
+static void subsJsonEsc(const wchar_t *in, char *out, int cb) {
+    int o = 0;
+    for (int i = 0; in[i] && o < cb - 2; i++) {
+        char c = (char)in[i];
+        if (c == '"' || c == '\\') { if (o < cb - 3) { out[o++] = '\\'; out[o++] = c; } }
+        else if ((unsigned char)c >= 32) out[o++] = c;
+    }
+    out[o] = 0;
+}
+
+static void subsAgyLocalPersist(int idx) {
+    if (idx < 0 || idx >= MAX_SUBS || !g_subsCachePath[0]) return;
+    if (!g_subsLockInit) return;
+    char body[4096];
+    int n = 0;
+    EnterCriticalSection(&g_subsLock);
+    n += sprintf(body + n, "{\"slot\":%d,\"at\":%lld,\"plan\":\"", idx, subsNowMs());
+    char esc[48];
+    subsJsonEsc(g_subsPlan[idx], esc, sizeof(esc));
+    n += sprintf(body + n, "%s", esc);
+    n += sprintf(body + n, "\",\"wins\":[");
+    int cnt = g_subsWinN[idx];
+    for (int i = 0; i < cnt; i++) {
+        SubsWin *w = &g_subsWin[idx][i];
+        subsJsonEsc(w->label, esc, sizeof(esc));
+        n += sprintf(body + n, "%s{\"label\":\"%s\",\"rem\":%d,\"pct\":%d,\"used\":%d,\"total\":%d,\"resetAt\":%lld}",
+                     i ? "," : "", esc, w->rem, w->pct, w->used, w->total, w->resetAt);
+    }
+    n += sprintf(body + n, "],\"credAvail\":%d,\"credTotal\":%d,\"rem\":%d}", g_subsCredAvail[idx], g_subsCredTotal[idx], g_subsProvRem[idx]);
+    LeaveCriticalSection(&g_subsLock);
+    if (n <= 0 || n >= (int)sizeof(body)) return;
+    wchar_t tmp[MAX_PATH];
+    lstrcpynW(tmp, g_subsCachePath, MAX_PATH);
+    lstrcatW(tmp, L".tmp");
+    HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD wr = 0;
+    WriteFile(h, body, (DWORD)n, &wr, NULL);
+    CloseHandle(h);
+    MoveFileW(tmp, g_subsCachePath); // atomic swap: a torn file never loads
+}
+
+static int subsJstr2(const char *js, jsmntok_t *t, int obj, const char *key, char *out, int cb) {
+    int v = jobjGet(js, t, obj, key);
+    if (v < 0 || t[v].type != JSMN_STRING) return 0;
+    int l = t[v].end - t[v].start;
+    if (l >= cb) l = cb - 1;
+    memcpy(out, js + t[v].start, l);
+    out[l] = 0;
+    return 1;
+}
+
+static void subsAgyLocalRestore(int idx) {
+    if (idx < 0 || idx >= MAX_SUBS || !g_subsCachePath[0]) return;
+    DWORD len = 0;
+    char *js = readFileUtf8(g_subsCachePath, &len);
+    if (!js) return;
+    jsmntok_t *t = NULL;
+    int n = subsParseBig(js, (int)len, &t);
+    if (n > 0 && t[0].type == JSMN_OBJECT) {
+        int slot = jintTok(js, t, jobjGet(js, t, 0, "slot"), -1);
+        if (slot == idx) {
+            char plan[48] = "";
+            if (subsJstr2(js, t, 0, "plan", plan, sizeof(plan)) && plan[0]) {
+                MultiByteToWideChar(CP_UTF8, 0, plan, -1, g_subsPlan[idx], 24);
+                g_subsPlan[idx][23] = 0;
+            }
+            int wins = jobjGet(js, t, 0, "wins");
+            if (wins >= 0 && t[wins].type == JSMN_ARRAY) {
+                int cnt = t[wins].size; if (cnt > 4) cnt = 4;
+                int k = wins + 1, got = 0;
+                for (int i = 0; i < cnt; i++) {
+                    if (t[k].type != JSMN_OBJECT) { k += jtokSpan(t, k); continue; }
+                    SubsWin w;
+                    memset(&w, 0, sizeof(w));
+                    char lab[32] = "";
+                    subsJstr2(js, t, k, "label", lab, sizeof(lab));
+                    if (lab[0]) MultiByteToWideChar(CP_UTF8, 0, lab, -1, w.label, 24);
+                    w.rem = jintTok(js, t, jobjGet(js, t, k, "rem"), 0);
+                    w.pct = jintTok(js, t, jobjGet(js, t, k, "pct"), 0);
+                    w.used = jintTok(js, t, jobjGet(js, t, k, "used"), -1);
+                    w.total = jintTok(js, t, jobjGet(js, t, k, "total"), -1);
+                    w.resetAt = subsJll(js, t, jobjGet(js, t, k, "resetAt"));
+                    g_subsWin[idx][got++] = w;
+                }
+                if (got) {
+                    subsSetWins(idx, g_subsWin[idx], got);
+                    g_subsWinN[idx] = got;
+                    g_subsCredAvail[idx] = jintTok(js, t, jobjGet(js, t, 0, "credAvail"), -1);
+                    g_subsCredTotal[idx] = jintTok(js, t, jobjGet(js, t, 0, "credTotal"), -1);
+                    g_subsProvRem[idx] = jintTok(js, t, jobjGet(js, t, 0, "rem"), -1);
+                    g_agyLocalOk[idx] = 1;
+                    if (g_cfg.debug) writeLogA("[wizbar] subs agy: restored last live local reading");
+                }
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, t);
+    HeapFree(GetProcessHeap(), 0, js);
+}
+static int g_agyLocalOk[MAX_SUBS];      // this slot has a live local-API reading
 static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
 
@@ -1230,7 +1357,21 @@ static int subsFetchAntigravity(int idx) {
     // The local language server is the authoritative source (it is what the
     // IDE's own quota UI shows). Only fall back to the cloud endpoints when it
     // is not running, e.g. the IDE is closed.
-    if (subsFetchAgyLocal(idx, 0)) return 1;
+    if (subsFetchAgyLocal(idx, 0)) {
+        g_agyLocalOk[idx] = 1;
+        subsAgyLocalPersist(idx); // last live reading survives a closed IDE
+        return 1;
+    }
+    // IDE closed (or its language server not spawned yet): the last LOCAL
+    // reading wins over the cloud, because the cloud summary lags the IDE
+    // (it kept showing gemini 5h = 100% while /quota showed 89.4%). The value
+    // stays on the board marked STALE, exactly like the harness's /quota
+    // serving its own last-good reading. Only a never-seen slot uses cloud.
+    if (g_agyLocalOk[idx]) {
+        if (g_cfg.debug) writeLogA("[wizbar] subs agy: local gone, keeping last live reading");
+        subsSetState(idx, g_subsProvRem[idx], 0);
+        return 1;
+    }
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(idx, &auth, authPath, MAX_PATH)) {
@@ -1598,12 +1739,22 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
 }
 
 static void subsStart(void) {
-    if (g_subsThreadStarted) return;
-    g_subsThreadStarted = 1;
+    // The lock comes FIRST: the cached-reading restore below calls
+    // subsSetWins, which takes it (an uninitialized CRITICAL_SECTION crashed
+    // the bar at startup with C0000005).
     if (!g_subsLockInit) {
         InitializeCriticalSection(&g_subsLock);
         g_subsLockInit = 1;
     }
+    // The cached local readings load before anything reads them: the chip and
+    // board render from these globals, so a bar that starts with the IDE closed
+    // still shows the IDE's last live numbers (marked stale).
+    if (!g_subsCachePath[0]) subsCachePathInit();
+    for (int i = 0; i < MAX_SUBS; i++)
+        if (i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].type == 2)
+            subsAgyLocalRestore(i);
+    if (g_subsThreadStarted) return;
+    g_subsThreadStarted = 1;
     HANDLE h = CreateThread(NULL, 0, subsThreadProc, NULL, 0, NULL);
     if (h) CloseHandle(h);
 }
