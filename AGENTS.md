@@ -415,6 +415,17 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   `modules.agents` no longer exists in the config. History: commit b9c9f8d removed the
   chip, the 2026-09 public-release pass removed the polling/socket wiring.
 
+## Tray icon (drawn, not stock)
+
+- `makeBarIcon(px)` in p_ui.c builds a 32bpp alpha DIB (BITMAPV5HEADER +
+  BI_BITFIELDS, top-down rows) wrapped with CreateIconIndirect: a pinkDeep
+  rounded tile with the bar itself (a cream pill) centered, 1px feathered so
+  it survives 16px on any taskbar theme. `LoadIconW(IDI_APPLICATION)` (the
+  blank white window rectangle) reads as a broken app - never go back.
+- SDF gotcha: clamp each half-distance at zero BEFORE the hypot, or a negative
+  axis inflates the length and the side edges pinch inward (petal silhouette
+  instead of a rounded square).
+
 ## Native bar cosmetics (captain pass, 2026-09-21)
 
 - The bar window needs its own `WM_RBUTTONUP` -> `showTrayMenu`. The tray icon
