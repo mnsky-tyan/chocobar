@@ -416,11 +416,16 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   very next rescan re-read every active file from byte 0 and DOUBLED every live
   record (today jumped 2x within a minute - "the token usage fluctuates").
   `tokLiveScan` also self-heals (`if (!g_tokCursorN) tokCursorLoad();`).
-- The live counters are CUMULATIVE across rescans (a warm scan only reads
-  appends), while the cache-only half (`g_tokBaseToday/Week/Month/All`) is
-  refreshed only on a full cache read. Never add the live counters to
-  `g_tokensToday` on the unchanged-cache fast path - that value already contains
-  them. Recompute `g_tokens* = base + live` every rescan instead.
+- There is ONE day-indexed histogram (`g_dayTot`/`g_dayApp`, p_ui.c,
+  oldest-first, `[DASH_MAX_DAYS-1]` = today) and every displayed number is
+  DERIVED from it per rescan (`tokDeriveWindows`): today = today's bucket,
+  Last 7/30 = the in-window day sums, All time = every bucket. Never keep a
+  second, cache-side base (`base + live`) or a mirrored live histogram: a base
+  captured once is never re-derived as the window slides, so the cards
+  permanently over-count the heatmap they sit above.
+- The day buckets are aged by `dashDayRollover` alone (toward LOWER indices);
+  the live scan indexes each record with a boundary array built fresh from the
+  current local time, so it needs no shift of its own.
 - **Opening one file over the WSL redirector costs ~25ms, and a
   `FindFirstFileW` per project dir ~25ms too.** A warm rescan that re-opens all
   21 active files costs ~550ms and blocks the bar. Skip a file when the cursor
@@ -457,12 +462,7 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   print 8 hours off in HKT.
 - The heatmap cell is now adaptive (`(innerW - rowLabW)/weeks - gap`, capped
   DX(16)); 26 fixed DX(11) cells left the right half of the card blank.
-- The two day-indexed views of the same usage run in OPPOSITE directions:
-  `g_tokDayLive` (p_tokens.c) is today-first (index 0 = today), while
-  `g_dayTot`/`g_dayApp` (p_ui.c) are oldest-first (`[DASH_MAX_DAYS-1]` = today).
-  One owner ages both per local midnight - `dashDayRollover` (p_ui.c) shifts the
-  heatmap arrays toward LOWER indices and calls `tokLiveDayShift` (p_tokens.c),
-  which shifts the live histogram toward HIGHER ones. Never copy one shift
-  direction into the other array, and never shift only one of the two: the
-  'Today' card and the heatmap's today cell then disagree (verified with a
-  standalone harness, since the bug is invisible on a same-day screenshot).
+- `tokens.enabled` off is a full reset, not a pause: the aggregates are
+  cleared AND the on-disk byte cursors are deleted (`tokLiveReset`), so a
+  re-enable does one clean full re-read (a cold scan of a few seconds) instead
+  of resuming from cursors that silently skipped everything written while off.

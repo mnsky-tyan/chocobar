@@ -193,11 +193,13 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
     lstrcpynW(c->text, text ? text : L"", 96);
     c->r.left = c->r.right = c->r.top = c->r.bottom = 0;
 }
-// live totals folded in from the JSONL session stores (p_tokens.c)
-extern long long g_tokTodayLive, g_tokWeekLive, g_tokMonthLive, g_tokAllLive;
+// how many tokens the live scan folded in (the "+N" log line). Every
+// displayed total is derived from the per-day buckets below, so the live scan
+// keeps no totals of its own.
+extern long long g_tokAllLive;
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
 long tokLiveScan(void);
-void tokLiveDayShift(int days); // day rollover: age the live histogram
+void tokLiveReset(void); // tokens.enabled off: forget cursors + live counters
 long long subsFetchedEpochMs(void);
 void subsCredits(int i, int *avail, int *total);
 void tokLiveInit(void);
@@ -240,11 +242,6 @@ static long long dashWallNowMs(void) {
 
 static long long g_lastScanMs = 0;      // GetTickCount64 of the last scan
 static long long g_lastScanEpoch = 0;   // wall clock of the last scan (dashWallNowMs)
-// cache-only totals. The live scan adds its own counters to these ONCE per
-// rescan; without a separate base, an unchanged cache (the fast path that
-// skips the 10MB re-read) would keep the COMBINED value and the live part
-// would be added again, doubling the number every rescan.
-static long long g_tokBaseToday = 0, g_tokBaseWeek = 0, g_tokBaseMonth = 0, g_tokBaseAll = 0;
 static unsigned long long g_tokDataVersion = 0;   // moves on every completed scan
 static unsigned long long g_dashTokVersion = 0;   // version the open board shows
 static int g_daySel = -1; // selected heatmap cell (daysBack), -1 = none
@@ -376,11 +373,10 @@ static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack) {
 // local midnight the day-indexed arrays are currently framed at
 static long long g_dashMidnight = 0;
 
-// A local midnight makes every day-indexed array one bucket older. The heatmap
-// arrays and the live histogram in p_tokens.c are two views of the same days,
-// so they age together here: the Electron cache is only re-read when it
-// changes, so on the unchanged-cache fast path this rollover is the only thing
-// that moves the arrays into today's frame.
+// A local midnight makes every day-indexed array one bucket older. The live
+// scan indexes each record with a freshly built boundary array, so only the
+// heatmap arrays need aging here - on the unchanged-cache fast path this
+// rollover is the only thing that moves them into today's frame.
 static void dashDayRollover(void) {
     SYSTEMTIME st; GetLocalTime(&st);
     st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
@@ -393,16 +389,35 @@ static void dashDayRollover(void) {
             memset(g_dayApp, 0, sizeof(g_dayApp));
         } else if (days > 0) {
             // g_dayTot/g_dayApp run oldest-first ([DASH_MAX_DAYS-1] = today), so
-            // the buckets move toward LOWER indices - the opposite direction
-            // from the live histogram, which runs today-first
+            // the buckets move toward LOWER indices
             memmove(g_dayTot, g_dayTot + days, (DASH_MAX_DAYS - days) * sizeof(g_dayTot[0]));
             memset(g_dayTot + DASH_MAX_DAYS - days, 0, (size_t)days * sizeof(g_dayTot[0]));
             memmove(g_dayApp, g_dayApp + days, (DASH_MAX_DAYS - days) * sizeof(g_dayApp[0]));
             memset(g_dayApp + DASH_MAX_DAYS - days, 0, (size_t)days * sizeof(g_dayApp[0]));
         }
-        tokLiveDayShift(days);
     }
     g_dashMidnight = mid;
+}
+
+// The four stat cards are derived from the SAME per-day buckets the heatmap
+// draws: today is today's bucket, Last 7/Last 30 the in-window day sums, All
+// time every bucket. Those buckets are aged at each local midnight, so a card
+// can never keep counting a day that has already fallen out of the heatmap the
+// way a cache-side base captured once did.
+static void tokDeriveWindows(void) {
+    long long today = g_dayTot[DASH_MAX_DAYS - 1];
+    g_tokWeek = g_tokMonth = g_tokAll = 0;
+    for (int i = 0; i < DASH_MAX_DAYS; i++) {
+        long long v = g_dayTot[i];
+        if (!v) continue;
+        int back = DASH_MAX_DAYS - 1 - i;
+        if (back < 7) g_tokWeek += v;
+        if (back < 30) g_tokMonth += v;
+        g_tokAll += v;
+    }
+    // -1 = nothing was read at all: the chip shows an em dash and the board
+    // shows its empty state instead of a wall of zeros
+    if (g_tokAll > 0 || g_tokensToday >= 0) g_tokensToday = today;
 }
 
 // today's raw (cache-exclusive) input+output, mirroring tokens.js; the
@@ -414,9 +429,16 @@ static void scanTokenCacheInner(void) {
     // never opened), no chip, and the board shows the master-off empty state
     if (!g_cfg.tokensEnabled) {
         g_tokensToday = -1;
-        g_tokBaseToday = g_tokBaseWeek = g_tokBaseMonth = g_tokBaseAll = 0;
-        g_tokWeek = g_tokMonth = g_tokAll = 0;
         g_cacheReadDone = 0; // a later re-enable must re-read the seed
+        // zero scans, zero dashboard data: drop every aggregate, and the live
+        // cursors with them, so a re-enable is one clean full re-read instead
+        // of resuming from cursors that skipped what arrived while off
+        memset(g_dayTot, 0, sizeof(g_dayTot));
+        memset(g_dayApp, 0, sizeof(g_dayApp));
+        memset(g_appAgg, 0, sizeof(g_appAgg));
+        memset(g_modelAgg, 0, sizeof(g_modelAgg));
+        g_appCount = g_modelCount = 0;
+        tokLiveReset();
         return;
     }
     wchar_t path[MAX_PATH];
@@ -443,7 +465,7 @@ static void scanTokenCacheInner(void) {
     // the live session scan below is the cheap incremental half that still
     // runs every rescan.
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; g_tokBaseToday = g_tokBaseWeek = g_tokBaseMonth = g_tokBaseAll = 0; return; }
+    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; return; }
     BY_HANDLE_FILE_INFORMATION fi;
     if (GetFileInformationByHandle(h, &fi)) {
         g_cacheMtimeScan = (((long long)fi.ftLastWriteTime.dwHighDateTime) << 32 | fi.ftLastWriteTime.dwLowDateTime) / 10000 - 11644473600000LL;
@@ -490,7 +512,6 @@ static void scanTokenCacheInner(void) {
     memset(g_modelAgg, 0, sizeof(g_modelAgg));
     g_appCount = 0;
     g_modelCount = 0;
-    g_tokWeek = g_tokMonth = g_tokAll = 0;
     // records look like ["key",{"app":"<name>","ts":...,...}] - walk by the
     // app key (it precedes ts inside each record)
     const char *p = buf, *end = buf + got;
@@ -529,14 +550,10 @@ static void scanTokenCacheInner(void) {
         if (ts >= midnight) total += sum;
         aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, bnd);
         if (ts > tsScanMax) tsScanMax = ts;
-        if (ts >= bnd[7]) g_tokWeek += sum;
-        if (ts >= bnd[30]) g_tokMonth += sum;
-        g_tokAll += sum;
         p = next ? next : end;
     }
     HeapFree(GetProcessHeap(), 0, buf);
     g_tokensToday = total;
-    g_tokBaseToday = total; g_tokBaseWeek = g_tokWeek; g_tokBaseMonth = g_tokMonth; g_tokBaseAll = g_tokAll;
     g_lastScanMs = (long long)GetTickCount64();
     g_lastScanEpoch = dashWallNowMs();
     // remember the seed boundary so the live session scan only counts records
@@ -559,22 +576,19 @@ static void scanTokenCache(void) {
     // the live session stores hold that is NEWER (p_tokens.c). Without the
     // live half every number freezes the moment the Electron app stops
     // writing the file - which is exactly what the captain saw.
+    long long added = 0;
     scanTokenCacheInner();
     if (g_cfg.tokensEnabled && g_cfg.tokSrcCount) {
         tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
-        long long added = tokLiveScan();
-        // cache-only base + live contribution, recomputed every rescan (the
-        // bases survive the unchanged-cache fast path, the live counters only
-        // grow with real appends)
-        g_tokensToday = g_tokBaseToday + g_tokTodayLive;
-        g_tokWeek = g_tokBaseWeek + g_tokWeekLive;
-        g_tokMonth = g_tokBaseMonth + g_tokMonthLive;
-        g_tokAll = g_tokBaseAll + g_tokAllLive;
-        if (added > 0) {
-            char lb[128];
-            sprintf(lb, "[wizbar] token live scan: +%lld tokens (live all-time %lld), today=%lld", added, g_tokAllLive, g_tokensToday);
-            writeLogA(lb);
-        }
+        added = tokLiveScan();
+    }
+    // the stat cards read the same day buckets the heatmap draws, so the two
+    // can never disagree once the window slides past a midnight
+    tokDeriveWindows();
+    if (added > 0) {
+        char lb[128];
+        sprintf(lb, "[wizbar] token live scan: +%lld tokens (live all-time %lld), today=%lld", added, g_tokAllLive, g_tokensToday);
+        writeLogA(lb);
     }
     g_tokDataVersion++;
     if (g_cfg.debug) { // how long the UI thread was blocked by this scan
