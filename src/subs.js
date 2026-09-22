@@ -33,10 +33,10 @@ const os = require('os');
 const { EventEmitter } = require('events');
 
 // --- Antigravity (Google Cloud Code) constants ---------------------------------
-// Public desktop-client OAuth creds (same pair the Antigravity IDE ships):
-// refreshing the pi-stored token needs no browser and no IDE running.
-const AGY_CLIENT_ID = 'REDACTED_OAUTH_CLIENT_ID';
-const AGY_CLIENT_SECRET = 'REDACTED_OAUTH_CLIENT_SECRET';
+// The Google desktop OAuth pair is NOT stored here: it is personal wiring and
+// comes from the provider entry (subs.providers[].clientId / clientSecret).
+// The IDE's local language-server source needs no credentials; only the cloud
+// fallback does, and it fails cleanly ("no oauth pair") when they are absent.
 const AGY_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const AGY_BASES = ['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com'];
 // Refresh this many ms before expiry so an in-flight fetch never carries a
@@ -415,13 +415,19 @@ class SubsTracker extends EventEmitter {
     return { entry: null, authPath };
   }
 
+  _agyNoPair() {
+    const e = new Error('no oauth pair in config (local IDE source needs none)');
+    e.status = 'no-auth';
+    return e;
+  }
+
   async _agyRefresh(refreshToken) {
     const r = await this._fetch(AGY_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        client_id: AGY_CLIENT_ID,
-        client_secret: AGY_CLIENT_SECRET,
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
         refresh_token: refreshToken,
         grant_type: 'refresh_token'
       })
@@ -518,6 +524,9 @@ class SubsTracker extends EventEmitter {
     const expires = Number(entry.expires) || 0;
     if (entry.refresh && (!token || expires < Date.now() + AGY_REFRESH_MARGIN_MS)) {
       try {
+        this.clientId = p.clientId || '';
+        this.clientSecret = p.clientSecret || '';
+        if (!this.clientId || !this.clientSecret) throw this._agyNoPair();
         const refreshed = await this._agyRefresh(entry.refresh);
         token = refreshed.access_token;
         this._agySaveAuth(authPath, entry, refreshed);
@@ -558,24 +567,34 @@ class SubsTracker extends EventEmitter {
     // silently to the per-model endpoint.
     const summary = await this._agyPost('/v1internal:retrieveUserQuotaSummary', token, projectId, {}, p);
     if (summary.status === 200 && summary.body && Array.isArray(summary.body.groups)) {
-      const windows = [];
+      // Antigravity exposes no weekly quota: each model family owns one rolling
+      // 5h window (the IDE's /quota shows exactly these two rows). Weekly-class
+      // buckets are dropped - the cloud summary returns them but they never
+      // reset and read as stale.
+      const low = { gemini: null, claude_gpt: null };
       for (const g of summary.body.groups) {
         const short = String((g && g.displayName) || 'Models').replace(/\s+[Mm]odels$/, '');
+        const fam = /gemini/i.test(short) ? 'gemini' : 'claude_gpt';
         for (const b of (g && g.buckets) || []) {
           if (typeof b.remainingFraction !== 'number') continue;
+          const is5h = /5h|five[_ ]?hour|session/i.test(String(b.window || b.bucketId || ''));
+          if (!is5h) continue;
           const rem = Math.min(100, Math.max(0, b.remainingFraction * 100));
-          windows.push({
-            key: `${b.bucketId || short}`,
-            label: `${short} ${b.window === 'weekly' ? 'week' : (b.window || 'win')}`,
-            percent: 100 - rem,
-            remainingPercent: rem,
-            used: null,
-            total: null,
-            remaining: null,
-            resetAt: b.resetTime ? Date.parse(b.resetTime) : null
-          });
+          if (!low[fam] || rem < low[fam].remainingPercent) {
+            low[fam] = {
+              key: `${b.bucketId || short}`,
+              label: fam === 'gemini' ? 'Gemini 5H' : 'Claude/GPT 5H',
+              percent: 100 - rem,
+              remainingPercent: rem,
+              used: null,
+              total: null,
+              remaining: null,
+              resetAt: b.resetTime ? Date.parse(b.resetTime) : null
+            };
+          }
         }
       }
+      const windows = Object.values(low).filter(Boolean);
       if (windows.length) {
         return {
           ok: true, label, plan: plan || 'Antigravity', status: statusFromWindows(windows),
@@ -600,8 +619,7 @@ class SubsTracker extends EventEmitter {
       return err;
     }
     const list = models.body.models || {};
-    let minRem = null;
-    let minReset = null;
+    const low = { gemini: null, claude_gpt: null };
     let counted = 0;
     for (const [mid, m] of Object.entries(list)) {
       if (!m || m.isInternal || mid.startsWith('chat_')) continue;
@@ -609,31 +627,36 @@ class SubsTracker extends EventEmitter {
       if (typeof q.remainingFraction !== 'number') continue;
       counted++;
       const rem = Math.min(100, Math.max(0, q.remainingFraction * 100));
-      if (minRem === null || rem < minRem) {
-        minRem = rem;
-        minReset = q.resetTime ? Date.parse(q.resetTime) : null;
+      const fam = /gemini/i.test(mid) ? 'gemini' : 'claude_gpt';
+      if (!low[fam] || rem < low[fam].remainingPercent) {
+        low[fam] = {
+          remainingPercent: rem,
+          resetAt: q.resetTime ? Date.parse(q.resetTime) : null
+        };
       }
     }
-    if (minRem === null) {
+    const fams = Object.entries(low).filter(([, v]) => v);
+    if (!fams.length) {
       const err = emptyProvider(label, ['no quota reported']);
       err.status = 'error';
       return err;
     }
+    const winList = fams.map(([fam, v]) => ({
+      key: fam,
+      label: fam === 'gemini' ? 'Gemini 5H' : 'Claude/GPT 5H',
+      percent: 100 - v.remainingPercent,
+      remainingPercent: v.remainingPercent,
+      used: null,
+      total: null,
+      remaining: null,
+      resetAt: v.resetAt
+    }));
     return {
       ok: true,
       label,
       plan: plan || 'Antigravity',
-      status: statusFromWindows([{ remainingPercent: minRem }]),
-      windows: [{
-        key: 'models',
-        label: 'models',
-        percent: 100 - minRem,
-        remainingPercent: minRem,
-        used: null,
-        total: null,
-        remaining: null,
-        resetAt: minReset
-      }],
+      status: statusFromWindows(winList),
+      windows: winList,
       notes: [`${counted} models`],
       errors: [],
       fetchedAt: Date.now()

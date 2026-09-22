@@ -91,6 +91,8 @@ typedef struct {
     int enabled;
     wchar_t *label;
     wchar_t *authPath;     // chatgpt auth.json, antigravity pi auth.json
+    wchar_t *clientId;     // google desktop oauth pair for the cloud fallback:
+    wchar_t *clientSecret; // user config only, never compiled in or committed
     wchar_t *configPath;   // zai config.json
     wchar_t *vscdbPath;    // antigravity IDE fallback token store
     wchar_t *providerName; // zai provider key
@@ -273,6 +275,10 @@ static void freeConfig(Config *c) {
         wideFree(&c->custom[i].command);
     }
     c->customCount = 0;
+    for (int i = 0; i < c->subsProviderCount; i++) {
+        wideFree(&c->subsProviders[i].clientId);
+        wideFree(&c->subsProviders[i].clientSecret);
+    }
     for (int i = 0; i < c->tokSrcCount; i++) wideFree(&c->tokSrc[i].sessionsDir);
     c->tokSrcCount = 0;
     for (int i = 0; i < c->iconCount; i++) {
@@ -547,6 +553,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     wideFree(&ty);
                     sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
                     sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
+                    sp->clientId     = jstrTok(js, t, jobjGet(js, t, k, "clientId"), L"");
+                    sp->clientSecret = jstrTok(js, t, jobjGet(js, t, k, "clientSecret"), L"");
                     sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
                     sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                     sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");

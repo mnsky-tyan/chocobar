@@ -239,17 +239,24 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   validated (page-aligned PEB, path-like decoded string); never hard-code one.
   Listening ports come from GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)
   (build.sh links iphlpapi). Prefer the non-daily endpoint instance.
-- ONE combined 5h panel per config entry, NOT one per family and NOT a weekly
-  window (decided with the captain 2026-09-22): Antigravity exposes no weekly
-  quota, so every clientModelConfigs entry is a 5h rolling window and the
-  binding constraint is the MIN remainingFraction across BOTH families (Gemini
-  and Claude/GPT). The IDE's own /quota shows the same numbers. Local readers
-  keep the family split only internally (subsAgyQuotaKey) to compute that min.
+- One panel per config entry shows TWO 5h rows - GEMINI 5H and CLAUDE/GPT 5H -
+  the same two rows the IDE's /quota panel shows. No weekly row: Antigravity
+  exposes no weekly quota (the cloud summary returns one; it never resets and
+  reads stale - dropped). NOT one combined
+  pie (reversed after the captain compared against /quota 2026-09-22): each
+  family owns its own rolling 5h window with its own reset, so the binding
+  constraint (chip) is the MIN remainingFraction across both families while the
+  board shows both. subsAgyQuotaKey keeps the family split.
 - The JSON endpoint port must be TRIED, not assumed: the language server owns
   several listeners (LSP/gRPC + the JSON one + the extension server) and which
   one serves GetUserStatus varies per boot (a 2026-09-22 boot answered 400 on
   the first listener, 200 with the real payload on the second). subsFetchAgyLocal
   now tries every listener of the chosen pid until a 200 with a parseable body.
+- The Google desktop OAuth pair is NOT in the repo (removed 2026-09-22 after the
+  captain refused to allowlist a public secret): subs.providers[].clientId /
+  clientSecret carry it in the USER config, and only the cloud fallback needs
+  it (the local language server needs none). History was scrubbed of the pair,
+  so a fresh clone never trips push protection.
 - tokens.labels ({ "pi": "pi-wsl" }) maps raw source keys to dashboard display
   names (parsed in chocobar.c, applied in p_ui.c's appLabelW). Aggregation keys,
   byte cursors and the appFilter keep the RAW key; only rendered row text swaps.

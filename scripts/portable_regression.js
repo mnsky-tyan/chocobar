@@ -489,7 +489,7 @@ const native = require('../src/native');
     antigravity: { type: 'oauth', access: 'ya29.stale', refresh: 'r1',
       expires: Date.now() - 60000, projectId: 'p1', email: 'u@example.com', ...over }
   }));
-  const agyProvider = (over) => ({ type: 'antigravity', enabled: true, label: 'AGY', authPath: authFile, ...over });
+  const agyProvider = (over) => ({ type: 'antigravity', enabled: true, label: 'AGY', authPath: authFile, clientId: 'test-client', clientSecret: 'test-secret', ...over });
 
   const SUMMARY = { groups: [
     { displayName: 'Gemini Models', buckets: [
@@ -538,11 +538,11 @@ const native = require('../src/native');
     const p = (await t.rescan()).providers['antigravity:0'];
     check('subs/agy: expired token refreshes; summary groups -> windows; plan from paidTier',
       p.ok === true && p.plan === 'Google AI Pro' && p.status === 'ok' &&
-      p.windows.length === 3 &&
-      p.windows[0].label === 'Gemini 5h' && p.windows[0].remainingPercent === 100 &&
-      p.windows[1].label === 'Gemini week' && p.windows[1].remainingPercent === 50 &&
-      p.windows[2].label === 'Claude and GPT 5h' && p.windows[2].remainingPercent === 20 &&
-      typeof p.windows[0].resetAt === 'number',
+      p.windows.length === 2 &&
+      p.windows[0].label === 'Gemini 5H' && p.windows[0].remainingPercent === 100 &&
+      p.windows[1].label === 'Claude/GPT 5H' && p.windows[1].remainingPercent === 20 &&
+      typeof p.windows[0].resetAt === 'number' &&
+      p.windows.every((w) => w.remainingPercent > 0 || w.label === 'Claude/GPT 5H'),
       JSON.stringify(p.windows.map((w) => w.label + ':' + w.remainingPercent)));
 
     // A rotated refresh token is persisted so the next scan starts valid.
@@ -557,7 +557,7 @@ const native = require('../src/native');
     const f = new SubsTracker(agyCfg([agyProvider()]), routeFetch({ summary403: true }));
     const fp = (await f.rescan()).providers['antigravity:0'];
     check('subs/agy: 403 SUBSCRIPTION_REQUIRED falls back to per-model quota',
-      fp.ok === true && fp.windows.length === 1 && fp.windows[0].key === 'models' &&
+      fp.ok === true && fp.windows.length === 1 && fp.windows[0].key === 'gemini' &&
       fp.windows[0].remainingPercent === 25 && fp.status === 'ok' &&
       fp.notes[0] === '2 models',
       JSON.stringify(fp.windows) + ' notes=' + JSON.stringify(fp.notes));
