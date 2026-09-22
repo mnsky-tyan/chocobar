@@ -122,7 +122,11 @@ static void subsAgyLocalRestore(int idx) {
     int n = subsParseBig(js, (int)len, &t);
     if (n > 0 && t[0].type == JSMN_OBJECT) {
         int slot = jintTok(js, t, jobjGet(js, t, 0, "slot"), -1);
-        if (slot == idx) {
+        // A 5h quota window is meaningless once the reading is older than one:
+        // after that the live cloud summary (different accounting, but current)
+        // beats resurrecting ancient numbers. 6h = one window plus slack.
+        long long at = subsJll(js, t, jobjGet(js, t, 0, "at"));
+        if (slot == idx && (subsNowMs() - at) < 6LL * 3600 * 1000) {
             char plan[48] = "";
             if (subsJstr2(js, t, 0, "plan", plan, sizeof(plan)) && plan[0]) {
                 MultiByteToWideChar(CP_UTF8, 0, plan, -1, g_subsPlan[idx], 24);
@@ -407,6 +411,19 @@ static void subsSetState(int idx, int rem, int success) {
     if (success) { g_subsProvRem[idx] = rem; g_subsProvStale[idx] = 0; }
     else if (g_subsProvRem[idx] >= 0) g_subsProvStale[idx] = 1;
     else g_subsProvRem[idx] = -1; // never succeeded: keep the no-data marker
+    LeaveCriticalSection(&g_subsLock);
+}
+
+// Flag a provider's numbers as "not the live source" without touching them.
+// The cloud fallback uses this: its 5h windows are phased differently from
+// the IDE's, so the panel must read STALE even on the very first cloud cycle
+// (g_subsProvRem was still -1, so subsSetState's guarded stale branch did
+// nothing and the board showed CAPPED - a fresh-looking wrong number).
+static void subsSetStaleOnly(int idx) {
+    if (idx < 0 || idx >= MAX_SUBS) return;
+    if (!g_subsLockInit) return;
+    EnterCriticalSection(&g_subsLock);
+    g_subsProvStale[idx] = 1;
     LeaveCriticalSection(&g_subsLock);
 }
 
@@ -1580,8 +1597,10 @@ static int subsFetchAntigravity(int idx) {
         }
         if (nw > 0) {
             subsSetWins(idx, wins, nw);
-            subsSetState(idx, loRem, 1);
             subsSetPlan(idx, plan);
+            // cloud summary = not the live source (see the model-configs path)
+            subsSetState(idx, loRem, 1);
+            subsSetStaleOnly(idx);
             return 1;
         }
         break; // 200 but no groups: nothing to retry on the other base
@@ -1655,8 +1674,12 @@ static int subsFetchAntigravity(int idx) {
         wins[0].total = -1;
         wins[0].resetAt = minReset;
         subsSetWins(idx, wins, 1);
-        subsSetState(idx, (int)(minRem + 0.5), 1);
         subsSetPlan(idx, plan);
+        // Cloud data is NOT the live source: its 5h windows are phased
+        // differently from the IDE's (cloud gemini read 100% while the IDE
+        // showed 89.4%), so a cloud-served panel must never look fresh.
+        subsSetState(idx, (int)(minRem + 0.5), 1);
+        subsSetStaleOnly(idx);
         return 1;
     }
     subsSetState(idx, 0, 0);
