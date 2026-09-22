@@ -199,9 +199,9 @@ static void addChip(int type, int customIdx, const wchar_t *text, int warn, cons
 
 // live totals folded in from the JSONL session stores (p_tokens.c)
 extern long long g_tokTodayLive, g_tokWeekLive, g_tokMonthLive, g_tokAllLive;
-extern long long g_tokMidnight;
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
 long tokLiveScan(void);
+void tokLiveDayShift(int days); // day rollover: age the live histogram
 long long subsFetchedEpochMs(void);
 void subsCredits(int i, int *avail, int *total);
 void tokLiveInit(void);
@@ -377,6 +377,38 @@ static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack) {
     return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
 }
 
+// local midnight the day-indexed arrays are currently framed at
+static long long g_dashMidnight = 0;
+
+// A local midnight makes every day-indexed array one bucket older. The heatmap
+// arrays and the live histogram in p_tokens.c are two views of the same days,
+// so they age together here: the Electron cache is only re-read when it
+// changes, so on the unchanged-cache fast path this rollover is the only thing
+// that moves the arrays into today's frame.
+static void dashDayRollover(void) {
+    SYSTEMTIME st; GetLocalTime(&st);
+    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
+    FILETIME fm; SystemTimeToFileTime(&st, &fm);
+    long long mid = dashMidnightMs(&fm, 0);
+    if (g_dashMidnight && mid > g_dashMidnight) {
+        int days = (int)((mid - g_dashMidnight + 43200000LL) / 86400000LL);
+        if (days >= DASH_MAX_DAYS) {
+            memset(g_dayTot, 0, sizeof(g_dayTot));
+            memset(g_dayApp, 0, sizeof(g_dayApp));
+        } else if (days > 0) {
+            // g_dayTot/g_dayApp run oldest-first ([DASH_MAX_DAYS-1] = today), so
+            // the buckets move toward LOWER indices - the opposite direction
+            // from the live histogram, which runs today-first
+            memmove(g_dayTot, g_dayTot + days, (DASH_MAX_DAYS - days) * sizeof(g_dayTot[0]));
+            memset(g_dayTot + DASH_MAX_DAYS - days, 0, (size_t)days * sizeof(g_dayTot[0]));
+            memmove(g_dayApp, g_dayApp + days, (DASH_MAX_DAYS - days) * sizeof(g_dayApp[0]));
+            memset(g_dayApp + DASH_MAX_DAYS - days, 0, (size_t)days * sizeof(g_dayApp[0]));
+        }
+        tokLiveDayShift(days);
+    }
+    g_dashMidnight = mid;
+}
+
 // today's raw (cache-exclusive) input+output, mirroring tokens.js; the
 // Electron app rewrites this cache every rescan, we just read it
 // every completed scan (data OR no-data) moves the version, so the open
@@ -517,6 +549,7 @@ static void scanTokenCacheInner(void) {
 static DWORD g_tokScanStart = 0;
 static void scanTokenCache(void) {
     g_tokScanStart = GetTickCount();
+    dashDayRollover();
     // the Electron cache is the history seed: read it, then fold in whatever
     // the live session stores hold that is NEWER (p_tokens.c). Without the
     // live half every number freezes the moment the Electron app stops
@@ -2786,6 +2819,9 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
     }
     if (!n) { if (tip) lstrcpynW(tip, L"No subscription windows", tipCb); if (txt) lstrcpynW(txt, L"\u2014", cb); return -1; }
     if (g_subsRotSec < 5) g_subsRotSec = 5;
+    // the set of providers with data shrinks between paints (one drops to no
+    // data), so the persistent index is clamped to what this call filled
+    if (g_subsRotIdx >= n) g_subsRotIdx %= n;
     DWORD now = GetTickCount();
     if (now - g_subsRotTick >= (DWORD)g_subsRotSec * 1000u) {
         g_subsRotTick = now;

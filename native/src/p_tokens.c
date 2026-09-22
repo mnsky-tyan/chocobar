@@ -32,13 +32,11 @@ static void writeLogA(const char *s);
 
 // live-scan totals, added to the Electron cache's numbers by p_ui.c
 long long g_tokTodayLive = 0, g_tokWeekLive = 0, g_tokMonthLive = 0, g_tokAllLive = 0;
-long long g_tokMidnight = 0;
 // live per-day sums, index = days back (0 = today). The day/week/month
 // windows are DERIVED from this histogram on every scan, so a record ages out
 // of a window when its day does instead of being counted forever.
 #define TOK_LIVE_DAYS 190 // must match DASH_MAX_DAYS (p_ui.c): the heatmap span
 static long long g_tokDayLive[TOK_LIVE_DAYS];
-static long long g_tokHistMidnight = 0; // midnight the histogram was last shifted at
 // scan diagnostics (one log line per rescan while general.debug is on)
 int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
 static long long g_tokLiveCount = 0; // records folded in (for the log line)
@@ -352,6 +350,17 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, c
 }
 
 // --------------------------------------------------------------- driver ----
+// Day rollover, driven by p_ui.c's dashDayRollover (which owns the clock and
+// shifts the heatmap arrays in the same step): every bucket moves one day
+// older so a record counted yesterday is today's "yesterday" and ages out.
+void tokLiveDayShift(int days) {
+    if (days >= TOK_LIVE_DAYS) memset(g_tokDayLive, 0, sizeof(g_tokDayLive));
+    else if (days > 0) {
+        memmove(g_tokDayLive + days, g_tokDayLive, (TOK_LIVE_DAYS - days) * sizeof(g_tokDayLive[0]));
+        memset(g_tokDayLive, 0, (size_t)days * sizeof(g_tokDayLive[0]));
+    }
+}
+
 // Record the seed (the Electron cache) so the live scan only counts what is
 // newer, and nothing already in the cache is counted twice.
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs) {
@@ -367,18 +376,6 @@ long tokLiveScan(void) {
     SYSTEMTIME st; GetLocalTime(&st);
     st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
     FILETIME fm; SystemTimeToFileTime(&st, &fm);
-    g_tokMidnight = dashMidnightMs(&fm, 0);
-    // a new day makes every bucket one day older: shift the histogram so a
-    // record counted yesterday is today's "yesterday" and ages out on schedule
-    if (g_tokHistMidnight && g_tokMidnight > g_tokHistMidnight) {
-        int days = (int)((g_tokMidnight - g_tokHistMidnight + 43200000LL) / 86400000LL);
-        if (days >= TOK_LIVE_DAYS) memset(g_tokDayLive, 0, sizeof(g_tokDayLive));
-        else if (days > 0) {
-            memmove(g_tokDayLive + days, g_tokDayLive, (TOK_LIVE_DAYS - days) * sizeof(g_tokDayLive[0]));
-            memset(g_tokDayLive, 0, (size_t)days * sizeof(g_tokDayLive[0]));
-        }
-    }
-    g_tokHistMidnight = g_tokMidnight;
     for (int j = 0; j <= 190; j++) bnd[j] = dashMidnightMs(&fm, j - 1);
     long long before = g_tokAllLive;
     // Self-heal: if the in-memory set was lost (an early config reload used to
