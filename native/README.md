@@ -27,9 +27,10 @@ native/build.sh        # -> native/chocobar.exe (~245 KB)
 ```
 
 Requires Nix (`pkgsCross.mingwW64` gcc/binutils + mcfgthreads). `build.sh`
-assembles `src/chocobar_full.c` from the four source parts, then compiles.
+assembles `src/chocobar_full.c` from the seven source parts, then compiles.
 Edit the PARTS (`src/chocobar.c`, `src/p_utils.c`, `src/p_metrics.c`,
-`src/p_ui.c`), never the assembled file.
+`src/p_subs.c`, `src/p_icons.c`, `src/p_tokens.c`, `src/p_ui.c`), never the
+assembled file.
 
 ## Run
 
@@ -58,21 +59,19 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 - The bar FOLLOWS the terminal, so screen captures at probed coordinates
   race the follow loop (stale rect = black/empty screenshots).
   `PrintWindow` on the `ChocobarBar` hwnd is the reliable verification.
-- Icons are Nerd Font glyphs drawn from the configured family (codepoints
-  verified against the font's cmap: pet 0xF004, gpu 0xF08CA, cpu 0xF035B,
-  temp 0xF05C3, ram 0xF04B0, vol 0xF057E / muted 0xF0581, battery 0xF240 /
-  AC 0xF0427, clock 0xF017). Icon + space is drawn dim (`theme.fgDim`),
-  the value in `theme.fg` / warn / override color - the two-tone look.
+- Icons are flattened SVG path data (viewBox 24, stroke-width 2.2), rendered
+  with GDI+ (`SmoothingModeAntiAlias8x8`, round caps/joins) into per-icon
+  premultiplied DIB caches and `AlphaBlend`ed - never hand-redraw them, port
+  the exact path data from `renderer/bar.js`'s `ICONS`. One stroke color each
+  (`theme.iconColor`, default pinkDeep); `theme.iconOpacity` rides `AlphaBlend`'s
+  `SourceConstantAlpha` (default 90 = Electron's `.seg svg { opacity: .9 }`).
+  Battery is a dynamic fill drawn by `svgDrawBatt`. Icon + space is drawn dim
+  (`theme.fgDim`), the value in `theme.fg` / warn / override color - the
+  two-tone look.
 - `theme.fgDim` is a real config key (default `#5a5245`); the config
   jsmn walker counts key+value PAIRS (2N tokens) - never "fix" that.
 - All wide strings go through `wideDup`/HeapFree; mixing `_wcsdup` with
   HeapFree caused a 0xC0000374 heap corruption once.
-- A crash handler (`SetUnhandledExceptionFilter` -> `writeLogA`) appends
-  the exception code to `native.log` next to the config; paint failures
-  log there too. No other logging in steady state.
-- `CreateWindowExW` starts the bar at (-2000,-2000); the follow tick moves
-  it. Never paint assumptions before `followTick` has run.
-
 - A crash handler (`SetUnhandledExceptionFilter` -> `writeLogA`) appends
   the exception code to `native.log` next to the config; paint failures
   log there too. No other logging in steady state.

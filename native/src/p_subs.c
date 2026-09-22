@@ -738,6 +738,15 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
         char *v = best + strlen(names[bi]);
         while (v < oe && (*v == ' ' || *v == ':' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
         if (v >= oe) break;
+        // The old value must match the shape we are about to write: a JSON string
+        // for the quoted keys, a number for expires. Anything else means the
+        // store is not the shape this surgery assumes, so abort the whole write
+        // (invariant: any doubt aborts) instead of splicing into invalid JSON.
+        if (quote[bi]) {
+            if (*v != '"') { HeapFree(GetProcessHeap(), 0, out); HeapFree(GetProcessHeap(), 0, buf); return; }
+        } else if (!(*v == '-' || (*v >= '0' && *v <= '9'))) {
+            HeapFree(GetProcessHeap(), 0, out); HeapFree(GetProcessHeap(), 0, buf); return;
+        }
         int head = (int)(v - p);
         memcpy(out + o, p, head); o += head;
         if (quote[bi]) out[o++] = '"';
@@ -759,11 +768,25 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
     int tail = (int)(buf + len - oe);
     if (tail > 0) { memcpy(out + o, oe, tail); o += tail; }
     out[o] = 0;
-    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    // Atomic write-back: never truncate the live credential store. Write a
+    // sibling temp file and rename it over the original, so an interruption
+    // leaves the store intact; a refused rename (another process holds the
+    // file open) is logged rather than silently dropping the rotated token.
+    wchar_t tmp[MAX_PATH + 8];
+    lstrcpynW(tmp, path, MAX_PATH);
+    lstrcatW(tmp, L".tmp");
+    HANDLE h = CreateFileW(tmp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD wr = 0;
         WriteFile(h, out, o, &wr, NULL);
         CloseHandle(h);
+        if (!MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+            writeLogA("subs agy: auth token write-back failed (store locked or read-only)");
+            DeleteFileW(tmp);
+        }
+    } else {
+        writeLogA("subs agy: auth temp file could not be created");
+        DeleteFileW(tmp);
     }
     HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, buf);
@@ -1477,7 +1500,7 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             if (g_cfg.debug) { // one line per provider: what the board will show
                 for (int i = 0; i < n; i++) {
                     if (!g_cfg.subsProviders[i].enabled) continue;
-                    wchar_t lb[64]; SubsWin w[4];
+                    SubsWin w[4];
                     int wn = subsProvWins(i, w, 4);
                     int stale = wn < 0; if (wn < 0) wn = -wn;
                     wchar_t plan[24]; subsProvPlan(i, plan, 24);

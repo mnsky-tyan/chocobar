@@ -39,7 +39,6 @@ long long g_tokTodayLive = 0, g_tokWeekLive = 0, g_tokMonthLive = 0, g_tokAllLiv
 static long long g_tokDayLive[TOK_LIVE_DAYS];
 // scan diagnostics (one log line per rescan while general.debug is on)
 int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
-static long long g_tokLiveCount = 0; // records folded in (for the log line)
 
 #define TOK_MAX_FILES 4096
 typedef struct { char path[520]; long long size; long long mtimeMs; } TokCursor;
@@ -53,32 +52,12 @@ static long long g_cacheMaxTs = 0;     // newest ts the Electron cache holds
 static long long g_cacheMtimeMs = 0;   // when that cache was last written
 
 // ------------------------------------------------------------ small utils ----
-static long long tokNowMs(void) {
-    FILETIME ft; GetSystemTimeAsFileTime(&ft);
-    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
-}
-
-static long long tokFileMtimeMs(const wchar_t *path) {
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return 0;
-    return (((long long)fa.ftLastWriteTime.dwHighDateTime) << 32 | fa.ftLastWriteTime.dwLowDateTime) / 10000
-           - 11644473600000LL;
-}
-
 // wide path -> utf8 (for the cursor file, which is plain JSON)
 static int tokWideToUtf8(const wchar_t *w, char *out, int cb) {
     if (!w || !*w) { if (cb > 0) out[0] = 0; return 0; }
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, cb, NULL, NULL);
     if (n > 0) return n - 1;
     if (cb > 0) out[0] = 0;
-    return 0;
-}
-
-static int tokUtf8ToWide(const char *s, wchar_t *out, int cch) {
-    if (!s || !*s) { if (cch > 0) out[0] = 0; return 0; }
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cch);
-    if (n > 0) return n - 1;
-    if (cch > 0) out[0] = 0;
     return 0;
 }
 
