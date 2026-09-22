@@ -877,6 +877,8 @@ typedef struct {
     DWORD pid;
     int port;
     int daily;                // command line pointed at the sandbox endpoint
+    int ports[16];            // every listener the pid owns
+    int portN;
     wchar_t token[80];
 } AgyLocal;
 
@@ -1008,13 +1010,12 @@ static BOOL subsAgyLocalFind(AgyLocal *out) {
         c.token[j] = 0;
         if (!c.token[0]) continue;
         c.daily = wcsstr(cl, L"daily-cloudcode") != NULL;
-        int ports[16];
-        int npo = subsAgyListenPorts(c.pid, ports, 16);
-        for (int k = 0; k < npo; k++) if (ports[k] > 0) { c.port = ports[k]; break; }
+        c.portN = subsAgyListenPorts(c.pid, c.ports, 16);
+        c.port = c.portN > 0 ? c.ports[0] : 0;
         if (g_cfg.debug) {
             char lb[220];
             sprintf(lb, "[wizbar] subs agy cand pid=%lu daily=%d ports=%d port=%d",
-                    (unsigned long)c.pid, c.daily, npo, c.port);
+                    (unsigned long)c.pid, c.daily, c.portN, c.port);
             writeLogA(lb);
         }
         if (!c.port) continue;
@@ -1101,21 +1102,7 @@ static int subsAgyQuotaKey(const wchar_t *label) {
     return wcsstr(lo, L"gemini") ? 0 : 1;
 }
 
-static int subsFetchAgyLocal(int idx, int fam) {
-    AgyLocal lc;
-    if (!subsAgyLocalFind(&lc)) return 0; // not running: caller falls back
-    static const char *body = "{}";
-    int st = 0, bl = 0;
-    char *resp = subsAgyLocalPost(&lc, body, 2, g_cfg.subsTimeoutMs, &st, &bl);
-    if (!resp || st != 200) {
-        if (g_cfg.debug) {
-            char lb[128];
-            sprintf(lb, "[wizbar] subs agy local: port %d st=%d (%s)", lc.port, st, resp ? "ok" : "null");
-            writeLogA(lb);
-        }
-        if (resp) HeapFree(GetProcessHeap(), 0, resp);
-        return 0;
-    }
+static int subsAgyLocalApply(int idx, int fam, int port, char *resp, int bl) {
     jsmntok_t *t = NULL;
     int n = subsParseBig(resp, bl, &t);
     if (n <= 0 || t[0].type != JSMN_OBJECT) {
@@ -1141,12 +1128,11 @@ static int subsFetchAgyLocal(int idx, int fam) {
         double avail = -1, monthly = -1;
         if (ps >= 0) avail = subsJdouble(resp, t, ps, "availablePromptCredits", -1);
         if (pi2 >= 0) monthly = subsJdouble(resp, t, pi2, "monthlyPromptCredits", -1);
-        if (avail >= 0 && monthly > 0 && fam == 0) {
+        if (avail >= 0 && monthly > 0) {
             int left = (int)(avail + 0.5);
             subsSetCredits(idx, left, (int)(monthly + 0.5));
         }
     }
-    // two family windows: Gemini and Claude/GPT
     SubsWin wins[2];
     double frac[2] = { -1, -1 };
     long long reset[2] = { 0, 0 };
@@ -1159,7 +1145,7 @@ static int subsFetchAgyLocal(int idx, int fam) {
             if (t[k].type != JSMN_OBJECT) continue;
             wchar_t *label = subsJstr(resp, t, k, "label");
             if (!label) continue;
-            int fam = subsAgyQuotaKey(label);
+            int mf = subsAgyQuotaKey(label);
             wideFree(&label);
             int qi = jobjGet(resp, t, k, "quotaInfo");
             if (qi < 0) continue;
@@ -1168,41 +1154,69 @@ static int subsFetchAgyLocal(int idx, int fam) {
             long long rms = 0;
             char *iso = subsJstrRaw(resp, t, qi, "resetTime");
             if (iso) { rms = subsIsoToMs(iso, (int)strlen(iso)); HeapFree(GetProcessHeap(), 0, iso); }
-            if (frac[fam] < 0 || f < frac[fam]) { frac[fam] = f; reset[fam] = rms; }
+            if (frac[mf] < 0 || f < frac[mf]) { frac[mf] = f; reset[mf] = rms; }
         }
     }
     HeapFree(GetProcessHeap(), 0, t);
     HeapFree(GetProcessHeap(), 0, resp);
-    // one window: this panel's family quota, the window the IDE calls weekly
-    int f = fam ? 1 : 0;
-    if (frac[f] < 0) return 0;
+    // ONE combined 5h window across the two model families. Antigravity
+    // does not expose a weekly quota: every clientModelConfigs entry is a
+    // 5-hour rolling window (the IDE's /quota shows the same), so the binding
+    // constraint is the lowest remaining fraction across both families.
+    int fBest = frac[0] >= 0 && (frac[1] < 0 || frac[0] <= frac[1]) ? 0 : 1;
+    if (frac[0] < 0 && frac[1] < 0) return 0;
+    if (frac[fBest] < 0) fBest = fBest ? 0 : 1;
     memset(&wins[0], 0, sizeof(wins[0]));
-    lstrcpynW(wins[0].label, L"week", 24);
-    wins[0].rem = (int)(frac[f] * 100.0 + 0.5);
+    lstrcpynW(wins[0].label, L"5h", 24);
+    wins[0].rem = (int)(frac[fBest] * 100.0 + 0.5);
     wins[0].pct = 100 - wins[0].rem;
     wins[0].used = -1; wins[0].total = -1;
-    wins[0].resetAt = reset[f];
+    wins[0].resetAt = reset[fBest];
     subsSetWins(idx, wins, 1);
     subsSetState(idx, wins[0].rem, 1);
     subsSetPlan(idx, plan);
     if (g_cfg.debug) {
         char lb[240];
-        sprintf(lb, "[wizbar] subs agy local: port=%d fam=%d rem=%d gemini=%.3f claude=%.3f",
-                lc.port, fam, wins[0].rem, frac[0] < 0 ? -1 : frac[0], frac[1] < 0 ? -1 : frac[1]);
+        sprintf(lb, "[wizbar] subs agy local: port=%d rem=%d gemini=%.3f claude=%.3f",
+                port, wins[0].rem, frac[0] < 0 ? -1 : frac[0], frac[1] < 0 ? -1 : frac[1]);
         writeLogA(lb);
     }
     return 1;
 }
 
+static int subsFetchAgyLocal(int idx, int fam) {
+    AgyLocal lc;
+    if (!subsAgyLocalFind(&lc)) return 0; // not running: caller falls back
+    static const char *body = "{}";
+    // Try EVERY listener the pid owns: which one serves the JSON endpoint
+    // varies per boot (an LSP/gRPC listener plus the JSON one), and the wrong
+    // one answers 400/401 or closes the connection - the pid/ports/token are
+    // all valid, only the pairing is wrong.
+    for (int p = 0; p < lc.portN; p++) {
+        if (lc.ports[p] <= 0) continue;
+        lc.port = lc.ports[p];
+        int st = 0, bl = 0;
+        char *resp = subsAgyLocalPost(&lc, body, 2, g_cfg.subsTimeoutMs, &st, &bl);
+        if (!resp || st != 200) {
+            if (g_cfg.debug) {
+                char lb[128];
+                sprintf(lb, "[wizbar] subs agy local: port %d st=%d (%s)", lc.port, st, resp ? "ok" : "null");
+                writeLogA(lb);
+            }
+            if (resp) HeapFree(GetProcessHeap(), 0, resp);
+            continue;
+        }
+        if (subsAgyLocalApply(idx, fam, lc.port, resp, bl)) return 1;
+    }
+    return 0;
+}
+
 static int subsFetchAntigravity(int idx) {
-    // The provider pool holds TWO slots per antigravity entry (family 0 =
-    // Gemini, 1 = GPT/Claude); each reports only its own family's quota.
-    int fam = (idx >= 0 && idx < MAX_SUBS) ? g_cfg.subsProviders[idx].family : 0;
     subsSetCredits(idx, -1, -1);
     // The local language server is the authoritative source (it is what the
     // IDE's own quota UI shows). Only fall back to the cloud endpoints when it
     // is not running, e.g. the IDE is closed.
-    if (subsFetchAgyLocal(idx, fam)) return 1;
+    if (subsFetchAgyLocal(idx, 0)) return 1;
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(idx, &auth, authPath, MAX_PATH)) {
@@ -1329,9 +1343,9 @@ static int subsFetchAntigravity(int idx) {
                             }
                         }
                         wideFree(&dn);
-                        // family filter: this slot only renders its own family
-                        // (the outer loop's jtokSpan already spans the buckets)
-                        if (subsAgyQuotaKey(shortName) != fam) continue;
+                        // ONE combined 5h window per bucket set: Antigravity
+                        // exposes no weekly quota, so only 5h-class buckets
+                        // count and the lowest one across both families wins.
                         int buckets = jobjGet(resp, t, k, "buckets");
                         if (buckets >= 0 && t[buckets].type == JSMN_ARRAY) {
                             int bc = t[buckets].size;
@@ -1341,28 +1355,40 @@ static int subsFetchAntigravity(int idx) {
                                 if (be->type == JSMN_OBJECT) {
                                     double rf = subsJdouble(resp, t, bk, "remainingFraction", -1);
                                     if (rf >= 0) {
+                                        // window kind first: only 5h-class
+                                        // buckets are real user quota (the
+                                        // IDE also returns weekly buckets it
+                                        // never resets, which read as stale)
+                                        wchar_t *win = subsJstr(resp, t, bk, "window");
+                                        int is5h = 0;
+                                        if (win) {
+                                            if (lstrcmpiW(win, L"5h") == 0 || lstrcmpiW(win, L"five_hour") == 0
+                                                || lstrcmpiW(win, L"five hour") == 0 || lstrcmpiW(win, L"session") == 0)
+                                                is5h = 1;
+                                        } else {
+                                            // no window field: the bucketId
+                                            // carries it ("gemini-5h")
+                                            wchar_t *bid = subsJstr(resp, t, bk, "bucketId");
+                                            if (bid && wcsstr(bid, L"5h")) is5h = 1;
+                                            wideFree(&bid);
+                                        }
+                                        wideFree(&win);
+                                        if (!is5h) continue;
                                         if (rf > 1) rf = 1;
                                         double rem = rf * 100.0;
-                                        if (rem < lo) lo = rem;
-                                        memset(&wins[nwin], 0, sizeof(SubsWin));
-                                        // the bucketId ("gemini-5h", "3p-weekly")
-                                        // is the most precise label available, but
-                                        // it is an internal code: "3p" means
-                                        // nothing to a human. Use the group name
-                                        // plus the window, which is what the
-                                        // vendor's own quota UI calls it.
-                                        wchar_t *win = subsJstr(resp, t, bk, "window");
-                                        if (win && lstrcmpiW(win, L"weekly") == 0)
-                                            lstrcpynW(wins[nwin].label, L"week", 24);
-                                        else if (win)
-                                            lstrcpynW(wins[nwin].label, win, 24);
-                                        else
-                                            lstrcpynW(wins[nwin].label, L"win", 24);
-                                        wideFree(&win);
-                                        wins[nwin].pct = (int)(100.0 - rem + 0.5);
-                                        wins[nwin].rem = (int)(rem + 0.5);
-                                        wins[nwin].used = -1;
-                                        wins[nwin].total = -1;
+                                        if (nwin >= 1) {
+                                            // already captured: only a tighter
+                                            // constraint may replace it
+                                            if (rem >= lo) continue;
+                                            nwin = 0;
+                                        }
+                                        lo = rem;
+                                        memset(&wins[0], 0, sizeof(SubsWin));
+                                        lstrcpynW(wins[0].label, L"5h", 24);
+                                        wins[0].pct = (int)(100.0 - rem + 0.5);
+                                        wins[0].rem = (int)(rem + 0.5);
+                                        wins[0].used = -1;
+                                        wins[0].total = -1;
                                         char *rt = subsJstrRaw(resp, t, bk, "resetTime");
                                         if (rt) {
                                             char raw[40];
@@ -1370,12 +1396,12 @@ static int subsFetchAntigravity(int idx) {
                                             if (rl > 39) rl = 39;
                                             memcpy(raw, rt, rl);
                                             raw[rl] = 0;
-                                            wins[nwin].resetAt = subsIsoToMs(raw, rl);
+                                            wins[0].resetAt = subsIsoToMs(raw, rl);
                                             HeapFree(GetProcessHeap(), 0, rt);
                                         } else {
-                                            wins[nwin].resetAt = 0;
+                                            wins[0].resetAt = 0;
                                         }
-                                        nwin++;
+                                        nwin = 1;
                                     }
                                 }
                                 bk += jtokSpan(t, bk);
@@ -1432,7 +1458,7 @@ static int subsFetchAntigravity(int idx) {
                         int mkl = klen < 79 ? klen : 79;
                         memcpy(mkey, resp + t[k].start, mkl);
                         mkey[mkl] = 0;
-                        if (!isChat && !isInternal && subsAgyQuotaKeyN(mkey) == fam
+                        if (!isChat && !isInternal
                             && q >= 0 && t[q].type == JSMN_OBJECT) {
                             double rf = subsJdouble(resp, t, q, "remainingFraction", -1);
                             if (rf >= 0) {
@@ -1457,7 +1483,7 @@ static int subsFetchAntigravity(int idx) {
         HeapFree(GetProcessHeap(), 0, resp);
         if (minRem < 0) break;
         memset(&wins[0], 0, sizeof(SubsWin));
-        lstrcpynW(wins[0].label, L"models", 16);
+        lstrcpynW(wins[0].label, L"5h", 24);
         wins[0].pct = (int)(100.0 - minRem + 0.5);
         wins[0].rem = (int)(minRem + 0.5);
         wins[0].used = -1;
@@ -1586,9 +1612,8 @@ static int subsChipStale(void) {
 static void subsProvLabel(int i, wchar_t *out, int cb) {
     const wchar_t *l = i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].label
                            ? g_cfg.subsProviders[i].label : NULL;
-    int fam = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].family : 0;
     int it = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].type : 0;
-    if (it == 2) l = fam ? L"Antigravity (GPT/Claude)" : L"Antigravity (Gemini)";
+    if (it == 2) l = L"Antigravity";
     else if (!l || !*l) l = it == 1 ? L"Z.ai" : L"ChatGPT";
     lstrcpynW(out, l, cb);
 }
