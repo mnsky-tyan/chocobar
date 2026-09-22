@@ -970,8 +970,8 @@ static BOOL subsAgyLocalFind(AgyLocal *out) {
         for (int k = 0; k < npo; k++) if (ports[k] > 0) { c.port = ports[k]; break; }
         if (g_cfg.debug) {
             char lb[220];
-            sprintf(lb, "[wizbar] subs agy cand pid=%lu daily=%d tok=%.8s ports=%d port=%d",
-                    (unsigned long)c.pid, c.daily, c.token, npo, c.port);
+            sprintf(lb, "[wizbar] subs agy cand pid=%lu daily=%d ports=%d port=%d",
+                    (unsigned long)c.pid, c.daily, npo, c.port);
             writeLogA(lb);
         }
         if (!c.port) continue;

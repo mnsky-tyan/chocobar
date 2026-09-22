@@ -414,6 +414,15 @@ static void dashDayRollover(void) {
 // every completed scan (data OR no-data) moves the version, so the open
 // dashboard can repaint on change instead of on a fixed heartbeat
 static void scanTokenCacheInner(void) {
+    // tokens.enabled is the master switch: off = zero scans (the cache file is
+    // never opened), no chip, and the board shows the master-off empty state
+    if (!g_cfg.tokensEnabled) {
+        g_tokensToday = -1;
+        g_tokBaseToday = g_tokBaseWeek = g_tokBaseMonth = g_tokBaseAll = 0;
+        g_tokWeek = g_tokMonth = g_tokAll = 0;
+        g_cacheReadDone = 0; // a later re-enable must re-read the seed
+        return;
+    }
     wchar_t path[MAX_PATH];
     path[0] = 0;
     if (g_cfg.tokenCachePath && *g_cfg.tokenCachePath) {
@@ -557,7 +566,7 @@ static void scanTokenCache(void) {
     scanTokenCacheInner();
     if (g_cfg.tokensEnabled && g_cfg.tokSrcCount) {
         tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
-        long added = tokLiveScan();
+        long long added = tokLiveScan();
         // cache-only base + live contribution, recomputed every rescan (the
         // bases survive the unchanged-cache fast path, the live counters only
         // grow with real appends)
@@ -670,7 +679,7 @@ static void buildChips(void) {
         g_chips[g_chipCount - 1].align = 2;
         g_chips[g_chipCount - 1].iconSvg = SVG_BOW;
     }
-    if (1) { // token chip (reads the Electron cache)
+    if (g_cfg.tokensEnabled) { // token chip (reads the Electron cache)
         wchar_t txt[32];
         fmtTokens(g_tokensToday, txt, 32);
         addChipI(CT_CUSTOM, -1, txt, 0, g_cfg.fgDim, 0);
@@ -977,7 +986,7 @@ static void repaintBar(HWND hwnd) {
     if (g_cfg.debug && g_chipCount != g_dbgChipsN) { // chip rects, for a click poster
         char lb[900]; int off = sprintf(lb, "[wizbar] chips:");
         for (int q = 0; q < g_chipCount && off < 860; q++)
-            off += sprintf(lb + off, " [%s %d..%d]", chipTypeName(&g_chips[q]), g_chips[q].r.left, g_chips[q].r.right);
+            off += sprintf(lb + off, " [%s %ld..%ld]", chipTypeName(&g_chips[q]), g_chips[q].r.left, g_chips[q].r.right);
         writeLogA(lb);
         g_dbgChipsN = g_chipCount;
     }
@@ -1701,7 +1710,12 @@ static void paintDash(HWND hwnd) {
         int innerW = w - 2 * padL;
         if (g_tokensToday < 0 && g_tokAll == 0) {
             dashCard(dc, padL, y, innerW, DX(38), t.card, t.divider);
-            dashStr(dc, padL + DX(14), y + DX(10), L"No token data. The token cache file could not be read \x2014 start Chocobar, or check tokens.cachePath.", t.dim, fBody);
+            // Two very different reasons for an empty board: the master switch
+            // is off (nothing is ever scanned) vs the cache file is unreadable.
+            const wchar_t *why = g_cfg.tokensEnabled
+                ? L"No token data. The token cache file could not be read \x2014 start Chocobar, or check tokens.cachePath."
+                : L"Token usage is off. Set tokens.enabled to true in the config to scan again.";
+            dashStr(dc, padL + DX(14), y + DX(10), why, t.dim, fBody);
         } else {
             // stat cards: Today / Last 7 / Last 30 / All time
             int cw2 = (innerW - 3 * DX(10)) / 4;
@@ -3108,7 +3122,7 @@ static const char *g_template =
     "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
-    "  \"tokens\": { \"appFilter\": [], \"cachePath\": \"\" },\r\n"
+    "  \"tokens\": { \"enabled\": true, \"appFilter\": [], \"cachePath\": \"\" },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"
     "    \"cpu\":  { \"enabled\": true, \"warnAt\": 85 },\r\n"
