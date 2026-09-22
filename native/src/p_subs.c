@@ -36,136 +36,6 @@ static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
 static int g_subsCredAvail[MAX_SUBS]; static int g_subsCredTotal[MAX_SUBS];
 static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
 static int g_agyLocalOk[MAX_SUBS];      // this slot has a live local-API reading
-static wchar_t g_subsCachePath[MAX_PATH]; // ~/.wizbar/subs-cache.json
-static int subsParseBig(const char *js, int len, jsmntok_t **outTok); // fwd
-static long long subsNowMs(void);
-static void subsSetWins(int idx, const SubsWin *w, int n);
-static char *readFileUtf8(const wchar_t *path, DWORD *outLen);
-
-// a JSON number as a long long (resetAt is epoch ms; jintTok is 32-bit)
-static long long subsJll(const char *js, const jsmntok_t *t, int i) {
-    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return 0;
-    char b[32];
-    int len = t[i].end - t[i].start;
-    if (len <= 0 || len >= (int)sizeof(b)) return 0;
-    memcpy(b, js + t[i].start, len);
-    b[len] = 0;
-    return atoll(b);
-}
-
-static void subsCachePathInit(void) {
-    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", g_subsCachePath, MAX_PATH);
-    if (!n) { g_subsCachePath[0] = 0; return; }
-    lstrcatW(g_subsCachePath, L"\\.wizbar\\subs-cache.json");
-}
-
-// JSON-escape into a narrow buffer; labels are simple vendor words, so this is
-// deliberately minimal (quotes and backslashes).
-static void subsJsonEsc(const wchar_t *in, char *out, int cb) {
-    int o = 0;
-    for (int i = 0; in[i] && o < cb - 2; i++) {
-        char c = (char)in[i];
-        if (c == '"' || c == '\\') { if (o < cb - 3) { out[o++] = '\\'; out[o++] = c; } }
-        else if ((unsigned char)c >= 32) out[o++] = c;
-    }
-    out[o] = 0;
-}
-
-static void subsAgyLocalPersist(int idx) {
-    if (idx < 0 || idx >= MAX_SUBS || !g_subsCachePath[0]) return;
-    if (!g_subsLockInit) return;
-    char body[4096];
-    int n = 0;
-    EnterCriticalSection(&g_subsLock);
-    n += sprintf(body + n, "{\"slot\":%d,\"at\":%lld,\"plan\":\"", idx, subsNowMs());
-    char esc[48];
-    subsJsonEsc(g_subsPlan[idx], esc, sizeof(esc));
-    n += sprintf(body + n, "%s", esc);
-    n += sprintf(body + n, "\",\"wins\":[");
-    int cnt = g_subsWinN[idx];
-    for (int i = 0; i < cnt; i++) {
-        SubsWin *w = &g_subsWin[idx][i];
-        subsJsonEsc(w->label, esc, sizeof(esc));
-        n += sprintf(body + n, "%s{\"label\":\"%s\",\"rem\":%d,\"pct\":%d,\"used\":%d,\"total\":%d,\"resetAt\":%lld}",
-                     i ? "," : "", esc, w->rem, w->pct, w->used, w->total, w->resetAt);
-    }
-    n += sprintf(body + n, "],\"credAvail\":%d,\"credTotal\":%d,\"rem\":%d}", g_subsCredAvail[idx], g_subsCredTotal[idx], g_subsProvRem[idx]);
-    LeaveCriticalSection(&g_subsLock);
-    if (n <= 0 || n >= (int)sizeof(body)) return;
-    wchar_t tmp[MAX_PATH];
-    lstrcpynW(tmp, g_subsCachePath, MAX_PATH);
-    lstrcatW(tmp, L".tmp");
-    HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    DWORD wr = 0;
-    WriteFile(h, body, (DWORD)n, &wr, NULL);
-    CloseHandle(h);
-    MoveFileW(tmp, g_subsCachePath); // atomic swap: a torn file never loads
-}
-
-static int subsJstr2(const char *js, jsmntok_t *t, int obj, const char *key, char *out, int cb) {
-    int v = jobjGet(js, t, obj, key);
-    if (v < 0 || t[v].type != JSMN_STRING) return 0;
-    int l = t[v].end - t[v].start;
-    if (l >= cb) l = cb - 1;
-    memcpy(out, js + t[v].start, l);
-    out[l] = 0;
-    return 1;
-}
-
-static void subsAgyLocalRestore(int idx) {
-    if (idx < 0 || idx >= MAX_SUBS || !g_subsCachePath[0]) return;
-    DWORD len = 0;
-    char *js = readFileUtf8(g_subsCachePath, &len);
-    if (!js) return;
-    jsmntok_t *t = NULL;
-    int n = subsParseBig(js, (int)len, &t);
-    if (n > 0 && t[0].type == JSMN_OBJECT) {
-        int slot = jintTok(js, t, jobjGet(js, t, 0, "slot"), -1);
-        // A 5h quota window is meaningless once the reading is older than one:
-        // after that the live cloud summary (different accounting, but current)
-        // beats resurrecting ancient numbers. 6h = one window plus slack.
-        long long at = subsJll(js, t, jobjGet(js, t, 0, "at"));
-        if (slot == idx && (subsNowMs() - at) < 6LL * 3600 * 1000) {
-            char plan[48] = "";
-            if (subsJstr2(js, t, 0, "plan", plan, sizeof(plan)) && plan[0]) {
-                MultiByteToWideChar(CP_UTF8, 0, plan, -1, g_subsPlan[idx], 24);
-                g_subsPlan[idx][23] = 0;
-            }
-            int wins = jobjGet(js, t, 0, "wins");
-            if (wins >= 0 && t[wins].type == JSMN_ARRAY) {
-                int cnt = t[wins].size; if (cnt > 4) cnt = 4;
-                int k = wins + 1, got = 0;
-                for (int i = 0; i < cnt; i++) {
-                    if (t[k].type != JSMN_OBJECT) { k += jtokSpan(t, k); continue; }
-                    SubsWin w;
-                    memset(&w, 0, sizeof(w));
-                    char lab[32] = "";
-                    subsJstr2(js, t, k, "label", lab, sizeof(lab));
-                    if (lab[0]) MultiByteToWideChar(CP_UTF8, 0, lab, -1, w.label, 24);
-                    w.rem = jintTok(js, t, jobjGet(js, t, k, "rem"), 0);
-                    w.pct = jintTok(js, t, jobjGet(js, t, k, "pct"), 0);
-                    w.used = jintTok(js, t, jobjGet(js, t, k, "used"), -1);
-                    w.total = jintTok(js, t, jobjGet(js, t, k, "total"), -1);
-                    w.resetAt = subsJll(js, t, jobjGet(js, t, k, "resetAt"));
-                    g_subsWin[idx][got++] = w;
-                }
-                if (got) {
-                    subsSetWins(idx, g_subsWin[idx], got);
-                    g_subsWinN[idx] = got;
-                    g_subsCredAvail[idx] = jintTok(js, t, jobjGet(js, t, 0, "credAvail"), -1);
-                    g_subsCredTotal[idx] = jintTok(js, t, jobjGet(js, t, 0, "credTotal"), -1);
-                    g_subsProvRem[idx] = jintTok(js, t, jobjGet(js, t, 0, "rem"), -1);
-                    g_agyLocalOk[idx] = 1;
-                    if (g_cfg.debug) writeLogA("[wizbar] subs agy: restored last live local reading");
-                }
-            }
-        }
-    }
-    HeapFree(GetProcessHeap(), 0, t);
-    HeapFree(GetProcessHeap(), 0, js);
-}
-static int g_agyLocalOk[MAX_SUBS];      // this slot has a live local-API reading
 static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
 
@@ -411,19 +281,6 @@ static void subsSetState(int idx, int rem, int success) {
     if (success) { g_subsProvRem[idx] = rem; g_subsProvStale[idx] = 0; }
     else if (g_subsProvRem[idx] >= 0) g_subsProvStale[idx] = 1;
     else g_subsProvRem[idx] = -1; // never succeeded: keep the no-data marker
-    LeaveCriticalSection(&g_subsLock);
-}
-
-// Flag a provider's numbers as "not the live source" without touching them.
-// The cloud fallback uses this: its 5h windows are phased differently from
-// the IDE's, so the panel must read STALE even on the very first cloud cycle
-// (g_subsProvRem was still -1, so subsSetState's guarded stale branch did
-// nothing and the board showed CAPPED - a fresh-looking wrong number).
-static void subsSetStaleOnly(int idx) {
-    if (idx < 0 || idx >= MAX_SUBS) return;
-    if (!g_subsLockInit) return;
-    EnterCriticalSection(&g_subsLock);
-    g_subsProvStale[idx] = 1;
     LeaveCriticalSection(&g_subsLock);
 }
 
@@ -1371,24 +1228,6 @@ static int subsFetchAgyLocal(int idx, int fam) {
 
 static int subsFetchAntigravity(int idx) {
     subsSetCredits(idx, -1, -1);
-    // The local language server is the authoritative source (it is what the
-    // IDE's own quota UI shows). Only fall back to the cloud endpoints when it
-    // is not running, e.g. the IDE is closed.
-    if (subsFetchAgyLocal(idx, 0)) {
-        g_agyLocalOk[idx] = 1;
-        subsAgyLocalPersist(idx); // last live reading survives a closed IDE
-        return 1;
-    }
-    // IDE closed (or its language server not spawned yet): the last LOCAL
-    // reading wins over the cloud, because the cloud summary lags the IDE
-    // (it kept showing gemini 5h = 100% while /quota showed 89.4%). The value
-    // stays on the board marked STALE, exactly like the harness's /quota
-    // serving its own last-good reading. Only a never-seen slot uses cloud.
-    if (g_agyLocalOk[idx]) {
-        if (g_cfg.debug) writeLogA("[wizbar] subs agy: local gone, keeping last live reading");
-        subsSetState(idx, g_subsProvRem[idx], 0);
-        return 1;
-    }
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(idx, &auth, authPath, MAX_PATH)) {
@@ -1462,158 +1301,37 @@ static int subsFetchAntigravity(int idx) {
         subsSetState(idx, 0, 0);
         return 0;
     }
-    SubsWin wins[4];
-    double loF[2] = { -1, -1 };  // per-family low-water mark (5h windows)
-    long long resetF[2] = { 0, 0 };
-    // grouped summary first (paid plans); 403 SUBSCRIPTION_REQUIRED = free
-    // tier, NOT an auth failure -> silent per-model fallback
-    int summaryDefinitive = 0;
-    for (int h = 0; h < 2 && !summaryDefinitive; h++) {
-        int st = 0, bl = 0;
-        char *resp = subsHttpPost("summary", hosts[h], L"/v1internal:retrieveUserQuotaSummary", hdrs,
-                                  "{}", 2, g_cfg.subsTimeoutMs, &st, &bl);
-        if (!resp) continue;
-        if (st == 403) { summaryDefinitive = 1; HeapFree(GetProcessHeap(), 0, resp); break; }
-        if (st == 401) {
-            writeLogA("subs agy: summary 401 (re-login)");
-            HeapFree(GetProcessHeap(), 0, resp);
-            subsSetState(idx, 0, 0);
-            return 0;
-        }
-        if (st != 200) { summaryDefinitive = 1; HeapFree(GetProcessHeap(), 0, resp); break; }
-        jsmntok_t *t = NULL;
-        int n = subsParseBig(resp, bl, &t);
-        if (n > 0 && t[0].type == JSMN_OBJECT) {
-            int groups = jobjGet(resp, t, 0, "groups");
-            if (groups >= 0 && t[groups].type == JSMN_ARRAY) {
-                int cnt = t[groups].size;
-                int k = groups + 1;
-                for (int i = 0; i < cnt; i++, k += jtokSpan(t, k)) {
-                    jsmntok_t *e = &t[k];
-                    if (e->type == JSMN_OBJECT) {
-                        // "Gemini Models" -> "Gemini"; "Claude and GPT models"
-                        // -> "Claude/GPT". Keep the prefix short but complete so
-                        // the appended window never truncates it.
-                        wchar_t shortName[24] = L"Models";
-                        wchar_t *dn = subsJstr(resp, t, k, "displayName");
-                        if (dn && *dn) {
-                            lstrcpynW(shortName, dn, 24);
-                            wchar_t *sp = wcsstr(shortName, L" Models");
-                            if (!sp) sp = wcsstr(shortName, L" models");
-                            if (sp) *sp = 0;
-                            // "Claude and GPT" -> "Claude/GPT" (the group is
-                            // two vendors; /quota-style naming, 1:1)
-                            wchar_t *and = wcsstr(shortName, L" and ");
-                            if (and) {
-                                wchar_t tmp[24];
-                                lstrcpynW(tmp, shortName, 24);
-                                wchar_t *ta = wcsstr(tmp, L" and ");
-                                if (ta) {
-                                    *ta = 0;
-                                    wchar_t tail[24];
-                                    lstrcpynW(tail, ta + 5, 24); // skip " and "
-                                    swprintf(shortName, 24, L"%ls/%ls", tmp, tail);
-                                }
-                            }
-                        }
-                        wideFree(&dn);
-                        // TWO 5h windows, one per model family - the same
-                        // rows the IDE's /quota shows. Antigravity exposes no
-                        // weekly quota, so only 5h-class buckets count (the
-                        // cloud summary also returns weekly buckets that never
-                        // reset and read as stale).
-                        int fam = subsAgyQuotaKey(shortName);
-                        int buckets = jobjGet(resp, t, k, "buckets");
-                        if (buckets >= 0 && t[buckets].type == JSMN_ARRAY && fam < 2) {
-                            int bc = t[buckets].size;
-                            int bk = buckets + 1;
-                            for (int b = 0; b < bc; b++) {
-                                jsmntok_t *be = &t[bk];
-                                if (be->type == JSMN_OBJECT) {
-                                    double rf = subsJdouble(resp, t, bk, "remainingFraction", -1);
-                                    if (rf >= 0) {
-                                        wchar_t *win = subsJstr(resp, t, bk, "window");
-                                        int is5h = 0;
-                                        if (win) {
-                                            if (lstrcmpiW(win, L"5h") == 0 || lstrcmpiW(win, L"five_hour") == 0
-                                                || lstrcmpiW(win, L"five hour") == 0 || lstrcmpiW(win, L"session") == 0)
-                                                is5h = 1;
-                                        } else {
-                                            wchar_t *bid = subsJstr(resp, t, bk, "bucketId");
-                                            if (bid && wcsstr(bid, L"5h")) is5h = 1;
-                                            wideFree(&bid);
-                                        }
-                                        wideFree(&win);
-                                        if (is5h) {
-                                            if (rf > 1) rf = 1;
-                                            double rem = rf * 100.0;
-                                            if (loF[fam] < 0 || rem < loF[fam]) {
-                                                loF[fam] = rem;
-                                                memset(&wins[fam], 0, sizeof(SubsWin));
-                                                lstrcpynW(wins[fam].label,
-                                                          fam ? L"Claude/GPT 5H" : L"Gemini 5H", 24);
-                                                wins[fam].pct = (int)(100.0 - rem + 0.5);
-                                                wins[fam].rem = (int)(rem + 0.5);
-                                                wins[fam].used = -1;
-                                                wins[fam].total = -1;
-                                                char *rt = subsJstrRaw(resp, t, bk, "resetTime");
-                                                if (rt) {
-                                                    char raw[40];
-                                                    int rl = (int)strlen(rt);
-                                                    if (rl > 39) rl = 39;
-                                                    memcpy(raw, rt, rl);
-                                                    raw[rl] = 0;
-                                                    wins[fam].resetAt = subsIsoToMs(raw, rl);
-                                                    HeapFree(GetProcessHeap(), 0, rt);
-                                                } else {
-                                                    wins[fam].resetAt = 0;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                bk += jtokSpan(t, bk);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        HeapFree(GetProcessHeap(), 0, t);
-        HeapFree(GetProcessHeap(), 0, resp);
-        int nw = 0, loRem = 101;
-        static const wchar_t *fam5h[2] = { L"Gemini 5H", L"Claude/GPT 5H" };
-        for (int f = 0; f < 2; f++) {
-            if (loF[f] < 0) continue;
-            memset(&wins[nw], 0, sizeof(SubsWin));
-            lstrcpynW(wins[nw].label, fam5h[f], 24);
-            wins[nw].rem = (int)(loF[f] + 0.5);
-            wins[nw].pct = 100 - wins[nw].rem;
-            wins[nw].used = -1;
-            wins[nw].total = -1;
-            wins[nw].resetAt = resetF[f];
-            if (wins[nw].rem < loRem) loRem = wins[nw].rem;
-            nw++;
-        }
-        if (nw > 0) {
-            subsSetWins(idx, wins, nw);
-            subsSetPlan(idx, plan);
-            // cloud summary = not the live source (see the model-configs path)
-            subsSetState(idx, loRem, 1);
-            subsSetStaleOnly(idx);
-            return 1;
-        }
-        break; // 200 but no groups: nothing to retry on the other base
-    }
-    // per-model fallback: the binding constraint across every non-internal
-    // model (internal and chat_* keys are IDE plumbing, not user quota)
-    for (int h = 0; h < 2; h++) {
+    // THE quota source, matching the harness's /quota exactly (pi-quota ->
+    // quota-axi -> pi-quota-inject.mjs): /v1internal:fetchAvailableModels on
+    // BOTH endpoints, merged with the daily/sandbox endpoint OVERWRITING
+    // production, then per family the first model key in priority order whose
+    // (merged) entry carries a quotaInfo. retrieveUserQuotaSummary is what
+    // reported gemini as a constant rf=1 untracked pool (the "100% while
+    // /quota is correct" bug); the two endpoints carry DIFFERENT quota
+    // figures and the sandbox is what actually serves Gemini. A quotaInfo may
+    // carry only a resetTime and no remainingFraction (the Claude/GPT pool
+    // between resets): the row stays on the board, its fraction renders as an
+    // em dash.
+    static const char *famKeys[2][5] = {
+        { "gemini-3.8-flash-tiered", "gemini-3.7-flash-tiered", "gemini-3.6-flash-high", "gemini-pro-agent", NULL },
+        { "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", NULL, NULL }
+    };
+    static const wchar_t *famNames[2] = { L"Gemini", L"Claude/GPT" };
+    double famRf[2] = { -1, -1 };
+    long long famReset[2] = { 0, 0 };
+    int famHave[2] = { 0, 0 };
+    for (int h = 0; h < 2; h++) { // production first, daily WINS (overwrite)
         int st = 0, bl = 0;
         char mbody[256];
         int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", auth.projectId);
         if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
         char *resp = subsHttpPost("models", hosts[h], L"/v1internal:fetchAvailableModels", hdrs,
                                   mbody, ml, g_cfg.subsTimeoutMs, &st, &bl);
+        if (g_cfg.debug) {
+            char lb[160];
+            sprintf(lb, "[wizbar] subs agy models host=%d st=%d bl=%d", h, st, bl);
+            writeLogA(lb);
+        }
         if (!resp) continue;
         if (st == 401) {
             writeLogA("subs agy: models 401 (re-login)");
@@ -1624,38 +1342,40 @@ static int subsFetchAntigravity(int idx) {
         if (st != 200) { HeapFree(GetProcessHeap(), 0, resp); break; }
         jsmntok_t *t = NULL;
         int n = subsParseBig(resp, bl, &t);
-        double minRem = -1;
-        long long minReset = 0;
         if (n > 0 && t[0].type == JSMN_OBJECT) {
             int models = jobjGet(resp, t, 0, "models");
             if (models >= 0 && t[models].type == JSMN_OBJECT) {
                 int cnt = t[models].size; // object: size = number of KEYS
                 int k = models + 1;
                 for (int i = 0; i < cnt; i++) {
-                    // k = key token, k+1 = value token (object children are PAIRS)
+                    // object children are key+value PAIRS: advance 1 + span(value)
                     if (t[k + 1].type == JSMN_OBJECT) {
                         int klen = t[k].end - t[k].start;
-                        int isChat = klen > 5 && strncmp(resp + t[k].start, "chat_", 5) == 0;
-                        int isInternal = subsJint(resp, t, k + 1, "isInternal", 0);
-                        int q = jobjGet(resp, t, k + 1, "quotaInfo");
-                        char mkey[80];
-                        int mkl = klen < 79 ? klen : 79;
-                        memcpy(mkey, resp + t[k].start, mkl);
-                        mkey[mkl] = 0;
-                        if (!isChat && !isInternal
-                            && q >= 0 && t[q].type == JSMN_OBJECT) {
-                            double rf = subsJdouble(resp, t, q, "remainingFraction", -1);
-                            if (rf >= 0) {
-                                if (rf > 1) rf = 1;
-                                double rem = rf * 100.0;
-                                if (minRem < 0 || rem < minRem) {
-                                    minRem = rem;
+                        const char *ks = resp + t[k].start;
+                        int matched = 0;
+                        for (int f = 0; f < 2 && !matched; f++) {
+                            for (int ki = 0; famKeys[f][ki]; ki++) {
+                                int kl = (int)strlen(famKeys[f][ki]);
+                                if (klen != kl || strncmp(ks, famKeys[f][ki], klen) != 0) continue;
+                                // tracked key: OVERWRITE the slot unconditionally,
+                                // exactly like Object.assign in pi-quota-inject
+                                // (the later endpoint's entry replaces the whole
+                                // model, quotaInfo or not)
+                                int q = jobjGet(resp, t, k + 1, "quotaInfo");
+                                famHave[f] = q >= 0 && t[q].type == JSMN_OBJECT;
+                                famRf[f] = -1;
+                                famReset[f] = 0;
+                                if (famHave[f]) {
+                                    famRf[f] = subsJdouble(resp, t, q, "remainingFraction", -1);
+                                    if (famRf[f] > 1) famRf[f] = 1;
                                     char *rt = subsJstrRaw(resp, t, q, "resetTime");
                                     if (rt) {
-                                        minReset = subsIsoToMs(rt, (int)strlen(rt));
+                                        famReset[f] = subsIsoToMs(rt, (int)strlen(rt));
                                         HeapFree(GetProcessHeap(), 0, rt);
-                                    } else minReset = 0;
+                                    }
                                 }
+                                matched = 1;
+                                break;
                             }
                         }
                     }
@@ -1665,21 +1385,33 @@ static int subsFetchAntigravity(int idx) {
         }
         HeapFree(GetProcessHeap(), 0, t);
         HeapFree(GetProcessHeap(), 0, resp);
-        if (minRem < 0) break;
-        memset(&wins[0], 0, sizeof(SubsWin));
-        lstrcpynW(wins[0].label, L"5h", 24);
-        wins[0].pct = (int)(100.0 - minRem + 0.5);
-        wins[0].rem = (int)(minRem + 0.5);
-        wins[0].used = -1;
-        wins[0].total = -1;
-        wins[0].resetAt = minReset;
-        subsSetWins(idx, wins, 1);
+    }
+    SubsWin wins[2];
+    int nw = 0, loRem = -1;
+    for (int f = 0; f < 2; f++) {
+        if (!famHave[f]) continue;
+        memset(&wins[nw], 0, sizeof(SubsWin));
+        lstrcpynW(wins[nw].label, famNames[f], 24);
+        wins[nw].rem = famRf[f] < 0 ? -1 : (int)(famRf[f] * 100.0 + 0.5);
+        wins[nw].pct = wins[nw].rem < 0 ? -1 : 100 - wins[nw].rem;
+        wins[nw].used = -1;
+        wins[nw].total = -1;
+        wins[nw].resetAt = famReset[f];
+        if (wins[nw].rem >= 0 && (loRem < 0 || wins[nw].rem < loRem)) loRem = wins[nw].rem;
+        nw++;
+    }
+    if (nw > 0) {
+        subsSetWins(idx, wins, nw);
         subsSetPlan(idx, plan);
-        // Cloud data is NOT the live source: its 5h windows are phased
-        // differently from the IDE's (cloud gemini read 100% while the IDE
-        // showed 89.4%), so a cloud-served panel must never look fresh.
-        subsSetState(idx, (int)(minRem + 0.5), 1);
-        subsSetStaleOnly(idx);
+        if (g_cfg.debug) {
+            char lb[128];
+            sprintf(lb, "[wizbar] subs agy: gemini=%d%% claude=%d%% (-1 = not reported)",
+                    famRf[0] < 0 ? -1 : (int)(famRf[0] * 100.0 + 0.5),
+                    famRf[1] < 0 ? -1 : (int)(famRf[1] * 100.0 + 0.5));
+            writeLogA(lb);
+        }
+        // loRem -1 = both fractions unreported: rows still shown, chip em dash
+        subsSetState(idx, loRem, 1);
         return 1;
     }
     subsSetState(idx, 0, 0);
@@ -1722,6 +1454,11 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             for (int i = 0; i < n; i++) {
                 if (!g_cfg.subsProviders[i].enabled) continue;
                 anyEnabled = 1;
+                if (g_cfg.debug) {
+                    char lb[64];
+                    sprintf(lb, "[wizbar] subs cycle: provider %d type %d enter", i, g_cfg.subsProviders[i].type);
+                    writeLogA(lb);
+                }
                 if (g_cfg.subsProviders[i].type == 0) subsFetchChatgpt(i);
                 else if (g_cfg.subsProviders[i].type == 1) subsFetchZai(i);
                 else subsFetchAntigravity(i);
@@ -1762,22 +1499,14 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
 }
 
 static void subsStart(void) {
-    // The lock comes FIRST: the cached-reading restore below calls
-    // subsSetWins, which takes it (an uninitialized CRITICAL_SECTION crashed
-    // the bar at startup with C0000005).
+    if (g_subsThreadStarted) return;
+    g_subsThreadStarted = 1;
+    // the lock MUST exist before the worker's first subsSet* call - the fetch
+    // thread can enter it within microseconds of starting (C0000005 if not)
     if (!g_subsLockInit) {
         InitializeCriticalSection(&g_subsLock);
         g_subsLockInit = 1;
     }
-    // The cached local readings load before anything reads them: the chip and
-    // board render from these globals, so a bar that starts with the IDE closed
-    // still shows the IDE's last live numbers (marked stale).
-    if (!g_subsCachePath[0]) subsCachePathInit();
-    for (int i = 0; i < MAX_SUBS; i++)
-        if (i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].type == 2)
-            subsAgyLocalRestore(i);
-    if (g_subsThreadStarted) return;
-    g_subsThreadStarted = 1;
     HANDLE h = CreateThread(NULL, 0, subsThreadProc, NULL, 0, NULL);
     if (h) CloseHandle(h);
 }

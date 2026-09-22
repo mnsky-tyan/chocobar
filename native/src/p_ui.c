@@ -2168,7 +2168,10 @@ static void paintDash(HWND hwnd) {
             // status pill (subs.css .pill): stale / capped / near cap / ok
             {
                 int lowest = 1000, anyw = 0;
-                for (int k = 0; k < wn; k++) { if (wins[k].rem < lowest) lowest = wins[k].rem; anyw = 1; }
+                // rem -1 = the backend reports no fraction for this pool right
+                // now (Claude/GPT between resets): the row exists but must not
+                // drag the pill to CAPPED
+                for (int k = 0; k < wn; k++) { if (wins[k].rem >= 0 && wins[k].rem < lowest) lowest = wins[k].rem; anyw = 1; }
                 const wchar_t *ps2 = NULL; COLORREF pc = t.dim, pbg = blendCr(t.head, t.dim, 31);
                 if (stale) { ps2 = L"STALE"; pc = t.yellow; pbg = blendCr(t.head, t.yellow, 31); }
                 else if (!anyw) ps2 = NULL;
@@ -2219,6 +2222,7 @@ static void paintDash(HWND hwnd) {
                 int kx = px2 + DX(14) + k * cellW;
                 int ky = bodyY + (bodyH - pieD) / 2;
                 int rem = wins[k].rem;
+                int unk = rem < 0; // no fraction reported: em dash, empty ring
                 if (rem < 0) rem = 0; if (rem > 100) rem = 100;
                 // track + arc (rotate -90: start at 12 o'clock, clockwise)
                 COLORREF track = blendCr(t.card, t.dim, 31);
@@ -2243,13 +2247,13 @@ static void paintDash(HWND hwnd) {
                 }
                 // center: "N%" pinkDeep + "left", the ink centered in the ring
                 wchar_t pctS[8];
-                swprintf(pctS, 7, L"%d", rem);
+                if (unk) swprintf(pctS, 7, L"\u2014"); else swprintf(pctS, 7, L"%d", rem);
                 int nw = dashStrW(dc, pctS, fPct);
-                int inkW = nw + DX(1) + dashStrW(dc, L"%", fS10);
+                int inkW = unk ? nw : nw + DX(1) + dashStrW(dc, L"%", fS10);
                 int cx0 = kx + (pieD - inkW) / 2;
                 int cyc = ky + pieD / 2;
                 dashStr(dc, cx0, cyc - DX(15), pctS, t.pinkDeep, fPct);
-                dashStr(dc, cx0 + nw + DX(1), cyc - DX(11), L"%", t.pinkDeep, fS10);
+                if (!unk) dashStr(dc, cx0 + nw + DX(1), cyc - DX(11), L"%", t.pinkDeep, fS10);
                 dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, cyc + DX(6), L"left", t.dim, fS9);
                 // meta right of the pie, clipped to its own cell
                 int mx = kx + pieD + DX(12);
@@ -2275,7 +2279,8 @@ static void paintDash(HWND hwnd) {
                     fmtNum(left, lf, 24);
                     fmtNum(wins[k].total, ts3, 24);
                     swprintf(usedLine, 71, L"%ls left of %ls", lf, ts3);
-                } else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
+                } else if (wins[k].pct < 0) swprintf(usedLine, 71, L"reset-only pool"); // no fraction reported
+                else swprintf(usedLine, 71, L"%d%% used", wins[k].pct);
                 dashStr(dc, mx, ky + (int)(pieD * 0.52f), usedLine, t.dim, fS10);
                 // third line: relative reset time (subs.js fmtReset)
                 wchar_t rst[40];
@@ -2832,7 +2837,8 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
         int best = -1;
         for (int k = 0; k < wn; k++) {
             if (wcsstr(w[k].label, L"week") || wcsstr(w[k].label, L"WEEK")) { best = k; break; }
-            if (best < 0 || w[k].rem < w[best].rem) best = k;
+            // prefer a row with a real fraction; rem -1 rows are reset-only
+            if (best < 0 || (w[k].rem >= 0 && w[k].rem < w[best].rem)) best = k;
         }
         if (best >= 0 && n < MAX_SUBS) pick[n++] = (i << 8) | best;
     }
@@ -2870,7 +2876,10 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
             swprintf(tip, tipCb, L"%ls %ls: %d%% left", plan, w[k].label, rem);
         }
     }
-    if (txt) swprintf(txt, cb, L"%d%%", rem);
+    if (txt) {
+        if (rem < 0) lstrcpynW(txt, L"\u2014", cb); // pool between resets
+        else swprintf(txt, cb, L"%d%%", rem);
+    }
     return rem;
 }
 
@@ -3217,9 +3226,9 @@ static const char *g_template =
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
     "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
-    "               // one entry = one panel with TWO 5h rows: Gemini 5H and Claude/GPT 5H (no weekly quota exists).\r\n"
-    "               // The IDE's local language server is the source; the cloud fallback needs YOUR google desktop\r\n"
-    "               // oauth pair (clientId / clientSecret) - never shipped, never committed.\r\n"
+    "               // one entry = one panel with two rows: Gemini and Claude/GPT, straight from\r\n"
+    "               // fetchAvailableModels on both Google endpoints (daily wins), the same source the\r\n"
+    "               // harness's /quota uses - no IDE or language server required.\r\n"
     "             ] },\r\n"
     "  \"tokens\": { \"enabled\": false,\r\n"
     "             \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"

@@ -207,13 +207,18 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   global state did exactly that via a never-set `any` flag); chip states:
   em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
   board reads the same per-provider window arrays (label/pct/used/total).
-- **Local-API reading wins forever**: a successful local fetch persists the
-  slot's windows/plan/credits to `~/.wizbar/subs-cache.json` (tmp+MoveFileW
-  swap) and restores at startup, so a closed IDE keeps showing the IDE's own
-  last numbers marked STALE instead of the cloud summary's lagging value
-  (cloud kept gemini 5h at 100% while /quota showed 89.4%). Cloud is used only
-  by a slot that was NEVER read locally. `subsStart` initializes the
-  CRITICAL_SECTION FIRST - the restore calls subsSetWins.
+- **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints
+  merged with daily/sandbox OVERWRITING production, per family key priority -
+  byte-for-byte the same source the harness's /quota uses** (pi-quota ->
+  quota-axi -> pi-quota-inject.mjs). Production's `retrieveUserQuotaSummary`
+  reports gemini as a constant rf=1 untracked pool and production/sandbox
+  carry DIFFERENT quota figures - reading the summary endpoint was the
+  "board 100% while /quota correct" bug. A quotaInfo may carry only a
+  resetTime and NO remainingFraction (Claude/GPT between resets): keep the
+  row, rem=-1 renders as an em dash ("reset-only pool"), and unknown rows are
+  excluded from the CAPPED/lowest math. Never reintroduce a persistence layer
+  or "local wins" policy without evidence - a fabricated cache file once fed
+  the captain stale numbers for hours.
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.
@@ -230,8 +235,16 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `"antigravity"` object and ABORTS on any doubt - a corrupted auth.json
   breaks the captain's whole toolchain, not just this bar.
 
-## Antigravity local quota source (p_subs.c, 2026-09-22)
+## Antigravity local quota source (DEAD CODE since 2026-09-23)
 
+- The local language-server path (subsFetchAgyLocal/subsAgyLocalApply +
+  PEB/TCP-table discovery) is NO LONGER CALLED: the captain's ground truth is
+  his /quota command, which never used the language server - it reads
+  fetchAvailableModels over HTTPS with the pi auth token (works with the IDE
+  closed). The local numbers (tiered 5h pools) DIVERGE from /quota, so letting
+  them feed the board reintroduces the mismatch. The dead helpers are still
+  compiled (excise in a dedicated pass); do not wire them back into the fetch
+  chain. Historical notes below still hold for that machinery:
 - The IDE's own /quota numbers come from its LOCAL language server, not the
   cloud: find `language_server*.exe`, read `--csrf_token` from its
   command line, POST `{}` to `http://127.0.0.1:<port>/exa.language_server_pb.
