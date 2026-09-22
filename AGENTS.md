@@ -171,6 +171,19 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   UNLOCKED; when locked, captures show the lock screen for every window.
   PW captures of the LAYERED bar return the raw premultiplied DIB (tint
   alpha 70% reads dark; alpha 0 reads black) - threshold accordingly.
+- **The captain's live config (`~/.wizbar/config.json`, default path; also the
+  `Edit config` menu target, resolved as `--config` > `WIZBAR_CONFIG` >
+  `%USERPROFILE%\.wizbar\config.json`) is not a sandbox.** A no-mistakes test
+  round once overwrote it with a 3-key stub and the captain lost the pet chip,
+  the token scan and 2 of 4 subs panels until it was restored. The bar never
+  WRITES this file (only an absent file gets the annotated template), so a
+  read-only attribute is safe for it - but do NOT leave it read-only: the
+  captain edits the config in Notepad with Ctrl+S, and a read-only file turns
+  that into a Save-As dialog. Guard strategy that worked: keep
+  `~/.wizbar-config-backup-good.json` outside the live home plus a 15s
+  stub-signature watchdog (restore only when the file has no `tokens` AND no
+  `modules` keys - the stub signature), so the captain's own edits are never
+  reverted.
 
 ## Native config parser (sharp edges, all bit us once)
 
@@ -213,9 +226,13 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 ## Antigravity local quota source (p_subs.c, 2026-09-22)
 
 - The IDE's own /quota numbers come from its LOCAL language server, not the
-  cloud: find `language_server_windows_x64.exe`, read `--csrf_token` from its
+  cloud: find `language_server*.exe`, read `--csrf_token` from its
   command line, POST `{}` to `http://127.0.0.1:<port>/exa.language_server_pb.
   LanguageServerService/GetUserStatus` with header `X-Codeium-Csrf-Token`.
+  Process match is a case-insensitive PREFIX (`language_server`): the shipped IDE
+  runs `language_server.exe` (from resources\bin), older builds
+  `language_server_windows_x64.exe` - an exact-name match silently found 0
+  candidates and fell back to cloud (caught by the pipeline's live test twice).
   Port/token are NOT persisted: the command line is read via
   NtQueryInformationProcess -> PEB -> ProcessParameters. PebBaseAddress and the
   CommandLine UNICODE_STRING offsets VARY per boot/build - every candidate is
