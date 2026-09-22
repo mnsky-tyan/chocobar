@@ -457,3 +457,12 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   print 8 hours off in HKT.
 - The heatmap cell is now adaptive (`(innerW - rowLabW)/weeks - gap`, capped
   DX(16)); 26 fixed DX(11) cells left the right half of the card blank.
+- The two day-indexed views of the same usage run in OPPOSITE directions:
+  `g_tokDayLive` (p_tokens.c) is today-first (index 0 = today), while
+  `g_dayTot`/`g_dayApp` (p_ui.c) are oldest-first (`[DASH_MAX_DAYS-1]` = today).
+  One owner ages both per local midnight - `dashDayRollover` (p_ui.c) shifts the
+  heatmap arrays toward LOWER indices and calls `tokLiveDayShift` (p_tokens.c),
+  which shifts the live histogram toward HIGHER ones. Never copy one shift
+  direction into the other array, and never shift only one of the two: the
+  'Today' card and the heatmap's today cell then disagree (verified with a
+  standalone harness, since the bug is invisible on a same-day screenshot).
