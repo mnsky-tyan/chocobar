@@ -2935,6 +2935,74 @@ static void trayRemove(void) {
     g_trayAdded = 0;
 }
 
+// Tray mark: a minimal pink tile with the bar inside it - the app IS a bar,
+// so the mark depicts one (a rounded pill). Pink on light or dark taskbars,
+// and it survives 16px because the shape carries the mark, no fine detail.
+// Alpha lives in the DIB, so no AND mask is needed.
+static HICON makeBarIcon(int px) {
+    const double pad = px * 0.10;         // tile margin, fraction of size
+    const double r = px * 0.24;           // tile corner radius
+    const double hx = px / 2.0 - pad;     // tile half extent
+    const double bh = px * 0.105;         // pill corner radius (= half height)
+    const double iw = px * 0.42;          // pill width
+    const double base[3] = { 0xD4, 0x93, 0xAA };  // theme pinkDeep
+    const double mark[3] = { 0xF7, 0xE2, 0xE9 };  // pill: near-white pink
+
+    BITMAPV5HEADER bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bV5Size = sizeof(bi);
+    bi.bV5Width = px;
+    bi.bV5Height = -px;                    // top-down rows
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000;
+    bi.bV5GreenMask = 0x0000FF00;
+    bi.bV5BlueMask = 0x000000FF;
+    bi.bV5AlphaMask = 0xFF000000;
+    void *bits = NULL;
+    HDC sdc = GetDC(NULL);
+    HBITMAP bm = CreateDIBSection(sdc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, sdc);
+    if (!bm || !bits) return NULL;
+    unsigned *px32 = (unsigned *)bits;
+    for (int y = 0; y < px; y++) {
+        for (int x = 0; x < px; x++) {
+            double cx = x + 0.5 - px / 2.0, cy = y + 0.5 - px / 2.0;
+            // rounded-tile signed distance: each half-distance is clamped at
+            // zero FIRST, or a negative axis inflates the length and the
+            // sides pinch inward (petal silhouette)
+            double qx = fabs(cx) - hx + r, qy = fabs(cy) - hx + r;
+            double ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
+            double d = sqrt(ox * ox + oy * oy) + (qx > qy ? qx : qy) - r;
+            // 1px feather: alpha ramps across the edge, no jaggies at any size
+            double a = 1.0 - (d - 0.5);
+            if (a < 0) a = 0; else if (a > 1) a = 1;
+            // the pill: a horizontal capsule inside the tile
+            double bx = fabs(cx) - (iw / 2.0 - bh);
+            double box = bx > 0 ? bx : 0;
+            double dm = sqrt(box * box + cy * cy) - bh;
+            double m = 1.0 - (dm - 0.5) / 0.8;
+            if (m < 0) m = 0; else if (m > 1) m = 1;
+            double c0 = base[0] + (mark[0] - base[0]) * m;
+            double c1 = base[1] + (mark[1] - base[1]) * m;
+            double c2 = base[2] + (mark[2] - base[2]) * m;
+            unsigned A = (unsigned)(a * 255.0 + 0.5);
+            unsigned R = (unsigned)(c0 + 0.5), G = (unsigned)(c1 + 0.5), B = (unsigned)(c2 + 0.5);
+            px32[y * px + x] = (A << 24) | (R << 16) | (G << 8) | B;
+        }
+    }
+    ICONINFO ii;
+    memset(&ii, 0, sizeof(ii));
+    ii.fIcon = TRUE;
+    ii.hbmColor = bm;
+    ii.hbmMask = CreateBitmap(px, px, 1, 1, NULL);
+    HICON h = CreateIconIndirect(&ii);
+    DeleteObject(ii.hbmMask);
+    DeleteObject(bm);                     // the icon keeps its own copy
+    return h;
+}
+
 static void trayAdd(HWND hwnd) {
     if (g_trayAdded || !g_cfg.showTray) return;
     memset(&g_nid, 0, sizeof(g_nid));
@@ -2943,7 +3011,8 @@ static void trayAdd(HWND hwnd) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY;
-    g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    g_nid.hIcon = makeBarIcon(32);
+    if (!g_nid.hIcon) g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     lstrcpynW(g_nid.szTip, L"Chocobar", 128);
     if (Shell_NotifyIconW(NIM_ADD, &g_nid)) g_trayAdded = 1;
 }
