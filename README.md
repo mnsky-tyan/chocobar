@@ -132,6 +132,20 @@ Every module takes `enabled` (default `true` unless noted). The three leftmost t
 - `label`: chip text; empty = icon only. `color`: chip color; empty = theme default. `title`: hover tooltip.
 - `command`: what a click runs. `toggle: true` holds an on/off state per run and appends ` on` / ` off` to the command.
 
+**Command-output chips** - set `intervalMs` and the command is polled on a timer instead of on click, and its stdout becomes the chip text. This is the escape hatch for any metric the bar has no reader for:
+
+```json
+{ "enabled": true, "icon": "gpu", "label": "",
+  "command": "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader",
+  "intervalMs": 5000, "format": "$v C", "warnAbove": 80 }
+```
+
+- `intervalMs`: poll period (minimum 1000). The command runs through `cmd.exe /c`, so pipes and redirects work.
+- `format`: wraps the value; `$v` is the trimmed stdout. Without `$v` the format is shown verbatim.
+- `warnAbove` / `warnBelow`: colour the value red outside that band. Either alone is fine; omit both to disable.
+
+The poll runs on its own thread, so a command that takes a second never hitches the bar. A failed command keeps the last good text rather than blanking the chip.
+
 ### `tokens` - the usage dashboard
 
 | Key | Default | What it does |
@@ -141,10 +155,25 @@ Every module takes `enabled` (default `true` unless noted). The three leftmost t
 | `cachePath` | `""` | Usage-history seed file; empty = `~/.wizbar/token-cache.json`. |
 | `appFilter` | `[]` | Harness allowlist: only these app ids are counted (empty = all). |
 | `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
-| `sources.zai` | – | `{ "enabled": true, "sessionsDir": "~/.zai/agent/sessions" }` - flat JSONL, scanned live. |
-| `sources.pi` | – | `{ "enabled": true, "sessionsDir": "~/.pi/agent/sessions" }` - one directory per project, scanned live. |
+| `sources` | `[]` | Every session store the live scan reads - a user-declared array, see below. |
 
-Only sources with a `sessionsDir` are scanned; the two shipped keys are `zai` and `pi`. Usage semantics per store are in the Token accounting section below.
+**`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else:
+
+```json
+"sources": [
+  { "app": "pi",  "path": "~/.pi/agent/sessions",  "enabled": true, "recursive": true },
+  { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
+  { "app": "zcode", "path": "~/.zcode/cli/db/db.sqlite", "enabled": false }
+]
+```
+
+- `app`: the aggregation key (and the `labels` lookup key). Omitted = the dot-directory above the store, so `~/.pi/agent/sessions` becomes `pi`.
+- `path`: the store. `~` is profile-relative; a UNC path works too.
+- `enabled`: per-source switch, honoured only when `tokens.enabled` is on.
+- `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
+- `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
+
+Usage semantics per store are in the Token accounting section below.
 
 ### `subs` - the subscription board
 
@@ -165,9 +194,34 @@ Each provider entry:
   "clientId": "", "clientSecret": "" }
 ```
 
-- `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login).
+- `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
 - `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
 - One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints (the daily endpoint wins), the same source the harness's `/quota` uses - no IDE or language server required.
+
+**`type: "generic"`** - any REST quota endpoint, declared entirely in config. This is what makes a new subscription plan a config edit rather than a code change:
+
+```json
+{ "type": "generic", "enabled": true, "label": "MyPlan",
+  "url": "https://api.example.com/v1/quota", "method": "GET",
+  "auth": { "header": "Authorization", "prefix": "Bearer ",
+            "path": "~/.example/auth.json", "key": "access_token" },
+  "headers": { "Accept": "application/json" },
+  "windows": [
+    { "label": "5h", "used": "$.data.five_hour.used",
+      "total": "$.data.five_hour.limit", "reset": "$.data.five_hour.resets_at" },
+    { "label": "week", "remaining": "$.data.weekly.remaining",
+      "total": "$.data.weekly.limit" }
+  ] }
+```
+
+- `url` / `method` / `body`: the request. `method` is `GET` unless it says `POST`; `body` is the raw POST body.
+- `auth`: one object, or an array of them. Each entry renders `header: prefix <value>`, where the value comes from `path` + `key` (read from a JSON file at fetch time), `env` (an environment variable), or `literal` (the config itself). Nothing is persisted.
+- `headers`: static `Name: value` lines, sent after the resolved auth.
+- `windows[]`: a `label` plus the JSON paths carrying the numbers. Paths are `$.a.b[0].c`. A window needs any two of `used` / `remaining` / `total`; the third is derived. `reset` is an ISO-8601 timestamp.
+- `planPath`: JSON path of the plan display name. Omitted = the `label`.
+- `require`: a path that must be present, for endpoints that answer `200` with an error body.
+- `expectStatus`: the status to accept; 0 = any 2xx.
+- `insecure`: allow plain `http`. Documented risk: it sends the token in the clear.
 
 **Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps the last good windows marked stale.
 
@@ -213,8 +267,9 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
   },
   "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
               "labels": { "pi": "pi-wsl" },
-              "sources": { "zai": { "enabled": true, "sessionsDir": "~/.zai/agent/sessions" },
-                           "pi":  { "enabled": true, "sessionsDir": "~/.pi/agent/sessions" } } },
+              "sources": [ { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
+                           { "app": "pi",  "path": "~/.pi/agent/sessions", "enabled": true,
+                             "recursive": true } ] } },
   "subs": { "enabled": false, "intervalMinutes": 2, "fetchTimeoutMs": 20000,
             "rotateSec": 60, "width": 880, "height": 580,
             "providers": [
@@ -225,7 +280,19 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                 "provider": "builtin:zai-coding-plan" },
               { "type": "antigravity", "enabled": false, "label": "Antigravity",
                 "authPath": "~/.pi/agent/auth.json",
-                "clientId": "", "clientSecret": "" }
+                "clientId": "", "clientSecret": "" },
+              { "type": "generic", "enabled": false, "label": "MyPlan",
+                "url": "https://api.example.com/v1/quota", "method": "GET",
+                "auth": { "header": "Authorization", "prefix": "Bearer ",
+                          "path": "~/.example/auth.json", "key": "access_token" },
+                "headers": { "Accept": "application/json" },
+                "windows": [
+                  { "label": "5h", "used": "$.data.five_hour.used",
+                    "total": "$.data.five_hour.limit",
+                    "reset": "$.data.five_hour.resets_at" },
+                  { "label": "week", "remaining": "$.data.weekly.remaining",
+                    "total": "$.data.weekly.limit" }
+                ] }
             ] },
   "terminal": { "className": "", "title": "" },
   "general": { "showTray": true, "autoStart": true, "debug": false }

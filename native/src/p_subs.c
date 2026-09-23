@@ -1534,6 +1534,278 @@ static int subsFetchAntigravity(int idx) {
     return 0;
 }
 
+// ---------------------------------------------------------------- generic ----
+// A JSONPath subset good enough for a quota endpoint: "$.a.b[0].c". It walks the
+// token tree directly - no string building, no allocation. Returns the token
+// index or -1. Deliberately narrow: an unsupported path just yields nothing and
+// the window is skipped, which is a visible config error rather than a crash.
+static int subsJsonPath(const char *js, const jsmntok_t *t, int root, const char *path) {
+    if (!path || path[0] != '$') return -1;
+    int cur = root;
+    const char *p = path + 1;
+    while (*p && cur >= 0) {
+        if (*p == '.') {
+            p++;
+            if (!*p) break;
+            const char *ks = p;
+            while (*p && *p != '.' && *p != '[') p++;
+            int kl = (int)(p - ks);
+            if (t[cur].type != JSMN_OBJECT) return -1;
+            int n = t[cur].size, k = cur + 1;
+            for (int i = 0; i < n; i++, k += 1 + jtokSpan(t, k + 1)) {
+                if (k >= 0 && t[k].type == JSMN_STRING && (t[k].end - t[k].start) == kl
+                    && strncmp(js + t[k].start, ks, (size_t)kl) == 0) {
+                    cur = k + 1;
+                    break;
+                }
+                if (i == n - 1) return -1;
+            }
+        } else if (*p == '[') {
+            p++;
+            int idx = 0, any = 0;
+            while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; any = 1; }
+            if (*p == ']') p++;
+            if (!any || t[cur].type != JSMN_ARRAY) return -1;
+            int k = cur + 1;
+            for (int i = 0; i < idx; i++) {
+                if (k < 0) return -1;
+                k += jtokSpan(t, k);
+            }
+            cur = k;
+        } else break;
+    }
+    return cur;
+}
+
+// the token at a JSONPath, as a double. Non-numbers (a stringified "1234")
+// are accepted, so an endpoint that quotes its counts still works.
+static double subsPathDouble(const char *js, const jsmntok_t *t, int root, const char *path, double dflt) {
+    int i = subsJsonPath(js, t, root, path);
+    if (i < 0) return dflt;
+    char buf[64];
+    int n = t[i].end - t[i].start;
+    if (n <= 0 || n >= (int)sizeof(buf)) return dflt;
+    memcpy(buf, js + t[i].start, (size_t)n);
+    buf[n] = 0;
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (end == buf) return dflt;
+    return v;
+}
+
+// resolve one auth entry to its header line. The secret is read at fetch time
+// and never written anywhere - the bar has no state that outlives the request.
+static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
+    wchar_t val[256]; val[0] = 0;
+    if (ga->path && *ga->path) {
+        int txtLen = 0;
+        char *txt = subsReadFileUtf8(ga->path, &txtLen);
+        if (!txt) return 0;
+        // the file is small (an auth.json); parse it in place
+        jsmntok_t *tk = NULL;
+        int n = subsParseBig(txt, (int)strlen(txt), &tk);
+        int v = -1;
+        if (n > 0) {
+            if (ga->key[0] == '.') v = subsJsonPath(txt, tk, 0, ga->key);
+            else v = jobjGet(txt, tk, 0, ga->key);
+        }
+        if (v >= 0) {
+            char *raw = subsJstrRaw(txt, tk, v, NULL);
+            // a non-string token still has to be readable as a value
+            char tmp[256];
+            int ln = tk[v].end - tk[v].start;
+            if (raw) { lstrcpynA(tmp, raw, 256); HeapFree(GetProcessHeap(), 0, raw); }
+            else if (ln > 0 && ln < 255) { memcpy(tmp, txt + tk[v].start, (size_t)ln); tmp[ln] = 0; }
+            else tmp[0] = 0;
+            MultiByteToWideChar(CP_UTF8, 0, tmp, -1, val, 256);
+        }
+        HeapFree(GetProcessHeap(), 0, tk);
+        HeapFree(GetProcessHeap(), 0, txt);
+    } else if (ga->env && *ga->env) {
+        wchar_t ev[256];
+        DWORD en = GetEnvironmentVariableW(ga->env, ev, 256);
+        if (!en || en >= 256) return 0;
+        lstrcpynW(val, ev, 256);
+    } else if (ga->literal && *ga->literal) {
+        lstrcpynW(val, ga->literal, 256);
+    } else return 0;
+    if (!val[0]) return 0;
+    swprintf(out, cch, L"%ls: %ls%ls\r\n", ga->header, ga->prefix, val);
+    return 1;
+}
+
+// Fetch a provider declared entirely in config: one REST call, then the quota
+// windows lifted out of the response by JSON path. This is the escape hatch for
+// any subscription service the bar has no built-in adapter for.
+static int subsFetchGeneric(int idx) {
+    SubsProvider *sp = &g_cfg.subsProviders[idx];
+    if (!sp->url || !*sp->url) { subsSetState(idx, 0, 0); return 0; }
+
+    // split the url into host + path (WinHTTP takes them separately)
+    wchar_t host[256], path[1024]; int insecure = sp->insecure;
+    const wchar_t *u = sp->url;
+    const wchar_t *hp = u;
+    if (wcsncmp(u, L"http://", 7) == 0) { insecure = 1; hp = u + 7; }
+    else if (wcsncmp(u, L"https://", 8) == 0) { hp = u + 8; }
+    else if (wcsncmp(u, L"https:", 6) == 0 || wcsncmp(u, L"http:", 5) == 0) {
+        writeLogA("subs gen: unsupported url scheme");
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    const wchar_t *sl = wcschr(hp, L'/');
+    if (!sl) { lstrcpynW(host, hp, 256); lstrcpynW(path, L"/", 16); }
+    else {
+        int hl = (int)(sl - hp); if (hl > 255) hl = 255;
+        memcpy(host, hp, (size_t)hl * sizeof(wchar_t)); host[hl] = 0;
+        lstrcpynW(path, sl, 1024);
+    }
+    if (!host[0]) { subsSetState(idx, 0, 0); return 0; }
+
+    // resolve the auth entries into a header blob
+    wchar_t *hdrs = NULL;
+    int hlen = 512, used = 0;
+    hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)hlen * sizeof(wchar_t));
+    if (!hdrs) { subsSetState(idx, 0, 0); return 0; }
+    hdrs[0] = 0;
+    for (int i = 0; i < sp->nAuth; i++) {
+        wchar_t line[384];
+        if (!subsGenAuthLine(&sp->auth[i], line, 384)) continue;
+        int need = used + lstrlenW(line) + 1;
+        if (need >= hlen) {
+            while (hlen <= need) hlen *= 2;
+            wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, hdrs, (size_t)hlen * sizeof(wchar_t));
+            if (!nb) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
+            hdrs = nb;
+        }
+        used += swprintf(hdrs + used, hlen - used, L"%ls", line);
+    }
+    // static headers from the config, appended after the resolved auth
+    if (sp->headerBlob && *sp->headerBlob) {
+        int need = used + lstrlenW(sp->headerBlob) + 1;
+        if (need >= hlen) {
+            while (hlen <= need) hlen *= 2;
+            wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, hdrs, (size_t)hlen * sizeof(wchar_t));
+            if (!nb) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
+            hdrs = nb;
+        }
+        used += swprintf(hdrs + used, hlen - used, L"%ls", sp->headerBlob);
+    }
+
+    unsigned long long t0 = GetTickCount64();
+    int st = 0, bl = 0; char *resp = NULL;
+    int isPost = (sp->method && lstrcmpiW(sp->method, L"POST") == 0);
+    if (isPost) {
+        char *body = NULL; int bodyLen = 0;
+        if (sp->reqBody && *sp->reqBody) {
+            int wl = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, NULL, 0, NULL, NULL);
+            body = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)wl);
+            if (!body) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
+            bodyLen = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, body, wl, NULL, NULL);
+        }
+        resp = subsHttpPost("gen", host, path, hdrs, body, bodyLen, g_cfg.subsTimeoutMs, &st, &bl);
+        if (body) HeapFree(GetProcessHeap(), 0, body);
+    } else {
+        resp = subsHttpGet("gen", L"chocobar", host, path, hdrs, g_cfg.subsTimeoutMs, &st, &bl);
+    }
+    HeapFree(GetProcessHeap(), 0, hdrs);
+    if (g_cfg.debug) {
+        char lb[160];
+        sprintf(lb, "[wizbar] subs gen %ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
+        writeLogA(lb);
+    }
+    if (!resp) { subsSetState(idx, 0, 0); return 0; }
+    if (st == 401 || st == 403) {
+        writeLogA("subs gen: 401/403 (auth rejected)");
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    if (sp->expectStatus && st != sp->expectStatus) {
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    if (st < 200 || st >= 300) {
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+
+    jsmntok_t *tk = NULL;
+    int n = subsParseBig(resp, bl, &tk);
+    if (n <= 0) {
+        HeapFree(GetProcessHeap(), 0, tk);
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    // a 200 can still be an error envelope (the zai gateway does exactly that):
+    // "require" names a path that must be present for the body to count
+    if (sp->requirePath[0] && subsJsonPath(resp, tk, 0, sp->requirePath) < 0) {
+        writeLogA("subs gen: response missing the required path");
+        HeapFree(GetProcessHeap(), 0, tk);
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+
+    SubsWin wins[MAX_GEN_WIN];
+    int nw = 0, loRem = -1;
+    for (int i = 0; i < sp->nWin && nw < MAX_GEN_WIN; i++) {
+        const GenWin *gw = &sp->win[i];
+        double usedV = -1, remV = -1, totV = -1;
+        if (gw->used[0])      usedV = subsPathDouble(resp, tk, 0, gw->used, -1);
+        if (gw->remaining[0]) remV  = subsPathDouble(resp, tk, 0, gw->remaining, -1);
+        if (gw->total[0])     totV  = subsPathDouble(resp, tk, 0, gw->total, -1);
+        // a window with no numbers at all is skipped, not shown as an em dash
+        if (usedV < 0 && remV < 0 && totV < 0) continue;
+        // derive whichever of the three is missing from the other two
+        if (totV >= 0 && usedV >= 0 && remV < 0) remV = totV - usedV;
+        if (totV >= 0 && remV >= 0 && usedV < 0) usedV = totV - remV;
+        if (usedV >= 0 && remV >= 0 && totV < 0) totV = usedV + remV;
+        memset(&wins[nw], 0, sizeof(SubsWin));
+        lstrcpynW(wins[nw].label, gw->label, 24);
+        wins[nw].used  = usedV < 0 ? -1 : (long long)usedV;
+        wins[nw].total = totV < 0 ? -1 : (long long)totV;
+        wins[nw].rem = (remV < 0 || totV <= 0) ? -1 : (int)(remV * 100.0 / totV + 0.5);
+        if (wins[nw].rem < 0) wins[nw].rem = -1;
+        else if (wins[nw].rem > 100) wins[nw].rem = 100;
+        wins[nw].pct = wins[nw].rem < 0 ? -1 : 100 - wins[nw].rem;
+        if (gw->reset[0]) {
+            int r = subsJsonPath(resp, tk, 0, gw->reset);
+            if (r >= 0) {
+                char *rt = subsJstrRaw(resp, tk, r, NULL);
+                if (rt) {
+                    wins[nw].resetAt = subsIsoToMs(rt, (int)strlen(rt));
+                    HeapFree(GetProcessHeap(), 0, rt);
+                }
+            }
+        }
+        if (wins[nw].rem >= 0 && (loRem < 0 || wins[nw].rem < loRem)) loRem = wins[nw].rem;
+        nw++;
+    }
+    // the plan name is a plain string at a path, read while the tree is alive
+    wchar_t plan[48]; plan[0] = 0;
+    if (sp->planPath[0]) {
+        int r = subsJsonPath(resp, tk, 0, sp->planPath);
+        if (r >= 0) {
+            char *pn = subsJstrRaw(resp, tk, r, NULL);
+            if (pn) { MultiByteToWideChar(CP_UTF8, 0, pn, -1, plan, 48); HeapFree(GetProcessHeap(), 0, pn); }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, tk);
+    HeapFree(GetProcessHeap(), 0, resp);
+
+    if (nw > 0) {
+        subsSetWins(idx, wins, nw);
+        subsSetPlan(idx, plan[0] ? plan : ((sp->label && *sp->label) ? sp->label : L"generic"));
+        subsSetState(idx, loRem, 1);
+        return 1;
+    }
+    subsSetState(idx, 0, 0);
+    return 0;
+}
+
 static LONG g_subsKick = 0; // board refresh button wakes the cycle early
 static volatile unsigned long long g_subsFetchedTick = 0; // cycle end (GetTickCount64)
 // wall clock of the cycle end. The board footer renders THIS directly: mixing a
@@ -1564,9 +1836,12 @@ long long subsFetchedEpochMs(void) { return g_subsFetchedEpoch; }
 // more than one provider is enabled (see the cycle below): the cycle time is
 // then the slowest provider instead of the sum of all of them.
 static void subsProviderFetch(int i) {
-    if (g_cfg.subsProviders[i].type == 0) subsFetchChatgpt(i);
-    else if (g_cfg.subsProviders[i].type == 1) subsFetchZai(i);
-    else subsFetchAntigravity(i);
+    switch (g_cfg.subsProviders[i].type) {
+        case 0:  subsFetchChatgpt(i);    break;
+        case 1:  subsFetchZai(i);        break;
+        case 3:  subsFetchGeneric(i);    break;
+        default: subsFetchAntigravity(i); break;
+    }
 }
 
 typedef struct { int idx; } SubsJob;
