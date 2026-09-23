@@ -198,6 +198,28 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
   the default config path and both subs auth headers.
 
+## Verifying the dashboards' z-order on the live box
+
+- `WindowFromPoint` and the `GW_HWNDPREV` walk both LIE when an unrelated window
+  covers the probe point (an installer dialog once read as "the dash is behind
+  the desktop", and the z-walk skipped the covering window entirely). The only
+  trustworthy check is PIXELS: BitBlt the screen over a probe strip inside the
+  dash and compare before/after. Pick the probe ADAPTIVELY - scan a grid inside
+  the dash rect for a strip that already shows the board's own pinkBg
+  (254,247,249) - so whatever else covers his screen cannot pollute the result.
+  Then place the covering window over THAT strip, confirm the strip changed,
+  and only then minimize/close it.
+- The bar's chip rects MOVE between runs: the captain edits his live config, and
+  a pet chip appearing or disappearing shifts every chip to its right by ~100px
+  (pet 32..90, tokens 118..236, subs 264..343 with the pet on; the tokens chip
+  starts at ~0 without it). Never hard-code click coordinates across runs - scan
+  for the chip in the same script run, or drop a temporary `writeLogA` in
+  WM_LBUTTONDOWN that prints every chip's `[type left..right]`; that is also the
+  fastest way to prove a chip's hit area matches its ink (it does - a "pet chip
+  opens the token board" scare was just the layout shifting under a stale
+  coordinate).
+
+
 ## Config reference + ignored keys
 
 - The complete user-facing config reference lives in README.md ("## Configuration"):
@@ -532,19 +554,31 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
 ## Native dashboards - layout sharp edges
 
-- **Both dashboards are WS_EX_TOOLWINDOW and open with
-  SetWindowPos(HWND_TOP | SWP_NOACTIVATE)** (the captain's ask: no taskbar
-  button; the earlier WS_EX_APPWINDOW was deliberate but read as a second app
-  with a blank icon). The z-order call needs BOTH halves - this was iterated
-  twice on the captain's box: `SetForegroundWindow` (original) raised the board
-  but STOLE the keyboard from the followed terminal (he typed " like" and every
-  keystroke landed on the dashboard - caught by a debug WM_KEYDOWN log), while
-  `SW_SHOWNA` (first fix) kept the focus but left the board SUNK behind his
-  windows, which he reported as "not opening at the front". HWND_TOP lifts it
-  above the terminal and every normal window, SWP_NOACTIVATE keeps the keyboard
-  where he was typing; the bar stays topmost above the board. Verified live:
-  foreground window unchanged across the open, board pixels captured on top of
-  the terminal. A click on the board still activates it (buttons, title-drag);
+- **Both dashboards are OWNED popups (owner = the bar, no WS_EX_TOOLWINDOW) and
+  open with SetWindowPos(HWND_TOP | SWP_NOACTIVATE)**. Three requirements had to
+  hold at once, and each one-line fix broke the next until the ownership was
+  right:
+    * `SetForegroundWindow` (original) raised the board but STOLE the keyboard
+      from the followed terminal - he typed " like" and every keystroke landed
+      on the dashboard (caught by a debug WM_KEYDOWN log).
+    * `SW_SHOWNA` kept the focus but left the board SUNK behind his windows.
+    * `HWND_TOP | SWP_NOACTIVATE` gives both halves, but ONLY while the board is
+      a normal window: WS_EX_TOOLWINDOW (the "hide the taskbar icon" fix) makes
+      Windows SKIP the dash when choosing the next window to activate, so the
+      moment the window above it was minimized or closed, activation fell
+      through to the terminal and Windows raised the TERMINAL over the board -
+      the "dashboard sinks to the bottom layer" bug, documented in this repo's
+      own history (main.js: the Electron dash is "A NORMAL window,
+      deliberately", for exactly this reason).
+  The fix is an OWNED popup. Owned windows get no taskbar button and no Alt-Tab
+  entry (the captain's ask, now free of charge), always sit above their owner
+  (bar above terminal, so the board cannot sink behind what it follows), and
+  remain activation candidates, so Windows raises the board WITH the terminal
+  instead of demoting it below it. Verified live: with a window placed over the
+  board and then MINIMIZED, and again with one placed over it and then CLOSED,
+  both boards are still painted at the probe point (the same probe showed the
+  board gone - 6174 of 6240 pixels changed - before the change); the foreground
+  window is unchanged across the open. A click on the board still activates it;
   Esc closes it.
 - Tray menu metrics (captain's "-25%" pass): rows DX(21), separators DX(5), 9px
   labels, width from `menuWidthPx()` (widest label + DX(34), min DX(96)) - a
