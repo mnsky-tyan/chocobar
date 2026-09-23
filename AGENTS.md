@@ -11,6 +11,22 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 
+## Sharp edges
+
+- A dead stdout sink (start-wizbar.vbs redirect) makes every `console.*`
+  throw EPIPE, and Electron pops an "A JavaScript error occurred" dialog
+  PER LINE - the app logs every scan, so the dialogs never stop until the
+  pipe reader comes back. main.js swallows stream EPIPE; keep it.
+- The native icons are a 1:1 port of `ICONS` in renderer/bar.js (viewBox 24,
+  stroke-width 2.2, bow 2). Never hand-redraw them again: port the exact path
+  data (rect/circle -> path syntax), and render through the 2x supersample
+  pass in iconRenderGdip - 1:1 GDI+ AA reads blocky next to Chromium.
+  Per-chip icon colors live in bar.css (#seg-tokens .ico = yellow, all
+  others pinkDeep).
+- pw_native.ps1-style PrintWindow captures of the LAYERED bar return the raw
+  premultiplied DIB at LOGICAL size if the bitmap is not rect x2; analyze at
+  x2 physical or every position reads wrong.
+
 ## Tests & checks
 
 - `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
@@ -107,25 +123,43 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   (WindowFromPoint proves it in one call). Hidden bar (terminal minimized)
   also explains "dead" hover - check IsWindowVisible first.
 - Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
-  pinkDeep), 24-unit paths flattened once, stroked with a round geometric
-  pen. Flattener sharp edges: the M point must be stored as subpath vertex 0
-  (closed fills/strokes lose their first edge otherwise) and svgArc must
-  sample from the START angle (atan2 of the start point), not angle 0 -
-  both bugs only showed once paths used arcs/closed shapes beyond the first
-  full-circle icons. Battery = dynamic fill (charge amount, warn <10%,
-  full + zigzag on AC) drawn by svgDrawBatt. theme.iconOpacity fades icon
-  boxes post-paint (pxScale after the alpha-repair pass; GDI writes alpha 0
-  and the repair must run first).
+  pinkDeep), 24-unit paths flattened once, rendered with GDI+
+  (SmoothingModeAntiAlias8x8, round caps/joins) into per-icon premultiplied
+  DIB caches and AlphaBlended - GDI Polyline stroking has no AA and read
+  wiggly. theme.iconOpacity rides AlphaBlend's SourceConstantAlpha (default
+  90 = Electron's `.seg svg { opacity: .9 }`); the old per-box pixel fade
+  is GONE (it double-faded). The gdip* facade + flattener serve the
+  dashboards too (donut pies, AA cards). Flattener sharp edges: the M point
+  must be stored as subpath vertex 0, and svgArc must sample from the START
+  angle. Battery = dynamic fill (charge amount, warn <10%, full + zigzag on
+  AC) drawn by svgDrawBatt into its own cache keyed by charge bucket.
+- GDI+ flat-API binding: GetProcAddress EVERY function and bail to the GDI
+  fallback if any is missing - `GdipCloseFigure` does not exist (the export
+  is `GdipClosePathFigure`); a NULL binding crashes the first paint
+  (C0000005 addr 0).
+- Bar font = FW_NORMAL: the Meslo Nerd Font family ships only Regular+Bold,
+  Chromium maps bar.css weight 600 to Regular, GDI rounds FW_SEMIBOLD to
+  Bold (read too heavy). 700 -> FW_BOLD.
 - Bar chrome parity: rounded corners are CSS (bar.css border-radius), drawn
   by fading the premultiplied tint per-pixel in the corner boxes (pxScale);
   DWM rounding does not apply to ULW surfaces. Hover pill = CLICKABLE chips
   only (align 2: shortcut/pet/tokens/subs/custom), pink at 50% blended over
   the tint, rounded 5px, inflated 5x2 CSS px; RHS metric segs get title
   tooltips instead (hand-rolled layered ChocobarTip window; TIP has
-  WS_EX_TRANSPARENT so it never eats the click). Clicking empty bar raises
-  the followed terminal. Token dashboard + subs board = WS_POPUP
-  "ChocobarDash" windows (DWM-rounded via DwmSetWindowAttribute 33 at
-  runtime), sizes from dashboard.width/height and subs.width/height.
+  WS_EX_TRANSPARENT so it never eats the click, and MUST be destroyed with
+  the bar - a lingering topmost tip reads as a second bar ghost). Clicking
+  empty bar raises the followed terminal. Token dashboard + subs board =
+  WS_POPUP WS_EX_APPWINDOW "ChocobarDash" windows (DWM-rounded via
+  DwmSetWindowAttribute 33), a 1:1 port of renderer/dash.css + subs.css:
+  stat cards white25 over pinkBg, plan-usage rows, 26-week heatmap (cell
+  radius 2.5 NOT the card 10, month labels, Sun/Fri rows, quantile
+  thresholds, click = day detail), by-app + by-model tables (sorted by
+  total desc, models capped 7, share bar pre-blended behind the first
+  cell, cache columns only when data exists), subs = donut pies per window
+  + status pills. Titlebar drag = HTCAPTION; refresh/✕ buttons drawn.
+- Posted mouse coordinates to the PMv2 bar from a DPI-UNAWARE process get
+  DOUBLED by Windows message-DPI translation: SetProcessDpiAwarenessContext(-4)
+  in the poster, or halve the coords. (Cost a debug round twice.)
 - Native config surface (all hot-reload): theme colors incl iconColor +
   iconOpacity + heatmap[5], bar.radius/backgroundAlpha/tint/font, dashboard
   + subs popup sizes, tokens.cachePath override + tokens.appFilter
@@ -137,6 +171,19 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   UNLOCKED; when locked, captures show the lock screen for every window.
   PW captures of the LAYERED bar return the raw premultiplied DIB (tint
   alpha 70% reads dark; alpha 0 reads black) - threshold accordingly.
+- **The captain's live config (`~/.wizbar/config.json`, default path; also the
+  `Edit config` menu target, resolved as `--config` > `WIZBAR_CONFIG` >
+  `%USERPROFILE%\.wizbar\config.json`) is not a sandbox.** A no-mistakes test
+  round once overwrote it with a 3-key stub and the captain lost the pet chip,
+  the token scan and 2 of 4 subs panels until it was restored. The bar never
+  WRITES this file (only an absent file gets the annotated template), so a
+  read-only attribute is safe for it - but do NOT leave it read-only: the
+  captain edits the config in Notepad with Ctrl+S, and a read-only file turns
+  that into a Save-As dialog. Guard strategy that worked: keep
+  `~/.wizbar-config-backup-good.json` outside the live home plus a 15s
+  stub-signature watchdog (restore only when the file has no `tokens` AND no
+  `modules` keys - the stub signature), so the captain's own edits are never
+  reverted.
 
 ## Native config parser (sharp edges, all bit us once)
 
@@ -151,6 +198,45 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
   the default config path and both subs auth headers.
 
+## Verifying the dashboards' z-order on the live box
+
+- `WindowFromPoint` and the `GW_HWNDPREV` walk both LIE when an unrelated window
+  covers the probe point (an installer dialog once read as "the dash is behind
+  the desktop", and the z-walk skipped the covering window entirely). The only
+  trustworthy check is PIXELS: BitBlt the screen over a probe strip inside the
+  dash and compare before/after. Pick the probe ADAPTIVELY - scan a grid inside
+  the dash rect for a strip that already shows the board's own pinkBg
+  (254,247,249) - so whatever else covers his screen cannot pollute the result.
+  Then place the covering window over THAT strip, confirm the strip changed,
+  and only then minimize/close it.
+- The bar's chip rects MOVE between runs: the captain edits his live config, and
+  a pet chip appearing or disappearing shifts every chip to its right by ~100px
+  (pet 32..90, tokens 118..236, subs 264..343 with the pet on; the tokens chip
+  starts at ~0 without it). Never hard-code click coordinates across runs - scan
+  for the chip in the same script run, or drop a temporary `writeLogA` in
+  WM_LBUTTONDOWN that prints every chip's `[type left..right]`; that is also the
+  fastest way to prove a chip's hit area matches its ink (it does - a "pet chip
+  opens the token board" scare was just the layout shifting under a stale
+  coordinate).
+
+
+## Config reference + ignored keys
+
+- The complete user-facing config reference lives in README.md ("## Configuration"):
+  every key the native parser reads, its default, and what editing it achieves,
+  plus the full starting-point JSON. The in-app template (writeTemplate) stays
+  the annotated first-run file; the README is the reference.
+- Electron-era keys the native parser does NOT read (safe to delete, no effect
+  when present): `bar.position`, `bar.insetX`, `bar.segmentSpacing`,
+  `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`,
+  `tokens.heatmapDays`, `theme.surfaces`, `terminal.reattachToExisting`, and
+  `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores are
+  SQLite and reach the board only through the `tokens.cachePath` seed; the live
+  scan covers `sources.zai` and `sources.pi` JSONL only). `bar.align` is 1=right,
+  2=left (there is no "center").
+- `subs` supports 0-5 providers per the captain's ask (MAX_SUBS stays 6); one
+  antigravity entry = one panel with two rows.
+
 ## Native subs chip (p_subs.c)
 
 - Mirrors src/subs.js chip semantics: ChatGPT wham/usage (Bearer token from
@@ -160,19 +246,130 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   global state did exactly that via a never-set `any` flag); chip states:
   em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
   board reads the same per-provider window arrays (label/pct/used/total).
+- **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints
+  merged with daily/sandbox OVERWRITING production, per family key priority -
+  byte-for-byte the same source the harness's /quota uses** (pi-quota ->
+  quota-axi -> pi-quota-inject.mjs). Production's `retrieveUserQuotaSummary`
+  reports gemini as a constant rf=1 untracked pool and production/sandbox
+  carry DIFFERENT quota figures - reading the summary endpoint was the
+  "board 100% while /quota correct" bug. A quotaInfo may carry only a
+  resetTime and NO remainingFraction (Claude/GPT between resets): keep the
+  row, rem=-1 renders as an em dash ("reset-only pool"), and unknown rows are
+  excluded from the CAPPED/lowest math. Never reintroduce a persistence layer
+  or "local wins" policy without evidence - a fabricated cache file once fed
+  the captain stale numbers for hours.
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.
 - Fetches run on a worker thread (WinHTTP, AUTOMATIC_PROXY); the UI timer
   only reads the latest state. HTTP failures log one line to native.log.
+- Antigravity (type 2) reads the pi auth store `~/.pi/agent/auth.json` key
+  `antigravity` ({access, refresh, expires(epoch MS), projectId}) and
+  refreshes with Google's public desktop-client pair; grouped quota summary
+  first, per-model `fetchAvailableModels` on 403 SUBSCRIPTION_REQUIRED
+  (free tier - NOT an auth failure). ISO-8601 reset times go through
+  `subsIsoToMs` (civil-days, no libc date code). The models body is ~150KB,
+  so it parses through a grown token array (`subsParseBig`), never a fixed
+  one. The refresh-token write-back is targeted text surgery inside the
+  `"antigravity"` object and ABORTS on any doubt - a corrupted auth.json
+  breaks the captain's whole toolchain, not just this bar.
+
+## Antigravity local quota source (DEAD CODE since 2026-09-23)
+
+- The local language-server path (subsFetchAgyLocal/subsAgyLocalApply +
+  PEB/TCP-table discovery) is NO LONGER CALLED: the captain's ground truth is
+  his /quota command, which never used the language server - it reads
+  fetchAvailableModels over HTTPS with the pi auth token (works with the IDE
+  closed). The local numbers (tiered 5h pools) DIVERGE from /quota, so letting
+  them feed the board reintroduces the mismatch. The dead helpers are still
+  compiled (excise in a dedicated pass); do not wire them back into the fetch
+  chain. Historical notes below still hold for that machinery:
+- The IDE's own /quota numbers come from its LOCAL language server, not the
+  cloud: find `language_server*.exe`, read `--csrf_token` from its
+  command line, POST `{}` to `http://127.0.0.1:<port>/exa.language_server_pb.
+  LanguageServerService/GetUserStatus` with header `X-Codeium-Csrf-Token`.
+  Process match is a case-insensitive PREFIX (`language_server`): the shipped IDE
+  runs `language_server.exe` (from resources\bin), older builds
+  `language_server_windows_x64.exe` - an exact-name match silently found 0
+  candidates and fell back to cloud (caught by the pipeline's live test twice).
+  Port/token are NOT persisted: the command line is read via
+  NtQueryInformationProcess -> PEB -> ProcessParameters. PebBaseAddress and the
+  CommandLine UNICODE_STRING offsets VARY per boot/build - every candidate is
+  validated (page-aligned PEB, path-like decoded string); never hard-code one.
+  Listening ports come from GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)
+  (build.sh links iphlpapi). Prefer the non-daily endpoint instance.
+- One panel per config entry shows TWO 5h rows - GEMINI 5H and CLAUDE/GPT 5H -
+  the same two rows the IDE's /quota panel shows. No weekly row: Antigravity
+  exposes no weekly quota (the cloud summary returns one; it never resets and
+  reads stale - dropped). NOT one combined
+  pie (reversed after the captain compared against /quota 2026-09-22): each
+  family owns its own rolling 5h window with its own reset, so the binding
+  constraint (chip) is the MIN remainingFraction across both families while the
+  board shows both. subsAgyQuotaKey keeps the family split.
+- The JSON endpoint port must be TRIED, not assumed: the language server owns
+  several listeners (LSP/gRPC + the JSON one + the extension server) and which
+  one serves GetUserStatus varies per boot (a 2026-09-22 boot answered 400 on
+  the first listener, 200 with the real payload on the second). subsFetchAgyLocal
+  now tries every listener of the chosen pid until a 200 with a parseable body.
+- The Google desktop OAuth pair is NOT in the repo (removed 2026-09-22 after the
+  captain refused to allowlist a public secret): subs.providers[].clientId /
+  clientSecret carry it in the USER config, and only the cloud fallback needs
+  it (the local language server needs none). History was scrubbed of the pair,
+  so a fresh clone never trips push protection.
+- tokens.labels ({ "pi": "pi-wsl" }) maps raw source keys to dashboard display
+  names (parsed in chocobar.c, applied in p_ui.c's appLabelW). Aggregation keys,
+  byte cursors and the appFilter keep the RAW key; only rendered row text swaps.
 
 ## Dev bar etiquette
 
 - The native dev bar runs on its OWN shell: spawn a `wt` window titled
   `chocobar-dev` away from the captain's workspace, then launch the bar so
-  it attaches to that window (sticky follow keeps it there).
+  it attaches to that window (sticky follow keeps it there). NEVER launch
+  it on the captain's terminal: his Electron bar lives there too, and two
+  always-on-top bars fight (his disappears under the dev bar). A closed or
+  zombie dev shell leaves the bar hidden at -1000,-1000 400x26; recreate
+  with `wt -w new nt --title chocobar-dev` (a dead shell can also linger as
+  an offscreen 157x25 rect - EnumWindows finds it, GetWindowRect fails).
 - `terminal.className` in config is AUTHORITATIVE: when set, the probe tries
   only that class and never falls back to the generic terminal class list.
+
+## Never leave an Electron debug port open (cost the captain his bar once)
+
+- 2026-09-21: an agent relaunched the app with `--remote-debugging-port=9222`
+  to dump the renderer DOM and left it open. Another agent's browser
+  automation (playwright) found the open port, attached to the FIRST page
+  target - the bar - and `Page.navigate`d it to a GitHub issue. The bar then
+  rendered a thin web page in its exact frame, which reads as "the bar
+  became a website". CDP is browser tooling and will happily drive any port
+  it finds; a status bar is the most exposed window on screen.
+- Defense in depth now, THREE layers (one is not enough - verified the hard
+  way): (1) `will-navigate`/`will-redirect` stop RENDERER-initiated navigations
+  only; (2) a session `webRequest` handler refuses any non-file request from a
+  renderer, which is the only thing that covers a browser-side CDP
+  `Page.navigate`; (3) because a network-blocked request leaves the renderer
+  on an error page WITHOUT firing any navigation event, a 1s URL poll reloads
+  the window's own document if it is ever not its file (`_urlHealTimer` in
+  src/bar.js, dies with the window). Verified live: a CDP navigation now
+  fails ERR_BLOCKED_BY_CLIENT and the bar is back with all chips live within
+  two seconds.
+- `session.defaultSession` throws "Session can only be received when app is
+  ready" at module load - register the handler via `app.isReady()` /
+  `app.once('ready')`, never at require time.
+- The REAL fix is operational: close the port when done. His canonical
+  launch is `~/.wizbar/runbar.ps1` (personal.json, no debug port) - always
+  end a debugging session by relaunching through it, and never leave
+  `--remote-debugging-port` in a long-running instance. A stale instance also
+  holds the single-instance lock, so a "relaunch" that silently quits is
+  usually an old process still alive - kill the whole tree first.
+- Restore recipe if it ever happens again: with the port up,
+  `curl -s 127.0.0.1:9222/json/list`, find the target whose url is NOT
+  `file:///.../bar.html`, and `Page.navigate` it back to
+  `file:///C:/Users/tyanw/review/chocobar/renderer/bar.html`. Dependency-
+  free CDP client recipe: raw `net` + `crypto` websocket handshake
+  (Runtime.enable / Runtime.evaluate / Page.navigate). ALWAYS read the
+  webSocketDebuggerUrl from the LIVE /json/list - a hardcoded/stale page id
+  makes Page.navigate time out and reads as "the attack failed" when nothing
+  was ever tested.
 
 ## Perf invariants (do not reintroduce)
 
@@ -180,8 +377,15 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   no fixed heartbeat, and `snapshot()` has no always-different `now` field. The bar/
   visibility gates run BEFORE `consumeDirty()` so changes observed while the bar is
   hidden stay pending and flush on restore.
-- Follow loop is 16ms (60Hz) and the unchanged-bounds fast path touches nothing
-  (no isVisible()/assertNoTaskbar per tick); `assertNoTaskbar` has a 2s re-assert floor.
+- Follow loop is ADAPTIVE (src/tracker.js `_scheduleFollow`): 8ms while the
+  terminal is in a modal move/size (120Hz - drag latency is the only place it
+  shows), 16ms for 500ms after a move, 100ms idle. It FOLLOWS LIVE through a
+  drag (the old hands-off freeze made drags read as broken) and the zGluedTo
+  sweep no longer skips mid-drag, so the bar keeps the pane's layer while it
+  moves. Measured 2026-09-21: CPU 10.3% -> ~5% of one core vs the fixed 60Hz
+  loop, RSS ~414 MB (Chromium-baseline dominated).
+- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
+  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
 - Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
   never a tasklist.exe spawn (~164ms/spawn measured; ~290ms in older notes).
 - The bar's heal interval must die with its window (see `BarWindow` closed/destroy) —
@@ -262,3 +466,170 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 - The experimental herdr agents-chip wiring was removed (no renderer ever drew it);
   `modules.agents` no longer exists in the config. History: commit b9c9f8d removed the
   chip, the 2026-09 public-release pass removed the polling/socket wiring.
+
+## Tray icon (drawn, not stock)
+
+- `makeBarIcon(px)` in p_ui.c builds a 32bpp alpha DIB (BITMAPV5HEADER +
+  BI_BITFIELDS, top-down rows) wrapped with CreateIconIndirect: a pinkDeep
+  rounded tile with the bar itself (a cream pill) centered, 1px feathered so
+  it survives 16px on any taskbar theme. `LoadIconW(IDI_APPLICATION)` (the
+  blank white window rectangle) reads as a broken app - never go back.
+- SDF gotcha: clamp each half-distance at zero BEFORE the hypot, or a negative
+  axis inflates the length and the side edges pinch inward (petal silhouette
+  instead of a rounded square).
+
+## Native bar cosmetics (captain pass, 2026-09-21)
+
+- The bar window needs its own `WM_RBUTTONUP` -> `showTrayMenu`. The tray icon
+  path (WM_TRAY) is the only one that existed, so right-clicking the BAR itself
+  did nothing. The menu mirrors main.js `buildChocobarMenu` (token dashboard,
+  subscription dashboard, edit config, open config folder, reload, quit).
+- Bar edge padding is 16/18 CSS px (`padL`/`padR` in repaintBar), matching
+  `#bar { padding: 0 18px 0 16px }`. The rounded corners need it too.
+- Battery value color: `battAc ? good : (low ? warn : NULL)` - charging green
+  OUTRANKS the low warning red (captain's call 2026-09-23: plugged in means
+  the charge is rising, so red would be a lie). Red only when low AND on
+  battery.
+- Dashboard button labels (refresh/close) are CENTRED in their frames, both
+  axes, measured with the same fBtn they are drawn with. The refresh frame
+  stays sized for the word "refresh" (no reflow mid-click), so the busy
+  "..." must be centred by advance width or it huddles at the left edge of
+  the wide pill. Vertical: GDI's y is the line-box top, so centre the ink
+  block (ascent+descent); the ellipsis is the exception - its ink is only
+  the dots ON the baseline (~tmDescent/3 tall), so it centres the baseline
+  plus half a dot. Verified live: both labels within 1px of frame centre.
+- **Verifying the native bar without a screen**: CopyFromScreen dies the moment
+  the session is locked (`OpenInputDesktop` returns 0 and you capture the lock
+  screen - it reads as "the bar went black"), and PrintWindow on the LAYERED
+  bar returns an all-black bitmap (a layered window renders through
+  UpdateLayeredWindow, so it has nothing to paint into a DC). What DOES work:
+  (a) `Get-Process LogonUI` tells you whether you are looking at a lock screen
+  at all - check it BEFORE trusting any capture; (b) PrintWindow works on the
+  NON-layered dash/subs popups (ChocobarDash), so dashboard changes are still
+  visually verifiable; (c) for the bar itself, a `-DDBG_CHIPS` build that dumps
+  the chip table (align/L/R/w/ico/cp/text) after layout is the only ground
+  truth - strip it again afterwards, it logs once per paint.
+- Config gotchas found in his `~/.wizbar/config.json`: the shortcut module key
+  was missing entirely (bolt chip silently absent) and the pet lived under
+  `modules.remielle`, a name the parser no longer reads - it must be
+  `modules.pet`. A missing/renamed module key disables that chip with no error,
+  so when a chip is "gone", diff the config keys against the parser first.
+
+## Native token live scan (p_tokens.c) - sharp edges
+
+- The bar reads the Electron app's `~/.wizbar/token-cache.json` as the HISTORY
+  SEED, then folds in everything newer from the live JSONL session stores
+  (`~/.pi/agent/sessions/**`, `~/.zai/agent/sessions/*`) via a per-file BYTE
+  cursor in `~/.wizbar/token-cursors.json`. Only records with `ts > cacheMaxTs`
+  are counted, so nothing is double counted. The Electron app is retired, so
+  this is now the only thing keeping "Today" non-zero.
+- **`tokLiveInit()` MUST run before `loadConfig()`** in wWinMain. loadConfig
+  rebuilds the chips, which runs the FIRST token scan, and that scan is what
+  populates the cursors; loading them afterwards wiped the in-memory set, so the
+  very next rescan re-read every active file from byte 0 and DOUBLED every live
+  record (today jumped 2x within a minute - "the token usage fluctuates").
+  `tokLiveScan` also self-heals (`if (!g_tokCursorN) tokCursorLoad();`).
+- There is ONE day-indexed histogram (`g_dayTot`/`g_dayApp`, p_ui.c,
+  oldest-first, `[DASH_MAX_DAYS-1]` = today) and every displayed number is
+  DERIVED from it per rescan (`tokDeriveWindows`): today = today's bucket,
+  Last 7/30 = the in-window day sums, All time = every bucket. Never keep a
+  second, cache-side base (`base + live`) or a mirrored live histogram: a base
+  captured once is never re-derived as the window slides, so the cards
+  permanently over-count the heatmap they sit above.
+- The day buckets are aged by `dashDayRollover` alone (toward LOWER indices);
+  the live scan indexes each record with a boundary array built fresh from the
+  current local time, so it needs no shift of its own.
+- **Opening one file over the WSL redirector costs ~25ms, and a
+  `FindFirstFileW` per project dir ~25ms too.** A warm rescan that re-opens all
+  21 active files costs ~550ms and blocks the bar. Skip a file when the cursor
+  already covers it (`c->size == fsz && c->mtimeMs == mt`, both taken from the
+  directory enumeration - never a separate `GetFileAttributesExW`), and read
+  mtime+size from `WIN32_FIND_DATAW`, not a second stat.
+- `tokens.rescanMinutes` was silently ignored (the tick was hard-coded to 30 =
+  30s, twice what his config asks). It is now `tokensRescanSec`, clamped 1..60
+  minutes. If a native config key seems to do nothing, grep the parser.
+- Measured (2026-09-22, captain's box): CPU ~4.5% of one core, RSS ~27.6 MB,
+  commit ~15.9 MB, 348 handles, 11 threads. The cold scan (cursor file absent)
+  reads ~148MB over UNC and takes ~3.3s once.
+
+## Native dashboards - layout sharp edges
+
+- **Both dashboards are OWNED popups (owner = the bar, no WS_EX_TOOLWINDOW) and
+  open with SetWindowPos(HWND_TOP | SWP_NOACTIVATE)**. Three requirements had to
+  hold at once, and each one-line fix broke the next until the ownership was
+  right:
+    * `SetForegroundWindow` (original) raised the board but STOLE the keyboard
+      from the followed terminal - he typed " like" and every keystroke landed
+      on the dashboard (caught by a debug WM_KEYDOWN log).
+    * `SW_SHOWNA` kept the focus but left the board SUNK behind his windows.
+    * `HWND_TOP | SWP_NOACTIVATE` gives both halves, but ONLY while the board is
+      a normal window: WS_EX_TOOLWINDOW (the "hide the taskbar icon" fix) makes
+      Windows SKIP the dash when choosing the next window to activate, so the
+      moment the window above it was minimized or closed, activation fell
+      through to the terminal and Windows raised the TERMINAL over the board -
+      the "dashboard sinks to the bottom layer" bug, documented in this repo's
+      own history (main.js: the Electron dash is "A NORMAL window,
+      deliberately", for exactly this reason).
+  The fix is an OWNED popup. Owned windows get no taskbar button and no Alt-Tab
+  entry (the captain's ask, now free of charge), always sit above their owner
+  (bar above terminal, so the board cannot sink behind what it follows), and
+  remain activation candidates, so Windows raises the board WITH the terminal
+  instead of demoting it below it. Verified live: with a window placed over the
+  board and then MINIMIZED, and again with one placed over it and then CLOSED,
+  both boards are still painted at the probe point (the same probe showed the
+  board gone - 6174 of 6240 pixels changed - before the change); the foreground
+  window is unchanged across the open. A click on the board still activates it;
+  Esc closes it.
+- Tray menu metrics (captain's "-25%" pass): rows DX(21), separators DX(5), 9px
+  labels, width from `menuWidthPx()` (widest label + DX(34), min DX(96)) - a
+  fixed DX(210) was wider than its content. The autostart check draws at the
+  RIGHT edge (`r.right - DX(18)..DX(6)`, DT_RIGHT); the label's right bound
+  shrinks by DX(24) on that row only.
+- Subs board must show EVERY enabled provider, 0 through 5: `en` is counted
+  first, then the row (body -> footer -> head, in that order, with floors) is
+  compressed until the whole stack fits the screen. **The stack is
+  n*(panelH+gap) - gap**, so `maxPanels` must be
+  `(avail + gap) / (panelH + gap)` - without the gap the 5th panel is lost to
+  integer truncation right after the compression loop made it fit (cost a full
+  debug round). With 0 providers the board still refits to its one empty-state
+  line (it used to keep the previous board's height).
+- Pie text is centred on the INK, not the glyph box: GDI puts the ink ~11 CSS px
+  below the draw origin, so the number/caption offsets are 18.5 / 14.5 / 2.5
+  (was 15/11/6, which left the number 3.5 CSS px low - measured off the
+  captain's screenshot, +6.5 CSS for the number+caption pair).
+- Probe gotchas: `FindWindowW("ChocobarDash", $null)` returns 0 - the window
+  needs its EXACT title ("Chocobar dashboard" / "Chocobar subscriptions").
+  A DPI-UNAWARE caller reads GetWindowRect HALVED on a 200% display (its screen
+  is 1440x900), so a screen-capture script must either call
+  SetProcessDpiAwarenessContext(-4) first or double the rect; PrintWindow on
+  `#32768` menus intermittently returns an all-black bitmap (BitBlt the screen
+  DC instead). The captain works with the board open, so a "toggle" click may
+  CLOSE his board - poll-and-shoot instead of click-then-sleep.
+
+## Native dashboards - layout sharp edges
+
+- Both dash windows are created HIDDEN, painted once (`UpdateWindow`), content-
+  fitted, and only then shown. Resizing a visible board reads as "bolted
+  together" (the top appears, the lower part lags in). `dashFitToContent()`
+  latches the window to `g_dashContentH` with a 45%-of-config-height floor.
+- **`GetTextExtentPoint32W` ignores `SetTextCharacterExtra`.** Any label drawn
+  with character extra must be measured with the same extra (`dashStrWEx`) or it
+  loses its last character. This clipped "CLAUDE/GPT WEEK" to "CLAUDE/GPT WEE".
+- The subs panel pie is sized from the WIDEST window label (`cellW - labNeed -
+  DX(20)`), never by fixed tiers: a pie that takes the whole cell clips the
+  label. Providers with 4 windows get a smaller pie, never a dropped window.
+- Table name columns must end at the first numeric column (`xs[4] - DX(6)`),
+  not a hard-coded width - a fixed `DX(150)` ellipsized real model ids
+  ("xiaomi/mimo-x-flash-preview") even in a 500px card.
+- The board footers must render a STORED wall-clock stamp, never
+  `wallNow - truncatedTickAge`: mixing `GetSystemTimeAsFileTime` with a
+  truncated `GetTickCount64` age made the seconds field oscillate (41 -> 42 ->
+  41) on every repaint. The stamp is in dashFmtTime's frame (local fields
+  reinterpreted as UTC), which is NOT a true UTC epoch - `subsNowMs()` would
+  print 8 hours off in HKT.
+- The heatmap cell is now adaptive (`(innerW - rowLabW)/weeks - gap`, capped
+  DX(16)); 26 fixed DX(11) cells left the right half of the card blank.
+- `tokens.enabled` off is a full reset, not a pause: the aggregates are
+  cleared AND the on-disk byte cursors are deleted (`tokLiveReset`), so a
+  re-enable does one clean full re-read (a cold scan of a few seconds) instead
+  of resuming from cursors that silently skipped everything written while off.

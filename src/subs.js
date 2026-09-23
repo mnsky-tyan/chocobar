@@ -12,6 +12,16 @@
 //        authorization = coding-plan apiKey read from <configPath>
 //        (provider <provider>, default builtin:zai-coding-plan).
 //        unit 3 = rolling hours, unit 6 = week.
+//  - antigravity: Google Antigravity (Gemini/Claude/GPT via Cloud Code).
+//      Credential: pi's ~/.pi/agent/auth.json "antigravity" entry
+//        ({access, refresh, expires(epoch ms), projectId, email}); an expired
+//        access token is refreshed with Google's public desktop-client creds
+//        (no IDE needed). Fallback: the IDE's state.vscdb token needle-scan.
+//      Quota: POST /v1internal:retrieveUserQuotaSummary (grouped buckets,
+//        paid tier); on 403 SUBSCRIPTION_REQUIRED (free tier - NOT an auth
+//        failure) fall back to per-model quotas from
+//        /v1internal:fetchAvailableModels.
+//      Plan label: loadCodeAssist paidTier.name (else currentTier.name).
 //
 // Snapshot shape (every provider, normalized):
 //   { ok, label, plan, status, windows: [{ key, label, percent, used, total,
@@ -21,6 +31,17 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { EventEmitter } = require('events');
+
+// --- Antigravity (Google Cloud Code) constants ---------------------------------
+// The Google desktop OAuth pair is NOT stored here: it is personal wiring and
+// comes from the provider entry (subs.providers[].clientId / clientSecret).
+// The IDE's local language-server source needs no credentials; only the cloud
+// fallback does, and it fails cleanly ("no oauth pair") when they are absent.
+const AGY_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const AGY_BASES = ['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com'];
+// Refresh this many ms before expiry so an in-flight fetch never carries a
+// token that dies mid-request.
+const AGY_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 function emptyProvider(label, errors) {
   return {
@@ -144,6 +165,8 @@ class SubsTracker extends EventEmitter {
       snap = await this._fetchChatgpt(p);
     } else if (p.type === 'zai') {
       snap = await this._fetchZai(p);
+    } else if (p.type === 'antigravity') {
+      snap = await this._fetchAntigravity(p);
     } else {
       snap = emptyProvider(p.label || p.type, [`unknown provider type "${p.type}"`]);
     }
@@ -362,6 +385,282 @@ class SubsTracker extends EventEmitter {
       err.status = 'error';
       return err;
     }
+  }
+
+  // --- Antigravity (Google Cloud Code) -----------------------------------------
+  // Reads the pi-stored OAuth entry (auth.json "antigravity") and refreshes
+  // the access token when it is near expiry. The IDE's state.vscdb is only a
+  // fallback for machines without the pi store.
+  _readAgyAuth(p) {
+    const authPath = p.authPath || path.join(os.homedir(), '.pi', 'agent', 'auth.json');
+    let entry = null;
+    try {
+      if (fs.existsSync(authPath)) {
+        const auth = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+        entry = auth.antigravity || null;
+      }
+    } catch (_) {}
+    if (entry && entry.refresh) return { entry, authPath };
+    // IDE fallback: ItemTable row keyed service|antigravity.userKey; the token
+    // lives under a "apiKey":"ya29...." needle (the ObjectRef raw prefix is
+    // NOT part of the token - keep the ya29. prefix, drop the type noise).
+    const vscdb = p.vscdbPath;
+    if (vscdb && fs.existsSync(vscdb)) {
+      try {
+        const raw = fs.readFileSync(vscdb, 'latin1');
+        const m = raw.match(/"apiKey":"(ya29\.[A-Za-z0-9._-]+)/);
+        if (m) return { entry: { access: m[1], projectId: p.projectId }, authPath: null };
+      } catch (_) {}
+    }
+    return { entry: null, authPath };
+  }
+
+  _agyNoPair() {
+    const e = new Error('no oauth pair in config (local IDE source needs none)');
+    e.status = 'no-auth';
+    return e;
+  }
+
+  async _agyRefresh(refreshToken) {
+    const r = await this._fetch(AGY_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token'
+      })
+    });
+    const body = await r.json().catch(() => null);
+    if (!r.ok || !body || !body.access_token) {
+      const e = new Error(`token refresh HTTP ${r.status}`);
+      e.status = r.status;
+      throw e;
+    }
+    return body;
+  }
+
+  // Persist a rotated refresh token so the next scan starts from a valid one.
+  // Best-effort: a read-only store must never break the scan.
+  _agySaveAuth(authPath, entry, refreshed) {
+    if (!authPath) return;
+    try {
+      const auth = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+      const cur = auth.antigravity || {};
+      auth.antigravity = Object.assign({}, cur, {
+        access: refreshed.access_token,
+        expires: Date.now() + (refreshed.expires_in || 3600) * 1000,
+        refresh: refreshed.refresh_token || entry.refresh,
+        type: 'oauth'
+      });
+      fs.writeFileSync(authPath, JSON.stringify(auth, null, 2));
+    } catch (_) {}
+  }
+
+  _agyHeaders(token) {
+    return {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      'User-Agent': 'antigravity/1.15.8 windows/amd64',
+      'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
+      'Client-Metadata': JSON.stringify({
+        ideType: 'ANTIGRAVITY',
+        platform: 'PLATFORM_UNSPECIFIED',
+        pluginType: 'GEMINI'
+      })
+    };
+  }
+
+  // POSTs to the first base that answers; a 403 SUBSCRIPTION_REQUIRED is a
+  // REAL response (free tier) and must not trigger the next base. Only a
+  // transport failure (network/timeout) advances to the fallback base - a
+  // definitive HTTP error is an answer and trying another base would only
+  // mask its status.
+  async _agyPost(ep, token, projectId, body, p) {
+    let lastErr = null;
+    for (const base of AGY_BASES) {
+      let r;
+      try {
+        r = await this._fetch(base + ep, {
+          method: 'POST',
+          headers: this._agyHeaders(token),
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(this._timeoutFor(p || {}))
+        });
+      } catch (e) {
+        lastErr = e.message || String(e);
+        continue; // network/timeout: try the fallback base
+      }
+      const text = await r.text().catch(() => '');
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_) {}
+      if (r.status === 403) {
+        // Genuine server answer (paid-gated endpoint): stop, do not retry
+        // another base. SUBSCRIPTION_REQUIRED means the plan, not the auth.
+        const blob = JSON.stringify(parsed || {});
+        const subscriptionRequired = blob.includes('SUBSCRIPTION_REQUIRED')
+          || blob.toLowerCase().includes('subscription');
+        return { status: 403, body: parsed, subscriptionRequired };
+      }
+      if (r.ok) return { status: r.status, body: parsed, subscriptionRequired: false };
+      return { status: r.status, body: parsed, subscriptionRequired: false, error: `HTTP ${r.status}` };
+    }
+    return { status: 0, body: null, subscriptionRequired: false, error: lastErr };
+  }
+
+  async _fetchAntigravity(p) {
+    const label = p.label || 'Antigravity';
+    const { entry, authPath } = this._readAgyAuth(p);
+    if (!entry) {
+      const noAuth = emptyProvider(label, [`no Antigravity login at ${authPath || p.vscdbPath || '(unset)'}`]);
+      noAuth.status = 'no-auth';
+      noAuth.notes.push('open Antigravity once to log in');
+      return noAuth;
+    }
+    let token = entry.access;
+    let projectId = entry.projectId || p.projectId || null;
+    const expires = Number(entry.expires) || 0;
+    if (entry.refresh && (!token || expires < Date.now() + AGY_REFRESH_MARGIN_MS)) {
+      try {
+        this.clientId = p.clientId || '';
+        this.clientSecret = p.clientSecret || '';
+        if (!this.clientId || !this.clientSecret) throw this._agyNoPair();
+        const refreshed = await this._agyRefresh(entry.refresh);
+        token = refreshed.access_token;
+        this._agySaveAuth(authPath, entry, refreshed);
+      } catch (e) {
+        const err = emptyProvider(label, [`token refresh failed: ${e.message || e}`]);
+        err.status = 'auth-expired';
+        err.notes.push('re-login to Antigravity');
+        return err;
+      }
+    }
+    if (!token) {
+      const err = emptyProvider(label, ['no access token']);
+      err.status = 'auth-expired';
+      return err;
+    }
+    // Plan label + project discovery when the store did not carry a project.
+    let plan = p.plan || null;
+    const meta = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' };
+    const assist = await this._agyPost('/v1internal:loadCodeAssist', token, projectId, { metadata: meta }, p);
+    if (assist.status === 200 && assist.body) {
+      plan = plan || (assist.body.paidTier && assist.body.paidTier.name)
+        || (assist.body.currentTier && assist.body.currentTier.name)
+        || (assist.body.paidTier && assist.body.paidTier.id) || null;
+      if (!projectId && assist.body.cloudaicompanionProject) projectId = assist.body.cloudaicompanionProject;
+    } else if (assist.status === 401 || (assist.status === 403 && !assist.subscriptionRequired)) {
+      const err = emptyProvider(label, [`loadCodeAssist HTTP ${assist.status}`]);
+      err.status = 'auth-expired';
+      err.notes.push('re-login to Antigravity');
+      return err;
+    }
+    if (!projectId) {
+      const err = emptyProvider(label, ['no project id (set subs.providers.projectId)']);
+      err.status = 'error';
+      return err;
+    }
+    // Grouped quota summary first (paid plans): two model groups x rolling
+    // 5h + weekly windows. 403 SUBSCRIPTION_REQUIRED = free tier: fall back
+    // silently to the per-model endpoint.
+    const summary = await this._agyPost('/v1internal:retrieveUserQuotaSummary', token, projectId, {}, p);
+    if (summary.status === 200 && summary.body && Array.isArray(summary.body.groups)) {
+      // Antigravity exposes no weekly quota: each model family owns one rolling
+      // 5h window (the IDE's /quota shows exactly these two rows). Weekly-class
+      // buckets are dropped - the cloud summary returns them but they never
+      // reset and read as stale.
+      const low = { gemini: null, claude_gpt: null };
+      for (const g of summary.body.groups) {
+        const short = String((g && g.displayName) || 'Models').replace(/\s+[Mm]odels$/, '');
+        const fam = /gemini/i.test(short) ? 'gemini' : 'claude_gpt';
+        for (const b of (g && g.buckets) || []) {
+          if (typeof b.remainingFraction !== 'number') continue;
+          const is5h = /5h|five[_ ]?hour|session/i.test(String(b.window || b.bucketId || ''));
+          if (!is5h) continue;
+          const rem = Math.min(100, Math.max(0, b.remainingFraction * 100));
+          if (!low[fam] || rem < low[fam].remainingPercent) {
+            low[fam] = {
+              key: `${b.bucketId || short}`,
+              label: fam === 'gemini' ? 'Gemini 5H' : 'Claude/GPT 5H',
+              percent: 100 - rem,
+              remainingPercent: rem,
+              used: null,
+              total: null,
+              remaining: null,
+              resetAt: b.resetTime ? Date.parse(b.resetTime) : null
+            };
+          }
+        }
+      }
+      const windows = Object.values(low).filter(Boolean);
+      if (windows.length) {
+        return {
+          ok: true, label, plan: plan || 'Antigravity', status: statusFromWindows(windows),
+          windows, notes: [], errors: [], fetchedAt: Date.now()
+        };
+      }
+    } else if (summary.subscriptionRequired) {
+      // free tier: the summary endpoint is paid-only, models carry the quota
+    } else if (summary.status === 401) {
+      const err = emptyProvider(label, ['quota HTTP 401']);
+      err.status = 'auth-expired';
+      err.notes.push('re-login to Antigravity');
+      return err;
+    }
+    // Per-model fallback: one window = the binding constraint across every
+    // non-internal model (internal and chat_* keys are IDE plumbing, not
+    // user quota).
+    const models = await this._agyPost('/v1internal:fetchAvailableModels', token, projectId, { project: projectId }, p);
+    if (models.status !== 200 || !models.body) {
+      const err = emptyProvider(label, [`models ${models.error || `HTTP ${models.status}`}`]);
+      err.status = models.status === 401 ? 'auth-expired' : 'error';
+      return err;
+    }
+    const list = models.body.models || {};
+    const low = { gemini: null, claude_gpt: null };
+    let counted = 0;
+    for (const [mid, m] of Object.entries(list)) {
+      if (!m || m.isInternal || mid.startsWith('chat_')) continue;
+      const q = m.quotaInfo || {};
+      if (typeof q.remainingFraction !== 'number') continue;
+      counted++;
+      const rem = Math.min(100, Math.max(0, q.remainingFraction * 100));
+      const fam = /gemini/i.test(mid) ? 'gemini' : 'claude_gpt';
+      if (!low[fam] || rem < low[fam].remainingPercent) {
+        low[fam] = {
+          remainingPercent: rem,
+          resetAt: q.resetTime ? Date.parse(q.resetTime) : null
+        };
+      }
+    }
+    const fams = Object.entries(low).filter(([, v]) => v);
+    if (!fams.length) {
+      const err = emptyProvider(label, ['no quota reported']);
+      err.status = 'error';
+      return err;
+    }
+    const winList = fams.map(([fam, v]) => ({
+      key: fam,
+      label: fam === 'gemini' ? 'Gemini 5H' : 'Claude/GPT 5H',
+      percent: 100 - v.remainingPercent,
+      remainingPercent: v.remainingPercent,
+      used: null,
+      total: null,
+      remaining: null,
+      resetAt: v.resetAt
+    }));
+    return {
+      ok: true,
+      label,
+      plan: plan || 'Antigravity',
+      status: statusFromWindows(winList),
+      windows: winList,
+      notes: [`${counted} models`],
+      errors: [],
+      fetchedAt: Date.now()
+    };
   }
 }
 

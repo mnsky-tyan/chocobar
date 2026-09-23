@@ -258,8 +258,6 @@ static wchar_t *pathBaseName(const wchar_t *p) {
     return (wchar_t *)b;
 }
 
-static int g_petDiagDone = 0;
-static void writeLogA(const char *s); // p_ui
 static int petRunning(const wchar_t *exePath) {
     if (!exePath || !*exePath) return 0;
     wchar_t base[MAX_PATH];
@@ -274,14 +272,6 @@ static int petRunning(const wchar_t *exePath) {
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
-    if (!found && !g_petDiagDone) {   // TEMP
-        g_petDiagDone = 1;
-        char dbg[160];
-        int bl = lstrlenW(base);
-        sprintf(dbg, "pet: not found base wlen=%d head=%04X %04X", bl,
-                bl > 0 ? (unsigned)base[0] : 0, bl > 1 ? (unsigned)base[1] : 0);
-        writeLogA(dbg);
-    }
     return found;
 }
 
