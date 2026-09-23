@@ -1226,6 +1226,136 @@ static int subsFetchAgyLocal(int idx, int fam) {
     return 0;
 }
 
+// one fetchAvailableModels call; runs on its own thread so the two endpoints
+// are fetched concurrently instead of back to back
+typedef struct {
+    const wchar_t *host; const wchar_t *hdrs; const wchar_t *project;
+    int timeoutMs; int st, bl; char *resp;
+} AgyModelsJob;
+static DWORD WINAPI agyModelsThread(LPVOID lp) {
+    AgyModelsJob *j = (AgyModelsJob *)lp;
+    char mbody[256];
+    int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", j->project);
+    if (ml <= 0 || ml >= (int)sizeof(mbody)) { j->resp = NULL; return 0; }
+    j->resp = subsHttpPost("models", j->host, L"/v1internal:fetchAvailableModels", j->hdrs,
+                           mbody, ml, j->timeoutMs, &j->st, &j->bl);
+    return 0;
+}
+
+// per-family model keys in priority order, exactly the keys pi-quota-inject
+// picks: the first key that carries a quotaInfo wins for that family
+static const char *agyFamKeys[2][5] = {
+    { "gemini-3.8-flash-tiered", "gemini-3.7-flash-tiered", "gemini-3.6-flash-high", "gemini-pro-agent", NULL },
+    { "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", NULL, NULL }
+};
+
+// Fetch /v1internal:fetchAvailableModels on BOTH endpoints CONCURRENTLY and
+// merge them into the family slots: production first, then the daily/sandbox
+// endpoint OVERWRITING it - byte-for-byte the Object.assign order of
+// pi-quota-inject.mjs. Each call costs ~1 s of pure server latency for ~160 KB,
+// so serialising them doubled the most expensive part of a subs cycle.
+// Returns 1 if both endpoints were attempted, 0 if neither, -1 on a 401.
+static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, const wchar_t *project,
+                          int timeoutMs, int debug,
+                          double *famRf, long long *famReset, int *famHave) {
+    AgyModelsJob mj[2];
+    HANDLE mth[2]; int mthN = 0;
+    for (int h = 0; h < 2; h++) {
+        memset(&mj[h], 0, sizeof(mj[h]));
+        mj[h].host = hosts[h];
+        mj[h].hdrs = hdrs; mj[h].project = project; mj[h].timeoutMs = timeoutMs;
+        mth[h] = CreateThread(NULL, 0, agyModelsThread, &mj[h], 0, NULL);
+        if (mth[h]) mthN = h + 1; else break;
+    }
+    if (mthN == 2) {
+        WaitForMultipleObjects(2, mth, TRUE, INFINITE);
+        CloseHandle(mth[0]); CloseHandle(mth[1]);
+    }
+    int attempted = 0, auth401 = 0;
+    for (int h = 0; h < 2; h++) {
+        int st = 0, bl = 0; char *resp;
+        if (mthN == 2) { st = mj[h].st; bl = mj[h].bl; resp = mj[h].resp; }
+        else {
+            char mbody[256];
+            int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", project);
+            if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
+            resp = subsHttpPost("models", hosts[h], L"/v1internal:fetchAvailableModels", hdrs,
+                                mbody, ml, timeoutMs, &st, &bl);
+        }
+        attempted = 1;
+        if (debug) {
+            char lb[160];
+            sprintf(lb, "[wizbar] subs agy models host=%d st=%d bl=%d", h, st, bl);
+            writeLogA(lb);
+        }
+        if (!resp) continue;
+        if (st == 401) { auth401 = 1; HeapFree(GetProcessHeap(), 0, resp); continue; }
+        if (st != 200) { HeapFree(GetProcessHeap(), 0, resp); continue; }
+        jsmntok_t *t = NULL;
+        int n = subsParseBig(resp, bl, &t);
+        if (n > 0 && t[0].type == JSMN_OBJECT) {
+            int models = jobjGet(resp, t, 0, "models");
+            if (models >= 0 && t[models].type == JSMN_OBJECT) {
+                int cnt = t[models].size; // object: size = number of KEYS
+                int k = models + 1;
+                for (int i = 0; i < cnt; i++) {
+                    // object children are key+value PAIRS: advance 1 + span(value)
+                    if (t[k + 1].type == JSMN_OBJECT) {
+                        int klen = t[k].end - t[k].start;
+                        const char *ks = resp + t[k].start;
+                        for (int f = 0; f < 2; f++) {
+                            int matched = 0;
+                            for (int ki = 0; agyFamKeys[f][ki]; ki++) {
+                                int kl = (int)strlen(agyFamKeys[f][ki]);
+                                if (klen != kl || strncmp(ks, agyFamKeys[f][ki], klen) != 0) continue;
+                                // tracked key: OVERWRITE the slot unconditionally,
+                                // exactly like Object.assign in pi-quota-inject
+                                // (the later endpoint's entry replaces the whole
+                                // model, quotaInfo or not)
+                                int q = jobjGet(resp, t, k + 1, "quotaInfo");
+                                famHave[f] = q >= 0 && t[q].type == JSMN_OBJECT;
+                                famRf[f] = -1;
+                                famReset[f] = 0;
+                                if (famHave[f]) {
+                                    famRf[f] = subsJdouble(resp, t, q, "remainingFraction", -1);
+                                    if (famRf[f] > 1) famRf[f] = 1;
+                                    char *rt = subsJstrRaw(resp, t, q, "resetTime");
+                                    if (rt) {
+                                        famReset[f] = subsIsoToMs(rt, (int)strlen(rt));
+                                        HeapFree(GetProcessHeap(), 0, rt);
+                                    }
+                                }
+                                matched = 1;
+                                break;
+                            }
+                            if (matched) break;
+                        }
+                    }
+                    k += 1 + jtokSpan(t, k + 1);
+                }
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, t);
+        HeapFree(GetProcessHeap(), 0, resp);
+    }
+    return auth401 ? -1 : (attempted ? 1 : 0);
+}
+
+// the same fetch driven from a thread, so it can overlap loadCodeAssist
+typedef struct {
+    const wchar_t *const *hosts; const wchar_t *hdrs;
+    wchar_t project[128];   // a COPY: the caller rewrites its own buffer
+    int timeoutMs, debug;
+    double famRf[2]; long long famReset[2]; int famHave[2];
+    int result;
+} AgyQuotaJob;
+static DWORD WINAPI agyQuotaThread(LPVOID lp) {
+    AgyQuotaJob *j = (AgyQuotaJob *)lp;
+    j->result = agyFetchModels(j->hosts, j->hdrs, j->project, j->timeoutMs, j->debug,
+                               j->famRf, j->famReset, j->famHave);
+    return 0;
+}
+
 static int subsFetchAntigravity(int idx) {
     subsSetCredits(idx, -1, -1);
     AgyAuth auth;
@@ -1246,11 +1376,29 @@ static int subsFetchAntigravity(int idx) {
         }
         subsAgySaveAuth(authPath, auth.access, auth.refresh, auth.expires);
     }
+    unsigned long long tAgy = GetTickCount64();
     if (!*auth.access) { subsSetState(idx, 0, 0); return 0; }
     wchar_t hdrs[4600];
     subsAgyHeaders(hdrs, 4600, auth.access);
     const wchar_t *hosts[2] = { L"cloudcode-pa.googleapis.com", L"daily-cloudcode-pa.sandbox.googleapis.com" };
     wchar_t plan[24] = L"Antigravity";
+    // The models calls are the expensive half of the cycle (~1 s of pure server
+    // latency each) and they need only a project id, which the auth file already
+    // carries. Fire them NOW, with the id we have, so the loadCodeAssist round
+    // trip below overlaps them instead of running back to back: a cycle then
+    // costs the LONGER of the two rather than their sum. If loadCodeAssist comes
+    // back with a DIFFERENT id the speculative result is discarded and fetched
+    // again, so a stale id can never show another project's numbers.
+    wchar_t usedProject[128]; usedProject[0] = 0;
+    HANDLE qth = NULL; AgyQuotaJob qj;
+    if (*auth.projectId) {
+        memset(&qj, 0, sizeof(qj));
+        qj.hosts = hosts; qj.hdrs = hdrs;
+        lstrcpynW(qj.project, auth.projectId, 128);
+        qj.timeoutMs = g_cfg.subsTimeoutMs; qj.debug = g_cfg.debug;
+        lstrcpynW(usedProject, auth.projectId, 128);
+        qth = CreateThread(NULL, 0, agyQuotaThread, &qj, 0, NULL);
+    }
     // Plan label + project discovery. loadCodeAssist runs on EVERY cycle:
     // the stored projectId used to short-circuit it, so the panel kept the
     // fallback label instead of the account's real tier ("Google AI Pro").
@@ -1296,6 +1444,7 @@ static int subsFetchAntigravity(int idx) {
         HeapFree(GetProcessHeap(), 0, resp);
         if (st == 200 || st == 403) break; // definitive answer
     }
+    if (g_cfg.debug) { char lb[80]; sprintf(lb, "[wizbar] subs agy: loadCodeAssist phase %llu ms", GetTickCount64() - tAgy); writeLogA(lb); }
     if (!*auth.projectId) {
         writeLogA("subs agy: no project id");
         subsSetState(idx, 0, 0);
@@ -1320,71 +1469,38 @@ static int subsFetchAntigravity(int idx) {
     double famRf[2] = { -1, -1 };
     long long famReset[2] = { 0, 0 };
     int famHave[2] = { 0, 0 };
-    for (int h = 0; h < 2; h++) { // production first, daily WINS (overwrite)
-        int st = 0, bl = 0;
-        char mbody[256];
-        int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", auth.projectId);
-        if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
-        char *resp = subsHttpPost("models", hosts[h], L"/v1internal:fetchAvailableModels", hdrs,
-                                  mbody, ml, g_cfg.subsTimeoutMs, &st, &bl);
-        if (g_cfg.debug) {
-            char lb[160];
-            sprintf(lb, "[wizbar] subs agy models host=%d st=%d bl=%d", h, st, bl);
-            writeLogA(lb);
-        }
-        if (!resp) continue;
-        if (st == 401) {
+    // Collect the speculative fetch that overlapped loadCodeAssist.
+    int needModels = 1;
+    if (qth) {
+        WaitForSingleObject(qth, INFINITE);
+        CloseHandle(qth);
+        if (qj.result < 0) { // 401: the token is no good
             writeLogA("subs agy: models 401 (re-login)");
-            HeapFree(GetProcessHeap(), 0, resp);
             subsSetState(idx, 0, 0);
             return 0;
         }
-        if (st != 200) { HeapFree(GetProcessHeap(), 0, resp); break; }
-        jsmntok_t *t = NULL;
-        int n = subsParseBig(resp, bl, &t);
-        if (n > 0 && t[0].type == JSMN_OBJECT) {
-            int models = jobjGet(resp, t, 0, "models");
-            if (models >= 0 && t[models].type == JSMN_OBJECT) {
-                int cnt = t[models].size; // object: size = number of KEYS
-                int k = models + 1;
-                for (int i = 0; i < cnt; i++) {
-                    // object children are key+value PAIRS: advance 1 + span(value)
-                    if (t[k + 1].type == JSMN_OBJECT) {
-                        int klen = t[k].end - t[k].start;
-                        const char *ks = resp + t[k].start;
-                        int matched = 0;
-                        for (int f = 0; f < 2 && !matched; f++) {
-                            for (int ki = 0; famKeys[f][ki]; ki++) {
-                                int kl = (int)strlen(famKeys[f][ki]);
-                                if (klen != kl || strncmp(ks, famKeys[f][ki], klen) != 0) continue;
-                                // tracked key: OVERWRITE the slot unconditionally,
-                                // exactly like Object.assign in pi-quota-inject
-                                // (the later endpoint's entry replaces the whole
-                                // model, quotaInfo or not)
-                                int q = jobjGet(resp, t, k + 1, "quotaInfo");
-                                famHave[f] = q >= 0 && t[q].type == JSMN_OBJECT;
-                                famRf[f] = -1;
-                                famReset[f] = 0;
-                                if (famHave[f]) {
-                                    famRf[f] = subsJdouble(resp, t, q, "remainingFraction", -1);
-                                    if (famRf[f] > 1) famRf[f] = 1;
-                                    char *rt = subsJstrRaw(resp, t, q, "resetTime");
-                                    if (rt) {
-                                        famReset[f] = subsIsoToMs(rt, (int)strlen(rt));
-                                        HeapFree(GetProcessHeap(), 0, rt);
-                                    }
-                                }
-                                matched = 1;
-                                break;
-                            }
-                        }
-                    }
-                    k += 1 + jtokSpan(t, k + 1);
-                }
-            }
+        if (lstrcmpW(usedProject, auth.projectId) == 0) {
+            // loadCodeAssist confirmed the id we already fetched with
+            famRf[0] = qj.famRf[0]; famRf[1] = qj.famRf[1];
+            famReset[0] = qj.famReset[0]; famReset[1] = qj.famReset[1];
+            famHave[0] = qj.famHave[0]; famHave[1] = qj.famHave[1];
+            needModels = 0;
         }
-        HeapFree(GetProcessHeap(), 0, t);
-        HeapFree(GetProcessHeap(), 0, resp);
+    }
+    if (needModels) {
+        int r = agyFetchModels(hosts, hdrs, auth.projectId, g_cfg.subsTimeoutMs, g_cfg.debug,
+                               famRf, famReset, famHave);
+        if (r < 0) {
+            writeLogA("subs agy: models 401 (re-login)");
+            subsSetState(idx, 0, 0);
+            return 0;
+        }
+    }
+    if (g_cfg.debug) {
+        char lb[96];
+        sprintf(lb, "[wizbar] subs agy: models phase %llu ms (overlapped=%d)",
+                GetTickCount64() - tAgy, !needModels);
+        writeLogA(lb);
     }
     SubsWin wins[2];
     int nw = 0, loRem = -1;
@@ -1444,6 +1560,22 @@ unsigned subsFetchedAgoSec(void) {
 // wall-clock epoch ms of the last completed cycle, 0 = never fetched
 long long subsFetchedEpochMs(void) { return g_subsFetchedEpoch; }
 
+// one provider's fetch, dispatched by type. Runs on its own thread when
+// more than one provider is enabled (see the cycle below): the cycle time is
+// then the slowest provider instead of the sum of all of them.
+static void subsProviderFetch(int i) {
+    if (g_cfg.subsProviders[i].type == 0) subsFetchChatgpt(i);
+    else if (g_cfg.subsProviders[i].type == 1) subsFetchZai(i);
+    else subsFetchAntigravity(i);
+}
+
+typedef struct { int idx; } SubsJob;
+static DWORD WINAPI subsProviderThread(LPVOID lp) {
+    SubsJob *j = (SubsJob *)lp;
+    subsProviderFetch(j->idx);
+    return 0;
+}
+
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
     for (;;) {
@@ -1451,6 +1583,13 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             int anyEnabled = 0;
             int n = g_cfg.subsProviderCount;
             if (n > MAX_SUBS) n = MAX_SUBS;
+            unsigned long long tCycle = GetTickCount64();
+            // Fan the enabled providers out over their own threads. Every fetch
+            // is independent (each writes only its own slot through the locked
+            // setters), so the wall time of a cycle drops from the SUM of the
+            // providers to the slowest one - measured 5.9s -> 2.6s for the
+            // captain's three providers.
+            HANDLE th[MAX_SUBS]; SubsJob jobs[MAX_SUBS]; int nth = 0;
             for (int i = 0; i < n; i++) {
                 if (!g_cfg.subsProviders[i].enabled) continue;
                 anyEnabled = 1;
@@ -1459,14 +1598,28 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                     sprintf(lb, "[wizbar] subs cycle: provider %d type %d enter", i, g_cfg.subsProviders[i].type);
                     writeLogA(lb);
                 }
-                if (g_cfg.subsProviders[i].type == 0) subsFetchChatgpt(i);
-                else if (g_cfg.subsProviders[i].type == 1) subsFetchZai(i);
-                else subsFetchAntigravity(i);
+                jobs[nth].idx = i;
+                HANDLE h = CreateThread(NULL, 0, subsProviderThread, &jobs[nth], 0, NULL);
+                if (h) th[nth++] = h;
+                else subsProviderFetch(i); // could not spawn: do it inline
+            }
+            if (nth > 1) {
+                WaitForMultipleObjects((DWORD)nth, th, TRUE, INFINITE);
+                for (int i = 0; i < nth; i++) CloseHandle(th[i]);
+            } else if (nth == 1) {
+                // a lone provider already ran to completion on its thread
+                WaitForSingleObject(th[0], INFINITE);
+                CloseHandle(th[0]);
             }
             if (!anyEnabled) {
                 for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
             }
             g_subsFetchedTick = GetTickCount64();
+            if (g_cfg.debug) {
+                char lb[64];
+                sprintf(lb, "[wizbar] subs cycle: total %llu ms", GetTickCount64() - tCycle);
+                writeLogA(lb);
+            }
             g_subsFetchedEpoch = subsLocalStampMs();
             if (g_cfg.debug) { // one line per provider: what the board will show
                 for (int i = 0; i < n; i++) {

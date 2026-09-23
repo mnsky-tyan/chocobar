@@ -3093,6 +3093,7 @@ static void showTrayMenu(HWND hwnd) {
     } else if (id == 5) {
         autoStartSet(!autoStartEnabled()); // the menu IS the control
     } else if (id == 6) {
+        writeLogA("TEMPMENU: check-for-updates clicked");
         // Opens the releases page rather than self-updating: no download, no
         // file swap, no unsigned-binary trust question. The bar knows its own
         // version (version.h), so the page is all the user needs to compare.
