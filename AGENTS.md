@@ -198,6 +198,23 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
   the default config path and both subs auth headers.
 
+## Config reference + ignored keys
+
+- The complete user-facing config reference lives in README.md ("## Configuration"):
+  every key the native parser reads, its default, and what editing it achieves,
+  plus the full starting-point JSON. The in-app template (writeTemplate) stays
+  the annotated first-run file; the README is the reference.
+- Electron-era keys the native parser does NOT read (safe to delete, no effect
+  when present): `bar.position`, `bar.insetX`, `bar.segmentSpacing`,
+  `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`,
+  `tokens.heatmapDays`, `theme.surfaces`, `terminal.reattachToExisting`, and
+  `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores are
+  SQLite and reach the board only through the `tokens.cachePath` seed; the live
+  scan covers `sources.zai` and `sources.pi` JSONL only). `bar.align` is 1=right,
+  2=left (there is no "center").
+- `subs` supports 0-5 providers per the captain's ask (MAX_SUBS stays 6); one
+  antigravity entry = one panel with two rows.
+
 ## Native subs chip (p_subs.c)
 
 - Mirrors src/subs.js chip semantics: ChatGPT wham/usage (Bearer token from
@@ -512,6 +529,42 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 - Measured (2026-09-22, captain's box): CPU ~4.5% of one core, RSS ~27.6 MB,
   commit ~15.9 MB, 348 handles, 11 threads. The cold scan (cursor file absent)
   reads ~148MB over UNC and takes ~3.3s once.
+
+## Native dashboards - layout sharp edges
+
+- **Both dashboards are WS_EX_TOOLWINDOW and open with SW_SHOWNA** (the captain's
+  ask: no taskbar button; the earlier WS_EX_APPWINDOW was deliberate but read as
+  a second app with a blank icon). TOOLWINDOW keeps click-activation working, so
+  the buttons and title-drag still take focus on first click; Escape then closes
+  as before. SW_SHOWNA matters as much: the old `SetForegroundWindow` on open
+  STOLE the keyboard from the followed terminal - the captain typed " like" and
+  every keystroke landed on the dashboard (caught by a debug WM_KEYDOWN log).
+  Opening a board must never move focus.
+- Tray menu metrics (captain's "-25%" pass): rows DX(21), separators DX(5), 9px
+  labels, width from `menuWidthPx()` (widest label + DX(34), min DX(96)) - a
+  fixed DX(210) was wider than its content. The autostart check draws at the
+  RIGHT edge (`r.right - DX(18)..DX(6)`, DT_RIGHT); the label's right bound
+  shrinks by DX(24) on that row only.
+- Subs board must show EVERY enabled provider, 0 through 5: `en` is counted
+  first, then the row (body -> footer -> head, in that order, with floors) is
+  compressed until the whole stack fits the screen. **The stack is
+  n*(panelH+gap) - gap**, so `maxPanels` must be
+  `(avail + gap) / (panelH + gap)` - without the gap the 5th panel is lost to
+  integer truncation right after the compression loop made it fit (cost a full
+  debug round). With 0 providers the board still refits to its one empty-state
+  line (it used to keep the previous board's height).
+- Pie text is centred on the INK, not the glyph box: GDI puts the ink ~11 CSS px
+  below the draw origin, so the number/caption offsets are 18.5 / 14.5 / 2.5
+  (was 15/11/6, which left the number 3.5 CSS px low - measured off the
+  captain's screenshot, +6.5 CSS for the number+caption pair).
+- Probe gotchas: `FindWindowW("ChocobarDash", $null)` returns 0 - the window
+  needs its EXACT title ("Chocobar dashboard" / "Chocobar subscriptions").
+  A DPI-UNAWARE caller reads GetWindowRect HALVED on a 200% display (its screen
+  is 1440x900), so a screen-capture script must either call
+  SetProcessDpiAwarenessContext(-4) first or double the rect; PrintWindow on
+  `#32768` menus intermittently returns an all-black bitmap (BitBlt the screen
+  DC instead). The captain works with the board open, so a "toggle" click may
+  CLOSE his board - poll-and-shoot instead of click-then-sleep.
 
 ## Native dashboards - layout sharp edges
 

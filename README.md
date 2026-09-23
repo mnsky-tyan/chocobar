@@ -4,11 +4,11 @@ Chocobar is a lightweight desktop status bar for Windows. It shows live system s
 
 ## Features
 
-- System chips for CPU, GPU, memory, CPU temperature, volume, battery, Bluetooth device battery, and local time.
+- System chips for CPU, GPU, memory, CPU temperature, volume, battery, and local time.
 - Terminal-aware placement: the bar sits above the followed terminal and moves with it. Auto-detection covers Windows Terminal, classic conhost, ConEmu, mintty, WezTerm, Alacritty, and Hyper. Set `terminal.className` to pin one window class when needed.
 - Dashboard with daily heatmap, summary cards, app/model breakdowns, cache details, and request counts.
-- Subscription plan board with live quota windows, plus a plan-usage card fed by a local JSON file.
-- Soft pastel themes, configurable spacing, fonts, alignment, position, opacity, and corner radius.
+- Subscription plan board with live quota windows per provider, laid out for anything from zero to five configured plans.
+- Soft pastel themes, configurable spacing, fonts, alignment, opacity, and corner radius.
 - Tray and bar context actions for the dashboards, `Reload chocobar`, config editing, and quit. Reloading keeps the single app instance and optional companion process intact.
 
 All usage adapters are opt-in and read local data only. Supported input shapes include provider or CLI SQLite usage databases (zcode is one optional example), JSONL session logs, JSON message stores, local desktop APIs, and subscription plan snapshots. No store is read until you enable its source, even though the toggles ship visible.
@@ -32,127 +32,186 @@ Autostart is controlled by `general.autostart` in the config; it writes an HKCU 
 
 ## Configuration
 
-On first use of a config path, Chocobar writes an annotated config template there - for a normal install that is:
+The native bar keeps its whole configuration in one JSON file:
 
 ```
 %USERPROFILE%\.wizbar\config.json
 ```
 
-This includes an explicit `--config <path>` launch: the file is created with the template on first use, so `Edit config` (bar or tray right-click) always has a file to open. The file is hot-reloaded after saving - no restart needed. The generated comments document every available key; the groups:
+Point it somewhere else with `chocobar.exe --config <path>` or the `WIZBAR_CONFIG` environment variable (`--config` wins). The file is **hot-reloaded on save** - no restart. On first use of a path the bar writes an annotated template there; after that the bar never writes the file again, so hand edits, comments, and personal wiring all survive (the tray menu's `Start with Windows` item is the one setting that lives in the registry instead, precisely so it cannot be overwritten).
 
-| Group | Controls |
-|---|---|
-| `bar` | Height, gap, position, alignment, font, spacing, tint, opacity, and backdrop |
-| `theme` | Text, pastel accents, warning, success, and divider colors; the five daily-heatmap shades; per-surface backgrounds (`surfaces`) for the dashboards and the context menu |
-| `modules` | System chip switches, polling intervals, thresholds, clock format, shortcut chip, user-defined chips, and optional companion |
-| `terminal` | Auto-detection, class pinning, and whether existing windows may be selected after a close |
-| `tokens` | Master switch, dashboard chip, rescan interval, heatmap range, harness display names, dashboard section toggles, and local usage adapters |
-| `subs` | Live subscription board: provider adapters, poll interval, request deadline, and window size |
-| `general` | Tray, autostart, and debug logging |
+Everything below is optional: delete a key and the built-in default applies. Sizes are CSS pixels (the bar scales them by the display DPI), colors are `#RRGGBB`.
 
-### A few things worth trying first
+### `bar` - the strip itself
 
-Small edits, hot-reloaded the moment you save:
+| Key | Default | What it does |
+|---|---|---|
+| `height` | `24` | Bar height in CSS px. |
+| `gap` | `8` | Horizontal gap between chips, and the gap between dashboard panels. |
+| `fontSize` | `12` | Chip text size. |
+| `fontFamily` | `"Cascadia Mono"` | Chip font. Takes a CSS font stack (`"'Segoe Print', cursive"` works); empty falls back to Segoe UI. |
+| `backgroundTint` | `"#FBF2E2"` | The cream tint you see through the acrylic. |
+| `backgroundAlpha` | `110` | How solid the tint is (0-255). |
+| `backdrop` | `"acrylic"` | `"acrylic"` for the blurred DWM backdrop, `"solid"` for a flat opaque bar. |
+| `radius` | `8` | Corner radius, 0-26. |
+| `align` | `1` | `1` = chips packed right (default), `2` = packed left. |
 
-**Make the bar yours** - position, tint, and translucency all live in `bar`. The tint is what you see through the acrylic; `backgroundAlpha` is how solid it is:
+### `theme` - colors and icons
+
+| Key | Default | What it does |
+|---|---|---|
+| `fg` | `"#080808"` | Primary text. |
+| `fgDim` | `"#5a5245"` | Secondary text (subtitles, captions). |
+| `pink` | `"#E8C7D0"` | Light pink (hover fills, accents). |
+| `pinkDeep` | `"#D493AA"` | The signature pink: pie rings, check marks, highlights. |
+| `pinkBg` | `"#FEF7F9"` | Dashboard page background. |
+| `warn` | `"#A00000"` | Warning color (thresholds, near-cap). |
+| `good` | `"#006400"` | Success color (OK pills, charging battery). |
+| `yellow` | `"#B8A96A"` | Stale/neutral marker. |
+| `divider` | `"#D9CCB2"` | Hairlines and dashed separators. |
+| `iconColor` | `""` | Color of every built-in icon; empty follows `pinkDeep`. |
+| `iconOpacity` | `90` | Icon opacity 0-100 (90 matches the Electron bar). |
+| `heatmap` | 5 shades | The daily-heatmap ramp, light to dark. |
+| `icons` | `[]` | Your own SVG icons, see below. |
+
+**Own icons** - each entry in `theme.icons` defines a named icon in the same 24-unit viewBox the built-ins use, stroked with width `w`. Reference it from `modules.custom[].icon` by name; defining a name twice replaces it, so this is hot-reload friendly:
 
 ```json
-"bar": { "height": 28, "align": "center", "gap": 8,
-         "backgroundTint": "#FBF2E2", "backgroundAlpha": 110, "backdrop": "acrylic" }
+"icons": [ { "name": "moon", "d": "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z", "w": 2.2 } ]
 ```
 
-**Your clock, your format**:
+### `modules` - the chips
+
+Every module takes `enabled` (default `true` unless noted). The three leftmost toggles and the metric chips:
+
+| Key | Default | What it does |
+|---|---|---|
+| `modules.gpu` | on | GPU usage chip (Windows Performance Counters). |
+| `modules.cpu` | on | CPU usage chip. |
+| `modules.cputemp` | on | CPU temperature chip (HWiNFO shared memory; `–` without it). |
+| `modules.ram` | on | Memory usage chip. |
+| `modules.volume` | on | System volume chip (Core Audio). |
+| `modules.battery` | on | Battery chip. Green while charging, red only when low **and** on battery. |
+| `modules.clock` | on | Local time; `format` below. |
+| `modules.cpu.warnAt` | `85` | CPU % that turns the value red. |
+| `modules.cputemp.warnAt` | `85` | Temperature (deg C) that turns red. |
+| `modules.ram.warnAt` | `90` | Memory % that turns red. |
+| `modules.clock.format` | `"{MMM} {dd} ({Wkk}) {HH}:{mm}"` | Clock format; `{Wkk}` is the weekday (`Mon`..`Sun`). |
+| `modules.shortcut` | off | The bolt chip: `label` (chip text) and `command` (anything your shell can launch). |
+| `modules.pet` | off | The bow chip: `label` (optional prefix), `exePath` (companion exe). Launches/stops it, state read from the live process. |
+| `modules.custom` | `[]` | Your own chips, see below. |
+
+**Custom chips** - each entry renders one more chip, right of the built-ins:
 
 ```json
-"clock": { "enabled": true, "format": "{MMM} {dd} ({Wkk}) {HH}:{mm}" }
-```
-
-**Only show the chips you use** - every module and toggle turns off the same way:
-
-```json
-"modules": { "battery": { "enabled": false }, "shortcut": { "enabled": false } }
-```
-
-**Add a chip that launches anything** - a URL, an app, a script; `toggle: true` makes it hold an on/off state and run `command on` / `command off`:
-
-```json
-"custom": [ { "enabled": true, "icon": "🎧", "label": "Music",
-              "command": "spotify.exe" } ]
-```
-
-**Feed the dashboard your own usage stores** - each source is one flag plus a path; nothing is read until you enable it:
-
-```json
-"tokens": { "enabled": true,
-            "sources": { "pi": { "enabled": true, "sessionsDir": "~/.pi/agent/sessions" } } }
-```
-
-**Warn colors when a machine runs hot** - thresholds per module:
-
-```json
-"modules": { "cpu": { "warnAt": 85 }, "cputemp": { "warnAt": 85 } }
-```
-
-Everything else - heatmap shades, harness display names, board providers, window sizes - follows the same pattern and is documented in the template itself.
-
-### The three toggles on the left of the bar
-
-The bar ships with three toggle chips visible, leftmost. Each is a button; hide any of them by flipping its flag in the config if you do not want it.
-
-| Chip | Opens / does | Intended use | Hide with |
-|---|---|---|---|
-| Bolt (shortcut) | Runs `modules.shortcut.command` | One-click launch of anything: an app, a script, a URL. With no command set it does nothing - set `modules.shortcut.command` (and optionally `label`) to wire it up | `modules.shortcut.enabled: false` |
-| Diamond (tokens) | Token usage dashboard | Local LLM/harness usage at a glance: today / 7 days / 30 days / all time, a daily heatmap, per-app and per-model breakdowns. Shows `–` until you enable a usage source under `tokens.sources` | `tokens.showOnBar: false` (or master `tokens.enabled: false` to also stop all scans) |
-| Gauge (subs) | Subscription plan board | Live rate-limit / quota windows for plans you wire under `subs.providers` (ChatGPT via a Codex CLI login, Z.ai coding plan via the zcode credential, Google Antigravity via its Cloud Code login - all ship disabled). The chip reads `—` until one is enabled | `subs.enabled: false` |
-
-A fourth chip, the bow (pet), is opt-in: set `modules.pet` (`enabled`, `exePath`, optional `label`) and it launches/stops a Windows companion exe, reading on/off from the live process.
-
-### Your own chips (`modules.custom`)
-
-Anything the built-in toggles don't cover, you add yourself - each entry in `modules.custom` renders one more chip on the bar, with your design and your function:
-
-```json
-{ "enabled": true, "icon": "\uf011", "label": "Focus", "color": "",
+{ "enabled": true, "icon": "moon", "label": "Focus", "color": "",
   "title": "Toggle the focus script", "toggle": true,
-  "command": "C:\\tools\\focus.bat" }
+  "command": "C:\tools\focus.bat" }
 ```
 
-- **Design**: `icon` (a nerd-font glyph or emoji), `label` (chip text; icon-only if empty), `color` (chip color; empty = theme default), `title` (hover tooltip).
-- **Function**: a click runs `command` - any program, script, or URL your shell can launch. With `toggle: true` the chip keeps an on/off state and runs `command on` / `command off` so your script can react; the state is per-run, like the pet's.
-- Chips appear right of the built-in toggles; remove an entry (or set `enabled: false`) and the chip is gone.
+- `icon`: a built-in name, a `theme.icons` name, a nerd-font glyph, or an emoji.
+- `label`: chip text; empty = icon only. `color`: chip color; empty = theme default. `title`: hover tooltip.
+- `command`: what a click runs. `toggle: true` holds an on/off state per run and appends ` on` / ` off` to the command.
 
-### Surface colors (`theme.surfaces`)
+### `tokens` - the usage dashboard
 
-The two dashboard windows can take their own background, independent of the shared palette: `theme.surfaces.dashboard` and `theme.surfaces.subs` each accept `followBar: true` (reuse the bar's tint) or an explicit `backgroundTint` (empty = the built-in pink). The dashboards are opaque windows by design, so the tint sets the color only.
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Master switch: off = zero scans, no chip, empty dashboard. |
+| `rescanMinutes` | `1` | Minutes between session-store scans (clamped 1-60). |
+| `cachePath` | `""` | Usage-history seed file; empty = `~/.wizbar/token-cache.json`. |
+| `appFilter` | `[]` | Harness allowlist: only these app ids are counted (empty = all). |
+| `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
+| `sources.zai` | – | `{ "enabled": true, "sessionsDir": "~/.zai/agent/sessions" }` - flat JSONL, scanned live. |
+| `sources.pi` | – | `{ "enabled": true, "sessionsDir": "~/.pi/agent/sessions" }` - one directory per project, scanned live. |
 
-### Subscription usage file
+Only sources with a `sessionsDir` are scanned; the two shipped keys are `zai` and `pi`. Usage semantics per store are in the Token accounting section below.
 
-Enable the master switch and the subscription source, then point `usagePath` at a local JSON file of plan snapshots. The generated config documents the snapshot shape, and Chocobar re-reads it on each usage rescan.
+### `subs` - the subscription board
+
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Master switch for the board and the gauge chip. |
+| `intervalMinutes` | `2` | Minutes between quota polls. |
+| `fetchTimeoutMs` | `20000` | Per-provider request deadline (3-60s). |
+| `rotateSec` | `60` | Seconds each plan stays on the rotating gauge chip (5-3600). |
+| `width` / `height` | `880` / `580` | Board window size in CSS px. |
+| `providers` | `[]` | Up to 6 entries; the board fits every enabled one. |
+
+Each provider entry:
+
+```json
+{ "type": "antigravity", "enabled": true, "label": "Antigravity",
+  "authPath": "~/.pi/agent/auth.json",
+  "clientId": "", "clientSecret": "" }
+```
+
+- `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login).
+- `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
+- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints (the daily endpoint wins), the same source the harness's `/quota` uses - no IDE or language server required.
+
+**Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps the last good windows marked stale.
+
+### `dashboard`, `terminal`, `general`
+
+| Key | Default | What it does |
+|---|---|---|
+| `dashboard.width` / `dashboard.height` | `900` / `520` | Token dashboard window size. |
+| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, mintty, then WezTerm/Alacritty/Hyper by process. |
+| `terminal.title` | `""` | Optional title substring to disambiguate. |
+| `general.showTray` | `true` | Show the tray icon. |
+| `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. |
+| `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`. |
+
+### Keys the native build ignores
+
+The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapDays`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
+
+### A complete starting point
 
 ```json
 {
-  "tokens": {
-    "sources": {
-      "subscription": {
-        "enabled": true,
-        "usagePath": "~/path/to/plan-usage.json"
-      }
-    }
-  }
+  "bar": { "height": 24, "gap": 8, "fontSize": 12, "fontFamily": "Cascadia Mono",
+           "backgroundTint": "#FBF2E2", "backgroundAlpha": 110,
+           "backdrop": "acrylic", "radius": 8, "align": 1 },
+  "theme": { "fg": "#080808", "fgDim": "#5a5245", "pink": "#E8C7D0",
+             "pinkDeep": "#D493AA", "warn": "#A00000", "good": "#006400",
+             "divider": "#D9CCB2", "iconColor": "", "iconOpacity": 90,
+             "heatmap": ["#F1ECD8", "#F6D8E0", "#EFB7C7", "#E28FB0", "#C95E8F"] },
+  "dashboard": { "width": 900, "height": 520 },
+  "modules": {
+    "gpu": { "enabled": true },
+    "cpu":  { "enabled": true, "warnAt": 85 },
+    "cputemp": { "enabled": true, "warnAt": 85 },
+    "ram":  { "enabled": true, "warnAt": 90 },
+    "volume": { "enabled": true },
+    "battery": { "enabled": true },
+    "clock": { "enabled": true, "format": "{MMM} {dd} ({Wkk}) {HH}:{mm}" },
+    "shortcut": { "enabled": false, "label": "", "command": "" },
+    "pet": { "enabled": false, "label": "", "exePath": "" },
+    "custom": [ { "enabled": true, "icon": "moon", "label": "Focus",
+                  "command": "C:\tools\focus.bat", "toggle": true } ]
+  },
+  "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
+              "labels": { "pi": "pi-wsl" },
+              "sources": { "zai": { "enabled": true, "sessionsDir": "~/.zai/agent/sessions" },
+                           "pi":  { "enabled": true, "sessionsDir": "~/.pi/agent/sessions" } } },
+  "subs": { "enabled": false, "intervalMinutes": 2, "fetchTimeoutMs": 20000,
+            "rotateSec": 60, "width": 880, "height": 580,
+            "providers": [
+              { "type": "chatgpt", "enabled": false, "label": "ChatGPT",
+                "authPath": "~/.codex/auth.json" },
+              { "type": "zai", "enabled": false, "label": "Z.ai",
+                "configPath": "~/.zcode/v2/config.json",
+                "provider": "builtin:zai-coding-plan" },
+              { "type": "antigravity", "enabled": false, "label": "Antigravity",
+                "authPath": "~/.pi/agent/auth.json",
+                "clientId": "", "clientSecret": "" }
+            ] },
+  "terminal": { "className": "", "title": "" },
+  "general": { "showTray": true, "autoStart": true, "debug": false }
 }
 ```
-
-Keep the file local and do not place secrets in the repository.
-
-### Subscription plans board (live quotas)
-
-Separately from the plan-usage file above, the subscription board shows live rate-limit / quota windows for plans you wire up under `subs.providers`. Each entry picks an adapter `type` (`chatgpt` reads a Codex CLI login, `zai` reads a Z.ai coding-plan credential, `antigravity` reads a Google Antigravity Cloud Code login), a display `label`, and where the credential lives. The examples ship disabled; nothing is pre-wired to any vendor. The poll interval (`intervalMinutes`), per-provider request deadline (`fetchTimeoutMs`), and board window size are configurable. A provider whose request fails or times out keeps its last good windows on the board, marked stale, until the next successful poll.
-
-Any number of providers may be wired - the board lays out one row per provider and grows its window to fit the content. One `antigravity` entry renders TWO panels, Antigravity (Gemini) and Antigravity (GPT/Claude), because the vendor reports one quota per model family. When the Antigravity IDE is running, the adapter reads its local language server (process discovery, then the authenticated `GetUserStatus` call the IDE's own quota view uses) - the same numbers the IDE shows. With the IDE closed it falls back to the cloud endpoints: it refreshes the access token from the stored refresh credential (no browser needed) and reads the grouped quota windows; on a free-tier plan, where the grouped summary endpoint is gated, it falls back to the per-model quota endpoint. A `403 SUBSCRIPTION_REQUIRED` therefore never looks like an expired login - only a token problem asks you to re-authenticate.
-
-### Harness names and dashboard sections
-
-The dashboard is harness-agnostic: source ids (`zcode`, `zai`, `pi`, `opencode`, `mimo`) are display names by default, and `tokens.labels` maps any of them to your own name (for example `{ "opencode": "opencode(wsl)" }`). `tokens.dashboard` switches individual dashboard sections (stat cards, heatmap, day detail, by-app, by-model, plan usage) on or off.
 
 ## Token accounting
 
