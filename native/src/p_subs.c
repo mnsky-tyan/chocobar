@@ -198,7 +198,7 @@ static wchar_t *subsZaiKey(int providerIdx, wchar_t **deviceMid) {
 
 // ---- HTTP GET via WinHTTP ---------------------------------------------------
 static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, const wchar_t *path, const wchar_t *headers,
-                         int timeoutMs, int *outStatus, int *outLen) {
+                         int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
     HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
@@ -207,10 +207,10 @@ static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host
     HINTERNET con = NULL, req = NULL;
     do {
         WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+        con = WinHttpConnect(ses, host, insecure ? INTERNET_DEFAULT_HTTP_PORT : INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (!con) { writeLogA("subs: connect failed"); break; }
         req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER,
-                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
         if (!req) break;
         if (headers && *headers) {
             WinHttpAddRequestHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
@@ -328,7 +328,7 @@ static int subsFetchChatgpt(int idx) {
     swprintf(hdrs, need, L"Authorization: Bearer %ls\r\nAccept: application/json", tok);
     wideFree(&tok);
     int status = 0, len = 0;
-    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, g_cfg.subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, 0, g_cfg.subsTimeoutMs, &status, &len);
     HeapFree(GetProcessHeap(), 0, hdrs);
     SubsWin wins[2];
     int nwin = 0;
@@ -407,7 +407,7 @@ static int subsFetchZai(int idx) {
     wideFree(&key);
     wideFree(&mid);
     int status = 0, len = 0;
-    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, g_cfg.subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, 0, g_cfg.subsTimeoutMs, &status, &len);
 
     if (!body) { subsSetState(idx, 0, 0); return 0; }
     jsmntok_t t[1024];
@@ -532,7 +532,7 @@ static long long subsIsoToMs(const char *s, int len) {
 // POST via WinHTTP (the GET helper above is GET-only); returns the body.
 static char *subsHttpPost(const char *tag, const wchar_t *host, const wchar_t *path,
                           const wchar_t *headers, const char *body, int bodyLen,
-                          int timeoutMs, int *outStatus, int *outLen) {
+                          int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
     HINTERNET ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!ses) ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
@@ -541,10 +541,10 @@ static char *subsHttpPost(const char *tag, const wchar_t *host, const wchar_t *p
     HINTERNET con = NULL, req = NULL;
     do {
         WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+        con = WinHttpConnect(ses, host, insecure ? INTERNET_DEFAULT_HTTP_PORT : INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (!con) { writeLogA("subs agy: connect failed"); break; }
         req = WinHttpOpenRequest(con, L"POST", path, NULL, WINHTTP_NO_REFERER,
-                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
         if (!req) break;
         if (headers && *headers) {
             WinHttpAddRequestHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
@@ -826,7 +826,7 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
     if (bl <= 0 || bl >= (int)sizeof(body)) return 0;
     int status = 0, len = 0;
     char *resp = subsHttpPost("token", L"oauth2.googleapis.com", L"/token",
-                              L"Content-Type: application/json", body, bl, 20000, &status, &len);
+                              L"Content-Type: application/json", body, bl, 0, 20000, &status, &len);
     if (!resp || (status != 200 && status != 207)) {
         char dbg[64];
         sprintf(dbg, "subs agy: token refresh HTTP %d", status);
@@ -1238,7 +1238,7 @@ static DWORD WINAPI agyModelsThread(LPVOID lp) {
     int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", j->project);
     if (ml <= 0 || ml >= (int)sizeof(mbody)) { j->resp = NULL; return 0; }
     j->resp = subsHttpPost("models", j->host, L"/v1internal:fetchAvailableModels", j->hdrs,
-                           mbody, ml, j->timeoutMs, &j->st, &j->bl);
+                           mbody, ml, 0, j->timeoutMs, &j->st, &j->bl);
     return 0;
 }
 
@@ -1267,9 +1267,12 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
         mth[h] = CreateThread(NULL, 0, agyModelsThread, &mj[h], 0, NULL);
         if (mth[h]) mthN = h + 1; else break;
     }
-    if (mthN == 2) {
-        WaitForMultipleObjects(2, mth, TRUE, INFINITE);
-        CloseHandle(mth[0]); CloseHandle(mth[1]);
+    // join and close every thread that was created: a thread that is still
+    // running keeps writing into mj[] (and, when this was called speculatively,
+    // into the CALLER's stack frame) after this function returns
+    for (int h = 0; h < mthN; h++) {
+        WaitForSingleObject(mth[h], INFINITE);
+        CloseHandle(mth[h]);
     }
     int attempted = 0, auth401 = 0;
     for (int h = 0; h < 2; h++) {
@@ -1280,7 +1283,7 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
             int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", project);
             if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
             resp = subsHttpPost("models", hosts[h], L"/v1internal:fetchAvailableModels", hdrs,
-                                mbody, ml, timeoutMs, &st, &bl);
+                                mbody, ml, 0, timeoutMs, &st, &bl);
         }
         attempted = 1;
         if (debug) {
@@ -1408,7 +1411,7 @@ static int subsFetchAntigravity(int idx) {
         // short truncated the JSON, so Google answered 400 on every call
         const char *assistBody = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
         char *resp = subsHttpPost("assist", hosts[h], L"/v1internal:loadCodeAssist", hdrs,
-            assistBody, (int)strlen(assistBody), g_cfg.subsTimeoutMs, &st, &bl);
+            assistBody, (int)strlen(assistBody), 0, g_cfg.subsTimeoutMs, &st, &bl);
         if (g_cfg.debug) {
             char lb[160];
             sprintf(lb, "[wizbar] subs agy loadCodeAssist host=%d st=%d bl=%d resp=%s", h, st, bl, resp ? "ok" : "NULL");
@@ -1461,10 +1464,6 @@ static int subsFetchAntigravity(int idx) {
     // carry only a resetTime and no remainingFraction (the Claude/GPT pool
     // between resets): the row stays on the board, its fraction renders as an
     // em dash.
-    static const char *famKeys[2][5] = {
-        { "gemini-3.8-flash-tiered", "gemini-3.7-flash-tiered", "gemini-3.6-flash-high", "gemini-pro-agent", NULL },
-        { "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", NULL, NULL }
-    };
     static const wchar_t *famNames[2] = { L"Gemini", L"Claude/GPT" };
     double famRf[2] = { -1, -1 };
     long long famReset[2] = { 0, 0 };
@@ -1566,11 +1565,15 @@ static int subsJsonPath(const char *js, const jsmntok_t *t, int root, const char
             while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; any = 1; }
             if (*p == ']') p++;
             if (!any || t[cur].type != JSMN_ARRAY) return -1;
-            int k = cur + 1;
+            // the array's own tokens run from cur+1 to cur+jtokSpan(t,cur); an
+            // index past the last element is a config typo, not a licence to
+            // keep walking into whatever token follows in document order
+            int k = cur + 1, end = cur + jtokSpan(t, cur);
             for (int i = 0; i < idx; i++) {
-                if (k < 0) return -1;
+                if (k >= end) return -1;
                 k += jtokSpan(t, k);
             }
+            if (k >= end) return -1;
             cur = k;
         } else break;
     }
@@ -1605,10 +1608,7 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
         jsmntok_t *tk = NULL;
         int n = subsParseBig(txt, (int)strlen(txt), &tk);
         int v = -1;
-        if (n > 0) {
-            if (ga->key[0] == '.') v = subsJsonPath(txt, tk, 0, ga->key);
-            else v = jobjGet(txt, tk, 0, ga->key);
-        }
+        if (n > 0) v = jobjGet(txt, tk, 0, ga->key);
         if (v >= 0) {
             char *raw = subsJstrRaw(txt, tk, v, NULL);
             // a non-string token still has to be readable as a value
@@ -1702,10 +1702,10 @@ static int subsFetchGeneric(int idx) {
             if (!body) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
             bodyLen = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, body, wl, NULL, NULL);
         }
-        resp = subsHttpPost("gen", host, path, hdrs, body, bodyLen, g_cfg.subsTimeoutMs, &st, &bl);
+        resp = subsHttpPost("gen", host, path, hdrs, body, bodyLen, insecure, g_cfg.subsTimeoutMs, &st, &bl);
         if (body) HeapFree(GetProcessHeap(), 0, body);
     } else {
-        resp = subsHttpGet("gen", L"chocobar", host, path, hdrs, g_cfg.subsTimeoutMs, &st, &bl);
+        resp = subsHttpGet("gen", L"chocobar", host, path, hdrs, insecure, g_cfg.subsTimeoutMs, &st, &bl);
     }
     HeapFree(GetProcessHeap(), 0, hdrs);
     if (g_cfg.debug) {
@@ -1969,7 +1969,7 @@ static void subsProvLabel(int i, wchar_t *out, int cb) {
                            ? g_cfg.subsProviders[i].label : NULL;
     int it = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].type : 0;
     if (it == 2) l = L"Antigravity";
-    else if (!l || !*l) l = it == 1 ? L"Z.ai" : L"ChatGPT";
+    else if (!l || !*l) l = it == 1 ? L"Z.ai" : (it == 3 ? L"generic" : L"ChatGPT");
     lstrcpynW(out, l, cb);
 }
 // provider plan name (Electron p.plan); empty until the first successful fetch

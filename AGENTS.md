@@ -191,6 +191,17 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `1 + jtokSpan(value)`; `jtokSpan` (chocobar.c) counts object children as
   pairs. The old ad-hoc walk silently skipped top-level keys that follow a
   deeply nested sibling (general/terminal/tokens/subs were never parsed!).
+- The first-run template (`g_template`) is a JSONC string whose braces must
+  match or a fresh install silently comes up with a truncated root object -
+  jsmn reports a token COUNT for the unbalanced tail, so loadConfig proceeds.
+  One object per root key (a duplicate key is dead: `jobjGet` takes the first)
+  and a harness that decodes the template and parses it with the vendored jsmn
+  (native/vendor/jsmn.h) is the only check that catches it.
+- `loadConfig` swaps `g_cfg` on the UI thread while the command-chip poll
+  thread reads it: the swap, the poll's config reads and the chip build all
+  take `g_cfgCustomLock` (p_ui.c), held only for copies. A new reader of
+  `g_cfg.custom[]` from a worker thread needs the same lock, never a raw
+  pointer.
 - JSON booleans MUST go through `jboolDefault` - `jintTok` uses atoi and
   `atoi("true") == 0` (disabled every subs provider silently).
 - MinGW `swprintf` follows C99: `%s` = char*, NOT wchar_t*. Every wide

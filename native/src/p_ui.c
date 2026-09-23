@@ -202,8 +202,39 @@ static void applyBackdrop(HWND hwnd) {
 // The poll NEVER runs on the UI thread - a command that takes a second must not
 // hitch the bar, so the text is stored here and the chip just reads it.
 static wchar_t g_customText[MAX_CUSTOM][96];
+// the command's raw trimmed output, kept beside the formatted chip text: the
+// warn band is a band on the captured NUMBER, and a format like "temp $v"
+// parses as 0 inside the formatted string
+static wchar_t g_customRaw[MAX_CUSTOM][64];
 static volatile long long g_customNextPoll[MAX_CUSTOM];
 static int g_customPollInit = 0;
+
+// loadConfig() frees and replaces g_cfg.custom[] on the UI thread while this
+// file's poll thread reads it, so both sides take this lock. It is held only
+// for a copy - never around the command itself - so a slow command cannot
+// block a config reload and a reload cannot free a pointer mid-read.
+static CRITICAL_SECTION g_cfgCustomLock;
+static void customLock(void) { EnterCriticalSection(&g_cfgCustomLock); }
+static void customUnlock(void) { LeaveCriticalSection(&g_cfgCustomLock); }
+
+static DWORD WINAPI customPollThread(LPVOID lp);
+
+// One thread walks every command chip. It is started from loadConfig - the one
+// point a startup, a config save and a tray Reload all go through - so a chip
+// added while the bar is already running is polled without a restart.
+static void customPollStart(void) {
+    if (g_customPollInit) return;
+    customLock();
+    int any = 0;
+    for (int i = 0; i < g_cfg.customCount; i++)
+        if (g_cfg.custom[i].enabled && g_cfg.custom[i].intervalMs > 0) { any = 1; break; }
+    customUnlock();
+    if (!any) return;
+    HANDLE h = CreateThread(NULL, 0, customPollThread, NULL, 0, NULL);
+    if (!h) return;
+    CloseHandle(h); // it runs until quit; the chips read its text, never its handle
+    g_customPollInit = 1;
+}
 
 // run `command` through cmd.exe (so PATH lookup, pipes and redirects all work)
 // and capture what it writes to stdout. Returns a trimmed, bounded copy.
@@ -238,7 +269,22 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
     char buf[4096];
     DWORD got = 0;
     wchar_t acc[4096]; int accLen = 0;
-    while (ReadFile(rd, buf, sizeof(buf) - 1, &got, NULL) && got > 0) {
+    // One deadline for the whole capture. EOF on the pipe only arrives once
+    // EVERY inherited write handle is gone, so a command that leaves a
+    // background child holding stdout (a `start /b ...` chain, a daemon it
+    // spawned) never ends the pipe - a blocking ReadFile would then wedge this
+    // thread, and with it every other command chip. Read only what is already
+    // available and stop at the same cap the process wait uses.
+    unsigned long long tStart = GetTickCount64();
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) break; // EOF / broken pipe
+        if (avail == 0) {
+            if (GetTickCount64() - tStart >= 5000) break;
+            Sleep(25);
+            continue;
+        }
+        if (!ReadFile(rd, buf, sizeof(buf) - 1, &got, NULL) || got == 0) break;
         buf[got] = 0;
         if (accLen < 4000) {
             int n = MultiByteToWideChar(CP_UTF8, 0, buf, (int)got, acc + accLen, 4096 - accLen - 1);
@@ -247,7 +293,12 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
     }
     acc[accLen] = 0;
     CloseHandle(rd);
-    WaitForSingleObject(pi.hProcess, 5000); // never wait forever on a hung command
+    // never wait forever on a hung command: spend what is left of the same cap,
+    // then kill it - an abandoned child would otherwise pile up one process per
+    // poll on every chip that misbehaves
+    unsigned long long spent = GetTickCount64() - tStart;
+    if (WaitForSingleObject(pi.hProcess, spent >= 5000 ? 0 : (DWORD)(5000 - spent)) != WAIT_OBJECT_0)
+        TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     // trim: leading whitespace, trailing whitespace and any trailing newlines
@@ -262,9 +313,9 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
 }
 
 // apply the format around the captured value. "$v" is the placeholder; a format
-// without it is used verbatim (the command printed its own text).
-static void customApplyFormat(const CustomChip *cc, const wchar_t *val, wchar_t *out, int cch) {
-    const wchar_t *f = cc->format;
+// without it is used verbatim (the command printed its own text). Takes the
+// strings, not the config entry: the poll thread owns its copy.
+static void customApplyFormat(const wchar_t *f, const wchar_t *val, wchar_t *out, int cch) {
     if (!f || !*f) { lstrcpynW(out, val, cch); return; }
     const wchar_t *ph = wcsstr(f, L"$v");
     if (!ph) { lstrcpynW(out, f, cch); return; }
@@ -276,29 +327,60 @@ static void customApplyFormat(const CustomChip *cc, const wchar_t *val, wchar_t 
     wcsncat(out, ph + 2, (size_t)(cch - lstrlenW(out) - 1));
 }
 
+// Copy the fields this chip needs out of the config under the lock, then run
+// the command on the copy: a reload can free g_cfg.custom[] the instant the
+// lock is released and this code keeps running on its own memory.
+static int customChipCopy(int ci, wchar_t *command, int cchCmd, wchar_t *format, int cchFmt) {
+    customLock();
+    int ok = 0;
+    if (ci >= 0 && ci < g_cfg.customCount) {
+        CustomChip *cc = &g_cfg.custom[ci];
+        if (cc->enabled && cc->intervalMs > 0 && cc->command && *cc->command) {
+            lstrcpynW(command, cc->command, cchCmd);
+            lstrcpynW(format, cc->format ? cc->format : L"", cchFmt);
+            ok = 1;
+        }
+    }
+    customUnlock();
+    return ok;
+}
+
 static void customPollOne(int ci) {
-    CustomChip *cc = &g_cfg.custom[ci];
-    if (!cc->enabled || !cc->command || !*cc->command || cc->intervalMs <= 0) return;
-    wchar_t val[512], txt[96];
-    if (!customRunCapture(cc->command, val, 512)) return; // keep the last good text
-    customApplyFormat(cc, val, txt, 96);
+    wchar_t command[1024], format[256], val[512], txt[96];
+    if (!customChipCopy(ci, command, 1024, format, 256)) return;
+    if (!customRunCapture(command, val, 512)) return; // keep the last good text
+    customApplyFormat(format, val, txt, 96);
+    customLock();
     lstrcpynW(g_customText[ci], txt, 96);
+    lstrcpynW(g_customRaw[ci], val, 64);
+    customUnlock();
+}
+
+static int customIntervalMs(int ci) {
+    customLock();
+    int ms = ci >= 0 && ci < g_cfg.customCount ? g_cfg.custom[ci].intervalMs : 0;
+    customUnlock();
+    return ms;
 }
 
 static DWORD WINAPI customPollThread(LPVOID lp) {
     (void)lp;
     for (int i = 0; i < MAX_CUSTOM; i++) {
-        if (g_cfg.custom[i].enabled && g_cfg.custom[i].intervalMs > 0)
-            customPollOne(i); // first read happens immediately
-        g_customNextPoll[i] = GetTickCount64() + (long long)g_cfg.custom[i].intervalMs;
+        int iv = customIntervalMs(i);
+        if (iv > 0) customPollOne(i); // first read happens immediately
+        g_customNextPoll[i] = GetTickCount64() + iv;
     }
     for (;;) {
         Sleep(100);
         unsigned long long now = GetTickCount64();
-        for (int i = 0; i < g_cfg.customCount; i++) {
-            if (g_cfg.custom[i].intervalMs <= 0) continue;
+        customLock();
+        int n = g_cfg.customCount;
+        customUnlock();
+        for (int i = 0; i < n; i++) {
+            int iv = customIntervalMs(i);
+            if (iv <= 0) continue;
             if (now < (unsigned long long)g_customNextPoll[i]) continue;
-            g_customNextPoll[i] = (long long)now + (long long)g_cfg.custom[i].intervalMs;
+            g_customNextPoll[i] = (long long)now + iv;
             customPollOne(i);
         }
     }
@@ -872,25 +954,23 @@ static void buildChips(void) {
         CustomChip *cc = &g_cfg.custom[ci];
         if (!cc->enabled) continue;
         wchar_t txt[96];
+        int warn = 0;
         int st = customStateGet(ci);
+        customLock();
         if (cc->intervalMs > 0) {
             // command-output chip: the text is whatever the command last printed
             lstrcpynW(txt, g_customText[ci], 96);
-            // warn band: outside [warnBelow, warnAbove] the text goes warn colour
-            int warn = 0;
+            // warn band: outside [warnBelow, warnAbove] the text goes warn colour.
+            // The band is on the command's RAW output, not the formatted text -
+            // "temp $v" and "$v C" both parse as 0 in the formatted string.
             if (cc->warnAbove >= 0 || cc->warnBelow >= 0) {
-                double v = _wtof(g_customText[ci]);
+                double v = _wtof(g_customRaw[ci]);
                 if (cc->warnAbove >= 0 && v > cc->warnAbove) warn = 1;
                 if (cc->warnBelow >= 0 && v < cc->warnBelow) warn = 1;
             }
-            addChipI(CT_CUSTOM, ci, txt, warn, cc->color && *cc->color ? cc->color : NULL, 0);
-            Chip *c2 = &g_chips[g_chipCount - 1];
-            c2->align = 2;
-            continue;
-        }
-        if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
+        } else if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
         else lstrcpynW(txt, cc->label ? cc->label : L"", 96);
-        addChipI(CT_CUSTOM, ci, txt, 0, cc->color && *cc->color ? cc->color : NULL, 0);
+        addChipI(CT_CUSTOM, ci, txt, warn, cc->color && *cc->color ? cc->color : NULL, 0);
         Chip *c = &g_chips[g_chipCount - 1];
         c->align = 2;
         // built-in name -> id
@@ -921,6 +1001,7 @@ static void buildChips(void) {
                                  : (unsigned)ch[0];
             c->iconCp = cp2;
         }
+        customUnlock();
     }
     // right metric group: icon + bare value, like the Electron bar
     wchar_t v[48];
@@ -3515,7 +3596,7 @@ static const char *g_template =
     "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
-    "  \"tokens\": { \"enabled\": true, \"appFilter\": [], \"cachePath\": \"\" },\r\n"
+    "  \"tokens\": { \"enabled\": true, \"appFilter\": [], \"cachePath\": \"\",\r\n"
     "    // sources[]: every session store the live scan reads. Add a harness by adding an\r\n"
     "    // entry - nothing is compiled in. app = the aggregation key (and the labels key);\r\n"
     "    // path = the store; recursive descends into per-project subdirectories (default on,\r\n"
@@ -3525,7 +3606,8 @@ static const char *g_template =
     "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": true, \"recursive\": true },\r\n"
     "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": true },\r\n"
     "      { \"app\": \"zcode\",\"path\": \"~/.zcode/cli/db/db.sqlite\", \"enabled\": false }\r\n"
-    "    ] },\r\n"
+    "    ],\r\n"
+    "    \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"
     "    \"cpu\":  { \"enabled\": true, \"warnAt\": 85 },\r\n"
@@ -3570,8 +3652,6 @@ static const char *g_template =
     "               // fetchAvailableModels on both Google endpoints (daily wins), the same source the\r\n"
     "               // harness's /quota uses - no IDE or language server required.\r\n"
     "             ] },\r\n"
-    "  \"tokens\": { \"enabled\": false,\r\n"
-    "             \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
     "  \"general\": { \"showTray\": true, \"autoStart\": true }\r\n"
     "  // autoStart registers the HKCU Run value on FIRST run only; after that the\r\n"
@@ -3610,8 +3690,13 @@ void loadConfig(void) {
     parseConfigInto(&next, raw, toks, 0);
     HeapFree(GetProcessHeap(), 0, toks);
     HeapFree(GetProcessHeap(), 0, raw);
+    // The command poll reads g_cfg.custom[] on its own thread: swap the config
+    // under the lock so a reload can never free a pointer it is mid-way
+    // through dereferencing.
+    customLock();
     freeConfig(&g_cfg);
     g_cfg = next;
+    customUnlock();
     g_cfgLoaded = 1;
     // A first run (template just written) registers the Run value per
     // general.autoStart; every later run leaves the registry to the menu
@@ -3625,6 +3710,9 @@ void loadConfig(void) {
     // freeConfig above freed every string the chip array points at
     // (colorOverride / iconColorOverride): rebuild before any paint reads them
     buildChips();
+    // A command chip added by this config (a save or a tray Reload, not only a
+    // fresh start) gets its poll thread here - the one point every reload reaches
+    customPollStart();
 }
 
 // --------------------------------------------------------------- wWinMain ----
@@ -3670,6 +3758,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     if (g_scale <= 0) g_scale = 1.0;
 
     resolveConfigPath();
+    // The poll thread reads the custom-chip config while loadConfig replaces it:
+    // the lock both sides take must exist before the first loadConfig runs.
+    InitializeCriticalSection(&g_cfgCustomLock);
     // The cursor file MUST be loaded before the config: loadConfig() rebuilds
     // the chips, which runs the first token scan, and that scan is what
     // populates the cursors. Loading them afterwards wiped the in-memory set,
@@ -3726,14 +3817,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
         writeLogA(dbg);
     }
     subsStart();
-    // command-output chips poll on their own thread, never the UI thread
-    for (int i = 0; i < MAX_CUSTOM; i++) {
-        if (g_cfg.custom[i].enabled && g_cfg.custom[i].intervalMs > 0) {
-            HANDLE h = CreateThread(NULL, 0, customPollThread, NULL, 0, NULL);
-            if (h) CloseHandle(h);
-            break; // one thread walks every chip
-        }
-    }
     followTick();
 
     MSG msg;
