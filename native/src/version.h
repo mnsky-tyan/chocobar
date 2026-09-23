@@ -5,8 +5,8 @@
 #define CB_VERSION_H
 
 #define CB_VER_MAJOR 1
-#define CB_VER_MINOR 1
+#define CB_VER_MINOR 2
 #define CB_VER_PATCH 0
-#define CB_VER_STR   "1.1.0"
+#define CB_VER_STR   "1.2.0"
 
 #endif

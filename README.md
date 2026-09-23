@@ -26,12 +26,13 @@ the bar is running. To start over, delete the file and relaunch.
 
 The bar follows the terminal window it sits on and hides when that window is
 minimized. Right-click the bar (or its tray icon) for the tray menu: the two
-dashboards, `Edit config`, `Open config folder`, `Start with Windows`, `Reload`
-and `Quit`.
+dashboards, `Start with Windows`, `Edit config`, `Open config folder`,
+`Check for updates`, `Reload` and `Quit`.
 
-**Updating** is a manual step: download the new `chocobar.exe`, quit the running
-bar from its tray menu, replace the file, and run it again. Your config is
-untouched - it lives in `%USERPROFILE%\.wizbar\`, never next to the executable.
+**Updating** is a manual step: pick `Check for updates` from the tray menu (it
+opens the releases page), download the new `chocobar.exe`, quit the running bar
+from its tray menu, replace the file, and run it again. Your config is untouched -
+it lives in `%USERPROFILE%\.wizbar\`, never next to the executable.
 
 ### Build from source
 
