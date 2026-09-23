@@ -2638,9 +2638,23 @@ static void dashToggle(int type) {
     // resize it triggers) happens while the window is still hidden, so the
     // captain sees ONE window at its final size instead of a board that grows
     // into place.
-    g_dash = CreateWindowExW(WS_EX_TOOLWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
+    // OWNED by the bar (the bar is itself owned by the followed terminal), with
+    // NO WS_EX_TOOLWINDOW. Two reasons, both load-bearing:
+    //   1. An owned popup never gets a taskbar button or an Alt-Tab entry - the
+    //      captain's ask - so hiding the taskbar icon no longer costs anything.
+    //   2. WS_EX_TOOLWINDOW made Windows SKIP this window when choosing the next
+    //      window to activate: the moment the window above the board was
+    //      minimized or closed, activation fell through to the terminal and
+    //      Windows raised the TERMINAL over the dash. That is the "dashboard
+    //      sinks to the bottom layer" bug, and it is documented in this repo's
+    //      own history (main.js: the Electron dash is "A NORMAL window,
+    //      deliberately"). As an owned normal window the dash stays a candidate
+    //      and is raised with the terminal instead of being demoted below it.
+    // Ownership also pins the board above the bar, and the bar above the
+    // terminal, so it can never sink behind the window it follows.
+    g_dash = CreateWindowExW(0, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
                              WS_POPUP, (sw - cw) / 2, (dashMaxH() + 40 - ch) / 2, cw, ch,
-                             NULL, NULL, GetModuleHandleW(NULL), NULL);
+                             g_bar, NULL, GetModuleHandleW(NULL), NULL);
     if (!g_dash) return;
     dashRoundCorners(g_dash);
     InvalidateRect(g_dash, NULL, FALSE);
