@@ -209,10 +209,10 @@ static wchar_t g_customRaw[MAX_CUSTOM][64];
 static volatile long long g_customNextPoll[MAX_CUSTOM];
 static int g_customPollInit = 0;
 
-// loadConfig() frees and replaces g_cfg.custom[] on the UI thread while this
-// file's poll thread reads it, so both sides take this lock. It is held only
-// for a copy - never around the command itself - so a slow command cannot
-// block a config reload and a reload cannot free a pointer mid-read.
+// loadConfig() installs a new config generation the poll thread must not see
+// half-written, so its reads pin the generation (cfgPin/cfgUnpin). This lock
+// covers only the published text, which the poll thread writes from its own
+// thread while the chip build reads it.
 static CRITICAL_SECTION g_cfgCustomLock;
 static void customLock(void) { EnterCriticalSection(&g_cfgCustomLock); }
 static void customUnlock(void) { LeaveCriticalSection(&g_cfgCustomLock); }
@@ -224,11 +224,11 @@ static DWORD WINAPI customPollThread(LPVOID lp);
 // added while the bar is already running is polled without a restart.
 static void customPollStart(void) {
     if (g_customPollInit) return;
-    customLock();
+    const Config *v = cfgPin();
     int any = 0;
-    for (int i = 0; i < g_cfg.customCount; i++)
-        if (g_cfg.custom[i].enabled && g_cfg.custom[i].intervalMs > 0) { any = 1; break; }
-    customUnlock();
+    for (int i = 0; i < v->customCount; i++)
+        if (v->custom[i].enabled && v->custom[i].intervalMs > 0) { any = 1; break; }
+    cfgUnpin();
     if (!any) return;
     HANDLE h = CreateThread(NULL, 0, customPollThread, NULL, 0, NULL);
     if (!h) return;
@@ -327,21 +327,21 @@ static void customApplyFormat(const wchar_t *f, const wchar_t *val, wchar_t *out
     wcsncat(out, ph + 2, (size_t)(cch - lstrlenW(out) - 1));
 }
 
-// Copy the fields this chip needs out of the config under the lock, then run
-// the command on the copy: a reload can free g_cfg.custom[] the instant the
-// lock is released and this code keeps running on its own memory.
+// Copy the fields this chip needs out of a pinned config generation, then run
+// the command on the copy: a reload retires that generation the instant the pin
+// is released, and this code keeps running on its own memory.
 static int customChipCopy(int ci, wchar_t *command, int cchCmd, wchar_t *format, int cchFmt) {
-    customLock();
+    const Config *v = cfgPin();
     int ok = 0;
-    if (ci >= 0 && ci < g_cfg.customCount) {
-        CustomChip *cc = &g_cfg.custom[ci];
+    if (ci >= 0 && ci < v->customCount) {
+        const CustomChip *cc = &v->custom[ci];
         if (cc->enabled && cc->intervalMs > 0 && cc->command && *cc->command) {
             lstrcpynW(command, cc->command, cchCmd);
             lstrcpynW(format, cc->format ? cc->format : L"", cchFmt);
             ok = 1;
         }
     }
-    customUnlock();
+    cfgUnpin();
     return ok;
 }
 
@@ -357,9 +357,9 @@ static void customPollOne(int ci) {
 }
 
 static int customIntervalMs(int ci) {
-    customLock();
-    int ms = ci >= 0 && ci < g_cfg.customCount ? g_cfg.custom[ci].intervalMs : 0;
-    customUnlock();
+    const Config *v = cfgPin();
+    int ms = ci >= 0 && ci < v->customCount ? v->custom[ci].intervalMs : 0;
+    cfgUnpin();
     return ms;
 }
 
@@ -373,9 +373,9 @@ static DWORD WINAPI customPollThread(LPVOID lp) {
     for (;;) {
         Sleep(100);
         unsigned long long now = GetTickCount64();
-        customLock();
-        int n = g_cfg.customCount;
-        customUnlock();
+        const Config *v = cfgPin();
+        int n = v->customCount;
+        cfgUnpin();
         for (int i = 0; i < n; i++) {
             int iv = customIntervalMs(i);
             if (iv <= 0) continue;
@@ -970,6 +970,7 @@ static void buildChips(void) {
             }
         } else if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
         else lstrcpynW(txt, cc->label ? cc->label : L"", 96);
+        customUnlock();
         addChipI(CT_CUSTOM, ci, txt, warn, cc->color && *cc->color ? cc->color : NULL, 0);
         Chip *c = &g_chips[g_chipCount - 1];
         c->align = 2;
@@ -1001,7 +1002,6 @@ static void buildChips(void) {
                                  : (unsigned)ch[0];
             c->iconCp = cp2;
         }
-        customUnlock();
     }
     // right metric group: icon + bare value, like the Electron bar
     wchar_t v[48];
@@ -1380,7 +1380,9 @@ static void execCmd(const wchar_t *cmd) {
     if (!cmd || !*cmd) return;
     wchar_t params[1200];
     lstrcpynW(params, L"/c ", 1200);
-    lstrcatW(params, cmd);
+    // the command is config data (a shortcut or a custom chip) of any length:
+    // copy it into the room that is left instead of appending it unbounded
+    lstrcpynW(params + 3, cmd, 1200 - 3);
     SHELLEXECUTEINFOW sei;
     memset(&sei, 0, sizeof(sei));
     sei.cbSize = sizeof(sei);
@@ -3596,16 +3598,16 @@ static const char *g_template =
     "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
-    "  \"tokens\": { \"enabled\": true, \"appFilter\": [], \"cachePath\": \"\",\r\n"
+    "  \"tokens\": { \"enabled\": false, \"appFilter\": [], \"cachePath\": \"\",\r\n"
     "    // sources[]: every session store the live scan reads. Add a harness by adding an\r\n"
     "    // entry - nothing is compiled in. app = the aggregation key (and the labels key);\r\n"
     "    // path = the store; recursive descends into per-project subdirectories (default on,\r\n"
     "    // harmless for a flat store); fields renames the usage keys for a harness that\r\n"
-    "    // spells them differently.\r\n"
+    "    // spells them differently. Shipped off: set tokens.enabled and the source you\r\n"
+    "    // want - nothing is read until you do.\r\n"
     "    \"sources\": [\r\n"
-    "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": true, \"recursive\": true },\r\n"
-    "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": true },\r\n"
-    "      { \"app\": \"zcode\",\"path\": \"~/.zcode/cli/db/db.sqlite\", \"enabled\": false }\r\n"
+    "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": false, \"recursive\": true },\r\n"
+    "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": false }\r\n"
     "    ],\r\n"
     "    \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"modules\": {\r\n"
@@ -3686,17 +3688,14 @@ void loadConfig(void) {
     if (!toks) { HeapFree(GetProcessHeap(), 0, raw); return; }
     jsmn_init(&parser);
     jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
-    Config next;
-    parseConfigInto(&next, raw, toks, 0);
+    Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
+    if (!next) { HeapFree(GetProcessHeap(), 0, toks); HeapFree(GetProcessHeap(), 0, raw); return; }
+    parseConfigInto(next, raw, toks, 0);
     HeapFree(GetProcessHeap(), 0, toks);
     HeapFree(GetProcessHeap(), 0, raw);
-    // The command poll reads g_cfg.custom[] on its own thread: swap the config
-    // under the lock so a reload can never free a pointer it is mid-way
-    // through dereferencing.
-    customLock();
-    freeConfig(&g_cfg);
-    g_cfg = next;
-    customUnlock();
+    // Installing the new generation retires the old one instead of freeing it:
+    // the provider fetch threads and the command poll both walk the live one.
+    cfgInstall(next);
     g_cfgLoaded = 1;
     // A first run (template just written) registers the Run value per
     // general.autoStart; every later run leaves the registry to the menu
@@ -3758,9 +3757,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     if (g_scale <= 0) g_scale = 1.0;
 
     resolveConfigPath();
-    // The poll thread reads the custom-chip config while loadConfig replaces it:
-    // the lock both sides take must exist before the first loadConfig runs.
+    // The command poll publishes its text under this lock, and the config swap
+    // below retires generations the fetch threads may still hold.
     InitializeCriticalSection(&g_cfgCustomLock);
+    InitializeCriticalSection(&g_cfgGenLock);
     // The cursor file MUST be loaded before the config: loadConfig() rebuilds
     // the chips, which runs the first token scan, and that scan is what
     // populates the cursors. Loading them afterwards wiped the in-memory set,

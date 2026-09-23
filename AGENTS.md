@@ -30,7 +30,8 @@ When updating this file, preserve this bar for all agents and keep entries conci
 ## Tests & checks
 
 - `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
-  public-release default guarantees; headless, any platform) + `scripts/pi_source_regression.js`
+  public-release default guarantees, and the native first-run template `g_template`
+  decoded + parsed as JSONC; headless, any platform) + `scripts/pi_source_regression.js`
   (pi session-log source; synthetic fixture + raw-sum cross-check when a real
   `~/.pi/agent/sessions` exists) + `scripts/model_case_regression.js` (case-variant
   model grouping in aggregate(); synthetic, self-skips its optional live-store half).
@@ -197,11 +198,13 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   One object per root key (a duplicate key is dead: `jobjGet` takes the first)
   and a harness that decodes the template and parses it with the vendored jsmn
   (native/vendor/jsmn.h) is the only check that catches it.
-- `loadConfig` swaps `g_cfg` on the UI thread while the command-chip poll
-  thread reads it: the swap, the poll's config reads and the chip build all
-  take `g_cfgCustomLock` (p_ui.c), held only for copies. A new reader of
-  `g_cfg.custom[]` from a worker thread needs the same lock, never a raw
-  pointer.
+- The live config is a GENERATION behind `g_cfgCur` (`#define g_cfg (*g_cfgCur)`,
+  chocobar.c): `loadConfig` installs a fresh generation and retires the old one
+  instead of freeing it, because the provider fetch threads (a `SubsProvider*`
+  held across a multi-second WinHTTP call) and the command-chip poll read it.
+  A worker thread that walks the config must `cfgPin()` / `cfgUnpin()`; a reader
+  with no pin is confined to the UI thread. `g_cfgCustomLock` (p_ui.c) covers
+  only the published chip text, never the config.
 - JSON booleans MUST go through `jboolDefault` - `jintTok` uses atoi and
   `atoi("true") == 0` (disabled every subs provider silently).
 - MinGW `swprintf` follows C99: `%s` = char*, NOT wchar_t*. Every wide
