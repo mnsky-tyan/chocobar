@@ -532,14 +532,20 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
 ## Native dashboards - layout sharp edges
 
-- **Both dashboards are WS_EX_TOOLWINDOW and open with SW_SHOWNA** (the captain's
-  ask: no taskbar button; the earlier WS_EX_APPWINDOW was deliberate but read as
-  a second app with a blank icon). TOOLWINDOW keeps click-activation working, so
-  the buttons and title-drag still take focus on first click; Escape then closes
-  as before. SW_SHOWNA matters as much: the old `SetForegroundWindow` on open
-  STOLE the keyboard from the followed terminal - the captain typed " like" and
-  every keystroke landed on the dashboard (caught by a debug WM_KEYDOWN log).
-  Opening a board must never move focus.
+- **Both dashboards are WS_EX_TOOLWINDOW and open with
+  SetWindowPos(HWND_TOP | SWP_NOACTIVATE)** (the captain's ask: no taskbar
+  button; the earlier WS_EX_APPWINDOW was deliberate but read as a second app
+  with a blank icon). The z-order call needs BOTH halves - this was iterated
+  twice on the captain's box: `SetForegroundWindow` (original) raised the board
+  but STOLE the keyboard from the followed terminal (he typed " like" and every
+  keystroke landed on the dashboard - caught by a debug WM_KEYDOWN log), while
+  `SW_SHOWNA` (first fix) kept the focus but left the board SUNK behind his
+  windows, which he reported as "not opening at the front". HWND_TOP lifts it
+  above the terminal and every normal window, SWP_NOACTIVATE keeps the keyboard
+  where he was typing; the bar stays topmost above the board. Verified live:
+  foreground window unchanged across the open, board pixels captured on top of
+  the terminal. A click on the board still activates it (buttons, title-drag);
+  Esc closes it.
 - Tray menu metrics (captain's "-25%" pass): rows DX(21), separators DX(5), 9px
   labels, width from `menuWidthPx()` (widest label + DX(34), min DX(96)) - a
   fixed DX(210) was wider than its content. The autostart check draws at the
