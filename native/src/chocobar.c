@@ -486,7 +486,7 @@ static void freeConfig(Config *c) {
     for (int i = 0; i < c->customCount; i++) {
         wideFree(&c->custom[i].icon); wideFree(&c->custom[i].label);
         wideFree(&c->custom[i].color); wideFree(&c->custom[i].title);
-        wideFree(&c->custom[i].command);
+        wideFree(&c->custom[i].command); wideFree(&c->custom[i].format);
     }
     c->customCount = 0;
     for (int i = 0; i < c->subsProviderCount; i++) {
