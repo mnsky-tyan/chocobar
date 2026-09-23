@@ -62,7 +62,8 @@
 // differently.
 typedef struct {
     int enabled;
-    char app[24];           // aggregate key ("pi", "zai", anything)
+    char app[20];           // aggregate key ("pi", "zai", anything); 19 chars is what
+                            // g_appName and the appFilter/labels tables hold
     wchar_t *sessionsDir;   // ~ prefixed = profile relative, else absolute/UNC
     int recursive;          // descend into per-project subdirectories
     char kIn[24], kOut[24], kCr[24], kCw[24], kTs[24], kModel[24];
@@ -183,7 +184,6 @@ typedef struct {
     wchar_t *reqBody;      // POST body
     wchar_t *headerBlob;   // static "Name: value\r\n" lines, pre-joined
     int insecure;          // 1 = allow plain http (sends the token in clear)
-    int expectStatus;      // 0 = any
     char requirePath[MAX_GEN_PATH]; // response must contain this path
     char planPath[MAX_GEN_PATH];    // plan display name
     int nAuth; GenAuth auth[MAX_GEN_AUTH];
@@ -429,7 +429,6 @@ static void genParse(SubsProvider *sp, const char *js, const jsmntok_t *t, int o
     sp->method    = jstrTok(js, t, jobjGet(js, t, obj, "method"), L"GET");
     sp->reqBody   = jstrTok(js, t, jobjGet(js, t, obj, "body"), NULL);
     sp->insecure  = jboolDefault(js, t, jobjGet(js, t, obj, "insecure"), 0);
-    sp->expectStatus = (int)jintTok(js, t, jobjGet(js, t, obj, "expectStatus"), 0);
     jstrCopyA(sp->requirePath, sizeof(sp->requirePath), js, t,
               jobjGet(js, t, obj, "require"), "");
     jstrCopyA(sp->planPath, sizeof(sp->planPath), js, t,
@@ -817,8 +816,10 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     // and the tokens.labels lookup key.
                     wchar_t *app = jstrTok(js, t, jobjGet(js, t, k, "app"), NULL);
                     if (app && *app) {
+                        // the copy is capacity-driven so the key can never be
+                        // longer than the 19 chars every sink accepts
                         int i2 = 0;
-                        for (; app[i2] && i2 < 23; i2++) ts->app[i2] = (char)app[i2];
+                        for (; app[i2] && i2 < (int)sizeof(ts->app) - 1; i2++) ts->app[i2] = (char)app[i2];
                         ts->app[i2] = 0;
                     } else {
                         tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));

@@ -110,13 +110,18 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     if (!tp) return 0;
     out->ts = parseLL(tp, end);
     if (out->ts <= 0) return 0;
-    // model
+    // model: the marker stops at the colon, so the value's opening quote
+    // has to be stepped over before the closing one is scanned for
     const char *mp = NULL;
     for (int i = 0; i + tk->len[5] <= len; i++) if (memcmp(ln + i, tk->k[5], tk->len[5]) == 0) { mp = ln + i + tk->len[5]; break; }
     if (mp) {
-        const char *me = mp;
-        while (me < end && *me != '"' && me - mp < 48) me++;
-        if (me > mp) { out->model = mp; out->modelLen = (int)(me - mp); }
+        while (mp < end && (*mp == ' ' || *mp == '\t')) mp++;
+        if (mp < end && *mp == '"') {
+            mp++;
+            const char *me = mp;
+            while (me < end && *me != '"' && me - mp < 48) me++;
+            if (me > mp) { out->model = mp; out->modelLen = (int)(me - mp); }
+        }
     }
     // usage numbers: cacheRead/cacheWrite are breakdown columns, input/output
     // are raw (the TOKEN CONVENTION in AGENTS.md)

@@ -196,8 +196,11 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   match or a fresh install silently comes up with a truncated root object -
   jsmn reports a token COUNT for the unbalanced tail, so loadConfig proceeds.
   One object per root key (a duplicate key is dead: `jobjGet` takes the first)
-  and a harness that decodes the template and parses it with the vendored jsmn
-  (native/vendor/jsmn.h) is the only check that catches it.
+  and the template guard in `scripts/portable_regression.js` (section 4b) is
+  the only check that catches it: it decodes the C string, strips the `//`
+  comments in JS and calls `JSON.parse`, so it proves the template is valid
+  JSONC and ships neutrally - it does NOT run jsmn or `parseConfigInto`, so
+  the parser half of this note is verified only by a real bar run.
 - The live config is a GENERATION behind `g_cfgCur` (`#define g_cfg (*g_cfgCur)`,
   chocobar.c): `loadConfig` installs a fresh generation and retires the old one
   instead of freeing it, because the provider fetch threads (a `SubsProvider*`
@@ -291,6 +294,24 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   global state did exactly that via a never-set `any` flag); chip states:
   em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
   board reads the same per-provider window arrays (label/pct/used/total).
+- Generic (type 3) provider URLs go through `subsCrackUrl`, which is the only
+  url decomposition in the file: the SCHEME alone decides TLS, a config
+  `insecure` only AUTHORIZES the cleartext scheme (`http://` with `insecure`
+  unset is refused, never sent with the token in the clear; `https://` with
+  `insecure` set is still TLS - a downgraded https request would post the
+  token to port 80), the host stops at the first `/` OR `:`, and an explicit
+  `:port` is split out because `WinHttpConnect` wants a bare server name beside
+  the port (leaving `:8443` inside the host breaks name resolution). The scheme
+  match is case-insensitive, and scheme-less or `https:host` (no `//`) urls
+  are rejected with a log line rather than silently assumed to be https.
+  `subsHttpGet`/`subsHttpPost` take the port (0 = the scheme default); the two
+  debug log lines format it with `snprintf` into `sizeof`-bounded buffers
+  because `host` and the provider label are config-sized (the old `sprintf`
+  overflowed a 160-byte stack buffer).
+- `expectStatus` is GONE from the generic provider: `require` (a path that must
+  exist) plus the default 2xx acceptance - with 401/403 called out first - cover
+  every case a status list could express, and a per-provider status whitelist is
+  one more key to forget. Do not re-add it.
 - **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints
   merged with daily/sandbox OVERWRITING production, per family key priority -
   byte-for-byte the same source the harness's /quota uses** (pi-quota ->
@@ -562,6 +583,23 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
 ## Native token live scan (p_tokens.c) - sharp edges
 
+- **`tokKeysBuild` markers stop at the COLON** (`"model":`, 8 bytes), not at the
+  value's opening quote as the Electron reader's 9-byte `"model":"` did. The
+  extractor in `tokParseLine` must therefore step over any spaces/TABs and the
+  opening `"` before scanning for the closing one - a marker-ending-at-colon
+  left as-is stops on the very first byte and yields modelLen=0, which silently
+  empties the dashboard's BY MODEL table (every record then fails `aggRecord`'s
+  `model && mlen > 0` gate) while every other section keeps counting. The
+  timestamp extractor right above has always skipped whitespace + quoted
+  strings; the model extractor must do the same.
+- **The app name is 19 chars, full stop.** `TokSource.app` is `char[20]` and
+  the parse loop copies by `sizeof(ts->app) - 1` so it cannot drift again;
+  `aggRecord` clamps `alen` to 19, and `g_appName[][]`,
+  `tokensApps[][]` and `tokLabelKeys[][]` all hold 20 bytes. Every writer and
+  every sink cap at the same place, so one key reaches the filter, the row and
+  the `tokens.labels` lookup. A field sized differently (the old `char[24]`
+  with `i2 < 23`) let a long config name be silently truncated into a different
+  key on the way in.
 - The bar reads the Electron app's `~/.wizbar/token-cache.json` as the HISTORY
   SEED, then folds in everything newer from the live JSONL session stores
   (`~/.pi/agent/sessions/**`, `~/.zai/agent/sessions/*`) via a per-file BYTE

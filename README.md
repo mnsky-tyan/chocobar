@@ -219,8 +219,7 @@ Each provider entry:
 - `windows[]`: a `label` plus the JSON paths carrying the numbers. Paths are `$.a.b[0].c`. A window needs any two of `used` / `remaining` / `total`; the third is derived. `reset` is an ISO-8601 timestamp.
 - `planPath`: JSON path of the plan display name. Omitted = the `label`.
 - `require`: a path that must be present, for endpoints that answer `200` with an error body.
-- `expectStatus`: the status to accept; 0 = any 2xx.
-- `insecure`: allow plain `http`. Documented risk: it sends the token in the clear.
+- `insecure`: authorize plain `http` (the scheme decides TLS; without this flag an `http://` URL is refused). Documented risk: it sends the token in the clear.
 
 **Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps the last good windows marked stale.
 
