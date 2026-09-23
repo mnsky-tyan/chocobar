@@ -64,15 +64,32 @@ static int tokWideToUtf8(const wchar_t *w, char *out, int cb) {
 // one record's fields, parsed out of a JSONL line
 typedef struct { long long ts; const char *app; int appLen; long long in, out, cr, cw; const char *model; int modelLen; } TokRec;
 
+// the six field names a source uses, pre-quoted for the substring search. Built
+// once per scan (not per line) so the hot path stays a memcmp.
+typedef struct { char k[6][32]; int len[6]; } TokKeys;
+static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
+    static const char *dflt[6] = { "input", "output", "cacheRead", "cacheWrite", "timestamp", "model" };
+    const char *src[6];
+    src[0] = s->kIn; src[1] = s->kOut; src[2] = s->kCr;
+    src[3] = s->kCw;  src[4] = s->kTs;  src[5] = s->kModel;
+    for (int i = 0; i < 6; i++) {
+        const char *v = (src[i] && *src[i]) ? src[i] : dflt[i];
+        tk->len[i] = sprintf(tk->k[i], "\"%s\":", v);
+    }
+}
+
 // pi: {"type":"message","message":{"role":"assistant","model":"...","usage":{...},"timestamp":123}}
 // zai: {"type":"assistant","usage":{...},"model":"...","timestamp":123} (flat)
-static int tokParseLine(const char *ln, int len, TokRec *out) {
+// Both are found the same way: the keys are searched for anywhere in the line,
+// so a harness that nests them differently still parses. The key NAMES come
+// from the source's tokens.sources[].fields, so only the shape has to match.
+static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out) {
     out->ts = 0; out->app = NULL; out->appLen = 0;
     out->in = out->out = out->cr = out->cw = 0; out->model = NULL; out->modelLen = 0;
-    // cheap pre-filter: no usage object = nothing to count
+    // cheap pre-filter: no input field = nothing to count
     const char *u = NULL;
-    for (int i = 0; i + 8 <= len; i++) {
-        if (memcmp(ln + i, "\"usage\"", 7) == 0) { u = ln + i; break; }
+    for (int i = 0; i + tk->len[0] <= len; i++) {
+        if (memcmp(ln + i, tk->k[0], tk->len[0]) == 0) { u = ln + i; break; }
     }
     if (!u) return 0;
     const char *end = ln + len;
@@ -80,11 +97,11 @@ static int tokParseLine(const char *ln, int len, TokRec *out) {
     // records). The line-level top-level "timestamp" is an ISO STRING and comes
     // first, so skip string-valued keys and take the first numeric one.
     const char *tp = NULL;
-    for (int i = 0; i + 12 <= len; ) {
-        if (memcmp(ln + i, "\"timestamp\":", 12) == 0) {
-            const char *v = ln + i + 12;
+    for (int i = 0; i + tk->len[4] <= len; ) {
+        if (memcmp(ln + i, tk->k[4], tk->len[4]) == 0) {
+            const char *v = ln + i + tk->len[4];
             while (v < end && (*v == ' ' || *v == '\t')) v++;
-            if (v < end && *v == '"') { i += 12; continue; } // ISO string: not it
+            if (v < end && *v == '"') { i += tk->len[4]; continue; } // ISO string: not it
             tp = v;
             break;
         }
@@ -95,7 +112,7 @@ static int tokParseLine(const char *ln, int len, TokRec *out) {
     if (out->ts <= 0) return 0;
     // model
     const char *mp = NULL;
-    for (int i = 0; i + 9 <= len; i++) if (memcmp(ln + i, "\"model\":\"", 9) == 0) { mp = ln + i + 9; break; }
+    for (int i = 0; i + tk->len[5] <= len; i++) if (memcmp(ln + i, tk->k[5], tk->len[5]) == 0) { mp = ln + i + tk->len[5]; break; }
     if (mp) {
         const char *me = mp;
         while (me < end && *me != '"' && me - mp < 48) me++;
@@ -103,12 +120,10 @@ static int tokParseLine(const char *ln, int len, TokRec *out) {
     }
     // usage numbers: cacheRead/cacheWrite are breakdown columns, input/output
     // are raw (the TOKEN CONVENTION in AGENTS.md)
-    const char *keys[4] = { "\"input\":", "\"output\":", "\"cacheRead\":", "\"cacheWrite\":" };
-    int lens[4] = { 8, 9, 12, 13 };
     long long *dst[4] = { &out->in, &out->out, &out->cr, &out->cw };
     for (int k = 0; k < 4; k++) {
-        for (int i = 0; i + lens[k] <= len; i++) {
-            if (memcmp(ln + i, keys[k], lens[k]) == 0) { *dst[k] = parseLL(ln + i + lens[k], end); break; }
+        for (int i = 0; i + tk->len[k] <= len; i++) {
+            if (memcmp(ln + i, tk->k[k], tk->len[k]) == 0) { *dst[k] = parseLL(ln + i + tk->len[k], end); break; }
         }
     }
     return 1;
@@ -117,7 +132,7 @@ static int tokParseLine(const char *ln, int len, TokRec *out) {
 // read [from, EOF) of a session file and hand every complete line's record to
 // aggRecord. Returns the new cursor (EOF) or -1 on a read error.
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
-                             const long long *bnd) {
+                             const long long *bnd, const TokKeys *tk) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
@@ -172,7 +187,7 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
         int len = (int)(nl - p);
         if (len > 0) {
             TokRec r;
-            if (tokParseLine(p, len, &r) && r.ts > g_cacheMaxTs) {
+            if (tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs) {
                 long long fld[4] = { r.in, r.out, r.cr, r.cw };
                 long long sum = fld[0] + fld[1] + fld[2] + fld[3];
                 aggRecord(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
@@ -286,7 +301,8 @@ static void tokCursorSet(const char *path, long long size, long long mtimeMs) {
 }
 
 // ------------------------------------------------------------- directory ----
-static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, const long long *bnd) {
+static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, const long long *bnd,
+                       const TokKeys *tk) {
     wchar_t pat[MAX_PATH];
     swprintf(pat, MAX_PATH, L"%ls\\*", dir);
     WIN32_FIND_DATAW fd;
@@ -298,7 +314,7 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, c
             if (lstrcmpW(fd.cFileName, L".") == 0 || lstrcmpW(fd.cFileName, L"..") == 0) continue;
             wchar_t sub[MAX_PATH];
             swprintf(sub, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
-            tokScanDir(sub, 1, appName, bnd);
+            tokScanDir(sub, 1, appName, bnd, tk);
             continue;
         }
         int nl = lstrlenW(fd.cFileName);
@@ -320,7 +336,7 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, c
         long long from = c ? c->size : 0;
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
-        long long neu = tokScanFile(full, from, appName, bnd);
+        long long neu = tokScanFile(full, from, appName, bnd, tk);
         if (neu >= 0) { g_tokDbgRead += (int)(neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -368,9 +384,13 @@ long tokLiveScan(void) {
             if (!n) continue;
             lstrcatW(dir, s->sessionsDir + 1);
         } else lstrcpynW(dir, s->sessionsDir, MAX_PATH);
-        // pi nests its sessions one directory per project; zai keeps them flat
-        int recursive = (s->app && lstrcmpA(s->app, "pi") == 0);
-        tokScanDir(dir, recursive, s->app ? s->app : "app", bnd);
+        // pi nests its sessions one directory per project; a flat store has
+        // no subdirectories, so recursing is harmless there and required here.
+        // The key is per source (recursive), not a hardcoded harness name.
+        int recursive = s->recursive;
+        TokKeys tk;
+        tokKeysBuild(s, &tk);
+        tokScanDir(dir, recursive, s->app, bnd, &tk);
     }
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
     if (g_cfg.debug) {

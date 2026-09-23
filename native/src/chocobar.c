@@ -54,16 +54,48 @@
 #define TIMER_METRICS 1
 #define TIMER_FOLLOW  2
 #define TIMER_CONFIG  3
-// a live token source: the JSONL session store the in-process scan reads
+// a live token source: the JSONL session store the in-process scan reads.
+// Declared by the user in tokens.sources[], so any harness that logs per-message
+// usage as JSONL is supported without a code change. `app` is the aggregation
+// key (and the tokens.labels lookup key); the field names default to the pi/zai
+// shape and can be overridden per source for a harness that spells them
+// differently.
 typedef struct {
-    int enabled;            // source flag inside tokens.sources.<name>
-    const char *app;        // aggregate key ("pi", "zai") - matches the cache
+    int enabled;
+    char app[24];           // aggregate key ("pi", "zai", anything)
     wchar_t *sessionsDir;   // ~ prefixed = profile relative, else absolute/UNC
+    int recursive;          // descend into per-project subdirectories
+    char kIn[24], kOut[24], kCr[24], kCw[24], kTs[24], kModel[24];
 } TokSource;
 
+#define MAX_TOK_SRC 8
 #define MAX_CUSTOM 16
 #define MAX_SUBS 6
 #define MAX_USER_ICONS 16
+#define MAX_GEN_AUTH 3
+#define MAX_GEN_WIN 4
+#define MAX_GEN_PATH 96
+
+// one auth credential for a generic provider: where the secret comes from and
+// which header carries it. Resolved at fetch time, never persisted.
+typedef struct {
+    wchar_t header[40];     // header name, e.g. "authorization"
+    wchar_t prefix[48];     // prepended verbatim, e.g. "Bearer "
+    wchar_t *path;          // JSON file to read the token from
+    char key[MAX_GEN_PATH]; // path inside that file, e.g. "access_token"
+    wchar_t *env;           // environment variable holding the token
+    wchar_t *literal;       // token written straight into the config
+} GenAuth;
+
+// one quota window of a generic provider: label plus the paths that carry the
+// numbers. A window with neither used nor remaining is skipped.
+typedef struct {
+    wchar_t label[24];
+    char used[MAX_GEN_PATH];
+    char remaining[MAX_GEN_PATH];
+    char total[MAX_GEN_PATH];
+    char reset[MAX_GEN_PATH];
+} GenWin;
 
 // a config-defined icon: name (referenced by modules.custom[].icon), SVG path
 // data in the 24-unit viewBox the built-in icons use, and a stroke width.
@@ -77,17 +109,66 @@ static void dbg(const char *fmt, ...) {
     (void)fmt;
 }
 
+// jsmn helpers live with the config parser below; declared here so the source
+// and provider parsers above can use them
+static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key);
+static int jtokSpan(const jsmntok_t *t, int i);
+
+// derive an aggregate key from a session-store path when the config does not
+// name one: ~/.pi/agent/sessions -> "pi". Walks up past the store folder and
+// its parent, then takes that directory with any leading dot stripped.
+static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
+    out[0] = 0;
+    if (!dir || !*dir || cch < 2) return;
+    wchar_t buf[MAX_PATH];
+    lstrcpynW(buf, dir, MAX_PATH);
+    for (int up = 0; up < 2; up++) { // drop "sessions", then its parent
+        wchar_t *s = wcsrchr(buf, L'\\');
+        wchar_t *f = wcsrchr(buf, L'/');
+        wchar_t *last = (s > f) ? s : f;
+        if (!last) { buf[0] = 0; break; }
+        *last = 0;
+    }
+    wchar_t *s = wcsrchr(buf, L'\\');
+    wchar_t *f = wcsrchr(buf, L'/');
+    wchar_t *last = (s > f) ? s : f;
+    const wchar_t *name = last ? last + 1 : buf;
+    if (*name == L'.') name++;
+    int i = 0;
+    for (; name[i] && i < cch - 1; i++) out[i] = (char)name[i];
+    out[i] = 0;
+    if (!out[0]) lstrcpyA(out, "app");
+}
+
+// copy one usage-field name out of the config, falling back to the default
+static void tokFieldCopy(char *dst, int cch, const char *js, jsmntok_t *t, int obj,
+                         const char *key, const char *dflt) {
+    lstrcpynA(dst, dflt, cch);
+    int k = jobjGet(js, t, obj, key);
+    if (k < 0 || t[k].type != JSMN_STRING) return;
+    int n = t[k].end - t[k].start;
+    if (n <= 0 || n >= cch) return;
+    memcpy(dst, js + t[k].start, (size_t)n);
+    dst[n] = 0;
+}
+
 
 // --------------------------------------------------------------- config ----
 typedef struct {
     int enabled;
     wchar_t *icon, *label, *color, *title, *command;
     int toggle;
+    // command-output chip: when intervalMs > 0 the command is polled and its
+    // stdout becomes the chip text (the escape hatch for any metric the bar
+    // does not know about). format is wrapped around the trimmed output.
+    int intervalMs;
+    wchar_t *format;
+    double warnAbove, warnBelow;   // -1 = disabled
 } CustomChip;
 
 // subscription provider (chip fetcher; mirrors config.subs.providers)
 typedef struct {
-    int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity
+    int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity, 3 = generic
     int family;          // antigravity only: 0 = Gemini, 1 = GPT/Claude
     int enabled;
     wchar_t *label;
@@ -97,6 +178,17 @@ typedef struct {
     wchar_t *configPath;   // zai config.json
     wchar_t *vscdbPath;    // antigravity IDE fallback token store
     wchar_t *providerName; // zai provider key
+    // ---- generic (type 3): a REST quota endpoint declared entirely in config
+    wchar_t *url;          // https://host/path (http allowed with insecure)
+    wchar_t *method;       // GET (default) or POST
+    wchar_t *reqBody;      // POST body
+    wchar_t *headerBlob;   // static "Name: value\r\n" lines, pre-joined
+    int insecure;          // 1 = allow plain http (sends the token in clear)
+    int expectStatus;      // 0 = any
+    char requirePath[MAX_GEN_PATH]; // response must contain this path
+    char planPath[MAX_GEN_PATH];    // plan display name
+    int nAuth; GenAuth auth[MAX_GEN_AUTH];
+    int nWin;  GenWin  win[MAX_GEN_WIN];
 } SubsProvider;
 
 typedef struct {
@@ -512,24 +604,55 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 k += 1 + jtokSpan(t, k + 1); // key + whole value subtree
             }
         }
-        // tokens.sources[]: the session stores the live scan reads. Only the
-        // JSONL ones are scanned in-process (pi nests per project, zai is flat);
-        // the SQLite stores (zcode/opencode) keep coming from the cache seed.
+        // tokens.sources[]: EVERY session store the live scan reads, declared
+        // by the user. An array of { app, path, enabled, recursive, fields }
+        // entries, so a new harness needs a config line and nothing else.
         int srcs = jobjGet(js, t, toks, "sources");
-        if (srcs >= 0 && t[srcs].type == JSMN_OBJECT) {
-            static const struct { const char *key; const char *app; } known[] = {
-                { "zai", "zai" }, { "pi", "pi" },
-            };
-            for (unsigned s = 0; s < sizeof(known) / sizeof(known[0]) && c->tokSrcCount < 4; s++) {
-                int se = jobjGet(js, t, srcs, known[s].key);
-                if (se < 0 || t[se].type != JSMN_OBJECT) continue;
-                TokSource *ts = &c->tokSrc[c->tokSrcCount];
-                memset(ts, 0, sizeof(*ts));
-                ts->app = known[s].app;
-                ts->enabled = jboolDefault(js, t, jobjGet(js, t, se, "enabled"), 1);
-                ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, se, "sessionsDir"), NULL);
-                if (ts->sessionsDir && *ts->sessionsDir) c->tokSrcCount++;
-                else wideFree(&ts->sessionsDir);
+        if (srcs >= 0 && t[srcs].type == JSMN_ARRAY) {
+            int n2 = t[srcs].size;
+            if (n2 > MAX_TOK_SRC) n2 = MAX_TOK_SRC;
+            int k = srcs + 1;
+            for (int j = 0; j < n2 && c->tokSrcCount < MAX_TOK_SRC; j++) {
+                if (t[k].type == JSMN_OBJECT) {
+                    TokSource *ts = &c->tokSrc[c->tokSrcCount];
+                    memset(ts, 0, sizeof(*ts));
+                    ts->enabled = jboolDefault(js, t, jobjGet(js, t, k, "enabled"), 1);
+                    ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, k, "path"), NULL);
+                    // app: explicit, else the dot-directory above the store
+                    // (~/.pi/agent/sessions -> "pi"). It is the aggregation key
+                    // and the tokens.labels lookup key.
+                    wchar_t *app = jstrTok(js, t, jobjGet(js, t, k, "app"), NULL);
+                    if (app && *app) {
+                        int i2 = 0;
+                        for (; app[i2] && i2 < 23; i2++) ts->app[i2] = (char)app[i2];
+                        ts->app[i2] = 0;
+                    } else {
+                        tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));
+                    }
+                    wideFree(&app);
+                    // recursion defaults ON: a flat store simply has no
+                    // subdirectories to descend into, a nested one needs it.
+                    ts->recursive = jboolDefault(js, t, jobjGet(js, t, k, "recursive"), 1);
+                    // field names default to the pi/zai shape; override for a
+                    // harness that spells them differently (prompt_tokens etc.)
+                    int fl = jobjGet(js, t, k, "fields");
+                    if (fl >= 0 && t[fl].type == JSMN_OBJECT) {
+                        tokFieldCopy(ts->kIn,    sizeof(ts->kIn),    js, t, fl, "input",     "input");
+                        tokFieldCopy(ts->kOut,   sizeof(ts->kOut),   js, t, fl, "output",    "output");
+                        tokFieldCopy(ts->kCr,    sizeof(ts->kCr),    js, t, fl, "cacheRead", "cacheRead");
+                        tokFieldCopy(ts->kCw,    sizeof(ts->kCw),    js, t, fl, "cacheWrite","cacheWrite");
+                        tokFieldCopy(ts->kTs,    sizeof(ts->kTs),    js, t, fl, "timestamp", "timestamp");
+                        tokFieldCopy(ts->kModel, sizeof(ts->kModel), js, t, fl, "model",     "model");
+                    } else {
+                        lstrcpyA(ts->kIn, "input"); lstrcpyA(ts->kOut, "output");
+                        lstrcpyA(ts->kCr, "cacheRead"); lstrcpyA(ts->kCw, "cacheWrite");
+                        lstrcpyA(ts->kTs, "timestamp"); lstrcpyA(ts->kModel, "model");
+                    }
+                    if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) c->tokSrcCount++;
+                    else wideFree(&ts->sessionsDir);
+                }
+                // advance k past this element
+                k += jtokSpan(t, k);
             }
         }
     }
