@@ -15,20 +15,38 @@ All usage adapters are opt-in and read local data only. Supported input shapes i
 
 ## Install and run
 
-```powershell
-npm install
-npm start
+Chocobar is a native Win32 executable: one file, no runtime, no Electron, no
+Node. Download `chocobar.exe` from the [latest release](https://github.com/mnsky-tyan/chocobar/releases/latest)
+and run it.
+
+It needs no installer and no administrator rights. On the first run it writes an
+annotated config template to `%USERPROFILE%\.wizbar\config.json` and reads that
+file from then on; every setting hot-reloads on save, so you can edit it while
+the bar is running. To start over, delete the file and relaunch.
+
+The bar follows the terminal window it sits on and hides when that window is
+minimized. Right-click the bar (or its tray icon) for the tray menu: the two
+dashboards, `Edit config`, `Open config folder`, `Start with Windows`, `Reload`
+and `Quit`.
+
+**Updating** is a manual step: download the new `chocobar.exe`, quit the running
+bar from its tray menu, replace the file, and run it again. Your config is
+untouched - it lives in `%USERPROFILE%\.wizbar\`, never next to the executable.
+
+### Build from source
+
+`native/build.sh` assembles the parts in `native/src/` and cross-compiles with
+the Nix mingw toolchain:
+
+```bash
+bash native/build.sh   # produces native/chocobar.exe
 ```
 
-The silent launcher keeps Chocobar independent from the terminal that started it:
+### Tests
 
-```powershell
-wscript C:\path\to\project\scripts\start-wizbar.vbs
+```bash
+npm test
 ```
-
-Use `scripts\start-wizbar.cmd` when console output is useful for debugging.
-
-Autostart is controlled by `general.autostart` in the config; it writes an HKCU Run entry for the silent launcher.
 
 ## Configuration
 

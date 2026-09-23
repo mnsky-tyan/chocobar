@@ -1,14 +1,13 @@
 {
   "name": "wizbar",
-  "productName": "WizBar",
+  "productName": "Chocobar",
   "version": "1.0.0",
   "description": "Slim acrylic system status bar floating above the terminal, with cross-CLI token usage tracking",
-  "main": "main.js",
   "license": "MIT",
   "scripts": {
-    "start": "electron .",
-    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js && node scripts/model_case_regression.js",
-    "postinstall": "electron --version || true"
+    "build": "bash native/build.sh",
+    "start": "bash native/build.sh && native/chocobar.exe",
+    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js && node scripts/model_case_regression.js"
   },
   "devDependencies": {
     "electron": "^33.2.0",
