@@ -2885,10 +2885,46 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
 
 static const MenuItem kMenuItems[] = {
     { L"Token dashboard",        10 }, { L"Subscription dashboard", 11 }, { NULL, 0 },
+    { L"Start with Windows",      5 }, { NULL, 0 },
     { L"Edit config",              1 }, { L"Open config folder",      2 }, { NULL, 0 },
     { L"Reload chocobar",          3 }, { L"Quit chocobar",           4 }, { NULL, 0 },
 };
 #define MENU_N ((int)(sizeof(kMenuItems) / sizeof(kMenuItems[0])))
+
+// ---- autostart ("Start with Windows") --------------------------------------
+// The HKCU Run value is the runtime source of truth and the tray menu is its
+// only control: no admin prompt (HKCU), no installer, survives reboots. The
+// general.autoStart config key is the FRESH-INSTALL default (applied when the
+// template is first written); the bar never rewrites the user's config, so the
+// menu toggle sticks until the user edits the file themselves.
+static const wchar_t *AUTOSTART_NAME = L"Chocobar";
+
+static int autoStartEnabled(void) {
+    wchar_t val[MAX_PATH + 2];
+    DWORD n = (DWORD)sizeof(val);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                     AUTOSTART_NAME, RRF_RT_REG_SZ, NULL, val, &n) != ERROR_SUCCESS) return 0;
+    return *val ? 1 : 0;
+}
+
+static void autoStartSet(int on) {
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_WRITE, &k) != ERROR_SUCCESS) return;
+    if (on) {
+        wchar_t exe[MAX_PATH];
+        DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+        if (n && n < MAX_PATH) {
+            wchar_t quoted[MAX_PATH + 3];
+            swprintf(quoted, MAX_PATH + 3, L"\"%ls\"", exe);
+            RegSetValueExW(k, AUTOSTART_NAME, 0, REG_SZ, (const BYTE *)quoted,
+                           (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
+        }
+    } else {
+        RegDeleteValueW(k, AUTOSTART_NAME);
+    }
+    RegCloseKey(k);
+}
 
 static void showTrayMenu(HWND hwnd) {
     HMENU m = CreatePopupMenu();
@@ -2927,6 +2963,8 @@ static void showTrayMenu(HWND hwnd) {
         SHELLEXECUTEINFOW sei; memset(&sei, 0, sizeof(sei)); sei.cbSize = sizeof(sei);
         sei.lpVerb = L"open"; sei.lpFile = dir; sei.nShow = SW_SHOWNORMAL;
         ShellExecuteExW(&sei);
+    } else if (id == 5) {
+        autoStartSet(!autoStartEnabled()); // the menu IS the control
     } else if (id == 3) {
         loadConfig();
         applyBackdrop(g_bar);
@@ -3128,7 +3166,18 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HGDIOBJ of = SelectObject(di->hDC, f);
         SetBkMode(di->hDC, TRANSPARENT);
         SetTextColor(di->hDC, sel ? t.pinkDeep : t.fg);
-        RECT tr = { r.left + DX(16), r.top, r.right - DX(12), r.bottom };
+        // "Start with Windows" carries a check in the gutter: the Run value is
+        // the state, so the mark is read live, never cached
+        int tx = r.left + DX(16);
+        if (kMenuItems[idx].cmd == 5 && autoStartEnabled()) {
+            HFONT fc = dashFont(12, FW_BOLD);
+            SelectObject(di->hDC, fc);
+            RECT cr = { r.left + DX(6), r.top, r.left + DX(16), r.bottom };
+            DrawTextW(di->hDC, L"\u2713", -1, &cr, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            SelectObject(di->hDC, f);
+            DeleteObject(fc);
+        }
+        RECT tr = { tx, r.top, r.right - DX(12), r.bottom };
         DrawTextW(di->hDC, kMenuItems[idx].label, -1, &tr,
                   DT_SINGLELINE | DT_LEFT | DT_VCENTER);
         SelectObject(di->hDC, of);
@@ -3233,7 +3282,9 @@ static const char *g_template =
     "  \"tokens\": { \"enabled\": false,\r\n"
     "             \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
-    "  \"general\": { \"showTray\": true }\r\n"
+    "  \"general\": { \"showTray\": true, \"autoStart\": true }\r\n"
+    "  // autoStart registers the HKCU Run value on FIRST run only; after that the\r\n"
+    "  // tray menu's \"Start with Windows\" item is the control (the bar never rewrites this file)\r\n"
     "}\r\n";
 
 
@@ -3246,10 +3297,12 @@ void writeTemplate(void) {
 }
 
 void loadConfig(void) {
+    int freshInstall = 0;
     DWORD len = 0;
     char *raw = readFileUtf8(g_cfgPath, &len);
     if (!raw) {
         writeTemplate();
+        freshInstall = 1;
         raw = readFileUtf8(g_cfgPath, &len);
         if (!raw) return;
     }
@@ -3269,6 +3322,9 @@ void loadConfig(void) {
     freeConfig(&g_cfg);
     g_cfg = next;
     g_cfgLoaded = 1;
+    // A first run (template just written) registers the Run value per
+    // general.autoStart; every later run leaves the registry to the menu
+    if (freshInstall && g_cfg.autoStart) autoStartSet(1);
     g_iconOpacity = g_cfg.iconOpacity / 100.0; // p_icons AlphaBlend constant
     g_subsRotSec = g_cfg.subsRotateSec;
     // theme.icons[] -> the icon engine (a name defined again replaces its slot,
