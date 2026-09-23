@@ -384,13 +384,11 @@ long tokLiveScan(void) {
         TokSource *s = &g_cfg.tokSrc[i];
         if (!s->enabled || !s->sessionsDir || !*s->sessionsDir) continue;
         wchar_t dir[MAX_PATH];
-        if (s->sessionsDir[0] == L'~') {
-            DWORD n = GetEnvironmentVariableW(L"USERPROFILE", dir, MAX_PATH);
-            if (!n) continue;
-            // the rest of the path is config data of any length: it has to be
-            // truncated into the room that is left, not appended
-            lstrcpynW(dir + n, s->sessionsDir + 1, MAX_PATH - (int)n);
-        } else lstrcpynW(dir, s->sessionsDir, MAX_PATH);
+        // the one bounded "~" expansion in the binary: it refuses a profile
+        // that does not fit and truncates the rest into the room that is left,
+        // so appending can never run off the buffer (or hand it a negative
+        // count)
+        subsPathExpand(s->sessionsDir, dir, MAX_PATH);
         // pi nests its sessions one directory per project; a flat store has
         // no subdirectories, so recursing is harmless there and required here.
         // The key is per source (recursive), not a hardcoded harness name.
@@ -413,8 +411,6 @@ long tokLiveScan(void) {
 void tokLiveInit(void) {
     if (g_cfg.debug) writeLogA("[wizbar] tokLiveInit called");
     // ~/.wizbar/token-cursors.json
-    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", g_tokCursorPath, MAX_PATH);
-    if (!n) { g_tokCursorPath[0] = 0; return; }
-    lstrcatW(g_tokCursorPath, L"\\.wizbar\\token-cursors.json");
+    subsPathExpand(L"~\\.wizbar\\token-cursors.json", g_tokCursorPath, MAX_PATH);
     tokCursorLoad();
 }

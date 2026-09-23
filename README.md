@@ -157,7 +157,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 | `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
 | `sources` | `[]` | Every session store the live scan reads - a user-declared array, see below. |
 
-**`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else:
+**`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else. Up to 8 sources; extras are ignored with no error, so keep the list short enough to count.
 
 ```json
 "sources": [
@@ -166,7 +166,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 ]
 ```
 
-- `app`: the aggregation key (and the `labels` lookup key). Omitted = the dot-directory above the store, so `~/.pi/agent/sessions` becomes `pi`.
+- `app`: the aggregation key (and the `labels` lookup key), up to 19 characters - longer names are truncated at that, because every consumer of the key (the dashboard rows, the `appFilter`, the `labels` table) stores exactly that much. Omitted = the dot-directory above the store, so `~/.pi/agent/sessions` becomes `pi`.
 - `path`: the store. `~` is profile-relative; a UNC path works too.
 - `enabled`: per-source switch, honoured only when `tokens.enabled` is on.
 - `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
@@ -214,9 +214,9 @@ Each provider entry:
 ```
 
 - `url` / `method` / `body`: the request. `method` is `GET` unless it says `POST`; `body` is the raw POST body.
-- `auth`: one object, or an array of them. Each entry renders `header: prefix <value>`, where the value comes from `path` + `key` (read from a JSON file at fetch time), `env` (an environment variable), or `literal` (the config itself). Nothing is persisted.
+- `auth`: one object, or an array of them (up to 3 per provider). Each entry renders `header: prefix <value>`, where the value comes from `path` + `key` (read from a JSON file at fetch time), `env` (an environment variable), or `literal` (the config itself). Nothing is persisted. A `key` that starts with `$` is a JSON path, so a secret nested inside the file is reachable (`"auth": { "path": "~/x/auth.json", "key": "$.auth.token" }`); any other `key` is one flat top-level key.
 - `headers`: static `Name: value` lines, sent after the resolved auth.
-- `windows[]`: a `label` plus the JSON paths carrying the numbers. Paths are `$.a.b[0].c`. A window needs any two of `used` / `remaining` / `total`; the third is derived. `reset` is an ISO-8601 timestamp.
+- `windows[]`: a `label` plus the JSON paths carrying the numbers, up to 6 per provider. Paths are `$.a.b[0].c`. A window needs any two of `used` / `remaining` / `total`; the third is derived. `reset` is an ISO-8601 timestamp.
 - `planPath`: JSON path of the plan display name. Omitted = the `label`.
 - `require`: a path that must be present, for endpoints that answer `200` with an error body.
 - `insecure`: authorize plain `http` (the scheme decides TLS; without this flag an `http://` URL is refused). Documented risk: it sends the token in the clear.

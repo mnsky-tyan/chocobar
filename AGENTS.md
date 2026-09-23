@@ -312,6 +312,15 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   exist) plus the default 2xx acceptance - with 401/403 called out first - cover
   every case a status list could express, and a per-provider status whitelist is
   one more key to forget. Do not re-add it.
+- Generic capacities are ONE constant each and the README documents them:
+  `windows[]` is `MAX_GEN_WIN` = **6** per provider and `auth` is
+  `MAX_GEN_AUTH` = 3. The parser field, `g_subsWin[MAX_SUBS][MAX_GEN_WIN]`,
+  `subsSetWins`' clamp and every reader's local array all size off the same
+  constant - a literal 4 anywhere is a silent drop of a declared window. A
+  generic auth `key` starting with `$` is a JSON path (a secret nested in the
+  auth file is reachable as `$.auth.token`); any other key is one flat
+  top-level key. An unrecognized `type` string logs a line naming it, because a
+  typo otherwise silently becomes a chatgpt quota fetch.
 - **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints
   merged with daily/sandbox OVERWRITING production, per family key priority -
   byte-for-byte the same source the harness's /quota uses** (pi-quota ->
@@ -583,7 +592,30 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
 ## Native token live scan (p_tokens.c) - sharp edges
 
+- **`tokens.sources[]` guard and storage must be the same number.** The loop
+  admits `MAX_TOK_SRC` entries (8) and stores into `TokSource
+  tokSrc[MAX_TOK_SRC]`- a literal smaller than the guard makes the 5th source
+  overwrite `theme.icons[]`, which sits right behind it in `Config`, and the
+  8th write runs past the whole heap generation (`loadConfig` installs a
+  heap-allocated `Config`). When a config array grows a guard, grow the field
+  with it in the same commit.
 - **`tokKeysBuild` markers stop at the COLON** (`"model":`, 8 bytes), not at the
+  value's opening quote as the Electron reader's 9-byte `"model":"` did. The
+  extractor in `tokParseLine` must therefore step over any spaces/TABs and the
+  opening `"` before scanning for the closing one - a marker-ending-at-colon
+  left as-is stops on the very first byte and yields modelLen=0, which silently
+  empties the dashboard's BY MODEL table (every record then fails `aggRecord`'s
+  `model && mlen > 0` gate) while every other section keeps counting. The
+  timestamp extractor right above has always skipped whitespace + quoted
+  strings; the model extractor must do the same.
+- **One bounded `~` expansion: `subsPathExpand`** (p_subs.c).
+  Both `~`-relative config paths in the token scan call it (the source store and
+  the cursor file). It refuses a `%USERPROFILE%` that does not fit
+  (`!n || n >= MAX_PATH`) and truncates the remainder into the room that is
+  left - inlining `GetEnvironmentVariableW` again would reintroduce the
+  negative `lstrcpynW` count (GetEnvironmentVariableW returns the REQUIRED
+  length and writes nothing when the buffer is too small, so `dir + n` is
+  already past the array).
   value's opening quote as the Electron reader's 9-byte `"model":"` did. The
   extractor in `tokParseLine` must therefore step over any spaces/TABs and the
   opening `"` before scanning for the closing one - a marker-ending-at-colon

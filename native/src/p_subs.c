@@ -27,7 +27,7 @@ static int g_subsLockInit = 0;
 // truncated before the window is appended, which used to garble every row of
 // the antigravity panel ("CLAUDE AND GPT" lost its window suffix).
 typedef struct { wchar_t label[24]; int pct; int rem; int used; int total; long long resetAt; } SubsWin;
-static SubsWin g_subsWin[MAX_SUBS][4];  // last good windows per provider
+static SubsWin g_subsWin[MAX_SUBS][MAX_GEN_WIN]; // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
 static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
 // absolute prompt credits where the vendor reports them (Antigravity's local
@@ -297,7 +297,7 @@ static void subsSetState(int idx, int rem, int success) {
 
 static void subsSetWins(int idx, const SubsWin *w, int n) {
     if (idx < 0 || idx >= MAX_SUBS) return;
-    if (n > 4) n = 4;
+    if (n > MAX_GEN_WIN) n = MAX_GEN_WIN;
     EnterCriticalSection(&g_subsLock);
     memcpy(g_subsWin[idx], w, n * sizeof(SubsWin));
     g_subsWinN[idx] = n;
@@ -436,7 +436,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
         subsSetState(idx, 0, 0);
         return 0;
     }
-    SubsWin wins[4];
+    SubsWin wins[MAX_GEN_WIN];
     int nwin = 0;
     double lo = 100;
     int limits = jobjGet(body, t, 0, "data");
@@ -458,7 +458,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
                     double rem = 100 - pct;
                     lo = found ? (rem < lo ? rem : lo) : rem;
                     found = 1;
-                    if (nwin < 4) {
+                    if (nwin < MAX_GEN_WIN) {
                         int unit = subsJint(body, t, k, "unit", -1);
                         int num = subsJint(body, t, k, "number", 5);
                         memset(&wins[nwin], 0, sizeof(SubsWin));
@@ -1624,7 +1624,12 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
         jsmntok_t *tk = NULL;
         int n = subsParseBig(txt, (int)strlen(txt), &tk);
         int v = -1;
-        if (n > 0) v = jobjGet(txt, tk, 0, ga->key);
+        if (n > 0) {
+            // a key that starts with $ is a json path (a secret nested in the
+            // file, "$.auth.token"); anything else is one flat top-level key
+            if (ga->key[0] == '$') v = subsJsonPath(txt, tk, 0, ga->key);
+            else v = jobjGet(txt, tk, 0, ga->key);
+        }
         if (v >= 0) {
             char *raw = subsJstrRawTok(txt, tk, v);
             // a non-string token still has to be readable as a value
@@ -1969,8 +1974,8 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             if (g_cfg.debug) { // one line per provider: what the board will show
                 for (int i = 0; i < n; i++) {
                     if (!g_cfg.subsProviders[i].enabled) continue;
-                    SubsWin w[4];
-                    int wn = subsProvWins(i, w, 4);
+                    SubsWin w[MAX_GEN_WIN];
+                    int wn = subsProvWins(i, w, MAX_GEN_WIN);
                     int stale = wn < 0; if (wn < 0) wn = -wn;
                     wchar_t plan[24]; subsProvPlan(i, plan, 24);
                     if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
