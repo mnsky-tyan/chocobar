@@ -198,6 +198,37 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
   the default config path and both subs auth headers.
 
+## Release + install (since v1.1.0)
+
+- Release = one exe, no installer: `git tag -a vX.Y.Z`, `bash native/build.sh`,
+  `gh release create vX.Y.Z native/chocobar.exe`. The version lives ONLY in
+  `native/src/version.h` - it feeds the startup log line (`writeLogA("chocobar "
+  CB_VER_STR " start")`), the windres version resource, and the tag. Bump it
+  there or the three disagree.
+- `v1.0.0` is ALREADY TAKEN by the PR #11 integration point and was never
+  released, so the first release is v1.1.0. Do not move a published tag.
+- Installed location is `%USERPROFILE%\Chocobar\chocobar.exe`, autostart is the
+  HKCU Run value `Chocobar` (update it when the exe moves - `general.autoStart`
+  only writes it on a fresh install), and `~/.wizbar/runbar.ps1` launches the
+  native bar. The two `personal.json` files are stale Electron-era display
+  configs; the live config is `~/.wizbar/config.json`, which the bar reads by
+  default with no `--config`.
+- Config is never written next to the exe, so updating is a file swap and
+  personal settings survive it. Say so in the release notes.
+- `writeLogA` follows `%USERPROFILE%\.wizbar` (it used to hardcode the
+  captain's home, which made a release build log nowhere on any other machine).
+- **The parser's key list is the authority on what a config means** - see
+  `native/src/chocobar.c`. `jintTok` means `bar.align` is 1=right / 2=left, so an
+  Electron-era `"align": "right"` string is coerced by `atoi` to 0 and lands on
+  1 (right) by luck. Keys the native build ignores, and that should be pruned
+  from a live config rather than left to imply they work: `bar.position`,
+  `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `theme.yellowBg`,
+  every `modules.*.intervalMs` plus `gpu.mode` / `volume.role`, all of
+  `modules.bluetooth` and `modules.agents`, `terminal.reattachToExisting`,
+  `tokens.showOnBar`, `tokens.heatmapWeeks`, and `tokens.sources.zcode` /
+  `opencode` / `mimo` (only `zai` and `pi` are scanned).
+
+
 ## Verifying the dashboards' z-order on the live box
 
 - `WindowFromPoint` and the `GW_HWNDPREV` walk both LIE when an unrelated window
