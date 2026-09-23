@@ -2989,7 +2989,7 @@ static const MenuItem kMenuItems[] = {
     { L"Token dashboard",        10 }, { L"Subscription dashboard", 11 }, { NULL, 0 },
     { L"Start with Windows",      5 }, { NULL, 0 },
     { L"Edit config",              1 }, { L"Open config folder",      2 }, { NULL, 0 },
-    { L"Reload chocobar",          3 }, { L"Quit chocobar",           4 }, { NULL, 0 },
+    { L"Check for updates",        6 }, { L"Reload chocobar",         3 }, { L"Quit chocobar", 4 }, { NULL, 0 },
 };
 #define MENU_N ((int)(sizeof(kMenuItems) / sizeof(kMenuItems[0])))
 
@@ -3092,6 +3092,15 @@ static void showTrayMenu(HWND hwnd) {
         ShellExecuteExW(&sei);
     } else if (id == 5) {
         autoStartSet(!autoStartEnabled()); // the menu IS the control
+    } else if (id == 6) {
+        // Opens the releases page rather than self-updating: no download, no
+        // file swap, no unsigned-binary trust question. The bar knows its own
+        // version (version.h), so the page is all the user needs to compare.
+        SHELLEXECUTEINFOW sei; memset(&sei, 0, sizeof(sei)); sei.cbSize = sizeof(sei);
+        sei.lpVerb = L"open";
+        sei.lpFile = L"https://github.com/mnsky-tyan/chocobar/releases/latest";
+        sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);
     } else if (id == 3) {
         loadConfig();
         applyBackdrop(g_bar);
