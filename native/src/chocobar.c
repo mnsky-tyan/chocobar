@@ -48,6 +48,8 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 
+static void writeLogA(const char *s); // p_ui
+
 #define APP_CLASS   L"ChocobarBar"
 #define APP_MUTEX   L"ChocobarSingleInstanceMutex"
 #define WM_TRAY     (WM_APP + 1)
@@ -74,7 +76,7 @@ typedef struct {
 #define MAX_SUBS 6
 #define MAX_USER_ICONS 16
 #define MAX_GEN_AUTH 3
-#define MAX_GEN_WIN 4
+#define MAX_GEN_WIN 6
 #define MAX_GEN_PATH 96
 
 // one auth credential for a generic provider: where the secret comes from and
@@ -236,7 +238,7 @@ typedef struct {
     int tokLabelCount;
     int tokensEnabled;            // master switch: off = zero scans
     int tokensRescanSec;          // tokens.rescanMinutes -> seconds between scans
-    TokSource tokSrc[4];          // JSONL session stores for the live scan
+    TokSource tokSrc[MAX_TOK_SRC];  // JSONL session stores for the live scan
     int tokSrcCount;
     UserIcon icons[MAX_USER_ICONS]; // theme.icons[]: new named icons
     int iconCount;
@@ -873,6 +875,14 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
                              : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
                              : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
+                    // an absent type falls back to chatgpt by design, but a
+                    // MISSPELLED one must say so: otherwise a typo silently
+                    // reads another provider's quota (the chatgpt fetch)
+                    if (ty && *ty && sp->type == 0 && lstrcmpiW(ty, L"chatgpt") != 0) {
+                        char tw[160];
+                        snprintf(tw, sizeof(tw), "[wizbar] subs: unknown provider type \"%ls\" - using chatgpt", ty);
+                        writeLogA(tw);
+                    }
                     wideFree(&ty);
                     sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
                     sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");

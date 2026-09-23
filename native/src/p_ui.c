@@ -2399,8 +2399,8 @@ static void paintDash(HWND hwnd) {
             }
             wchar_t label[48];
             subsProvLabel(pi2, label, 48);
-            SubsWin wins[4];
-            int wn = subsProvWins(pi2, wins, 4);
+            SubsWin wins[MAX_GEN_WIN];
+            int wn = subsProvWins(pi2, wins, MAX_GEN_WIN);
             int stale = wn < 0; if (wn < 0) wn = -wn;
             int px2 = padL;
             int py2 = y + shown * (panelH + gap);
@@ -3140,8 +3140,8 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
     int n = 0;
     for (int i = 0; i < pn; i++) {
         if (!subsProvEnabled(i)) continue;
-        SubsWin w[4];
-        int wn = subsProvWins(i, w, 4);
+        SubsWin w[MAX_GEN_WIN];
+        int wn = subsProvWins(i, w, MAX_GEN_WIN);
         if (wn < 0) wn = -wn;
         if (wn <= 0) continue;
         int best = -1;
@@ -3163,8 +3163,8 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
         g_subsRotIdx = (g_subsRotIdx + 1) % n;
     }
     int pi2 = pick[g_subsRotIdx] >> 8, k = pick[g_subsRotIdx] & 0xFF;
-    SubsWin w[4];
-    int wn = subsProvWins(pi2, w, 4);
+    SubsWin w[MAX_GEN_WIN];
+    int wn = subsProvWins(pi2, w, MAX_GEN_WIN);
     if (wn < 0) wn = -wn;
     if (k >= wn) k = 0;
     int rem = w[k].rem;
@@ -3599,12 +3599,12 @@ static const char *g_template =
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
     "  \"tokens\": { \"enabled\": false, \"appFilter\": [], \"cachePath\": \"\",\r\n"
-    "    // sources[]: every session store the live scan reads. Add a harness by adding an\r\n"
-    "    // entry - nothing is compiled in. app = the aggregation key (and the labels key);\r\n"
-    "    // path = the store; recursive descends into per-project subdirectories (default on,\r\n"
-    "    // harmless for a flat store); fields renames the usage keys for a harness that\r\n"
-    "    // spells them differently. Shipped off: set tokens.enabled and the source you\r\n"
-    "    // want - nothing is read until you do.\r\n"
+    "    // sources[]: every session store the live scan reads, up to 8. Add a harness by\r\n"
+    "    // adding an entry - nothing is compiled in. app = the aggregation key (and the\r\n"
+    "    // labels key); path = the store; recursive descends into per-project subdirectories\r\n"
+    "    // (default on, harmless for a flat store); fields renames the usage keys for a\r\n"
+    "    // harness that spells them differently. Shipped off: set tokens.enabled and the\r\n"
+    "    // source you want - nothing is read until you do.\r\n"
     "    \"sources\": [\r\n"
     "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": false, \"recursive\": true },\r\n"
     "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": false }\r\n"
