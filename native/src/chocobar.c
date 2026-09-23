@@ -152,7 +152,6 @@ static void tokFieldCopy(char *dst, int cch, const char *js, jsmntok_t *t, int o
     dst[n] = 0;
 }
 
-
 // --------------------------------------------------------------- config ----
 typedef struct {
     int enabled;
@@ -353,6 +352,127 @@ static int jboolDefault(const char *js, const jsmntok_t *t, int i, int def) {
     return def;
 }
 
+// copy a JSON string into a bounded narrow buffer (generic paths/key names)
+static void jstrCopyA(char *dst, int cch, const char *js, const jsmntok_t *t, int i,
+                      const char *dflt) {
+    if (dflt) lstrcpynA(dst, dflt, cch); else dst[0] = 0;
+    if (i < 0 || t[i].type != JSMN_STRING) return;
+    int n = t[i].end - t[i].start;
+    if (n <= 0 || n >= cch) return;
+    memcpy(dst, js + t[i].start, (size_t)n);
+    dst[n] = 0;
+}
+
+// one auth entry of a generic provider: "header: prefix <value>" where the
+// value comes from a JSON file, an environment variable, or the config itself.
+static void genParseAuth(const char *js, const jsmntok_t *t, int obj, GenAuth *ga) {
+    memset(ga, 0, sizeof(*ga));
+    wchar_t *h = jstrTok(js, t, jobjGet(js, t, obj, "header"), L"Authorization");
+    lstrcpynW(ga->header, h, 40); wideFree(&h);
+    wchar_t *p = jstrTok(js, t, jobjGet(js, t, obj, "prefix"), L"Bearer ");
+    lstrcpynW(ga->prefix, p, 48); wideFree(&p);
+    ga->path   = jstrTok(js, t, jobjGet(js, t, obj, "path"), NULL);
+    jstrCopyA(ga->key, sizeof(ga->key), js, t, jobjGet(js, t, obj, "key"), "access_token");
+    ga->env    = jstrTok(js, t, jobjGet(js, t, obj, "env"), NULL);
+    ga->literal = jstrTok(js, t, jobjGet(js, t, obj, "literal"), NULL);
+}
+
+// one quota window: a label plus the response paths carrying the numbers
+static void genParseWin(const char *js, const jsmntok_t *t, int obj, GenWin *gw) {
+    memset(gw, 0, sizeof(*gw));
+    wchar_t *l = jstrTok(js, t, jobjGet(js, t, obj, "label"), L"");
+    lstrcpynW(gw->label, l, 24); wideFree(&l);
+    jstrCopyA(gw->used,      sizeof(gw->used),      js, t, jobjGet(js, t, obj, "used"),      "");
+    jstrCopyA(gw->remaining, sizeof(gw->remaining), js, t, jobjGet(js, t, obj, "remaining"), "");
+    jstrCopyA(gw->total,     sizeof(gw->total),     js, t, jobjGet(js, t, obj, "total"),     "");
+    jstrCopyA(gw->reset,     sizeof(gw->reset),     js, t, jobjGet(js, t, obj, "reset"),     "");
+}
+
+// join static header lines into one \r\n-separated blob for WinHTTP
+static wchar_t *genHeadersBlob(const char *js, const jsmntok_t *t, int obj) {
+    int h = jobjGet(js, t, obj, "headers");
+    if (h < 0 || t[h].type != JSMN_OBJECT) return NULL;
+    int n = t[h].size, k = h + 1, cch = 256;
+    wchar_t *blob = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)cch * sizeof(wchar_t));
+    if (!blob) return NULL;
+    int len = 0;
+    for (int i = 0; i < n; i++) {
+        wchar_t *nm = jstrTok(js, t, k, NULL);
+        wchar_t *vl = jstrTok(js, t, k + 1, NULL);
+        k += 1 + jtokSpan(t, k + 1);
+        if (nm && vl) {
+            int need = len + lstrlenW(nm) + lstrlenW(vl) + 8;
+            if (need >= cch) {
+                while (cch <= need) cch *= 2;
+                wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, blob, (size_t)cch * sizeof(wchar_t));
+                if (!nb) { wideFree(&nm); wideFree(&vl); wideFree(&blob); return NULL; }
+                blob = nb;
+            }
+            len += swprintf(blob + len, cch - len, L"%ls: %ls\r\n", nm, vl);
+        }
+        wideFree(&nm); wideFree(&vl);
+    }
+    if (!len) { wideFree(&blob); return NULL; }
+    return blob;
+}
+
+// a type-3 provider: url, optional auth list, static headers, quota windows.
+// Everything a new service needs lives here, so wiring one up is a config edit.
+static void genParse(SubsProvider *sp, const char *js, const jsmntok_t *t, int obj) {
+    sp->url       = jstrTok(js, t, jobjGet(js, t, obj, "url"), NULL);
+    sp->method    = jstrTok(js, t, jobjGet(js, t, obj, "method"), L"GET");
+    sp->reqBody   = jstrTok(js, t, jobjGet(js, t, obj, "body"), NULL);
+    sp->insecure  = jboolDefault(js, t, jobjGet(js, t, obj, "insecure"), 0);
+    sp->expectStatus = (int)jintTok(js, t, jobjGet(js, t, obj, "expectStatus"), 0);
+    jstrCopyA(sp->requirePath, sizeof(sp->requirePath), js, t,
+              jobjGet(js, t, obj, "require"), "");
+    jstrCopyA(sp->planPath, sizeof(sp->planPath), js, t,
+              jobjGet(js, t, obj, "planPath"), "");
+    // auth may be one object or a list of them (api key + bearer, say)
+    int a = jobjGet(js, t, obj, "auth");
+    if (a >= 0) {
+        if (t[a].type == JSMN_OBJECT) {
+            genParseAuth(js, t, a, &sp->auth[0]);
+            sp->nAuth = 1;
+        } else if (t[a].type == JSMN_ARRAY) {
+            int n = t[a].size; if (n > MAX_GEN_AUTH) n = MAX_GEN_AUTH;
+            int k = a + 1;
+            for (int i = 0; i < n && sp->nAuth < MAX_GEN_AUTH; i++) {
+                if (t[k].type == JSMN_OBJECT)
+                    genParseAuth(js, t, k, &sp->auth[sp->nAuth++]);
+                k += jtokSpan(t, k);
+            }
+        }
+    }
+    sp->headerBlob = genHeadersBlob(js, t, obj);
+    // windows[]: a label plus the paths carrying the numbers
+    int w = jobjGet(js, t, obj, "windows");
+    if (w >= 0 && t[w].type == JSMN_ARRAY) {
+        int n = t[w].size; if (n > MAX_GEN_WIN) n = MAX_GEN_WIN;
+        int k = w + 1;
+        for (int i = 0; i < n && sp->nWin < MAX_GEN_WIN; i++) {
+            if (t[k].type == JSMN_OBJECT)
+                genParseWin(js, t, k, &sp->win[sp->nWin++]);
+            k += jtokSpan(t, k);
+        }
+    }
+}
+
+// release every generic allocation; called from the config teardown so a
+// reload cannot leak the previous set of paths
+static void genFree(SubsProvider *sp) {
+    wideFree(&sp->url); wideFree(&sp->method); wideFree(&sp->reqBody);
+    wideFree(&sp->headerBlob);
+    for (int i = 0; i < sp->nAuth; i++) {
+        wideFree(&sp->auth[i].path);
+        wideFree(&sp->auth[i].env);
+        wideFree(&sp->auth[i].literal);
+    }
+    sp->nAuth = 0;
+    sp->nWin = 0;
+}
+
+
 static void freeConfig(Config *c) {
     wideFree(&c->tint); wideFree(&c->backdrop); wideFree(&c->fontFamily);
     wideFree(&c->fg); wideFree(&c->fgDim); wideFree(&c->pink); wideFree(&c->pinkDeep); wideFree(&c->divider);
@@ -370,8 +490,10 @@ static void freeConfig(Config *c) {
     }
     c->customCount = 0;
     for (int i = 0; i < c->subsProviderCount; i++) {
-        wideFree(&c->subsProviders[i].clientId);
-        wideFree(&c->subsProviders[i].clientSecret);
+        SubsProvider *sp = &c->subsProviders[i];
+        wideFree(&sp->clientId);
+        wideFree(&sp->clientSecret);
+        genFree(sp);
     }
     for (int i = 0; i < c->tokSrcCount; i++) wideFree(&c->tokSrc[i].sessionsDir);
     c->tokSrcCount = 0;
@@ -533,6 +655,15 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     cc->color   = jstrTok(js, t, jobjGet(js, t, k, "color"), L"");
                     cc->title   = jstrTok(js, t, jobjGet(js, t, k, "title"), NULL);
                     cc->command = jstrTok(js, t, jobjGet(js, t, k, "command"), L"");
+                    // command-output chip: intervalMs > 0 polls the command and
+                    // its stdout becomes the chip text; format wraps it and
+                    // warnAbove/warnBelow colour it. All three are optional.
+                    cc->intervalMs = (int)jintTok(js, t, jobjGet(js, t, k, "intervalMs"), 0);
+                    if (cc->intervalMs < 0) cc->intervalMs = 0;
+                    if (cc->intervalMs > 0 && cc->intervalMs < 1000) cc->intervalMs = 1000;
+                    cc->format = jstrTok(js, t, jobjGet(js, t, k, "format"), NULL);
+                    cc->warnAbove = jdoubleTok(js, t, jobjGet(js, t, k, "warnAbove"), -1);
+                    cc->warnBelow = jdoubleTok(js, t, jobjGet(js, t, k, "warnBelow"), -1);
                     c->customCount++;
                 }
                 // advance k past this element
@@ -675,7 +806,9 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     memset(sp, 0, sizeof(*sp));
                     int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
                     wchar_t *ty = subs == -1 ? NULL : jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
-                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1 : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2 : 0;
+                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
+                             : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
+                             : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
                     wideFree(&ty);
                     sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
                     sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
@@ -684,6 +817,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
                     sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                     sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
+                    if (sp->type == 3) genParse(sp, js, t, k);
                     c->subsProviderCount++;
                 }
                 // advance k past this element

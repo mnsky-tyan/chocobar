@@ -195,6 +195,116 @@ static void applyBackdrop(HWND hwnd) {
 }
 
 // --------------------------------------------------------- chip building ----
+// ------------------------------------------------- command-output chips ----
+// A custom chip with intervalMs > 0 runs its command on a background thread and
+// shows the trimmed stdout. This is the escape hatch for any metric the bar has
+// no reader for: one config entry and the command is the whole implementation.
+// The poll NEVER runs on the UI thread - a command that takes a second must not
+// hitch the bar, so the text is stored here and the chip just reads it.
+static wchar_t g_customText[MAX_CUSTOM][96];
+static volatile long long g_customNextPoll[MAX_CUSTOM];
+static int g_customPollInit = 0;
+
+// run `command` through cmd.exe (so PATH lookup, pipes and redirects all work)
+// and capture what it writes to stdout. Returns a trimmed, bounded copy.
+static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
+    out[0] = 0;
+    if (!command || !*command) return 0;
+    wchar_t cmd[2048];
+    swprintf(cmd, 2048, L"cmd.exe /c %ls", command);
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return 0;
+    STARTUPINFOW si; memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = wr; si.hStdError = wr; si.hStdInput = NULL;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    // Run the command in the user's profile, not the bar's own directory: the
+    // bar can be launched from a UNC cwd (a WSL path, a network share) and
+    // cmd.exe refuses to run at all with one - it just prints its cwd and exits,
+    // which reads as "the chip never updates".
+    wchar_t cwd[MAX_PATH]; cwd[0] = 0;
+    DWORD cl = GetEnvironmentVariableW(L"USERPROFILE", cwd, MAX_PATH);
+    if (!cl || cl >= MAX_PATH) cwd[0] = 0;
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW, NULL, cwd[0] ? cwd : NULL, &si, &pi)) {
+        CloseHandle(rd); CloseHandle(wr);
+        return 0;
+    }
+    CloseHandle(wr); // the child owns it now; closing ours is what ends the pipe
+    char buf[4096];
+    DWORD got = 0;
+    wchar_t acc[4096]; int accLen = 0;
+    while (ReadFile(rd, buf, sizeof(buf) - 1, &got, NULL) && got > 0) {
+        buf[got] = 0;
+        if (accLen < 4000) {
+            int n = MultiByteToWideChar(CP_UTF8, 0, buf, (int)got, acc + accLen, 4096 - accLen - 1);
+            if (n > 0) accLen += n;
+        }
+    }
+    acc[accLen] = 0;
+    CloseHandle(rd);
+    WaitForSingleObject(pi.hProcess, 5000); // never wait forever on a hung command
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    // trim: leading whitespace, trailing whitespace and any trailing newlines
+    wchar_t *p = acc;
+    while (*p == L' ' || *p == L'\t' || *p == L'\r' || *p == L'\n') p++;
+    int len = (int)lstrlenW(p);
+    while (len > 0 && (p[len-1] == L'\r' || p[len-1] == L'\n' ||
+                       p[len-1] == L' ' || p[len-1] == L'\t')) p[--len] = 0;
+    if (len <= 0) return 0;
+    lstrcpynW(out, p, cch);
+    return 1;
+}
+
+// apply the format around the captured value. "$v" is the placeholder; a format
+// without it is used verbatim (the command printed its own text).
+static void customApplyFormat(const CustomChip *cc, const wchar_t *val, wchar_t *out, int cch) {
+    const wchar_t *f = cc->format;
+    if (!f || !*f) { lstrcpynW(out, val, cch); return; }
+    const wchar_t *ph = wcsstr(f, L"$v");
+    if (!ph) { lstrcpynW(out, f, cch); return; }
+    int head = (int)(ph - f);
+    if (head < 0) head = 0;
+    if (head > cch - 1) head = cch - 1;
+    wcsncpy(out, f, (size_t)head); out[head] = 0;
+    wcsncat(out, val, (size_t)(cch - head - 1));
+    wcsncat(out, ph + 2, (size_t)(cch - lstrlenW(out) - 1));
+}
+
+static void customPollOne(int ci) {
+    CustomChip *cc = &g_cfg.custom[ci];
+    if (!cc->enabled || !cc->command || !*cc->command || cc->intervalMs <= 0) return;
+    wchar_t val[512], txt[96];
+    if (!customRunCapture(cc->command, val, 512)) return; // keep the last good text
+    customApplyFormat(cc, val, txt, 96);
+    lstrcpynW(g_customText[ci], txt, 96);
+}
+
+static DWORD WINAPI customPollThread(LPVOID lp) {
+    (void)lp;
+    for (int i = 0; i < MAX_CUSTOM; i++) {
+        if (g_cfg.custom[i].enabled && g_cfg.custom[i].intervalMs > 0)
+            customPollOne(i); // first read happens immediately
+        g_customNextPoll[i] = GetTickCount64() + (long long)g_cfg.custom[i].intervalMs;
+    }
+    for (;;) {
+        Sleep(100);
+        unsigned long long now = GetTickCount64();
+        for (int i = 0; i < g_cfg.customCount; i++) {
+            if (g_cfg.custom[i].intervalMs <= 0) continue;
+            if (now < (unsigned long long)g_customNextPoll[i]) continue;
+            g_customNextPoll[i] = (long long)now + (long long)g_cfg.custom[i].intervalMs;
+            customPollOne(i);
+        }
+    }
+    return 0;
+}
+
 static int customStateGet(int idx) { return idx >= 0 && idx < MAX_CUSTOM ? g_customState[idx] : 0; }
 
 static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
@@ -763,6 +873,21 @@ static void buildChips(void) {
         if (!cc->enabled) continue;
         wchar_t txt[96];
         int st = customStateGet(ci);
+        if (cc->intervalMs > 0) {
+            // command-output chip: the text is whatever the command last printed
+            lstrcpynW(txt, g_customText[ci], 96);
+            // warn band: outside [warnBelow, warnAbove] the text goes warn colour
+            int warn = 0;
+            if (cc->warnAbove >= 0 || cc->warnBelow >= 0) {
+                double v = _wtof(g_customText[ci]);
+                if (cc->warnAbove >= 0 && v > cc->warnAbove) warn = 1;
+                if (cc->warnBelow >= 0 && v < cc->warnBelow) warn = 1;
+            }
+            addChipI(CT_CUSTOM, ci, txt, warn, cc->color && *cc->color ? cc->color : NULL, 0);
+            Chip *c2 = &g_chips[g_chipCount - 1];
+            c2->align = 2;
+            continue;
+        }
         if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
         else lstrcpynW(txt, cc->label ? cc->label : L"", 96);
         addChipI(CT_CUSTOM, ci, txt, 0, cc->color && *cc->color ? cc->color : NULL, 0);
@@ -3093,7 +3218,6 @@ static void showTrayMenu(HWND hwnd) {
     } else if (id == 5) {
         autoStartSet(!autoStartEnabled()); // the menu IS the control
     } else if (id == 6) {
-        writeLogA("TEMPMENU: check-for-updates clicked");
         // Opens the releases page rather than self-updating: no download, no
         // file swap, no unsigned-binary trust question. The bar knows its own
         // version (version.h), so the page is all the user needs to compare.
@@ -3392,6 +3516,16 @@ static const char *g_template =
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
     "  \"tokens\": { \"enabled\": true, \"appFilter\": [], \"cachePath\": \"\" },\r\n"
+    "    // sources[]: every session store the live scan reads. Add a harness by adding an\r\n"
+    "    // entry - nothing is compiled in. app = the aggregation key (and the labels key);\r\n"
+    "    // path = the store; recursive descends into per-project subdirectories (default on,\r\n"
+    "    // harmless for a flat store); fields renames the usage keys for a harness that\r\n"
+    "    // spells them differently.\r\n"
+    "    \"sources\": [\r\n"
+    "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": true, \"recursive\": true },\r\n"
+    "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": true },\r\n"
+    "      { \"app\": \"zcode\",\"path\": \"~/.zcode/cli/db/db.sqlite\", \"enabled\": false }\r\n"
+    "    ] },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"
     "    \"cpu\":  { \"enabled\": true, \"warnAt\": 85 },\r\n"
@@ -3403,7 +3537,12 @@ static const char *g_template =
     "    \"shortcut\": { \"enabled\": false, \"label\": \"\", \"command\": \"\" },\r\n"
     "    \"pet\": { \"enabled\": false, \"label\": \"\", \"exePath\": \"\" },\r\n"
     "    \"custom\": [\r\n"
-    "      { \"enabled\": false, \"icon\": \"\", \"label\": \"Example\", \"command\": \"notepad.exe\", \"toggle\": false }\r\n"
+    "      { \"enabled\": false, \"icon\": \"\", \"label\": \"Example\", \"command\": \"notepad.exe\", \"toggle\": false },\r\n"
+    "      // command-output chip: poll a command and show its stdout. format wraps the value\r\n"
+    "      // ($v = the trimmed output); warnAbove / warnBelow colour it outside that band.\r\n"
+    "      { \"enabled\": false, \"icon\": \"gpu\", \"label\": \"\",\r\n"
+    "        \"command\": \"nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader\",\r\n"
+    "        \"intervalMs\": 5000, \"format\": \"$v C\", \"warnAbove\": 80 }\r\n"
     "    ]\r\n"
     "  },\r\n"
     "  \"subs\": { \"enabled\": false, \"intervalMinutes\": 2, \"fetchTimeoutMs\": 20000,\r\n"
@@ -3411,7 +3550,22 @@ static const char *g_template =
     "             \"providers\": [\r\n"
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
-    "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
+    "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" },\r\n"
+    "               // generic: ANY rest quota endpoint, declared entirely here. url + optional\r\n"
+    "               // auth (a token from a file, an env var, or the config itself) + windows[]\r\n"
+    "               // with JSON paths into the response. paths are $.a.b[0].c. A window needs\r\n"
+    "               // any two of used / remaining / total; the third is derived.\r\n"
+    "               { \"type\": \"generic\", \"enabled\": false, \"label\": \"MyPlan\",\r\n"
+    "                 \"url\": \"https://api.example.com/v1/quota\", \"method\": \"GET\",\r\n"
+    "                 \"auth\": { \"header\": \"Authorization\", \"prefix\": \"Bearer \",\r\n"
+    "                            \"path\": \"~/.example/auth.json\", \"key\": \"access_token\" },\r\n"
+    "                 \"headers\": { \"Accept\": \"application/json\" },\r\n"
+    "                 \"windows\": [\r\n"
+    "                   { \"label\": \"5h\",  \"used\": \"$.data.five_hour.used\",\r\n"
+    "                     \"total\": \"$.data.five_hour.limit\", \"reset\": \"$.data.five_hour.resets_at\" },\r\n"
+    "                   { \"label\": \"week\", \"remaining\": \"$.data.weekly.remaining\",\r\n"
+    "                     \"total\": \"$.data.weekly.limit\" }\r\n"
+    "                 ] }\r\n"
     "               // one entry = one panel with two rows: Gemini and Claude/GPT, straight from\r\n"
     "               // fetchAvailableModels on both Google endpoints (daily wins), the same source the\r\n"
     "               // harness's /quota uses - no IDE or language server required.\r\n"
@@ -3572,6 +3726,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
         writeLogA(dbg);
     }
     subsStart();
+    // command-output chips poll on their own thread, never the UI thread
+    for (int i = 0; i < MAX_CUSTOM; i++) {
+        if (g_cfg.custom[i].enabled && g_cfg.custom[i].intervalMs > 0) {
+            HANDLE h = CreateThread(NULL, 0, customPollThread, NULL, 0, NULL);
+            if (h) CloseHandle(h);
+            break; // one thread walks every chip
+        }
+    }
     followTick();
 
     MSG msg;
