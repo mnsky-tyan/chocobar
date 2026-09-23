@@ -1272,25 +1272,29 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
                           int timeoutMs, int debug,
                           double *famRf, long long *famReset, int *famHave) {
     AgyModelsJob mj[2];
-    HANDLE mth[2]; int mthN = 0;
+    HANDLE mth[2]; int started[2] = { 0, 0 };
     for (int h = 0; h < 2; h++) {
         memset(&mj[h], 0, sizeof(mj[h]));
         mj[h].host = hosts[h];
         mj[h].hdrs = hdrs; mj[h].project = project; mj[h].timeoutMs = timeoutMs;
         mth[h] = CreateThread(NULL, 0, agyModelsThread, &mj[h], 0, NULL);
-        if (mth[h]) mthN = h + 1; else break;
+        // the mask is PER HOST, not a count: a thread that could not start
+        // leaves only ITS host to the inline fetch below, while a host whose
+        // thread did start keeps that thread's result
+        if (mth[h]) started[h] = 1; else break;
     }
     // join and close every thread that was created: a thread that is still
     // running keeps writing into mj[] (and, when this was called speculatively,
     // into the CALLER's stack frame) after this function returns
-    for (int h = 0; h < mthN; h++) {
+    for (int h = 0; h < 2; h++) {
+        if (!started[h]) continue;
         WaitForSingleObject(mth[h], INFINITE);
         CloseHandle(mth[h]);
     }
     int attempted = 0, auth401 = 0;
     for (int h = 0; h < 2; h++) {
         int st = 0, bl = 0; char *resp;
-        if (mthN == 2) { st = mj[h].st; bl = mj[h].bl; resp = mj[h].resp; }
+        if (started[h]) { st = mj[h].st; bl = mj[h].bl; resp = mj[h].resp; }
         else {
             char mbody[256];
             int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", project);
@@ -1922,14 +1926,16 @@ static DWORD WINAPI subsProviderThread(LPVOID lp) {
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
     for (;;) {
-        if (g_cfg.subsEnabled) { // master switch off: no polls, no requests
+        // ONE pin per cycle, taken before the master switch and released after
+        // the interval is read: every config access in this loop goes through
+        // it. Every fetch holds a SubsProvider* for the whole (multi-second)
+        // request, so a reload that lands mid-fetch retires that generation
+        // instead of freeing it, and the whole cycle reads one consistent
+        // snapshot.
+        const Config *view = cfgPin();
+        if (view->subsEnabled) { // master switch off: no polls, no requests
             int anyEnabled = 0;
             unsigned long long tCycle = GetTickCount64();
-            // Every fetch holds a SubsProvider* for the whole (multi-second)
-            // request, so the cycle pins ONE config generation: a reload that
-            // lands mid-fetch retires that generation instead of freeing it,
-            // and the whole cycle reads one consistent snapshot.
-            const Config *view = cfgPin();
             int n = view->subsProviderCount;
             if (n > MAX_SUBS) n = MAX_SUBS;
             // Fan the enabled providers out over their own threads. Every fetch
@@ -1960,20 +1966,19 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                 WaitForSingleObject(th[0], INFINITE);
                 CloseHandle(th[0]);
             }
-            cfgUnpin(); // every fetch is done: a retired generation can go now
             if (!anyEnabled) {
                 for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
             }
             g_subsFetchedTick = GetTickCount64();
-            if (g_cfg.debug) {
+            if (view->debug) {
                 char lb[64];
                 sprintf(lb, "[wizbar] subs cycle: total %llu ms", GetTickCount64() - tCycle);
                 writeLogA(lb);
             }
             g_subsFetchedEpoch = subsLocalStampMs();
-            if (g_cfg.debug) { // one line per provider: what the board will show
+            if (view->debug) { // one line per provider: what the board will show
                 for (int i = 0; i < n; i++) {
-                    if (!g_cfg.subsProviders[i].enabled) continue;
+                    if (!view->subsProviders[i].enabled) continue;
                     SubsWin w[MAX_GEN_WIN];
                     int wn = subsProvWins(i, w, MAX_GEN_WIN);
                     int stale = wn < 0; if (wn < 0) wn = -wn;
@@ -1992,7 +1997,8 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             }
         }
         // sleep the interval, but a kick (refresh button) breaks out early
-        int ivl = g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000;
+        int ivl = view->subsIntervalMin > 0 ? view->subsIntervalMin * 60000 : 120000;
+        cfgUnpin(); // the sleeps below read no config: let a retired generation go
         for (int waited = 0; waited < ivl; waited += 250) {
             if (InterlockedCompareExchange(&g_subsKick, 0, 0)) break;
             Sleep(250);

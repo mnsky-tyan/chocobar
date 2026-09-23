@@ -333,6 +333,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   excluded from the CAPPED/lowest math. Never reintroduce a persistence layer
   or "local wins" policy without evidence - a fabricated cache file once fed
   the captain stale numbers for hours.
+- **`agyFetchModels` launches one thread PER HOST and tracks that as a per-host
+  mask, never a count.** A count (`mthN`) collapses "host 1's thread could not
+  start" into "only one thread was started", so the sequential fallback then
+  fetches host 0 a SECOND time inline and drops the started thread's `mj[0].resp`
+  on the floor (a pure leak, and a doubled endpoint). The mask keeps each host's
+  result - a host whose thread failed is exactly and only that host.
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.
@@ -616,14 +622,6 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   negative `lstrcpynW` count (GetEnvironmentVariableW returns the REQUIRED
   length and writes nothing when the buffer is too small, so `dir + n` is
   already past the array).
-  value's opening quote as the Electron reader's 9-byte `"model":"` did. The
-  extractor in `tokParseLine` must therefore step over any spaces/TABs and the
-  opening `"` before scanning for the closing one - a marker-ending-at-colon
-  left as-is stops on the very first byte and yields modelLen=0, which silently
-  empties the dashboard's BY MODEL table (every record then fails `aggRecord`'s
-  `model && mlen > 0` gate) while every other section keeps counting. The
-  timestamp extractor right above has always skipped whitespace + quoted
-  strings; the model extractor must do the same.
 - **The app name is 19 chars, full stop.** `TokSource.app` is `char[20]` and
   the parse loop copies by `sizeof(ts->app) - 1` so it cannot drift again;
   `aggRecord` clamps `alen` to 19, and `g_appName[][]`,
