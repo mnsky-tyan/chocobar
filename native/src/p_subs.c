@@ -205,7 +205,8 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
 }
 
 // ---- HTTP GET via WinHTTP ---------------------------------------------------
-static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, const wchar_t *path, const wchar_t *headers,
+static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, int port,
+                         const wchar_t *path, const wchar_t *headers,
                          int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
     HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
@@ -215,7 +216,9 @@ static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host
     HINTERNET con = NULL, req = NULL;
     do {
         WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, insecure ? INTERNET_DEFAULT_HTTP_PORT : INTERNET_DEFAULT_HTTPS_PORT, 0);
+        con = WinHttpConnect(ses, host, port ? (INTERNET_PORT)port
+                                                    : (insecure ? INTERNET_DEFAULT_HTTP_PORT
+                                                                : INTERNET_DEFAULT_HTTPS_PORT), 0);
         if (!con) { writeLogA("subs: connect failed"); break; }
         req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER,
                                  WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
@@ -336,7 +339,7 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
     swprintf(hdrs, need, L"Authorization: Bearer %ls\r\nAccept: application/json", tok);
     wideFree(&tok);
     int status = 0, len = 0;
-    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", 0, L"/backend-api/wham/usage", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
     HeapFree(GetProcessHeap(), 0, hdrs);
     SubsWin wins[2];
     int nwin = 0;
@@ -415,7 +418,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
     wideFree(&key);
     wideFree(&mid);
     int status = 0, len = 0;
-    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", 0, L"/api/monitor/usage/quota/limit", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
 
     if (!body) { subsSetState(idx, 0, 0); return 0; }
     jsmntok_t t[1024];
@@ -538,7 +541,7 @@ static long long subsIsoToMs(const char *s, int len) {
 }
 
 // POST via WinHTTP (the GET helper above is GET-only); returns the body.
-static char *subsHttpPost(const char *tag, const wchar_t *host, const wchar_t *path,
+static char *subsHttpPost(const char *tag, const wchar_t *host, int port, const wchar_t *path,
                           const wchar_t *headers, const char *body, int bodyLen,
                           int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
@@ -549,7 +552,9 @@ static char *subsHttpPost(const char *tag, const wchar_t *host, const wchar_t *p
     HINTERNET con = NULL, req = NULL;
     do {
         WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, insecure ? INTERNET_DEFAULT_HTTP_PORT : INTERNET_DEFAULT_HTTPS_PORT, 0);
+        con = WinHttpConnect(ses, host, port ? (INTERNET_PORT)port
+                                                    : (insecure ? INTERNET_DEFAULT_HTTP_PORT
+                                                                : INTERNET_DEFAULT_HTTPS_PORT), 0);
         if (!con) { writeLogA("subs agy: connect failed"); break; }
         req = WinHttpOpenRequest(con, L"POST", path, NULL, WINHTTP_NO_REFERER,
                                  WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
@@ -833,7 +838,7 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
         cid, cs, a->refresh);
     if (bl <= 0 || bl >= (int)sizeof(body)) return 0;
     int status = 0, len = 0;
-    char *resp = subsHttpPost("token", L"oauth2.googleapis.com", L"/token",
+    char *resp = subsHttpPost("token", L"oauth2.googleapis.com", 0, L"/token",
                               L"Content-Type: application/json", body, bl, 0, 20000, &status, &len);
     if (!resp || (status != 200 && status != 207)) {
         char dbg[64];
@@ -1245,7 +1250,7 @@ static DWORD WINAPI agyModelsThread(LPVOID lp) {
     char mbody[256];
     int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", j->project);
     if (ml <= 0 || ml >= (int)sizeof(mbody)) { j->resp = NULL; return 0; }
-    j->resp = subsHttpPost("models", j->host, L"/v1internal:fetchAvailableModels", j->hdrs,
+    j->resp = subsHttpPost("models", j->host, 0, L"/v1internal:fetchAvailableModels", j->hdrs,
                            mbody, ml, 0, j->timeoutMs, &j->st, &j->bl);
     return 0;
 }
@@ -1290,7 +1295,7 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
             char mbody[256];
             int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", project);
             if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
-            resp = subsHttpPost("models", hosts[h], L"/v1internal:fetchAvailableModels", hdrs,
+            resp = subsHttpPost("models", hosts[h], 0, L"/v1internal:fetchAvailableModels", hdrs,
                                 mbody, ml, 0, timeoutMs, &st, &bl);
         }
         attempted = 1;
@@ -1418,7 +1423,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         // the length MUST be the full literal: a hard-coded count that was 4
         // short truncated the JSON, so Google answered 400 on every call
         const char *assistBody = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
-        char *resp = subsHttpPost("assist", hosts[h], L"/v1internal:loadCodeAssist", hdrs,
+        char *resp = subsHttpPost("assist", hosts[h], 0, L"/v1internal:loadCodeAssist", hdrs,
             assistBody, (int)strlen(assistBody), 0, cfg->subsTimeoutMs, &st, &bl);
         if (cfg->debug) {
             char lb[160];
@@ -1645,6 +1650,58 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
     return 1;
 }
 
+// case-insensitive prefix compare (a hand-edited config writes HTTP://; URL
+// schemes are ASCII by definition, so folding A-Z is exact)
+static int subsPreI(const wchar_t *s, const wchar_t *p) {
+    while (*p) {
+        wchar_t a = *s, b = *p;
+        if (a >= L'A' && a <= L'Z') a += 32;
+        if (b >= L'A' && b <= L'Z') b += 32;
+        if (a != b) return 0;
+        s++;
+        p++;
+    }
+    return 1;
+}
+
+// one quota url into the pieces WinHTTP wants: the server name, the port
+// and the request path (query included). The SCHEME decides TLS, and a config
+// "insecure" flag may only AUTHORIZE the cleartext scheme - it must never turn
+// an https url into one. Returns 0 (and logs why) for anything else.
+static int subsCrackUrl(const wchar_t *url, wchar_t *host, int cchHost, int *port,
+                        wchar_t *path, int cchPath, int *tls) {
+    host[0] = 0; path[0] = 0; *port = 0; *tls = 0;
+    if (!url || !*url) return 0;
+    const wchar_t *rest;
+    if (subsPreI(url, L"http://")) { *tls = 0; rest = url + 7; }
+    else if (subsPreI(url, L"https://")) { *tls = 1; rest = url + 8; }
+    else { writeLogA("subs gen: unsupported url scheme"); return 0; }
+    // the host runs to the first '/', ':' (an explicit port) or end of string
+    const wchar_t *p = rest;
+    while (*p && *p != L'/' && *p != L':') p++;
+    int hl = (int)(p - rest);
+    if (hl <= 0 || hl >= cchHost) { writeLogA("subs gen: url host is empty or too long"); return 0; }
+    memcpy(host, rest, (size_t)hl * sizeof(wchar_t));
+    host[hl] = 0;
+    // an explicit :port (a bare colon with no digits is a config typo)
+    if (*p == L':') {
+        p++;
+        int n = 0, digits = 0;
+        while (*p >= L'0' && *p <= L'9') {
+            n = n * 10 + (*p - L'0');
+            p++;
+            digits++;
+            if (n > 65535) { writeLogA("subs gen: url port out of range"); return 0; }
+        }
+        if (!digits || n <= 0) { writeLogA("subs gen: url port is not a number"); return 0; }
+        *port = n;
+    }
+    // the path keeps its query string; "http://host" on its own means "/"
+    if (*p == L'/') lstrcpynW(path, p, cchPath);
+    else lstrcpynW(path, L"/", cchPath);
+    return 1;
+}
+
 // Fetch a provider declared entirely in config: one REST call, then the quota
 // windows lifted out of the response by JSON path. This is the escape hatch for
 // any subscription service the bar has no built-in adapter for.
@@ -1652,25 +1709,20 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
     const SubsProvider *sp = &cfg->subsProviders[idx];
     if (!sp->url || !*sp->url) { subsSetState(idx, 0, 0); return 0; }
 
-    // split the url into host + path (WinHTTP takes them separately)
-    wchar_t host[256], path[1024]; int insecure = sp->insecure;
-    const wchar_t *u = sp->url;
-    const wchar_t *hp = u;
-    if (wcsncmp(u, L"http://", 7) == 0) { insecure = 1; hp = u + 7; }
-    else if (wcsncmp(u, L"https://", 8) == 0) { hp = u + 8; }
-    else if (wcsncmp(u, L"https:", 6) == 0 || wcsncmp(u, L"http:", 5) == 0) {
-        writeLogA("subs gen: unsupported url scheme");
+    // host + port + path, and TLS only from the scheme
+    wchar_t host[256], path[1024]; int port = 0, tls = 0;
+    if (!subsCrackUrl(sp->url, host, 256, &port, path, 1024, &tls)) {
         subsSetState(idx, 0, 0);
         return 0;
     }
-    const wchar_t *sl = wcschr(hp, L'/');
-    if (!sl) { lstrcpynW(host, hp, 256); lstrcpynW(path, L"/", 16); }
-    else {
-        int hl = (int)(sl - hp); if (hl > 255) hl = 255;
-        memcpy(host, hp, (size_t)hl * sizeof(wchar_t)); host[hl] = 0;
-        lstrcpynW(path, sl, 1024);
+    // the flag authorizes the cleartext scheme; without it an http url is
+    // refused rather than sent with the token in the clear
+    int insecure = !tls;
+    if (!tls && !sp->insecure) {
+        writeLogA("subs gen: http url needs insecure: true");
+        subsSetState(idx, 0, 0);
+        return 0;
     }
-    if (!host[0]) { subsSetState(idx, 0, 0); return 0; }
 
     // resolve the auth entries into a header blob
     wchar_t *hdrs = NULL;
@@ -1716,25 +1768,22 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
             bodyLen = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, body, wl, NULL, NULL);
             if (bodyLen > 0) bodyLen--;
         }
-        resp = subsHttpPost("gen", host, path, hdrs, body, bodyLen, insecure, cfg->subsTimeoutMs, &st, &bl);
+        resp = subsHttpPost("gen", host, port, path, hdrs, body, bodyLen, insecure, cfg->subsTimeoutMs, &st, &bl);
         if (body) HeapFree(GetProcessHeap(), 0, body);
     } else {
-        resp = subsHttpGet("gen", L"chocobar", host, path, hdrs, insecure, cfg->subsTimeoutMs, &st, &bl);
+        resp = subsHttpGet("gen", L"chocobar", host, port, path, hdrs, insecure, cfg->subsTimeoutMs, &st, &bl);
     }
     HeapFree(GetProcessHeap(), 0, hdrs);
     if (cfg->debug) {
         char lb[160];
-        sprintf(lb, "[wizbar] subs gen %ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
+        // the host is user config, so the wide string can be far longer than the
+        // line: format it bounded (a long host simply truncates the log line)
+        snprintf(lb, sizeof(lb), "[wizbar] subs gen %ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
         writeLogA(lb);
     }
     if (!resp) { subsSetState(idx, 0, 0); return 0; }
     if (st == 401 || st == 403) {
         writeLogA("subs gen: 401/403 (auth rejected)");
-        HeapFree(GetProcessHeap(), 0, resp);
-        subsSetState(idx, 0, 0);
-        return 0;
-    }
-    if (sp->expectStatus && st != sp->expectStatus) {
         HeapFree(GetProcessHeap(), 0, resp);
         subsSetState(idx, 0, 0);
         return 0;
@@ -1930,8 +1979,9 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                     int off = sprintf(line, "[wizbar] subs[%d] %ls plan=%ls wins=%d stale=%d ::", i,
                                       lab, plan, wn, stale);
                     for (int k = 0; k < wn && off < 360; k++)
-                        off += sprintf(line + off, " [%ls rem=%d pct=%d used=%d total=%d]",
-                                       w[k].label, w[k].rem, w[k].pct, w[k].used, w[k].total);
+                        off += snprintf(line + off, sizeof(line) - (size_t)off,
+                                        " [%ls rem=%d pct=%d used=%d total=%d]",
+                                        w[k].label, w[k].rem, w[k].pct, w[k].used, w[k].total);
                     writeLogA(line);
                 }
             }
