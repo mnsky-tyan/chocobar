@@ -2122,6 +2122,14 @@ static void paintDash(HWND hwnd) {
         int innerW = w - 2 * padL;
         int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
         int shown = 0;
+        // how many panels will actually draw: the board must show EVERY enabled
+        // provider (0 = nothing configured, 5 is the supported max). The old
+        // fixed-height rows fit only four on this screen, so the fifth was
+        // silently dropped - count first, then size the row to fit.
+        int en = 0;
+        if (g_cfg.subsEnabled)
+            for (int pi2 = 0; pi2 < pn; pi2++)
+                if (subsProvEnabled(pi2)) en++;
         // ---- subscriptions board: one full-width panel per provider, that
         // provider's windows laid out left-to-right inside it.
         //
@@ -2131,12 +2139,28 @@ static void paintDash(HWND hwnd) {
         // antigravity rows appeared. Full-width rows with horizontal cells
         // show every window the provider reports.
         int headH = DX(40), footH = DX(26), bodyH = DX(112);
+        // Compress the row (body first, then footer, then head - the pies keep
+        // their share longest) until every enabled provider's panel fits the
+        // screen. The floors keep a 5-panel board legible.
+        if (en > 0) {
+            int avail = dashMaxH() - y - DX(24);
+            for (;;) {
+                if (en * (headH + bodyH + footH) + (en - 1) * gap <= avail) break;
+                if (bodyH > DX(72)) { bodyH -= DX(4); continue; }
+                if (footH > DX(16)) { footH -= DX(2); continue; }
+                if (headH > DX(28)) { headH -= DX(2); continue; }
+                break; // nothing left to give: maxPanels below guards the rest
+            }
+        }
         int panelH = headH + bodyH + footH;
         // the stack is bounded by the SCREEN, not the window: the content-fit
         // grows the board to its content, so a panel that fits on screen must
         // still be drawn (clipping by the current height would drop panels the
-        // board was about to grow enough to show)
-        int maxPanels = (dashMaxH() - y - DX(24)) / (panelH + gap);
+        // board was about to grow enough to show). The stack is
+        // n*(panelH+gap) - gap (no trailing gap), so the division has to add
+        // the gap back: without it a 5-panel stack that the compression loop
+        // just made fit still lost its last panel to the truncation.
+        int maxPanels = (dashMaxH() - y - DX(24) + gap) / (panelH + gap);
         if (maxPanels < 1) maxPanels = 1;
         for (int pi2 = 0; pi2 < pn; pi2++) {
             if (!g_cfg.subsEnabled || !subsProvEnabled(pi2)) continue; // master off or disabled: no panel (Electron parity)
@@ -2158,7 +2182,6 @@ static void paintDash(HWND hwnd) {
             int py2 = y + shown * (panelH + gap);
             // panel: card + head (dot, name, pill) + body (cells) + foot
             dashCard(dc, px2, py2, innerW, panelH, t.card, t.divider);
-            int headH = DX(40);
             dashCard(dc, px2, py2, innerW, headH, t.head, 0);
             // dashed head underline
             HPEN dpen = CreatePen(PS_DOT, 1, t.divider);
@@ -2276,9 +2299,14 @@ static void paintDash(HWND hwnd) {
                 int inkW = unk ? nw : nw + DX(1) + dashStrW(dc, L"%", fS10);
                 int cx0 = kx + (pieD - inkW) / 2;
                 int cyc = ky + pieD / 2;
-                dashStr(dc, cx0, cyc - DX(15), pctS, t.pinkDeep, fPct);
-                if (!unk) dashStr(dc, cx0 + nw + DX(1), cyc - DX(11), L"%", t.pinkDeep, fS10);
-                dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, cyc + DX(6), L"left", t.dim, fS9);
+                // centre the INK on the ring, not the glyph box: GDI puts the
+                // ink ~11 CSS px below the draw origin, so the old fixed
+                // offsets (15/11/6) left the number 3.5 CSS px low and the
+                // caption dragged the pair lower still (measured +6.5 CSS off
+                // centre in the captain's screenshot)
+                dashStr(dc, cx0, cyc - DX(18.5), pctS, t.pinkDeep, fPct);
+                if (!unk) dashStr(dc, cx0 + nw + DX(1), cyc - DX(14.5), L"%", t.pinkDeep, fS10);
+                dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, cyc + DX(2.5), L"left", t.dim, fS9);
                 // meta right of the pie, clipped to its own cell
                 int mx = kx + pieD + DX(12);
                 wchar_t up[20];
@@ -2335,6 +2363,9 @@ static void paintDash(HWND hwnd) {
         }
         // panels are fixed-height rows, so the stack's bottom is the content edge
         if (shown) g_dashContentH = y + shown * panelH + (shown - 1) * gap + DX(14);
+        // 0 providers: the board still shrinks to its single "not configured"
+        // line (it used to keep the previous board's height)
+        else g_dashContentH = y + DX(38) + DX(14);
     }
 
     DeleteObject(fTitle); DeleteObject(fBody); DeleteObject(fVal);
@@ -2467,12 +2498,6 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         dashFitToContent(); // the window is on screen: shrink now, not on a tick
         return 0;
     }
-    case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); }
-        return 0;
-    case WM_RBUTTONUP:
-        DestroyWindow(hwnd);
-        return 0;
     case WM_NCHITTEST: {
         LRESULT base = DefWindowProcW(hwnd, msg, wp, lp);
         if (base == HTCLIENT) {
@@ -2548,7 +2573,18 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_ACTIVATE:
+        if (g_cfg.debug) { char lb[80]; sprintf(lb, "[wizbar] dash WM_ACTIVATE wp=%d", (int)wp); writeLogA(lb); }
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); }
+        return 0;
+    case WM_RBUTTONUP:
+        if (g_cfg.debug) writeLogA("[wizbar] dash WM_RBUTTONUP");
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
+        if (g_cfg.debug) writeLogA("[wizbar] dash WM_DESTROY");
         KillTimer(hwnd, 1);
         g_dash = NULL;
         g_dashPainted = -1;
@@ -2574,7 +2610,7 @@ static void dashToggle(int type) {
         SetWindowPos(g_dash, NULL, (tsw - tw) / 2, (dashMaxH() + 40 - th2) / 2, tw, th2, SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
         UpdateWindow(g_dash); // repaint + content-fit at the new size, once
-        SetForegroundWindow(g_dash);
+        ShowWindow(g_dash, SW_SHOWNA); // visible, not activated (see above)
         return;
     }
     scanTokenCache(); // fresh numbers for the panel
@@ -2591,21 +2627,27 @@ static void dashToggle(int type) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassW(&wc);
     g_dashType = type;
-    // APPWINDOW: the Electron dash is a NORMAL window on purpose (taskbar +
-    // Alt-Tab entry) so activation never falls through to the terminal.
+    // TOOLWINDOW: the dashboard must NOT put a button in the taskbar (the
+    // captain's ask - the blank default icon there read as a second app).
+    // Tool windows still take the foreground normally, so clicking the board
+    // keeps working; it just stays out of the taskbar and Alt-Tab.
     // WS_VISIBLE is deliberately absent: the first paint (and the content-fit
     // resize it triggers) happens while the window is still hidden, so the
     // captain sees ONE window at its final size instead of a board that grows
     // into place.
-    g_dash = CreateWindowExW(WS_EX_APPWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
+    g_dash = CreateWindowExW(WS_EX_TOOLWINDOW, L"ChocobarDash", type == 0 ? L"Chocobar dashboard" : L"Chocobar subscriptions",
                              WS_POPUP, (sw - cw) / 2, (dashMaxH() + 40 - ch) / 2, cw, ch,
                              NULL, NULL, GetModuleHandleW(NULL), NULL);
     if (!g_dash) return;
     dashRoundCorners(g_dash);
     InvalidateRect(g_dash, NULL, FALSE);
     UpdateWindow(g_dash); // forces the WM_PAINT -> paint + fit, off screen
-    ShowWindow(g_dash, SW_SHOW);
-    SetForegroundWindow(g_dash);
+    // SW_SHOWNA: the board must be VISIBLE without taking the keyboard. The
+    // old SetForegroundWindow here stole focus from the followed terminal, so
+    // everything the captain typed next (" like") landed on the dashboard and
+    // his editor never saw it. A click on the board still activates it (the
+    // buttons and title-drag need that); Escape then closes it as before.
+    ShowWindow(g_dash, SW_SHOWNA);
 }
 
 // ---- hover tooltips (Electron: seg.title) -----------------------------------
@@ -2950,6 +2992,31 @@ static void autoStartSet(int on) {
     RegCloseKey(k);
 }
 
+// Menu width: the widest row label + padding + room for the autostart check
+// at the RIGHT edge. A fixed DX(210) left the drawer wider than its content
+// (the captain's "a little bit too big"); this tracks the labels instead.
+static int menuWidthPx(void) {
+    static int cached = 0;
+    static double cachedScale = 0;
+    if (cached && cachedScale == g_scale) return cached;
+    HDC dc = GetDC(NULL);
+    HFONT f = dashFont(9, FW_NORMAL);
+    HGDIOBJ of = SelectObject(dc, f);
+    int mx = 0;
+    for (int i = 0; i < MENU_N; i++) {
+        if (!kMenuItems[i].label) continue;
+        SIZE ts; GetTextExtentPoint32W(dc, kMenuItems[i].label, lstrlenW(kMenuItems[i].label), &ts);
+        if (ts.cx > mx) mx = ts.cx;
+    }
+    SelectObject(dc, of);
+    DeleteObject(f);
+    ReleaseDC(NULL, dc);
+    cached = mx + DX(8) + DX(18) + DX(8); // label + gutter + check + right pad
+    if (cached < DX(96)) cached = DX(96);
+    cachedScale = g_scale;
+    return cached;
+}
+
 static void showTrayMenu(HWND hwnd) {
     HMENU m = CreatePopupMenu();
     // Same items as the Electron bar menu (main.js buildChocobarMenu); each row
@@ -3157,9 +3224,9 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MEASUREITEMSTRUCT *mi = (MEASUREITEMSTRUCT *)lp;
         if (mi->CtlType != ODT_MENU) break;
         int idx = (int)mi->itemData;
-        if (idx < 0 || idx >= MENU_N) { mi->itemWidth = DX(210); mi->itemHeight = DX(24); return TRUE; }
-        if (!kMenuItems[idx].label) { mi->itemWidth = DX(210); mi->itemHeight = DX(7); }
-        else { mi->itemWidth = DX(210); mi->itemHeight = DX(28); }
+        if (idx < 0 || idx >= MENU_N) { mi->itemWidth = menuWidthPx(); mi->itemHeight = DX(18); return TRUE; }
+        if (!kMenuItems[idx].label) { mi->itemWidth = menuWidthPx(); mi->itemHeight = DX(5); }
+        else { mi->itemWidth = menuWidthPx(); mi->itemHeight = DX(21); }
         return TRUE;
     }
     case WM_DRAWITEM: {
@@ -3182,26 +3249,26 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DeleteObject(b);
         if (sel) { // leading marker ties the row to the bar's own hover pill
             HBRUSH mb = CreateSolidBrush(t.pinkDeep);
-            RECT mr = { r.left, r.top + DX(5), r.left + DX(3), r.bottom - DX(5) };
+            RECT mr = { r.left, r.top + DX(4), r.left + DX(2), r.bottom - DX(4) };
             FillRect(di->hDC, &mr, mb);
             DeleteObject(mb);
         }
-        HFONT f = dashFont(12, FW_NORMAL);
+        HFONT f = dashFont(9, FW_NORMAL);
         HGDIOBJ of = SelectObject(di->hDC, f);
         SetBkMode(di->hDC, TRANSPARENT);
         SetTextColor(di->hDC, sel ? t.pinkDeep : t.fg);
-        // "Start with Windows" carries a check in the gutter: the Run value is
-        // the state, so the mark is read live, never cached
-        int tx = r.left + DX(16);
-        if (kMenuItems[idx].cmd == 5 && autoStartEnabled()) {
-            HFONT fc = dashFont(12, FW_BOLD);
+        // "Start with Windows" carries a check at the RIGHT edge, clear of the
+        // label: the Run value is the state, so the mark is read live
+        int tick = (kMenuItems[idx].cmd == 5 && autoStartEnabled());
+        if (tick) {
+            HFONT fc = dashFont(9, FW_BOLD);
             SelectObject(di->hDC, fc);
-            RECT cr = { r.left + DX(6), r.top, r.left + DX(16), r.bottom };
-            DrawTextW(di->hDC, L"\u2713", -1, &cr, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            RECT cr = { r.right - DX(18), r.top, r.right - DX(6), r.bottom };
+            DrawTextW(di->hDC, L"\u2713", -1, &cr, DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
             SelectObject(di->hDC, f);
             DeleteObject(fc);
         }
-        RECT tr = { tx, r.top, r.right - DX(12), r.bottom };
+        RECT tr = { r.left + DX(8), r.top, r.right - (tick ? DX(24) : DX(8)), r.bottom };
         DrawTextW(di->hDC, kMenuItems[idx].label, -1, &tr,
                   DT_SINGLELINE | DT_LEFT | DT_VCENTER);
         SelectObject(di->hDC, of);
