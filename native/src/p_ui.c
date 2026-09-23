@@ -813,8 +813,9 @@ static void buildChips(void) {
             int low = g_m.battPct <= 20;
             swprintf(v, 48, L"%d%%", g_m.battPct);
             // charging reads green (theme.good), like the Electron bar's
-            // .seg-battery.on value; low still wins with warn red
-            addChipI(CT_BATTERY, 0, v, low, low ? g_cfg.warn : (g_m.battAc ? g_cfg.good : NULL), 0);
+            // .seg-battery.on value, and green WINS over the low warning:
+            // plugged in means the charge is rising, so red would be a lie
+            addChipI(CT_BATTERY, 0, v, low, g_m.battAc ? g_cfg.good : (low ? g_cfg.warn : NULL), 0);
             g_chips[g_chipCount - 1].iconSvg = SVG_BAT; // fill tracks the charge
         } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0);
     }
@@ -1683,14 +1684,37 @@ static void paintDash(HWND hwnd) {
         g_btnRefresh.right = bx; g_btnRefresh.left = bx - rw;
         g_btnRefresh.top = ty - DX(3); g_btnRefresh.bottom = ty + DX(11) + DX(6);
         bx -= rw + DX(6);
+        // Centre each label in its frame on BOTH axes. The frame is DX(20)
+        // tall and GDI's tmHeight is the whole line box, so the old fixed
+        // +DX(3) left the wording riding high in the frame (the "..."/"x"
+        // glyphs read as pinned to the top edge). Measure the SAME font the
+        // text is drawn with (fBtn), centre on the frame's mid-line.
+        TEXTMETRICW tm2; memset(&tm2, 0, sizeof(tm2));
+        HGDIOBJ ofm = SelectObject(dc, fBtn);
+        GetTextMetricsW(dc, &tm2);
+        SelectObject(dc, ofm);
         for (int bi2 = 1; bi2 <= 2; bi2++) {
             RECT *br = bi2 == 1 ? &g_btnRefresh : &g_btnClose;
             const wchar_t *tx = bi2 == 1 ? rf : cl;
+            // Horizontal: the refresh frame is deliberately sized for the
+            // word "refresh" so it never reflows under the cursor mid-click,
+            // which left the busy "..." huddled at the LEFT edge of a wide
+            // pill. Centre the advance width instead of padding DX(9).
+            int txOff = ((br->right - br->left) - dashStrW(dc, tx, fBtn)) / 2;
+            // Vertical: GDI's y is the top of the line box, so centre the
+            // ink block (ascent+descent). The ellipsis is the exception -
+            // its ink is ONLY the dots sitting on the baseline (about a
+            // third of the descent tall), so centring the block left them
+            // reading low; centre the baseline plus half a dot instead.
+            int ell = (bi2 == 1 && rf[0] == L'.');
+            int dotH = tm2.tmDescent / 3; if (dotH < 2) dotH = 2;
+            int tyOff = ell ? ((br->bottom - br->top) / 2) - tm2.tmAscent + dotH / 2
+                            : ((br->bottom - br->top) - (tm2.tmAscent + tm2.tmDescent)) / 2;
             if (g_btnHover == bi2) {
                 dashCard(dc, br->left, br->top, br->right - br->left, br->bottom - br->top, t.bg, t.pink);
-                dashStr(dc, br->left + DX(9), br->top + DX(3), tx, t.pinkDeep, fBtn);
+                dashStr(dc, br->left + txOff, br->top + tyOff, tx, t.pinkDeep, fBtn);
             } else {
-                dashStr(dc, br->left + DX(9), br->top + DX(3), tx, t.dim, fBtn);
+                dashStr(dc, br->left + txOff, br->top + tyOff, tx, t.dim, fBtn);
             }
         }
         g_tbBottom = g_btnRefresh.bottom + DX(10) + 1;
