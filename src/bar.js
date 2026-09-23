@@ -54,6 +54,46 @@ class BarWindow {
       }
     });
 
+    // Navigation lockdown, three layers because one is not enough. The bar
+    // renders ONE local file and has no legitimate destination: refusing to
+    // leave it keeps a debug-port (CDP) client or a stray renderer navigation
+    // from replacing the bar with a web page. A browser-side navigation is
+    // only stopped by the network lock in main.js (which leaves an error page),
+    // so a navigation that still lands anywhere else is undone here.
+    const ownFile = path.join(__dirname, '..', 'renderer', 'bar.html');
+    const isOwn = (u) => String(u).startsWith('file://');
+    const heal = () => { try { this.win.loadFile(ownFile); } catch (_) {} };
+    const lockNav = (wc) => {
+      if (!wc) return;
+      // Each hook is optional: a stubbed/partial webContents (tests, future
+      // Electron API drift) must never break window creation.
+      if (typeof wc.on === 'function') {
+        wc.on('will-navigate', (e, u) => { if (!isOwn(u)) e.preventDefault(); });
+        wc.on('will-redirect', (e, u) => { if (!isOwn(u)) e.preventDefault(); });
+        wc.on('did-navigate', (e, u) => { if (!isOwn(u)) heal(); });
+        wc.on('did-navigate-in-page', (e, u) => { if (!isOwn(u)) heal(); });
+        wc.on('did-fail-navigate', () => heal());
+      }
+      if (typeof wc.setWindowOpenHandler === 'function') {
+        wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+      }
+    };
+    lockNav(this.win.webContents);
+
+    // Safety net for the one path the events above cannot see: a request
+    // blocked at the network layer (a debug-port client navigating the bar)
+    // leaves the renderer on an error page WITHOUT firing any navigation
+    // event, so nothing would ever put the bar back. Poll the document's URL
+    // and reload our own file if it is ever anything else. The timer dies
+    // with the window (a leaked 1s timer per rebuild is not acceptable).
+    this._urlHealTimer = setInterval(() => {
+      try {
+        if (!this.win || this.win.isDestroyed() || !this.win.webContents) return;
+        const u = this.win.webContents.getURL();
+        if (u && !String(u).startsWith('file://')) this.win.loadFile(ownFile);
+      } catch (_) {}
+    }, 1000);
+
     this.hwnd = native.hwndNumberFromBuffer(this.win.getNativeWindowHandle());
     // Structural taskbar exclusion: WS_EX_TOOLWINDOW makes the shell skip the
     // window on EVERY enumeration, so no taskbar rebuild (explorer restart,
@@ -76,8 +116,8 @@ class BarWindow {
       this._shouldShow = false;
       // The heal interval must not outlive its window: main.js rebuilds the bar
       // as a NEW BarWindow on 'closed', and without this each rebuild would
-      // leak another 400ms timer doing no-op work forever.
-      if (this._healTimer) { clearInterval(this._healTimer); this._healTimer = null; }
+      // leak another timer doing no-op work forever.
+      if (this._urlHealTimer) { clearInterval(this._urlHealTimer); this._urlHealTimer = null; }
     });
 
     // Periodic size guard (see healSize) — heals any OS-side growth of the window.

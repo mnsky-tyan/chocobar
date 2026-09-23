@@ -163,9 +163,37 @@ function render() {
   if (panels.dataset.sig !== sig) {
     panels.dataset.sig = sig;
     panels.innerHTML = entries.map(([k, p], i) => panelHtml(k, p || {}, i)).join('');
+    // Plan count is NOT fixed: any number of wired providers lays out in one
+    // row (capped at 3 so a 4th wraps instead of squeezing the pies).
+    const cols = Math.max(1, Math.min(entries.length, 3));
+    panels.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
   }
   entries.forEach(([k, p], i) => renderProvider(k, p || {}, i));
   $('scan-info').textContent = `last scan ${state.lastScan ? new Date(state.lastScan).toLocaleTimeString() : '—'}`;
+  fitWindow();
+}
+
+// Frame the window to its content: the board is not user-resizable, so when
+// the panels need more height than the configured box (3 plans x several
+// windows each) it grows once to fit instead of scrolling. Width stays put.
+let fitPending = false;
+function fitWindow() {
+  if (fitPending) return;
+  fitPending = true;
+  const run = () => {
+    fitPending = false;
+    const doc = document.documentElement;
+    if (!doc) return;
+    const need = doc.scrollHeight;
+    const have = window.innerHeight;
+    if (need > have + 2 && window.wizbar && window.wizbar.fitHeight) {
+      window.wizbar.fitHeight(Math.min(need + 8, 900));
+    }
+  };
+  // Defer one frame so the new panels are laid out before measuring; a stub
+  // DOM without rAF (tests) just runs inline.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else run();
 }
 
 $('btn-close').addEventListener('click', () => window.wizbar.close());

@@ -1,6 +1,32 @@
 'use strict';
 // WizBar — slim acrylic status bar floating above the terminal + token tracker.
-const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut } = require('electron');
+const { app, Tray, Menu, ipcMain, nativeImage, shell, dialog, globalShortcut, session, screen } = require('electron');
+
+// --- network lockdown ---------------------------------------------------------
+// Every Chocobar window renders exactly one local file, so a network request
+// from any renderer is either a bug or a hijack attempt. The will-navigate
+// guard in lockWindowNavigation only stops RENDERER-initiated navigations: a
+// browser-side navigation (a CDP Page.navigate against a debug port) goes
+// around it entirely, which is how the bar got replaced by a web page twice.
+// Refusing the request at the network layer covers that path too - the window
+// keeps its own document. Main-process fetches (token/subs scans) use node,
+// not this session, so they are unaffected.
+//
+// Registered the moment the app allows it: session.defaultSession throws
+// "Session can only be received when app is ready" at module load, and the
+// guard must be in place BEFORE the first window loads anything.
+let _netLocked = false;
+function lockNetwork() {
+  if (_netLocked) return;
+  const s = session && (session.defaultSession || null);
+  if (!s || !s.webRequest || typeof s.webRequest.onBeforeRequest !== 'function') return;
+  _netLocked = true;
+  s.webRequest.onBeforeRequest((details, cb) => {
+    cb({ cancel: !String(details.url).startsWith('file://') });
+  });
+}
+if (app.isReady()) lockNetwork();
+else app.once('ready', lockNetwork);
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
@@ -11,6 +37,27 @@ const { TokenTracker } = require('./src/tokens');
 const { SubsTracker } = require('./src/subs');
 const { BarWindow } = require('./src/bar');
 const native = require('./src/native');
+
+// --- dead log sink guard -------------------------------------------------------
+// The bar is started by start-wizbar.vbs with stdout redirected. When that
+// pipe/file dies (rotated, truncated, or its reader closes) every console
+// write throws EPIPE, and Electron pops an "A JavaScript error occurred"
+// dialog PER LINE - the app logs every scan, so the dialogs never stop. A
+// dead log sink must never reach the user: swallow stream errors instead.
+// EPIPE is the dead-sink case and stays silent; any OTHER stream error still
+// means something is broken, so it is recorded in the debug log (which does
+// not depend on the dead stdout) instead of vanishing without a trace.
+for (const s of [process.stdout, process.stderr]) {
+  if (s && typeof s.on === 'function') {
+    s.on('error', (e) => {
+      if (e && e.code === 'EPIPE') return;
+      try {
+        fs.appendFileSync(path.join(APP_DIR, 'debug.log'),
+          new Date().toISOString() + ' stream error: ' + ((e && e.code) || e) + '\n');
+      } catch (_) {}
+    });
+  }
+}
 
 // --- single instance -----------------------------------------------------------
 if (!app.requestSingleInstanceLock()) {
@@ -168,6 +215,7 @@ function openSubs() {
     }
   });
   subsWin.loadFile(path.join(__dirname, 'renderer', 'subs.html'));
+  lockWindowNavigation(subsWin, path.join(__dirname, "renderer", "subs.html"));
   subsWin.once('ready-to-show', () => raiseDash(subsWin));
   subsWin.webContents.on('did-finish-load', () => {
     if (subsWin && !subsWin.isDestroyed()) {
@@ -215,6 +263,7 @@ function openDashboard() {
     }
   });
   dashWin.loadFile(path.join(__dirname, 'renderer', 'dash.html'));
+  lockWindowNavigation(dashWin, path.join(__dirname, "renderer", "dash.html"));
   dashWin.once('ready-to-show', () => raiseDash());
   // Data rides on did-finish-load (not ready-to-show, which only fires once
   // per window): a Reload chocobar re-fires this and re-seeds the fresh page.
@@ -509,6 +558,37 @@ function spawnBar() {
 
 let shuttingDown = false;
 
+// A Chocobar window renders exactly one local file: the bar, the token dash or
+// the subs board. None of them has any legitimate destination, so navigation is
+// refused outright. This also closes the door on a debug-port (CDP) client
+// driving a navigation into an app window - the bar is thin and always on
+// screen, so a hijacked one reads as the whole bar being replaced by a page.
+// Three layers, because one is not enough:
+//   1. will-navigate / will-redirect stop RENDERER-initiated navigations.
+//   2. lockNetwork() refuses the request at the network layer, which is the
+//      only thing that covers a browser-side (CDP Page.navigate) navigation.
+//   3. A navigation that still lands (blocked requests end on an error page)
+//      is undone here: the window reloads its own document.
+function lockWindowNavigation(win, ownFile) {
+  const wc = win && win.webContents;
+  if (!wc) return;
+  const isOwn = (u) => String(u).startsWith('file://');
+  const heal = () => {
+    try { wc.loadFile(ownFile); } catch (_) {}
+  };
+  // Each hook is optional: a partial webContents must never break a window.
+  if (typeof wc.on === 'function') {
+    wc.on('will-navigate', (e, u) => { if (!isOwn(u)) e.preventDefault(); });
+    wc.on('will-redirect', (e, u) => { if (!isOwn(u)) e.preventDefault(); });
+    wc.on('did-navigate', (e, u) => { if (!isOwn(u)) heal(); });
+    wc.on('did-navigate-in-page', (e, u) => { if (!isOwn(u)) heal(); });
+    wc.on('did-fail-navigate', () => heal());
+  }
+  if (typeof wc.setWindowOpenHandler === 'function') {
+    wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  }
+}
+
 let lastZSync = 0;
 const syncZ = (hwnd, force) => {
   const now = Date.now();
@@ -522,12 +602,12 @@ const syncZ = (hwnd, force) => {
 // the two drift apart. The foreground hook is the earliest possible signal
 // of that (it fires inside the activation), so it re-inserts immediately
 // and unconditionally - one SetWindowPos, no enumeration on the hot path.
-// A slow zGluedTo sweep is the safety net for anything the hook misses.
-// Hands-off during interactive drags.
+// A slow zGluedTo sweep is the safety net for anything the hook misses -
+// including mid-drag layer changes (a dragged pane keeps its z-band, and the
+// bar must stay glued to that band, not freeze behind it).
 const zDriftCheck = () => {
   if (process.platform !== 'win32') return;
   if (!tracker.hwnd || !bar || !bar.hwnd || !bar.win || bar.win.isDestroyed()) return;
-  if (native.inMoveSize()) return;
   if (!native.zGluedTo(bar.hwnd, tracker.hwnd)) syncZ(tracker.hwnd, true);
 };
 native.hookForegroundChange(() => {
@@ -584,6 +664,19 @@ function wireBar() {
 
   // renderer -> main
   ipcMain.handle('get-config', () => configManager.config);
+  // Content-fit height for the subscription board: the board is not
+  // user-resizable, so the renderer asks for a taller box when its panels
+  // need one (any number of wired plans). Registered once, not per open.
+  ipcMain.on('fit-subs-height', (e, h) => {
+    const w = e.sender.getOwnerBrowserWindow();
+    if (!w || w.isDestroyed()) return;
+    const want = Math.max(240, Math.min(900, Math.round(h) || 0));
+    const b = w.getBounds();
+    if (want === b.height) return;
+    const wa = screen.getDisplayMatching(b).workArea;
+    const newH = Math.min(want, wa.height - 80);
+    w.setBounds({ ...b, height: newH }, false);
+  });
   ipcMain.handle('get-theme', () => themePayload(configManager.config));
   ipcMain.handle('get-tokens', () => tokens ? tokens.aggregate() : null);
   ipcMain.handle('rescan-tokens', () => tokens ? tokens.rescan() : null);
