@@ -52,7 +52,10 @@ static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
         DWORD n = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
         if (!n || n >= MAX_PATH) { out[0] = 0; return; }
         lstrcpynW(out, up, outCch);
-        lstrcatW(out, in + 1);
+        // the remainder has to stay inside the caller's buffer: a long profile
+        // plus a long path would otherwise run off the end of it
+        int ul = lstrlenW(out);
+        if (ul < outCch) lstrcpynW(out + ul, in + 1, outCch - ul);
     } else {
         lstrcpynW(out, in, outCch);
     }
@@ -80,24 +83,29 @@ static wchar_t *subsJstr(const char *js, jsmntok_t *t, int obj, const char *key)
     return jstrTok(js, t, k, NULL);
 }
 
-// same, but the raw UTF-8 bytes (caller frees) - for values parsed in place
-// (ISO timestamps), where a wide round-trip would only add work
-static char *subsJstrRaw(const char *js, jsmntok_t *t, int obj, const char *key) {
-    int k = jobjGet(js, t, obj, key);
-    if (k < 0 || t[k].type != JSMN_STRING) return NULL;
-    int len = t[k].end - t[k].start;
+// the raw UTF-8 bytes of ONE ALREADY SELECTED token (caller frees), NULL if it
+// is not a string - for values parsed in place (ISO timestamps), where a wide
+// round-trip would only add work
+static char *subsJstrRawTok(const char *js, const jsmntok_t *t, int tok) {
+    if (tok < 0 || t[tok].type != JSMN_STRING) return NULL;
+    int len = t[tok].end - t[tok].start;
     char *out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 1);
     if (!out) return NULL;
-    memcpy(out, js + t[k].start, len);
+    memcpy(out, js + t[tok].start, (size_t)len);
     out[len] = 0;
     return out;
 }
 
+// same, but the string value of obj[key] (caller frees), NULL if absent
+static char *subsJstrRaw(const char *js, jsmntok_t *t, int obj, const char *key) {
+    return subsJstrRawTok(js, t, jobjGet(js, t, obj, key));
+}
+
 // ---- ChatGPT (wham/usage) ---------------------------------------------------
 // auth.json: { auth_mode: "chatgpt", tokens: { access_token: "..." } }
-static wchar_t *subsChatgptToken(int idx) {
+static wchar_t *subsChatgptToken(const Config *cfg, int idx) {
     wchar_t path[MAX_PATH];
-    const wchar_t *rawAuth = subsNz(g_cfg.subsProviders[idx].authPath);
+    const wchar_t *rawAuth = subsNz(cfg->subsProviders[idx].authPath);
     if (!rawAuth) rawAuth = L"~/.codex/auth.json";
     subsPathExpand(rawAuth, path, MAX_PATH);
     int len = 0;
@@ -126,8 +134,8 @@ static wchar_t *subsChatgptToken(int idx) {
 
 // ---- Z.ai key ---------------------------------------------------------------
 // config.json: { provider: { "builtin:zai-coding-plan": { enabled, options: { apiKey } } } }
-static wchar_t *subsZaiKey(int providerIdx, wchar_t **deviceMid) {
-    SubsProvider *sp = &g_cfg.subsProviders[providerIdx];
+static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceMid) {
+    const SubsProvider *sp = &cfg->subsProviders[providerIdx];
     wchar_t path[MAX_PATH];
     const wchar_t *rawCfg = subsNz(sp->configPath);
     if (!rawCfg) rawCfg = L"~/.zcode/v2/config.json";
@@ -318,8 +326,8 @@ void subsCredits(int i, int *avail, int *total) {
     LeaveCriticalSection(&g_subsLock);
 }
 
-static int subsFetchChatgpt(int idx) {
-    wchar_t *tok = subsChatgptToken(idx);
+static int subsFetchChatgpt(const Config *cfg, int idx) {
+    wchar_t *tok = subsChatgptToken(cfg, idx);
     if (!tok) { writeLogA("subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(idx, 0, 0); return 0; }
     // access_token is a multi-KB JWT: build the header block at its full size
     int need = 32 + lstrlenW(tok) + 64;
@@ -328,7 +336,7 @@ static int subsFetchChatgpt(int idx) {
     swprintf(hdrs, need, L"Authorization: Bearer %ls\r\nAccept: application/json", tok);
     wideFree(&tok);
     int status = 0, len = 0;
-    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, 0, g_cfg.subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
     HeapFree(GetProcessHeap(), 0, hdrs);
     SubsWin wins[2];
     int nwin = 0;
@@ -383,9 +391,9 @@ static int subsFetchChatgpt(int idx) {
     return 1;
 }
 
-static int subsFetchZai(int idx) {
+static int subsFetchZai(const Config *cfg, int idx) {
     wchar_t *mid = NULL;
-    wchar_t *key = subsZaiKey(idx, &mid);
+    wchar_t *key = subsZaiKey(cfg, idx, &mid);
     if (!key) { subsSetState(idx, 0, 0); return 0; }
     wchar_t hdrs[1600];
     swprintf(hdrs, 1600,
@@ -407,7 +415,7 @@ static int subsFetchZai(int idx) {
     wideFree(&key);
     wideFree(&mid);
     int status = 0, len = 0;
-    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, 0, g_cfg.subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
 
     if (!body) { subsSetState(idx, 0, 0); return 0; }
     jsmntok_t t[1024];
@@ -620,9 +628,9 @@ typedef struct {
 
 // auth.json: { "antigravity": { access, refresh, expires, projectId } }
 // Fallback: the IDE state.vscdb needle "apiKey":"ya29...." (no refresh).
-static int subsAgyReadAuth(int idx, AgyAuth *out, wchar_t *authPathOut, int cch) {
+static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *authPathOut, int cch) {
     memset(out, 0, sizeof(*out));
-    const wchar_t *raw = subsNz(g_cfg.subsProviders[idx].authPath);
+    const wchar_t *raw = subsNz(cfg->subsProviders[idx].authPath);
     if (!raw) raw = L"~/.pi/agent/auth.json";
     subsPathExpand(raw, authPathOut, cch);
     int len = 0;
@@ -651,7 +659,7 @@ static int subsAgyReadAuth(int idx, AgyAuth *out, wchar_t *authPathOut, int cch)
         if (*out->access || out->hasRefresh) return 1;
     }
     // IDE fallback: binary needle scan over the vscdb row blob
-    const wchar_t *vraw = subsNz(g_cfg.subsProviders[idx].vscdbPath);
+    const wchar_t *vraw = subsNz(cfg->subsProviders[idx].vscdbPath);
     if (vraw && *vraw) {
         wchar_t vpath[MAX_PATH];
         subsPathExpand(vraw, vpath, MAX_PATH);
@@ -1359,19 +1367,19 @@ static DWORD WINAPI agyQuotaThread(LPVOID lp) {
     return 0;
 }
 
-static int subsFetchAntigravity(int idx) {
+static int subsFetchAntigravity(const Config *cfg, int idx) {
     subsSetCredits(idx, -1, -1);
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
-    if (!subsAgyReadAuth(idx, &auth, authPath, MAX_PATH)) {
+    if (!subsAgyReadAuth(cfg, idx, &auth, authPath, MAX_PATH)) {
         writeLogA("subs agy: no login (open Antigravity once)");
         subsSetState(idx, 0, 0);
         return 0;
     }
     // refresh a near-expired token before any quota call
     if (auth.hasRefresh && (!*auth.access || auth.expires < subsNowMs() + AGY_REFRESH_MARGIN_MS)) {
-        const wchar_t *cid = idx >= 0 && idx < g_cfg.subsProviderCount ? g_cfg.subsProviders[idx].clientId : NULL;
-        const wchar_t *cs  = idx >= 0 && idx < g_cfg.subsProviderCount ? g_cfg.subsProviders[idx].clientSecret : NULL;
+        const wchar_t *cid = idx >= 0 && idx < cfg->subsProviderCount ? cfg->subsProviders[idx].clientId : NULL;
+        const wchar_t *cs  = idx >= 0 && idx < cfg->subsProviderCount ? cfg->subsProviders[idx].clientSecret : NULL;
         if (!subsAgyRefresh(&auth, cid, cs)) {
             writeLogA("subs agy: token refresh failed (re-login)");
             subsSetState(idx, 0, 0);
@@ -1398,7 +1406,7 @@ static int subsFetchAntigravity(int idx) {
         memset(&qj, 0, sizeof(qj));
         qj.hosts = hosts; qj.hdrs = hdrs;
         lstrcpynW(qj.project, auth.projectId, 128);
-        qj.timeoutMs = g_cfg.subsTimeoutMs; qj.debug = g_cfg.debug;
+        qj.timeoutMs = cfg->subsTimeoutMs; qj.debug = cfg->debug;
         lstrcpynW(usedProject, auth.projectId, 128);
         qth = CreateThread(NULL, 0, agyQuotaThread, &qj, 0, NULL);
     }
@@ -1411,8 +1419,8 @@ static int subsFetchAntigravity(int idx) {
         // short truncated the JSON, so Google answered 400 on every call
         const char *assistBody = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
         char *resp = subsHttpPost("assist", hosts[h], L"/v1internal:loadCodeAssist", hdrs,
-            assistBody, (int)strlen(assistBody), 0, g_cfg.subsTimeoutMs, &st, &bl);
-        if (g_cfg.debug) {
+            assistBody, (int)strlen(assistBody), 0, cfg->subsTimeoutMs, &st, &bl);
+        if (cfg->debug) {
             char lb[160];
             sprintf(lb, "[wizbar] subs agy loadCodeAssist host=%d st=%d bl=%d resp=%s", h, st, bl, resp ? "ok" : "NULL");
             writeLogA(lb);
@@ -1423,7 +1431,7 @@ static int subsFetchAntigravity(int idx) {
             int n = subsParseBig(resp, bl, &t);
             if (n > 0 && t[0].type == JSMN_OBJECT) {
                 int paid = jobjGet(resp, t, 0, "paidTier");
-                if (g_cfg.debug && paid < 0)
+                if (cfg->debug && paid < 0)
                     writeLogA("[wizbar] subs agy loadCodeAssist: 200 but no paidTier (plan stays generic)");
                 if (paid >= 0 && t[paid].type == JSMN_OBJECT) {
                     wchar_t *nm = subsJstr(resp, t, paid, "name");
@@ -1447,7 +1455,7 @@ static int subsFetchAntigravity(int idx) {
         HeapFree(GetProcessHeap(), 0, resp);
         if (st == 200 || st == 403) break; // definitive answer
     }
-    if (g_cfg.debug) { char lb[80]; sprintf(lb, "[wizbar] subs agy: loadCodeAssist phase %llu ms", GetTickCount64() - tAgy); writeLogA(lb); }
+    if (cfg->debug) { char lb[80]; sprintf(lb, "[wizbar] subs agy: loadCodeAssist phase %llu ms", GetTickCount64() - tAgy); writeLogA(lb); }
     if (!*auth.projectId) {
         writeLogA("subs agy: no project id");
         subsSetState(idx, 0, 0);
@@ -1487,7 +1495,7 @@ static int subsFetchAntigravity(int idx) {
         }
     }
     if (needModels) {
-        int r = agyFetchModels(hosts, hdrs, auth.projectId, g_cfg.subsTimeoutMs, g_cfg.debug,
+        int r = agyFetchModels(hosts, hdrs, auth.projectId, cfg->subsTimeoutMs, cfg->debug,
                                famRf, famReset, famHave);
         if (r < 0) {
             writeLogA("subs agy: models 401 (re-login)");
@@ -1495,7 +1503,7 @@ static int subsFetchAntigravity(int idx) {
             return 0;
         }
     }
-    if (g_cfg.debug) {
+    if (cfg->debug) {
         char lb[96];
         sprintf(lb, "[wizbar] subs agy: models phase %llu ms (overlapped=%d)",
                 GetTickCount64() - tAgy, !needModels);
@@ -1518,7 +1526,7 @@ static int subsFetchAntigravity(int idx) {
     if (nw > 0) {
         subsSetWins(idx, wins, nw);
         subsSetPlan(idx, plan);
-        if (g_cfg.debug) {
+        if (cfg->debug) {
             char lb[128];
             sprintf(lb, "[wizbar] subs agy: gemini=%d%% claude=%d%% (-1 = not reported)",
                     famRf[0] < 0 ? -1 : (int)(famRf[0] * 100.0 + 0.5),
@@ -1550,15 +1558,16 @@ static int subsJsonPath(const char *js, const jsmntok_t *t, int root, const char
             while (*p && *p != '.' && *p != '[') p++;
             int kl = (int)(p - ks);
             if (t[cur].type != JSMN_OBJECT) return -1;
-            int n = t[cur].size, k = cur + 1;
+            int n = t[cur].size, k = cur + 1, hit = -1;
             for (int i = 0; i < n; i++, k += 1 + jtokSpan(t, k + 1)) {
-                if (k >= 0 && t[k].type == JSMN_STRING && (t[k].end - t[k].start) == kl
-                    && strncmp(js + t[k].start, ks, (size_t)kl) == 0) {
-                    cur = k + 1;
-                    break;
-                }
-                if (i == n - 1) return -1;
+                if (t[k].type == JSMN_STRING && (t[k].end - t[k].start) == kl
+                    && strncmp(js + t[k].start, ks, (size_t)kl) == 0) { hit = k + 1; break; }
             }
+            // a parent with no children (or no matching one) yields nothing -
+            // staying on the parent would feed an unrelated token to the
+            // require guard and to every window path
+            if (hit < 0) return -1;
+            cur = hit;
         } else if (*p == '[') {
             p++;
             int idx = 0, any = 0;
@@ -1601,8 +1610,10 @@ static double subsPathDouble(const char *js, const jsmntok_t *t, int root, const
 static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
     wchar_t val[256]; val[0] = 0;
     if (ga->path && *ga->path) {
+        wchar_t path[MAX_PATH];
+        subsPathExpand(ga->path, path, MAX_PATH); // "~/..." like every other read
         int txtLen = 0;
-        char *txt = subsReadFileUtf8(ga->path, &txtLen);
+        char *txt = subsReadFileUtf8(path, &txtLen);
         if (!txt) return 0;
         // the file is small (an auth.json); parse it in place
         jsmntok_t *tk = NULL;
@@ -1610,7 +1621,7 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
         int v = -1;
         if (n > 0) v = jobjGet(txt, tk, 0, ga->key);
         if (v >= 0) {
-            char *raw = subsJstrRaw(txt, tk, v, NULL);
+            char *raw = subsJstrRawTok(txt, tk, v);
             // a non-string token still has to be readable as a value
             char tmp[256];
             int ln = tk[v].end - tk[v].start;
@@ -1637,8 +1648,8 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
 // Fetch a provider declared entirely in config: one REST call, then the quota
 // windows lifted out of the response by JSON path. This is the escape hatch for
 // any subscription service the bar has no built-in adapter for.
-static int subsFetchGeneric(int idx) {
-    SubsProvider *sp = &g_cfg.subsProviders[idx];
+static int subsFetchGeneric(const Config *cfg, int idx) {
+    const SubsProvider *sp = &cfg->subsProviders[idx];
     if (!sp->url || !*sp->url) { subsSetState(idx, 0, 0); return 0; }
 
     // split the url into host + path (WinHTTP takes them separately)
@@ -1700,15 +1711,18 @@ static int subsFetchGeneric(int idx) {
             int wl = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, NULL, 0, NULL, NULL);
             body = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)wl);
             if (!body) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
+            // the conversion reports the terminator: Content-Length must be the
+            // bytes actually sent, or the request carries a trailing NUL
             bodyLen = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, body, wl, NULL, NULL);
+            if (bodyLen > 0) bodyLen--;
         }
-        resp = subsHttpPost("gen", host, path, hdrs, body, bodyLen, insecure, g_cfg.subsTimeoutMs, &st, &bl);
+        resp = subsHttpPost("gen", host, path, hdrs, body, bodyLen, insecure, cfg->subsTimeoutMs, &st, &bl);
         if (body) HeapFree(GetProcessHeap(), 0, body);
     } else {
-        resp = subsHttpGet("gen", L"chocobar", host, path, hdrs, insecure, g_cfg.subsTimeoutMs, &st, &bl);
+        resp = subsHttpGet("gen", L"chocobar", host, path, hdrs, insecure, cfg->subsTimeoutMs, &st, &bl);
     }
     HeapFree(GetProcessHeap(), 0, hdrs);
-    if (g_cfg.debug) {
+    if (cfg->debug) {
         char lb[160];
         sprintf(lb, "[wizbar] subs gen %ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
         writeLogA(lb);
@@ -1774,7 +1788,7 @@ static int subsFetchGeneric(int idx) {
         if (gw->reset[0]) {
             int r = subsJsonPath(resp, tk, 0, gw->reset);
             if (r >= 0) {
-                char *rt = subsJstrRaw(resp, tk, r, NULL);
+                char *rt = subsJstrRawTok(resp, tk, r);
                 if (rt) {
                     wins[nw].resetAt = subsIsoToMs(rt, (int)strlen(rt));
                     HeapFree(GetProcessHeap(), 0, rt);
@@ -1789,7 +1803,7 @@ static int subsFetchGeneric(int idx) {
     if (sp->planPath[0]) {
         int r = subsJsonPath(resp, tk, 0, sp->planPath);
         if (r >= 0) {
-            char *pn = subsJstrRaw(resp, tk, r, NULL);
+            char *pn = subsJstrRawTok(resp, tk, r);
             if (pn) { MultiByteToWideChar(CP_UTF8, 0, pn, -1, plan, 48); HeapFree(GetProcessHeap(), 0, pn); }
         }
     }
@@ -1835,19 +1849,19 @@ long long subsFetchedEpochMs(void) { return g_subsFetchedEpoch; }
 // one provider's fetch, dispatched by type. Runs on its own thread when
 // more than one provider is enabled (see the cycle below): the cycle time is
 // then the slowest provider instead of the sum of all of them.
-static void subsProviderFetch(int i) {
-    switch (g_cfg.subsProviders[i].type) {
-        case 0:  subsFetchChatgpt(i);    break;
-        case 1:  subsFetchZai(i);        break;
-        case 3:  subsFetchGeneric(i);    break;
-        default: subsFetchAntigravity(i); break;
+static void subsProviderFetch(const Config *cfg, int i) {
+    switch (cfg->subsProviders[i].type) {
+        case 0:  subsFetchChatgpt(cfg, i);    break;
+        case 1:  subsFetchZai(cfg, i);        break;
+        case 3:  subsFetchGeneric(cfg, i);    break;
+        default: subsFetchAntigravity(cfg, i); break;
     }
 }
 
-typedef struct { int idx; } SubsJob;
+typedef struct { int idx; const Config *cfg; } SubsJob;
 static DWORD WINAPI subsProviderThread(LPVOID lp) {
     SubsJob *j = (SubsJob *)lp;
-    subsProviderFetch(j->idx);
+    subsProviderFetch(j->cfg, j->idx);
     return 0;
 }
 
@@ -1856,9 +1870,14 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
     for (;;) {
         if (g_cfg.subsEnabled) { // master switch off: no polls, no requests
             int anyEnabled = 0;
-            int n = g_cfg.subsProviderCount;
-            if (n > MAX_SUBS) n = MAX_SUBS;
             unsigned long long tCycle = GetTickCount64();
+            // Every fetch holds a SubsProvider* for the whole (multi-second)
+            // request, so the cycle pins ONE config generation: a reload that
+            // lands mid-fetch retires that generation instead of freeing it,
+            // and the whole cycle reads one consistent snapshot.
+            const Config *view = cfgPin();
+            int n = view->subsProviderCount;
+            if (n > MAX_SUBS) n = MAX_SUBS;
             // Fan the enabled providers out over their own threads. Every fetch
             // is independent (each writes only its own slot through the locked
             // setters), so the wall time of a cycle drops from the SUM of the
@@ -1866,17 +1885,18 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             // captain's three providers.
             HANDLE th[MAX_SUBS]; SubsJob jobs[MAX_SUBS]; int nth = 0;
             for (int i = 0; i < n; i++) {
-                if (!g_cfg.subsProviders[i].enabled) continue;
+                if (!view->subsProviders[i].enabled) continue;
                 anyEnabled = 1;
-                if (g_cfg.debug) {
+                if (view->debug) {
                     char lb[64];
-                    sprintf(lb, "[wizbar] subs cycle: provider %d type %d enter", i, g_cfg.subsProviders[i].type);
+                    sprintf(lb, "[wizbar] subs cycle: provider %d type %d enter", i, view->subsProviders[i].type);
                     writeLogA(lb);
                 }
                 jobs[nth].idx = i;
+                jobs[nth].cfg = view;
                 HANDLE h = CreateThread(NULL, 0, subsProviderThread, &jobs[nth], 0, NULL);
                 if (h) th[nth++] = h;
-                else subsProviderFetch(i); // could not spawn: do it inline
+                else subsProviderFetch(view, i); // could not spawn: do it inline
             }
             if (nth > 1) {
                 WaitForMultipleObjects((DWORD)nth, th, TRUE, INFINITE);
@@ -1886,6 +1906,7 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                 WaitForSingleObject(th[0], INFINITE);
                 CloseHandle(th[0]);
             }
+            cfgUnpin(); // every fetch is done: a retired generation can go now
             if (!anyEnabled) {
                 for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
             }

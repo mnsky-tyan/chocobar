@@ -382,7 +382,9 @@ long tokLiveScan(void) {
         if (s->sessionsDir[0] == L'~') {
             DWORD n = GetEnvironmentVariableW(L"USERPROFILE", dir, MAX_PATH);
             if (!n) continue;
-            lstrcatW(dir, s->sessionsDir + 1);
+            // the rest of the path is config data of any length: it has to be
+            // truncated into the room that is left, not appended
+            lstrcpynW(dir + n, s->sessionsDir + 1, MAX_PATH - (int)n);
         } else lstrcpynW(dir, s->sessionsDir, MAX_PATH);
         // pi nests its sessions one directory per project; a flat store has
         // no subdirectories, so recursing is harmless there and required here.

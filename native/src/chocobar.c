@@ -245,7 +245,13 @@ typedef struct {
 double g_scale = 1.0;        // display scale (dpi/96): config values are in DIPs (shared)
 double g_iconOpacity = 1.0;  // theme.iconOpacity/100 (used by the icon renderer)
 
-static Config g_cfg;
+// The live config is swapped wholesale by loadConfig while the provider fetch
+// threads (each holds a SubsProvider* across a multi-second HTTP call) and the
+// command-chip poll read it, so it lives behind an indirection: a swap installs
+// a new generation and retires the previous one, and the last reader frees it.
+static Config g_cfgGen0;              // generation 0: the static buffer, never heap-freed
+static Config *g_cfgCur = &g_cfgGen0;
+#define g_cfg (*g_cfgCur)
 static FILETIME g_cfgMtime;
 static int g_cfgLoaded = 0;
 
@@ -501,6 +507,63 @@ static void freeConfig(Config *c) {
         wideFree(&c->icons[i].name); wideFree(&c->icons[i].d);
     }
     c->iconCount = 0;
+}
+
+// ---- config lifetime -------------------------------------------------------
+// A reader pins the generation it is about to walk; loadConfig retires the
+// generation it replaces and the last reader out frees it, so an in-flight
+// fetch can never read a provider struct the UI thread has already freed.
+static CRITICAL_SECTION g_cfgGenLock;
+static long g_cfgGenRefs = 0;
+// generations a reader may still walk, newest last (empty whenever nobody pins)
+static Config **g_cfgRetired = NULL;
+static int g_cfgRetiredN = 0, g_cfgRetiredCap = 0;
+
+static const Config *cfgPin(void) {
+    EnterCriticalSection(&g_cfgGenLock);
+    const Config *v = g_cfgCur;
+    g_cfgGenRefs++;
+    LeaveCriticalSection(&g_cfgGenLock);
+    return v;
+}
+
+static void cfgUnpin(void) {
+    EnterCriticalSection(&g_cfgGenLock);
+    if (--g_cfgGenRefs <= 0) {
+        g_cfgGenRefs = 0;
+        while (g_cfgRetiredN > 0) {
+            Config *r = g_cfgRetired[--g_cfgRetiredN];
+            freeConfig(r);
+            if (r != &g_cfgGen0) HeapFree(GetProcessHeap(), 0, r);
+        }
+    }
+    LeaveCriticalSection(&g_cfgGenLock);
+}
+
+// remember a replaced generation until its last reader is done
+static void cfgRetire(Config *old) {
+    if (g_cfgRetiredN == g_cfgRetiredCap) {
+        int cap = g_cfgRetiredCap ? g_cfgRetiredCap * 2 : 8;
+        Config **p = (Config **)HeapReAlloc(GetProcessHeap(), 0, g_cfgRetired,
+                                            (SIZE_T)cap * sizeof(Config *));
+        if (!p) return; // cannot be tracked: lose it rather than free a live one
+        g_cfgRetired = p;
+        g_cfgRetiredCap = cap;
+    }
+    g_cfgRetired[g_cfgRetiredN++] = old;
+}
+
+// install a freshly parsed generation (caller keeps no reference to it)
+static void cfgInstall(Config *next) {
+    EnterCriticalSection(&g_cfgGenLock);
+    Config *old = g_cfgCur;
+    g_cfgCur = next;
+    if (g_cfgGenRefs > 0) cfgRetire(old); // readers still walk it
+    else {
+        freeConfig(old);
+        if (old != &g_cfgGen0) HeapFree(GetProcessHeap(), 0, old);
+    }
+    LeaveCriticalSection(&g_cfgGenLock);
 }
 
 static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {

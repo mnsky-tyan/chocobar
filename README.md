@@ -162,8 +162,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 ```json
 "sources": [
   { "app": "pi",  "path": "~/.pi/agent/sessions",  "enabled": true, "recursive": true },
-  { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
-  { "app": "zcode", "path": "~/.zcode/cli/db/db.sqlite", "enabled": false }
+  { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true }
 ]
 ```
 
