@@ -962,8 +962,11 @@ static void buildChips(void) {
             lstrcpynW(txt, g_customText[ci], 96);
             // warn band: outside [warnBelow, warnAbove] the text goes warn colour.
             // The band is on the command's RAW output, not the formatted text -
-            // "temp $v" and "$v C" both parse as 0 in the formatted string.
-            if (cc->warnAbove >= 0 || cc->warnBelow >= 0) {
+            // "temp $v" and "$v C" both parse as 0 in the formatted string. An
+            // empty raw string means no poll has produced a value yet, and
+            // _wtof reads THAT as 0 too, so the band would colour the chip from
+            // the very first paint a "warnBelow" that 0 happens to fall under.
+            if ((cc->warnAbove >= 0 || cc->warnBelow >= 0) && g_customRaw[ci][0]) {
                 double v = _wtof(g_customRaw[ci]);
                 if (cc->warnAbove >= 0 && v > cc->warnAbove) warn = 1;
                 if (cc->warnBelow >= 0 && v < cc->warnBelow) warn = 1;
