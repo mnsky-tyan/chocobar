@@ -120,6 +120,7 @@ typedef struct {
     wchar_t *terminalTitle;   // substring match on the terminal's window title
     wchar_t *clockFormat;
     int showTray;
+    int autoStart;            // fresh installs register the Run value (default on)
     int debug;                 // general.debug: extra scan logging
 
     int subsEnabled, subsIntervalMin, subsTimeoutMs, subsRotateSec;
@@ -316,6 +317,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->mGpu = c->mCpu = c->mCpuTemp = c->mRam = c->mVolume = c->mBattery = c->mClock = 1;
     c->cpuWarnAt = 85; c->ramWarnAt = 90; c->tempWarnAt = 85;
     c->showTray = 1;
+    c->autoStart = 1;
     c->debug = 0;
     c->clockFormat = wideDup(L"{MMM} {dd} ({Wkk}) {HH}:{mm}");
     c->subsEnabled = 0; c->subsIntervalMin = 2; c->subsTimeoutMs = 20000; c->subsProviderCount = 0;
@@ -572,6 +574,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     int general = jobjGet(js, t, root, "general");
     if (general >= 0) {
         c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
+        c->autoStart = jboolDefault(js, t, jobjGet(js, t, general, "autoStart"), 1);
         c->debug = jboolDefault(js, t, jobjGet(js, t, general, "debug"), 0);
     }
 }
