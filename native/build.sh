@@ -24,5 +24,5 @@ nix shell \
   nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
   nixpkgs#pkgsCross.mingwW64.buildPackages.binutils \
   nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads \
-  -c sh -c "x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c -o chocobar.exe -Ivendor -L$MCFGTHREAD_LIB -ldwmapi -ld2d1 -ldwrite -lpdh -lcomctl32 -lole32 -luuid -lgdi32 -ld3d11 -ldxgi -ldcomp -lwinhttp -lmsimg32 -liphlpapi -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
+  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -ld2d1 -ldwrite -lpdh -lcomctl32 -lole32 -luuid -lgdi32 -ld3d11 -ldxgi -ldcomp -lwinhttp -lmsimg32 -liphlpapi -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
 echo "built: $(ls -la chocobar.exe | awk '{print $5}') bytes"

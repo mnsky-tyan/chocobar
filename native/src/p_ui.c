@@ -1,8 +1,24 @@
 // ------------------------------------------------------------------ ui ----
-// append-only diagnostics file; used for crashes and D2D failures only
+// append-only diagnostics file; used for crashes and D2D failures only.
+// The path follows the user profile (the config lives there too) - never a
+// hardcoded home, or a release build on any other machine logs nowhere.
 static void writeLogA(const char *s) {
-    HANDLE h = CreateFileW(L"C:\\Users\\tyanw\\.wizbar\\native.log",
-                           FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+    static int ensured = 0;
+    wchar_t path[MAX_PATH], home[MAX_PATH];
+    if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) && home[0])
+        swprintf(path, MAX_PATH, L"%ls\\.wizbar\\native.log", home);
+    else {
+        GetTempPathW(MAX_PATH, path);
+        lstrcatW(path, L"chocobar-native.log");
+    }
+    if (!ensured) { // the folder does not exist on a first run
+        wchar_t dir[MAX_PATH];
+        lstrcpynW(dir, path, MAX_PATH);
+        wchar_t *slash = wcsrchr(dir, L'\\');
+        if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
+        ensured = 1;
+    }
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     SetFilePointer(h, 0, NULL, FILE_END);
     DWORD w;
@@ -3476,6 +3492,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     SetUnhandledExceptionFilter(crashHandler);
     HANDLE mutex = CreateMutexW(NULL, TRUE, APP_MUTEX);
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0; // single instance
+    writeLogA("chocobar " CB_VER_STR " start");
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     // per-monitor-v2 DPI awareness: DWM frame bounds and GetWindowRect must
