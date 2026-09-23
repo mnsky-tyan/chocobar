@@ -447,8 +447,18 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   subscription dashboard, edit config, open config folder, reload, quit).
 - Bar edge padding is 16/18 CSS px (`padL`/`padR` in repaintBar), matching
   `#bar { padding: 0 18px 0 16px }`. The rounded corners need it too.
-- Battery value color: `low ? warn : (battAc ? good : NULL)` - green while
-  charging, red only when low.
+- Battery value color: `battAc ? good : (low ? warn : NULL)` - charging green
+  OUTRANKS the low warning red (captain's call 2026-09-23: plugged in means
+  the charge is rising, so red would be a lie). Red only when low AND on
+  battery.
+- Dashboard button labels (refresh/close) are CENTRED in their frames, both
+  axes, measured with the same fBtn they are drawn with. The refresh frame
+  stays sized for the word "refresh" (no reflow mid-click), so the busy
+  "..." must be centred by advance width or it huddles at the left edge of
+  the wide pill. Vertical: GDI's y is the line-box top, so centre the ink
+  block (ascent+descent); the ellipsis is the exception - its ink is only
+  the dots ON the baseline (~tmDescent/3 tall), so it centres the baseline
+  plus half a dot. Verified live: both labels within 1px of frame centre.
 - **Verifying the native bar without a screen**: CopyFromScreen dies the moment
   the session is locked (`OpenInputDesktop` returns 0 and you capture the lock
   screen - it reads as "the bar went black"), and PrintWindow on the LAYERED
