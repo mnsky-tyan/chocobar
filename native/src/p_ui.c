@@ -2607,10 +2607,13 @@ static void dashToggle(int type) {
         int tsw = GetSystemMetrics(SM_CXSCREEN);
         if (tw > tsw - 40) tw = tsw - 40;
         if (th2 > dashMaxH()) th2 = dashMaxH();
-        SetWindowPos(g_dash, NULL, (tsw - tw) / 2, (dashMaxH() + 40 - th2) / 2, tw, th2, SWP_NOZORDER | SWP_NOACTIVATE);
+        // HWND_TOP raises the board above the terminal and every other normal
+        // window; SWP_NOACTIVATE keeps the keyboard with the terminal. Both are
+        // needed - SetForegroundWindow alone stole the captain's keystrokes,
+        // and SW_SHOWNA alone left the board sunk behind his windows.
+        SetWindowPos(g_dash, HWND_TOP, (tsw - tw) / 2, (dashMaxH() + 40 - th2) / 2, tw, th2, SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
         UpdateWindow(g_dash); // repaint + content-fit at the new size, once
-        ShowWindow(g_dash, SW_SHOWNA); // visible, not activated (see above)
         return;
     }
     scanTokenCache(); // fresh numbers for the panel
@@ -2642,12 +2645,15 @@ static void dashToggle(int type) {
     dashRoundCorners(g_dash);
     InvalidateRect(g_dash, NULL, FALSE);
     UpdateWindow(g_dash); // forces the WM_PAINT -> paint + fit, off screen
-    // SW_SHOWNA: the board must be VISIBLE without taking the keyboard. The
-    // old SetForegroundWindow here stole focus from the followed terminal, so
-    // everything the captain typed next (" like") landed on the dashboard and
-    // his editor never saw it. A click on the board still activates it (the
-    // buttons and title-drag need that); Escape then closes it as before.
-    ShowWindow(g_dash, SW_SHOWNA);
+    // Raise the board to the top of the z-order WITHOUT activating it.
+    // HWND_TOP lifts it above the terminal and every other normal window (the
+    // captain's "it sinks behind my windows"), while SWP_NOACTIVATE keeps the
+    // keyboard where he was typing - the old SetForegroundWindow here made his
+    // next keystrokes (" like") land on the dashboard instead of his editor.
+    // The bar stays topmost and above the board; a click on the board still
+    // activates it (the buttons and title-drag need that), and Esc closes it.
+    SetWindowPos(g_dash, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 // ---- hover tooltips (Electron: seg.title) -----------------------------------
