@@ -348,9 +348,10 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Providers fetch CONCURRENTLY: `subsThreadProc` starts one thread per enabled
   provider (WinHTTP, AUTOMATIC_PROXY) and waits for them, because every fetch
   is independent and each writes only its own slot through the locked setters -
-  a cycle costs the slowest provider, not the sum (5.9s -> 1.9s measured). The
-  UI timer only reads the latest state; HTTP failures log one line to
-  native.log.
+  a cycle costs the slowest provider, not the sum (5.9s -> 1.9s END TO END on
+  the captain's box with three providers; the fanout step alone measured 2.6s,
+  as the comment in `subsThreadProc` records). The UI timer only reads the
+  latest state; HTTP failures log one line to native.log.
 - Antigravity (type 2) reads the pi auth store `~/.pi/agent/auth.json` key
   `antigravity` ({access, refresh, expires(epoch MS), projectId}) and
   refreshes with Google's public desktop-client pair; grouped quota summary
@@ -598,9 +599,12 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   (a) `Get-Process LogonUI` tells you whether you are looking at a lock screen
   at all - check it BEFORE trusting any capture; (b) PrintWindow works on the
   NON-layered dash/subs popups (ChocobarDash), so dashboard changes are still
-  visually verifiable; (c) for the bar itself, a `-DDBG_CHIPS` build that dumps
-  the chip table (align/L/R/w/ico/cp/text) after layout is the only ground
-  truth - strip it again afterwards, it logs once per paint.
+  visually verifiable; (c) the layered bar is verified by GEOMETRY
+  (`GetWindowRect`, and `WindowFromPoint` for hit areas) or a `general.debug`
+  log line, never by pixels - the full recipe is in native/README.md
+  "Verifying on the machine". There is no chip-dump build flag: for the chip
+  table, drop a temporary `writeLogA` in `chipClick` (p_ui.c) printing
+  `g_chips[idx].r` and the chip type, then strip it again.
 - Config gotchas found in his `~/.wizbar/config.json`: the shortcut module key
   was missing entirely (bolt chip silently absent) and the pet lived under
   `modules.remielle`, a name the parser no longer reads - it must be
