@@ -1684,8 +1684,10 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t **buf, int *cap, int *used
     HeapFree(GetProcessHeap(), 0, tmp);
     int ok = 0;
     if (val && *val) {
-        // the header line needs room for the fixed parts plus the whole secret
-        int need = *used + lstrlenW(ga->header) + lstrlenW(ga->prefix) + lstrlenW(val) + 3;
+        // the header line needs room for the fixed parts, the whole secret,
+        // the CRLF AND the terminator: swprintf returns -1 and leaves the line
+        // half-written if it does not all fit
+        int need = *used + lstrlenW(ga->header) + lstrlenW(ga->prefix) + lstrlenW(val) + 5;
         if (need >= *cap) {
             int nc = *cap;
             while (nc <= need) nc *= 2;
@@ -1693,8 +1695,9 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t **buf, int *cap, int *used
             if (nb) { *buf = nb; *cap = nc; }
             else { HeapFree(GetProcessHeap(), 0, val); return 0; }
         }
-        *used += swprintf(*buf + *used, *cap - *used, L"%ls: %ls%ls\r\n",
-                          ga->header, ga->prefix, val);
+        int n = swprintf(*buf + *used, *cap - *used, L"%ls: %ls%ls\r\n",
+                         ga->header, ga->prefix, val);
+        if (n > 0) *used += n; // never let a negative return poison the length
         ok = 1;
     }
     HeapFree(GetProcessHeap(), 0, val);
@@ -1712,7 +1715,7 @@ static int subsPreI(const wchar_t *s, const wchar_t *p) {
         s++;
         p++;
     }
-    return 1;
+    return *s != 0; // the remainder must exist: "https" is not "https://"
 }
 
 // one quota url into the pieces WinHTTP wants: the server name, the port
@@ -1890,21 +1893,14 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
         if (wins[nw].rem >= 0 && (loRem < 0 || wins[nw].rem < loRem)) loRem = wins[nw].rem;
         nw++;
     }
-    // the plan name is a plain string at a path, read while the tree is alive
-    wchar_t plan[48]; plan[0] = 0;
-    if (sp->planPath[0]) {
-        int r = subsJsonPath(resp, tk, 0, sp->planPath);
-        if (r >= 0) {
-            char *pn = subsJstrRawTok(resp, tk, r);
-            if (pn) { MultiByteToWideChar(CP_UTF8, 0, pn, -1, plan, 48); HeapFree(GetProcessHeap(), 0, pn); }
-        }
-    }
     HeapFree(GetProcessHeap(), 0, tk);
     HeapFree(GetProcessHeap(), 0, resp);
 
     if (nw > 0) {
         subsSetWins(idx, wins, nw);
-        subsSetPlan(idx, plan[0] ? plan : ((sp->label && *sp->label) ? sp->label : L"generic"));
+        // the panel head is the config label (a plan name would be one more
+        // path to configure); "generic" only when even that is missing
+        subsSetPlan(idx, (sp->label && *sp->label) ? sp->label : L"generic");
         subsSetState(idx, loRem, 1);
         return 1;
     }

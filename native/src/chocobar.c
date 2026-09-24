@@ -204,7 +204,6 @@ typedef struct {
     wchar_t *headerBlob;   // static "Name: value\r\n" lines, pre-joined
     int insecure;          // 1 = allow plain http (sends the token in clear)
     char requirePath[MAX_GEN_PATH]; // response must contain this path
-    char planPath[MAX_GEN_PATH];    // plan display name
     int nAuth; GenAuth auth[MAX_GEN_AUTH];
     int nWin;  GenWin  win[MAX_GEN_WIN];
 } SubsProvider;
@@ -450,8 +449,6 @@ static void genParse(SubsProvider *sp, const char *js, const jsmntok_t *t, int o
     sp->insecure  = jboolDefault(js, t, jobjGet(js, t, obj, "insecure"), 0);
     jstrCopyA(sp->requirePath, sizeof(sp->requirePath), js, t,
               jobjGet(js, t, obj, "require"), "");
-    jstrCopyA(sp->planPath, sizeof(sp->planPath), js, t,
-              jobjGet(js, t, obj, "planPath"), "");
     // auth may be one object or a list of them (api key + bearer, say)
     int a = jobjGet(js, t, obj, "auth");
     if (a >= 0) {
@@ -916,7 +913,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->dashH = jintTok(js, t, jobjGet(js, t, dash, "height"), c->dashH);
         if (c->dashW < 360) c->dashW = 360; if (c->dashH < 240) c->dashH = 240;
     }
-        int arr = jobjGet(js, t, subs, "providers");
+        int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
         if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
             int n2 = t[arr].size;
             if (n2 > MAX_SUBS) n2 = MAX_SUBS;
@@ -927,7 +924,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
                     memset(sp, 0, sizeof(*sp));
                     int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
-                    wchar_t *ty = subs == -1 ? NULL : jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
+                    wchar_t *ty = jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
                     sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
                              : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
                              : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
