@@ -68,7 +68,7 @@ Point it somewhere else with `chocobar.exe --config <path>` or the `WIZBAR_CONFI
 
 Everything below is optional: delete a key and the built-in default applies. Sizes are CSS pixels (the bar scales them by the display DPI), colors are `#RRGGBB`.
 
-Every `Default` in the tables below is that built-in fallback, and so is the complete starting point at the end of this section. The template the bar writes on a first run ships a softer look on purpose - a taller bar, the `Segoe Print` font, a pastel tint - so that is what a new install opens with; deleting a key from it brings the fallback listed below back.
+Every `Default` in the tables below is that built-in fallback, and so is the complete starting point at the end of this section. The template the bar writes on a first run ships a softer look on purpose - a taller bar, the `Segoe Print` font, a pastel tint, and a clock without the weekday - and it leaves the token scan and the subscription board switched off, so an untouched install reads nothing; deleting a key from it brings the fallback listed below back.
 
 ### `bar` - the strip itself
 
@@ -335,7 +335,7 @@ Per source, the raw numbers come from the provider's own usage records:
 | `mimo` | assistant message `tokens` from the local desktop API | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
 | `subscription` | your plan-usage JSON (`used` / `total` per plan) | n/a (credits, not tokens) | never mixed into token totals |
 
-Exact read sites, for reference:
+Exact read sites, for reference. The shipped bar reads whatever `tokens.sources[]` declares, in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`). The sites below are the retired Electron app's readers, kept because they pin the same per-store semantics:
 
 - zcode: `scripts/zcode_query.py` (the SQL) and `_scanZcode` in `src/tokens.js`
 - zai/pi sessions: `_readSessionTail` in `src/tokens.js`
@@ -372,14 +372,25 @@ The suite covers portable readers, neutral defaults, token aggregation, subscrip
 
 ## Layout
 
+The shipped bar is the native Win32 build in `native/`. The `main.js` tree below it is the retired Electron app it replaced - kept for reference; its old config surface is what "Keys the native build ignores" documents.
+
 ```text
-main.js            app entry, tray, IPC, lifecycle, and reload action
-src/config.js      defaults and hot-reloaded user config
-src/tracker.js     terminal detection and follow state machine
-src/native.js      native bindings and portable readers
-src/metrics.js     system metric polling
-src/tokens.js      local usage adapters and aggregation
-src/bar.js         bar BrowserWindow
-renderer/          bar and dashboard HTML, CSS, JavaScript, and preloads
-scripts/           launchers and regression suites
+native/src/chocobar.c   entry, config parser, wWinMain
+native/src/p_metrics.c  cpu / ram / temp / volume / battery / gpu / pet polls
+native/src/p_subs.c     subscription quota fetchers (WinHTTP)
+native/src/p_icons.c    chip icons (flattened SVG paths)
+native/src/p_tokens.c   live session-log scan and byte cursors
+native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
+native/src/p_utils.c    logging, string, and config helpers
+native/README.md        native build, run, and verification notes
+
+main.js                 app entry, tray, IPC, lifecycle, and reload action
+src/config.js           defaults and hot-reloaded user config
+src/tracker.js          terminal detection and follow state machine
+src/native.js           native bindings and portable readers
+src/metrics.js          system metric polling
+src/tokens.js           local usage adapters and aggregation
+src/bar.js              bar BrowserWindow
+renderer/               bar and dashboard HTML, CSS, JavaScript, and preloads
+scripts/                launchers, store queries, and regression suites
 ```
