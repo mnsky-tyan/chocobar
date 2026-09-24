@@ -737,7 +737,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                     t_GdipSetSmoothingMode(g, 6);
                     float fw = pct <= 0 ? 0.0f : 12.4f * (float)(bucket * 2) / 100.0f;
                     if (fw < 0.9f) fw = 0.9f; // never zero-width sliver floor
-                    int low = (pct < 10);
+                    int low = (pct < 10) && !ac; // charging outranks the red fill too
                     COLORREF fc = low ? warn : accent;
                     unsigned int alpha = low ? 230u : 191u; // 0.9 / 0.75
                     GpPath *fp = NULL;
