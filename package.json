@@ -1,7 +1,7 @@
 {
   "name": "wizbar",
   "productName": "Chocobar",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Slim acrylic system status bar floating above the terminal, with cross-CLI token usage tracking",
   "license": "MIT",
   "scripts": {
