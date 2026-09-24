@@ -588,6 +588,43 @@ static void cfgInstall(Config *next) {
     LeaveCriticalSection(&g_cfgGenLock);
 }
 
+// the aggregation key: an explicit app name, capacity-capped at the 19
+// chars every sink stores, else derived from the store path
+static void tokAppSet(TokSource *ts, const wchar_t *app) {
+    if (app && *app) {
+        int i = 0;
+        for (; app[i] && i < (int)sizeof(ts->app) - 1; i++) ts->app[i] = (char)app[i];
+        ts->app[i] = 0;
+    } else {
+        tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));
+    }
+}
+
+// the rest of a source entry, shared by the array form and the converted
+// legacy object form. Returns 1 when the entry is a usable source (it has a
+// store and a key); a sessionless entry is dropped instead of counted.
+static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj) {
+    // recursion defaults ON: a flat store has no subdirectories to descend
+    // into, a nested one needs it
+    ts->recursive = jboolDefault(js, t, jobjGet(js, t, obj, "recursive"), 1);
+    int fl = jobjGet(js, t, obj, "fields");
+    if (fl >= 0 && t[fl].type == JSMN_OBJECT) {
+        tokFieldCopy(ts->kIn,    sizeof(ts->kIn),    js, t, fl, "input",     "input");
+        tokFieldCopy(ts->kOut,   sizeof(ts->kOut),   js, t, fl, "output",    "output");
+        tokFieldCopy(ts->kCr,    sizeof(ts->kCr),    js, t, fl, "cacheRead", "cacheRead");
+        tokFieldCopy(ts->kCw,    sizeof(ts->kCw),    js, t, fl, "cacheWrite","cacheWrite");
+        tokFieldCopy(ts->kTs,    sizeof(ts->kTs),    js, t, fl, "timestamp", "timestamp");
+        tokFieldCopy(ts->kModel, sizeof(ts->kModel), js, t, fl, "model",     "model");
+    } else {
+        lstrcpyA(ts->kIn, "input"); lstrcpyA(ts->kOut, "output");
+        lstrcpyA(ts->kCr, "cacheRead"); lstrcpyA(ts->kCw, "cacheWrite");
+        lstrcpyA(ts->kTs, "timestamp"); lstrcpyA(ts->kModel, "model");
+    }
+    if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) return 1;
+    wideFree(&ts->sessionsDir);
+    return 0;
+}
+
 static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     memset(c, 0, sizeof(*c));
     c->height = 24; c->gap = 8; c->fontSize = 12; c->backgroundAlpha = 110;
@@ -838,39 +875,37 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     // (~/.pi/agent/sessions -> "pi"). It is the aggregation key
                     // and the tokens.labels lookup key.
                     wchar_t *app = jstrTok(js, t, jobjGet(js, t, k, "app"), NULL);
-                    if (app && *app) {
-                        // the copy is capacity-driven so the key can never be
-                        // longer than the 19 chars every sink accepts
-                        int i2 = 0;
-                        for (; app[i2] && i2 < (int)sizeof(ts->app) - 1; i2++) ts->app[i2] = (char)app[i2];
-                        ts->app[i2] = 0;
-                    } else {
-                        tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));
-                    }
+                    tokAppSet(ts, app);
                     wideFree(&app);
-                    // recursion defaults ON: a flat store simply has no
-                    // subdirectories to descend into, a nested one needs it.
-                    ts->recursive = jboolDefault(js, t, jobjGet(js, t, k, "recursive"), 1);
-                    // field names default to the pi/zai shape; override for a
-                    // harness that spells them differently (prompt_tokens etc.)
-                    int fl = jobjGet(js, t, k, "fields");
-                    if (fl >= 0 && t[fl].type == JSMN_OBJECT) {
-                        tokFieldCopy(ts->kIn,    sizeof(ts->kIn),    js, t, fl, "input",     "input");
-                        tokFieldCopy(ts->kOut,   sizeof(ts->kOut),   js, t, fl, "output",    "output");
-                        tokFieldCopy(ts->kCr,    sizeof(ts->kCr),    js, t, fl, "cacheRead", "cacheRead");
-                        tokFieldCopy(ts->kCw,    sizeof(ts->kCw),    js, t, fl, "cacheWrite","cacheWrite");
-                        tokFieldCopy(ts->kTs,    sizeof(ts->kTs),    js, t, fl, "timestamp", "timestamp");
-                        tokFieldCopy(ts->kModel, sizeof(ts->kModel), js, t, fl, "model",     "model");
-                    } else {
-                        lstrcpyA(ts->kIn, "input"); lstrcpyA(ts->kOut, "output");
-                        lstrcpyA(ts->kCr, "cacheRead"); lstrcpyA(ts->kCw, "cacheWrite");
-                        lstrcpyA(ts->kTs, "timestamp"); lstrcpyA(ts->kModel, "model");
-                    }
-                    if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) c->tokSrcCount++;
-                    else wideFree(&ts->sessionsDir);
+                    if (tokSourceFinish(ts, js, t, k)) c->tokSrcCount++;
                 }
                 // advance k past this element
                 k += jtokSpan(t, k);
+            }
+        } else if (srcs >= 0 && t[srcs].type == JSMN_OBJECT) {
+            // pre-array configs wrote sources as an OBJECT keyed by app
+            // ({"pi": {"sessionsDir": ...}}). Without this branch such a
+            // config yields zero sources with no word, so the chip and the
+            // dashboard silently keep serving the stale cache seed. Convert it:
+            // the key becomes the app, sessionsDir the store, enabled carries
+            // over. Entries without a sessionsDir (the old zcode/opencode
+            // sqlite stores) are skipped exactly as they always were.
+            writeLogA("[wizbar] tokens: sources uses the legacy object form - "
+                      "converting to the array form; update config.json");
+            int k = srcs + 1;
+            for (int j = 0; j < t[srcs].size && c->tokSrcCount < MAX_TOK_SRC; j++) {
+                // object children are key+value PAIRS
+                if (t[k].type == JSMN_STRING && t[k+1].type == JSMN_OBJECT) {
+                    TokSource *ts = &c->tokSrc[c->tokSrcCount];
+                    memset(ts, 0, sizeof(*ts));
+                    ts->enabled = jboolDefault(js, t, jobjGet(js, t, k+1, "enabled"), 1);
+                    ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, k+1, "sessionsDir"), NULL);
+                    wchar_t *app = jstrTok(js, t, k, NULL); // the key is the app
+                    tokAppSet(ts, app);
+                    wideFree(&app);
+                    if (tokSourceFinish(ts, js, t, k+1)) c->tokSrcCount++;
+                }
+                k += 1 + jtokSpan(t, k+1); // key + whole value subtree
             }
         }
     }
