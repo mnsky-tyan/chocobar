@@ -164,10 +164,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Native config surface (all hot-reload): theme colors incl iconColor +
   iconOpacity + heatmap[5], bar.radius/backgroundAlpha/tint/font, dashboard
   + subs popup sizes, tokens.cachePath override + tokens.appFilter
-  (harness allowlist for the chip/dash), subs providers/interval/timeout
-  (which plans to check), modules toggles + warnAt, custom chips (label/
-  icon/color/title/command/toggle), terminal.className/title. Template
-  (writeTemplate) documents all of it.
+  (harness allowlist for the chip/dash), terminal.className/title.
+  The rest of the surface is the agnostic part and the README's Configuration
+  section owns it: `tokens.sources[]` (any harness = one config entry),
+  `subs.providers[].type: "generic"`, and the command-output custom chips
+  (`intervalMs`/`format`/`warnAbove`/`warnBelow`). The first-run template
+  (writeTemplate) ships every one of those keys with an inline annotation.
 - Screenshot verification of Windows windows only works while the session is
   UNLOCKED; when locked, captures show the lock screen for every window.
   PW captures of the LAYERED bar return the raw premultiplied DIB (tint
@@ -279,9 +281,10 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`,
   `tokens.heatmapDays`, `theme.surfaces`, `terminal.reattachToExisting`, and
   `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores are
-  SQLite and reach the board only through the `tokens.cachePath` seed; the live
-  scan covers `sources.zai` and `sources.pi` JSONL only). `bar.align` is 1=right,
-  2=left (there is no "center").
+  SQLite and reach the board only through the `tokens.cachePath` seed). What the
+  live scan covers is NOT a fixed list: it walks every entry of the
+  `tokens.sources[]` array, so any harness the user declares is scanned.
+  `bar.align` is 1=right, 2=left (there is no "center").
 - `subs` supports 0-5 providers per the captain's ask (MAX_SUBS stays 6); one
   antigravity entry = one panel with two rows.
 
@@ -342,8 +345,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.
-- Fetches run on a worker thread (WinHTTP, AUTOMATIC_PROXY); the UI timer
-  only reads the latest state. HTTP failures log one line to native.log.
+- Providers fetch CONCURRENTLY: `subsThreadProc` starts one thread per enabled
+  provider (WinHTTP, AUTOMATIC_PROXY) and waits for them, because every fetch
+  is independent and each writes only its own slot through the locked setters -
+  a cycle costs the slowest provider, not the sum (5.9s -> 1.9s measured). The
+  UI timer only reads the latest state; HTTP failures log one line to
+  native.log.
 - Antigravity (type 2) reads the pi auth store `~/.pi/agent/auth.json` key
   `antigravity` ({access, refresh, expires(epoch MS), projectId}) and
   refreshes with Google's public desktop-client pair; grouped quota summary
@@ -638,11 +645,13 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   dot-directory anywhere -> the store folder's own name. Both separators are
   accepted and doubled separators yield no component.
 - The bar reads the Electron app's `~/.wizbar/token-cache.json` as the HISTORY
-  SEED, then folds in everything newer from the live JSONL session stores
-  (`~/.pi/agent/sessions/**`, `~/.zai/agent/sessions/*`) via a per-file BYTE
-  cursor in `~/.wizbar/token-cursors.json`. Only records with `ts > cacheMaxTs`
-  are counted, so nothing is double counted. The Electron app is retired, so
-  this is now the only thing keeping "Today" non-zero.
+  SEED, then folds in everything newer from the live JSONL session stores -
+  whichever ones `tokens.sources[]` declares (not a hardcoded pi/zai pair: a new
+  harness is a config entry, and `recursive` decides whether that store is
+  walked flat or per project) - via a per-file BYTE cursor in
+  `~/.wizbar/token-cursors.json`. Only records with `ts > cacheMaxTs` are
+  counted, so nothing is double counted. The Electron app is retired, so this
+  is now the only thing keeping "Today" non-zero.
 - **`tokLiveInit()` MUST run before `loadConfig()`** in wWinMain. loadConfig
   rebuilds the chips, which runs the FIRST token scan, and that scan is what
   populates the cursors; loading them afterwards wiped the in-memory set, so the
@@ -737,7 +746,7 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   loses its last character. This clipped "CLAUDE/GPT WEEK" to "CLAUDE/GPT WEE".
 - The subs panel pie is sized from the WIDEST window label (`cellW - labNeed -
   DX(20)`), never by fixed tiers: a pie that takes the whole cell clips the
-  label. Providers with 4 windows get a smaller pie, never a dropped window.
+  label. Providers with many windows get a smaller pie, never a dropped window.
 - Table name columns must end at the first numeric column (`xs[4] - DX(6)`),
   not a hard-coded width - a fixed `DX(150)` ellipsized real model ids
   ("xiaomi/mimo-x-flash-preview") even in a 500px card.

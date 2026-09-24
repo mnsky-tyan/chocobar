@@ -5,9 +5,11 @@
 // froze at the moment it died (the captain's "token dashboard is stale, still
 // 0" - the cache's last record was 2h old and local midnight had rolled over).
 //
-// This file reads the session stores the Electron app used to scan - pi and
-// zai are plain JSONL, so no SQLite is needed - and merges the NEW records into
-// the aggregate the Electron cache already provides:
+// This file reads whatever session stores the user declares in
+// tokens.sources[] - any harness that logs per-message usage as JSONL, with the
+// six key NAMES taken from each source's `fields` (so a harness that spells them
+// differently needs no code change) - and merges the NEW records into the
+// aggregate the Electron cache already provides:
 //
 //   * the Electron cache is still the history seed (zcode/opencode/mimo live
 //     in SQLite and stay as the cache last wrote them),
