@@ -17,8 +17,11 @@ memory and CPU figures are the ones the top-level README quotes.
 
 Phase 2 progress: the token analytics chips + dashboards and the
 subscription board are DONE (`paintDash` / `dashToggle`, ported 1:1 from
-`renderer/dash.css` + `subs.css`). Still open: bluetooth battery, autostart
-writing.
+`renderer/dash.css` + `subs.css`). Autostart writing is done as well
+(`general.autoStart` writes the HKCU Run value on a first run; afterwards the
+tray menu's item is the control). Bluetooth stays unimplemented on purpose -
+`modules.bluetooth` is an ignored Electron-era key (README "Keys the native
+build ignores").
 
 ## Build (from WSL, cross-compiled)
 
@@ -35,7 +38,7 @@ assembled file.
 ## Run
 
 ```
-chocobar-native.exe --config C:\Users\<you>\.wizbar\personal.json
+chocobar.exe --config C:\Users\<you>\.wizbar\personal.json
 ```
 
 Single-instance; a second launch exits silently. The window starts
@@ -57,8 +60,12 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
   drawn explicitly (`paint(g_bar)` in wWinMain after `initRender`);
   otherwise the bar stays invisible forever.
 - The bar FOLLOWS the terminal, so screen captures at probed coordinates
-  race the follow loop (stale rect = black/empty screenshots).
-  `PrintWindow` on the `ChocobarBar` hwnd is the reliable verification.
+  race the follow loop (stale rect = black/empty screenshots). The bar itself
+  is `WS_EX_LAYERED`: `PrintWindow` on it returns an all-black bitmap (it
+  renders through `UpdateLayeredWindow`, so it has nothing to paint into a DC).
+  Verify the NON-layered dashboard / subs popups with `PrintWindow`, and the
+  bar itself by geometry (`GetWindowRect` / `WindowFromPoint`) or a debug log
+  line - see "Verifying on the machine" below.
 - Icons are flattened SVG path data (viewBox 24, stroke-width 2.2), rendered
   with GDI+ (`SmoothingModeAntiAlias8x8`, round caps/joins) into per-icon
   premultiplied DIB caches and `AlphaBlend`ed - never hand-redraw them, port
@@ -80,10 +87,10 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 
 ## Verifying on the machine
 
-`native_probe2.js` (koffi through electron-as-node, DPI-aware) checks the
-bar exists, is visible, uncloaked, and sits directly above the terminal.
-Screenshot verification only works while the session is UNLOCKED - when
-locked, captures show the lock screen for every window, which once sent a
-debugging session chasing phantom "invisible window" bugs. Kill the bar
-only via `taskkill /IM chocobar-native.exe /F` (targeted; never blanket
-taskkill powershell).
+Check the session is UNLOCKED first (`Get-Process LogonUI`): when locked,
+captures show the lock screen for every window, which once sent a debugging
+session chasing phantom "invisible window" bugs. `PrintWindow` on the
+`ChocobarDash` popups verifies the dashboards; the bar itself is layered, so
+verify it by geometry (`GetWindowRect`, and `WindowFromPoint` for hit areas)
+or a `general.debug` log line, not by pixels. Kill the bar only via
+`taskkill /IM chocobar.exe /F` (targeted; never blanket taskkill powershell).
