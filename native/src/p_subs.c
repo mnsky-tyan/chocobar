@@ -949,8 +949,8 @@ static BOOL subsAgyCmdLine(DWORD pid, const wchar_t *needle, wchar_t *out, int c
                 tmp[rd / 2] = 0;
                 // validate: looks like a command line (quoted path or drive letter)
                 BOOL pathlike = (tmp[0] == L'"') ||
-                                ((tmp[0] >= L'A' && tmp[0] <= L'Z') || (tmp[0] >= L'a' && tmp[0] <= L'z')) &&
-                                (tmp[1] == L':') && (tmp[2] == L'\\' || tmp[2] == L'/');
+                                (((tmp[0] >= L'A' && tmp[0] <= L'Z') || (tmp[0] >= L'a' && tmp[0] <= L'z')) &&
+                                 (tmp[1] == L':') && (tmp[2] == L'\\' || tmp[2] == L'/'));
                 if (!pathlike) continue;
                 if (needle && wcsstr(tmp, needle)) {
                     int n = (int)(rd / 2);
@@ -1132,6 +1132,7 @@ static int subsAgyQuotaKey(const wchar_t *label) {
 }
 
 static int subsAgyLocalApply(int idx, int fam, int port, char *resp, int bl) {
+    (void)fam;
     jsmntok_t *t = NULL;
     int n = subsParseBig(resp, bl, &t);
     if (n <= 0 || t[0].type != JSMN_OBJECT) {
@@ -1766,6 +1767,7 @@ static int subsCrackUrl(const wchar_t *url, wchar_t *host, int cchHost, int *por
 // windows lifted out of the response by JSON path. This is the escape hatch for
 // any subscription service the bar has no built-in adapter for.
 static int subsFetchGeneric(const Config *cfg, int idx) {
+    if (idx < 0 || idx >= MAX_SUBS) return 0; // every caller clamps to MAX_SUBS
     const SubsProvider *sp = &cfg->subsProviders[idx];
     if (!sp->url || !*sp->url) { subsSetState(idx, 0, 0); return 0; }
 
@@ -1829,8 +1831,9 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
     if (cfg->debug) {
         char lb[160];
         // the host is user config, so the wide string can be far longer than the
-        // line: format it bounded (a long host simply truncates the log line)
-        snprintf(lb, sizeof(lb), "[wizbar] subs gen %ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
+        // line: format it bounded - a precision AND the buffer bound mean a long
+        // host truncates the log line instead of tripping the analyzer
+        snprintf(lb, sizeof(lb), "[wizbar] subs gen %.92ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
         writeLogA(lb);
     }
     if (!resp) { subsSetState(idx, 0, 0); return 0; }

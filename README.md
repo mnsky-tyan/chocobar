@@ -278,7 +278,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
               "labels": { "pi": "pi-wsl" },
               "sources": [ { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
                            { "app": "pi",  "path": "~/.pi/agent/sessions", "enabled": true,
-                             "recursive": true } ] } },
+                             "recursive": true } ] },
   "subs": { "enabled": false, "intervalMinutes": 2, "fetchTimeoutMs": 20000,
             "rotateSec": 60, "width": 880, "height": 580,
             "providers": [

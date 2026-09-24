@@ -9,11 +9,11 @@ Electron bar uses (`runbar.ps1` passes the personal config).
 ## Status
 
 Phase 1 scope works end to end: acrylic bar, terminal follow with z-glue,
-chips (cpu/cputemp/ram/volume/battery/clock + pet/shortcut/custom), tray,
-config hot-reload, template materialization, single instance, no-activate
-click behavior. Measured on the deployment machine: ~47 MB working set /
-34 MB private / one process (Electron baseline was 408 MB / 245 MB / four
-processes).
+chips (cpu/cputemp/ram/volume/battery/clock + pet/shortcut/custom, including
+command-output chips), tray, config hot-reload, template materialization,
+single instance, no-activate click behavior. Measured on the deployment
+machine: one process (against Electron's four, 408 MB / 245 MB); the current
+memory and CPU figures are the ones the top-level README quotes.
 
 Phase 2 progress: the token analytics chips + dashboards and the
 subscription board are DONE (`paintDash` / `dashToggle`, ported 1:1 from
@@ -23,7 +23,7 @@ writing.
 ## Build (from WSL, cross-compiled)
 
 ```sh
-native/build.sh        # -> native/chocobar.exe (~245 KB)
+native/build.sh        # -> native/chocobar.exe
 ```
 
 Requires Nix (`pkgsCross.mingwW64` gcc/binutils + mcfgthreads). `build.sh`
