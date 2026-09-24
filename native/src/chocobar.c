@@ -132,6 +132,31 @@ static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key)
 static int jtokSpan(const jsmntok_t *t, int i);
 static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_subs
 
+// one bounded, NUL-terminated UTF-8 copy of a config string. Every reader of
+// the aggregation key decodes it back as UTF-8 (aggRecord's appFilter loop,
+// appLabelW), so a copy that narrowed each wchar to one byte would store
+// invalid bytes for a non-ASCII name and the key would never round-trip - the
+// allowlist would silently drop every record of that source. The copy also
+// stops inside cch and only on a whole character, because a half-copied
+// sequence is a key no lookup can ever match either.
+static void tokUtf8Copy(const wchar_t *w, char *out, int cch) {
+    out[0] = 0;
+    if (!w || !*w || cch < 2) return;
+    char tmp[128];
+    int cap = (int)sizeof(tmp);
+    if (cap > cch - 1) cap = cch - 1;
+    int take = lstrlenW(w), n = 0;
+    while (take > 0) {
+        n = WideCharToMultiByte(CP_UTF8, 0, w, take, tmp, cap, NULL, NULL);
+        if (n > 0) break; // the whole prefix fit: complete sequences only
+        if (w[take - 1] >= 0xD800 && w[take - 1] <= 0xDBFF) take--; // half a surrogate pair
+        take--;
+    }
+    if (n <= 0) return;
+    memcpy(out, tmp, (size_t)n);
+    out[n] = 0;
+}
+
 // derive an aggregate key from a session-store path when the config does not
 // name one: ~/.pi/agent/sessions -> "pi", ~/.claude/projects -> "claude".
 // The path is EXPANDED first (a config string may carry a ~) and trailing
@@ -148,13 +173,13 @@ static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
     int len = (int)lstrlenW(buf);
     while (len > 0 && (buf[len-1] == L'\\' || buf[len-1] == L'/')) buf[--len] = 0;
     if (len <= 0) { lstrcpyA(out, "app"); return; }
-    const wchar_t *name = NULL, *nameEnd = NULL;
+    wchar_t *name = NULL, *nameEnd = NULL;
     int i = len; // one past the end of the component being tested
     while (i > 0) {
         int j = i;
         while (j > 0 && buf[j-1] != L'\\' && buf[j-1] != L'/') j--;
         if (j < i) { // a real component [j, i); doubled separators yield none
-            const wchar_t *comp = buf + j;
+            wchar_t *comp = buf + j;
             if (!name) { name = comp; nameEnd = buf + i; } // the store folder
             if (comp[0] == L'.' && comp[1] && comp[1] != L'.') {
                 name = comp + 1; nameEnd = buf + i; // dot stripped, same end
@@ -167,10 +192,12 @@ static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
         lstrcpyA(out, "app");
         return;
     }
-    int n = 0;
-    for (const wchar_t *q = name; q < nameEnd && *q && n < cch - 1; q++, n++)
-        out[n] = (char)*q;
-    out[n] = 0;
+    // the component is a run inside buf: terminate it in place and convert it
+    // as one key, exactly the way tokAppSet stores an explicit app
+    wchar_t tail = *nameEnd;
+    *nameEnd = 0;
+    tokUtf8Copy(name, out, cch);
+    *nameEnd = tail;
     if (!out[0]) lstrcpyA(out, "app");
 }
 
@@ -603,16 +630,12 @@ static void cfgInstall(Config *next) {
     LeaveCriticalSection(&g_cfgGenLock);
 }
 
-// the aggregation key: an explicit app name, capacity-capped at the 19
-// chars every sink stores, else derived from the store path
+// the aggregation key: an explicit app name, capacity-capped at the 19 bytes
+// every sink stores (cut on a character boundary), else derived from the store
+// path
 static void tokAppSet(TokSource *ts, const wchar_t *app) {
-    if (app && *app) {
-        int i = 0;
-        for (; app[i] && i < (int)sizeof(ts->app) - 1; i++) ts->app[i] = (char)app[i];
-        ts->app[i] = 0;
-    } else {
-        tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));
-    }
+    if (app && *app) tokUtf8Copy(app, ts->app, sizeof(ts->app));
+    else tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));
 }
 
 // the rest of a source entry, shared by the array form and the converted
