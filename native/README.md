@@ -16,8 +16,8 @@ machine: one process (against Electron's four, 408 MB / 245 MB); the current
 memory and CPU figures are the ones the top-level README quotes.
 
 Phase 2 progress: the token analytics chips + dashboards and the
-subscription board are DONE (`paintDash` / `dashToggle`, ported 1:1 from
-`renderer/dash.css` + `subs.css`). Autostart writing is done as well
+subscription board are DONE (`paintDash` / `dashToggle`, a 1:1 port of the
+retired Electron renderer's `dash.css` + `subs.css`). Autostart writing is done as well
 (`general.autoStart` writes the HKCU Run value on a first run; afterwards the
 tray menu's item is the control). Bluetooth stays unimplemented on purpose -
 `modules.bluetooth` is an ignored Electron-era key (README "Keys the native
@@ -69,7 +69,8 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 - Icons are flattened SVG path data (viewBox 24, stroke-width 2.2), rendered
   with GDI+ (`SmoothingModeAntiAlias8x8`, round caps/joins) into per-icon
   premultiplied DIB caches and `AlphaBlend`ed - never hand-redraw them, port
-  the exact path data from `renderer/bar.js`'s `ICONS`. One stroke color each
+  the exact path data - the paths in `p_icons.c` are a 1:1 port of the
+  retired Electron bar's `ICONS`. One stroke color each
   (`theme.iconColor`, default pinkDeep); `theme.iconOpacity` rides `AlphaBlend`'s
   `SourceConstantAlpha` (default 90 = Electron's `.seg svg { opacity: .9 }`).
   Battery is a dynamic fill drawn by `svgDrawBatt`. Icon + space is drawn dim

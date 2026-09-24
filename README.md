@@ -50,12 +50,6 @@ the Nix mingw toolchain:
 bash native/build.sh   # produces native/chocobar.exe
 ```
 
-### Tests
-
-```bash
-npm test
-```
-
 ## Configuration
 
 The native bar keeps its whole configuration in one JSON file:
@@ -338,15 +332,7 @@ Per source, the raw numbers come from the provider's own usage records:
 
 Every row is a per-store semantics note, not something you declare: the shipped bar scans only the JSONL session stores in `tokens.sources[]`, and `zcode` / `opencode` / `mimo` / `subscription` have no native reader.
 
-Exact read sites, for reference. The shipped bar reads whatever `tokens.sources[]` declares, in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`). The sites below are the retired Electron app's readers, kept because they pin the same per-store semantics:
-
-- zcode: `scripts/zcode_query.py` (the SQL) and `_scanZcode` in `src/tokens.js`
-- zai/pi sessions: `_readSessionTail` in `src/tokens.js`
-- opencode: `_scanOpencodeDb` / `_scanOpencodeFiles` in `src/tokens.js`
-- mimo: `_scanMimo` in `src/tokens.js`
-- aggregation: `aggregate()` in `src/tokens.js` (`rowTotal = input + output + cacheRead + cacheWrite`)
-
-`npm test` cross-checks the scanner against a raw walk of a real session store: record counts and per-column sums must match exactly, and the portable suite pins the aggregation contract (totals include cache; input/output columns stay raw).
+Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
 
 ## Use the bar and dashboard
 
@@ -365,17 +351,17 @@ Internal compatibility paths and filenames still use `wizbar`, including `~/.wiz
 
 ## Tests
 
-Tests are headless, use a temporary HOME, and require no GUI:
+Tests are headless and require no GUI:
 
 ```bash
 npm test
 ```
 
-The suite covers portable readers, neutral defaults, token aggregation, subscription snapshots, terminal probe resolution, and session-log scanning. Windows-only checks cover native sensor providers.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers.
 
 ## Layout
 
-The shipped bar is the native Win32 build in `native/`. The `main.js` tree below it is the retired Electron app it replaced - kept for reference; its old config surface is what "Keys the native build ignores" documents.
+The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents.
 
 ```text
 native/src/chocobar.c   entry, config parser, wWinMain
@@ -386,14 +372,5 @@ native/src/p_tokens.c   live session-log scan and byte cursors
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-
-main.js                 app entry, tray, IPC, lifecycle, and reload action
-src/config.js           defaults and hot-reloaded user config
-src/tracker.js          terminal detection and follow state machine
-src/native.js           native bindings and portable readers
-src/metrics.js          system metric polling
-src/tokens.js           local usage adapters and aggregation
-src/bar.js              bar BrowserWindow
-renderer/               bar and dashboard HTML, CSS, JavaScript, and preloads
-scripts/                launchers, store queries, and regression suites
+scripts/                launchers, icon tooling, and the regression suite
 ```
