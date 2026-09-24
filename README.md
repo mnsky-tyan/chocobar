@@ -335,6 +335,8 @@ Per source, the raw numbers come from the provider's own usage records:
 | `mimo` | assistant message `tokens` from the local desktop API | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
 | `subscription` | your plan-usage JSON (`used` / `total` per plan) | n/a (credits, not tokens) | never mixed into token totals |
 
+Every row is a per-store semantics note, not something you declare: the shipped bar scans only the JSONL session stores in `tokens.sources[]`, and `zcode` / `opencode` / `mimo` / `subscription` have no native reader.
+
 Exact read sites, for reference. The shipped bar reads whatever `tokens.sources[]` declares, in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`). The sites below are the retired Electron app's readers, kept because they pin the same per-store semantics:
 
 - zcode: `scripts/zcode_query.py` (the SQL) and `_scanZcode` in `src/tokens.js`
