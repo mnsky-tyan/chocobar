@@ -2055,26 +2055,37 @@ static void subsStart(void) {
     if (h) CloseHandle(h);
 }
 
-// chip state readers (UI thread): lowest remaining across providers with data
+// chip state readers (UI thread): lowest remaining across providers with data.
+//
+// "stale" here means the chip has NOTHING to show, not that some provider
+// failed its last poll. A provider is marked stale when a fetch fails, but its
+// last known windows are still on the board and still worth reporting - so a
+// single timeout used to blank the whole chip to "stale" while the dashboard
+// (which asks per provider) happily showed fresh, correct numbers. The chip is
+// stale only when NO provider has a usable remaining value.
 static int subsChipRem(void) {
     if (!g_subsLockInit) return -1;
     EnterCriticalSection(&g_subsLock);
     int r = -1;
     for (int i = 0; i < MAX_SUBS; i++)
         if (g_subsProvRem[i] >= 0 && (r < 0 || g_subsProvRem[i] < r)) r = g_subsProvRem[i];
-    int stale = 0;
-    for (int i = 0; i < MAX_SUBS; i++) if (g_subsProvStale[i]) stale = 1;
     LeaveCriticalSection(&g_subsLock);
-    return stale ? -2 : r; // -2 = stale, -1 = no data
+    return r; // -1 = no provider has a number
 }
 
 static int subsChipStale(void) {
     if (!g_subsLockInit) return 0;
     EnterCriticalSection(&g_subsLock);
-    int s = 0;
-    for (int i = 0; i < MAX_SUBS; i++) if (g_subsProvStale[i]) s = 1;
+    // stale only if every provider that HAS a value failed its last fetch, or
+    // nothing has ever succeeded. Any live provider clears it.
+    int anyValue = 0, anyLive = 0;
+    for (int i = 0; i < MAX_SUBS; i++) {
+        if (g_subsProvRem[i] < 0) continue;
+        anyValue = 1;
+        if (!g_subsProvStale[i]) anyLive = 1;
+    }
     LeaveCriticalSection(&g_subsLock);
-    return s;
+    return anyValue && !anyLive;
 }
 
 // ---- subs board (dashboard) readers ----------------------------------------
