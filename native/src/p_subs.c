@@ -1980,8 +1980,10 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             // Fan the enabled providers out over their own threads. Every fetch
             // is independent (each writes only its own slot through the locked
             // setters), so the wall time of a cycle drops from the SUM of the
-            // providers to the slowest one - measured 5.9s -> 2.6s for the
-            // captain's three providers.
+            // providers to the slowest one - 5.9s -> 2.6s for the captain's
+            // three providers at this step alone. The whole cycle measured
+            // 1.9s once the antigravity model calls and loadCodeAssist
+            // overlapped those fetches too (the perf commit, 3c533f2).
             HANDLE th[MAX_SUBS]; SubsJob jobs[MAX_SUBS]; int nth = 0;
             for (int i = 0; i < n; i++) {
                 if (!view->subsProviders[i].enabled) continue;

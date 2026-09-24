@@ -824,7 +824,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     int toks = jobjGet(js, t, root, "tokens");
     if (toks >= 0 && t[toks].type == JSMN_OBJECT) {
         c->tokensEnabled = jboolDefault(js, t, jobjGet(js, t, toks, "enabled"), 1);
-        // minutes -> seconds, clamped 5..3600: the metrics tick is 1s, so this
+        // minutes -> seconds, clamped 1..60 MINUTES: the metrics tick is 1s, so this
         // is the tick count between token scans
         int rm = jintTok(js, t, jobjGet(js, t, toks, "rescanMinutes"), 1);
         if (rm < 1) rm = 1;

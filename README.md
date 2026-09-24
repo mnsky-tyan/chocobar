@@ -14,7 +14,7 @@ The subscription board - how much of each plan's quota you have left, before you
 
 ## Features
 
-Chocobar puts a thin, soft bar right above your terminal, and it follows that window as you move it around your screen - so it is always where you are already looking. On the bar sit small readouts for the things you care about while you work: your processor and graphics card, how much memory is free, how hot the CPU is running, the volume, the battery, and the time. Each one turns a warning color when it crosses a limit you choose, so a problem catches your eye before it becomes a surprise.
+Chocobar puts a thin, soft bar right above your terminal, and it follows that window as you move it around your screen - so it is always where you are already looking. On the bar sit small readouts for the things you care about while you work: your processor and graphics card, how much of your memory is in use, how hot the CPU is running, the volume, the battery, and the time. The CPU, temperature, and memory readouts take a limit you choose and turn a warning color once they cross it, so a problem catches your eye before it becomes a surprise.
 
 If you use AI coding tools, the bar keeps count for you. It reads the session logs those tools already write on your own disk and adds up how many tokens you have spent, then shows that on the bar and in a dashboard. The dashboard lays out your usage as a daily heatmap, summary cards for today and the last week and month, a breakdown by app and by model, and request counts. A separate board watches your subscription plans and shows, for each one, how much of each time window you have left - so you can see a plan nearing its cap at a glance instead of finding out when it stops working.
 
@@ -239,7 +239,7 @@ Each provider entry:
 | Key | Default | What it does |
 |---|---|---|
 | `dashboard.width` / `dashboard.height` | `900` / `520` | Token dashboard window size. |
-| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, mintty, then WezTerm/Alacritty/Hyper by process. |
+| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, and mintty by class, in that order. |
 | `terminal.title` | `""` | Optional title substring to disambiguate. |
 | `general.showTray` | `true` | Show the tray icon. |
 | `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. |
@@ -347,17 +347,16 @@ Exact read sites, for reference:
 
 ## Use the bar and dashboard
 
-- Click the diamond (tokens) chip or use `Ctrl+Alt+D` to open the dashboard.
-- Double-launch Chocobar to open the dashboard when it is already running.
+- Click the diamond (tokens) chip for the dashboard, the gauge (subscription) chip for the plan board.
 - Right-click the bar or tray icon for dashboards, reload, config, and quit actions; the menu closes on an outside click or Esc.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
-- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Following is sticky - the bar keeps one terminal until it closes, then re-probes (foreground terminal first).
+- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Following is sticky - the bar keeps one terminal until it closes, then re-probes (foreground terminal first). Chocobar runs as a single instance, so launching it a second time does nothing; use the tray menu or a chip click instead.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
 - Launch with a specific config file: `chocobar --config <path>` (or the `WIZBAR_CONFIG` environment variable). The file gets the annotated template on first use, so personal wiring stays in personal files while a fresh install just works.
 
 ## Defaults and privacy
 
-The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The three toggle chips are visible so you can find them; with nothing wired they show `–` / `—` and scan nothing. Chocobar has no telemetry. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
+The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The tokens and subscription chips are not on the bar at all until you switch those masters on; with nothing wired behind them they then show an em dash instead of a number. Chocobar has no telemetry. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
 
 Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar` and `start-wizbar.vbs`. The application and all user-visible strings use Chocobar.
 
