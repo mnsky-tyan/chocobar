@@ -541,12 +541,12 @@ static long long subsIsoToMs(const char *s, int len) {
 }
 
 // POST via WinHTTP (the GET helper above is GET-only); returns the body.
-static char *subsHttpPost(const char *tag, const wchar_t *host, int port, const wchar_t *path,
+static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *host, int port, const wchar_t *path,
                           const wchar_t *headers, const char *body, int bodyLen,
                           int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
-    HINTERNET ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
-    if (!ses) ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
+    if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!ses) { writeLogA("subs agy: open failed"); return NULL; }
     char *result = NULL;
     HINTERNET con = NULL, req = NULL;
@@ -838,7 +838,7 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
         cid, cs, a->refresh);
     if (bl <= 0 || bl >= (int)sizeof(body)) return 0;
     int status = 0, len = 0;
-    char *resp = subsHttpPost("token", L"oauth2.googleapis.com", 0, L"/token",
+    char *resp = subsHttpPost("token", AGY_UA, L"oauth2.googleapis.com", 0, L"/token",
                               L"Content-Type: application/json", body, bl, 0, 20000, &status, &len);
     if (!resp || (status != 200 && status != 207)) {
         char dbg[64];
@@ -1250,7 +1250,7 @@ static DWORD WINAPI agyModelsThread(LPVOID lp) {
     char mbody[256];
     int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", j->project);
     if (ml <= 0 || ml >= (int)sizeof(mbody)) { j->resp = NULL; return 0; }
-    j->resp = subsHttpPost("models", j->host, 0, L"/v1internal:fetchAvailableModels", j->hdrs,
+    j->resp = subsHttpPost("models", AGY_UA, j->host, 0, L"/v1internal:fetchAvailableModels", j->hdrs,
                            mbody, ml, 0, j->timeoutMs, &j->st, &j->bl);
     return 0;
 }
@@ -1299,7 +1299,7 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
             char mbody[256];
             int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", project);
             if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
-            resp = subsHttpPost("models", hosts[h], 0, L"/v1internal:fetchAvailableModels", hdrs,
+            resp = subsHttpPost("models", AGY_UA, hosts[h], 0, L"/v1internal:fetchAvailableModels", hdrs,
                                 mbody, ml, 0, timeoutMs, &st, &bl);
         }
         attempted = 1;
@@ -1427,7 +1427,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         // the length MUST be the full literal: a hard-coded count that was 4
         // short truncated the JSON, so Google answered 400 on every call
         const char *assistBody = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
-        char *resp = subsHttpPost("assist", hosts[h], 0, L"/v1internal:loadCodeAssist", hdrs,
+        char *resp = subsHttpPost("assist", AGY_UA, hosts[h], 0, L"/v1internal:loadCodeAssist", hdrs,
             assistBody, (int)strlen(assistBody), 0, cfg->subsTimeoutMs, &st, &bl);
         if (cfg->debug) {
             char lb[160];
@@ -1465,27 +1465,14 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         if (st == 200 || st == 403) break; // definitive answer
     }
     if (cfg->debug) { char lb[80]; sprintf(lb, "[wizbar] subs agy: loadCodeAssist phase %llu ms", GetTickCount64() - tAgy); writeLogA(lb); }
-    if (!*auth.projectId) {
-        writeLogA("subs agy: no project id");
-        subsSetState(idx, 0, 0);
-        return 0;
-    }
-    // THE quota source, matching the harness's /quota exactly (pi-quota ->
-    // quota-axi -> pi-quota-inject.mjs): /v1internal:fetchAvailableModels on
-    // BOTH endpoints, merged with the daily/sandbox endpoint OVERWRITING
-    // production, then per family the first model key in priority order whose
-    // (merged) entry carries a quotaInfo. retrieveUserQuotaSummary is what
-    // reported gemini as a constant rf=1 untracked pool (the "100% while
-    // /quota is correct" bug); the two endpoints carry DIFFERENT quota
-    // figures and the sandbox is what actually serves Gemini. A quotaInfo may
-    // carry only a resetTime and no remainingFraction (the Claude/GPT pool
-    // between resets): the row stays on the board, its fraction renders as an
-    // em dash.
     static const wchar_t *famNames[2] = { L"Gemini", L"Claude/GPT" };
     double famRf[2] = { -1, -1 };
     long long famReset[2] = { 0, 0 };
     int famHave[2] = { 0, 0 };
-    // Collect the speculative fetch that overlapped loadCodeAssist.
+    // Collect the speculative fetch that overlapped loadCodeAssist. The thread
+    // writes into qj, a local of THIS frame, so it is joined HERE - above every
+    // early return below - and its lifetime can never depend on which branch
+    // the code takes.
     int needModels = 1;
     if (qth) {
         WaitForSingleObject(qth, INFINITE);
@@ -1503,6 +1490,22 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
             needModels = 0;
         }
     }
+    if (!*auth.projectId) {
+        writeLogA("subs agy: no project id");
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    // THE quota source, matching the harness's /quota exactly (pi-quota ->
+    // quota-axi -> pi-quota-inject.mjs): /v1internal:fetchAvailableModels on
+    // BOTH endpoints, merged with the daily/sandbox endpoint OVERWRITING
+    // production, then per family the first model key in priority order whose
+    // (merged) entry carries a quotaInfo. retrieveUserQuotaSummary is what
+    // reported gemini as a constant rf=1 untracked pool (the "100% while
+    // /quota is correct" bug); the two endpoints carry DIFFERENT quota
+    // figures and the sandbox is what actually serves Gemini. A quotaInfo may
+    // carry only a resetTime and no remainingFraction (the Claude/GPT pool
+    // between resets): the row stays on the board, its fraction renders as an
+    // em dash.
     if (needModels) {
         int r = agyFetchModels(hosts, hdrs, auth.projectId, cfg->subsTimeoutMs, cfg->debug,
                                famRf, famReset, famHave);
@@ -1614,49 +1617,88 @@ static double subsPathDouble(const char *js, const jsmntok_t *t, int root, const
     return v;
 }
 
-// resolve one auth entry to its header line. The secret is read at fetch time
-// and never written anywhere - the bar has no state that outlives the request.
-static int subsGenAuthLine(const GenAuth *ga, wchar_t *out, int cch) {
-    wchar_t val[256]; val[0] = 0;
+// resolve one auth entry and append its header line to the caller's blob,
+// growing the blob as needed. The secret comes from a JSON file, an env var or
+// the config itself and NONE of the three has a length the code may assume - a
+// JWT is already past a kilobyte - so the line is sized from the secret
+// instead of a fixed buffer that would truncate it mid-signature. The secret
+// is read at fetch time and never written anywhere - the bar has no state
+// that outlives the request.
+static int subsGenAuthLine(const GenAuth *ga, wchar_t **buf, int *cap, int *used) {
+    char *tmp = NULL; int tmpLen = 0;   // the secret as UTF-8 bytes
+    wchar_t *val = NULL;                // ... and as wide chars
     if (ga->path && *ga->path) {
         wchar_t path[MAX_PATH];
         subsPathExpand(ga->path, path, MAX_PATH); // "~/..." like every other read
         int txtLen = 0;
         char *txt = subsReadFileUtf8(path, &txtLen);
-        if (!txt) return 0;
-        // the file is small (an auth.json); parse it in place
-        jsmntok_t *tk = NULL;
-        int n = subsParseBig(txt, (int)strlen(txt), &tk);
-        int v = -1;
-        if (n > 0) {
-            // a key that starts with $ is a json path (a secret nested in the
-            // file, "$.auth.token"); anything else is one flat top-level key
-            if (ga->key[0] == '$') v = subsJsonPath(txt, tk, 0, ga->key);
-            else v = jobjGet(txt, tk, 0, ga->key);
+        if (txt) {
+            // the file is small (an auth.json); parse it in place
+            jsmntok_t *tk = NULL;
+            int n = subsParseBig(txt, (int)strlen(txt), &tk);
+            int v = -1;
+            if (n > 0) {
+                // a key that starts with $ is a json path (a secret nested in
+                // the file, "$.auth.token"); anything else is one flat key
+                if (ga->key[0] == '$') v = subsJsonPath(txt, tk, 0, ga->key);
+                else v = jobjGet(txt, tk, 0, ga->key);
+            }
+            if (v >= 0) {
+                char *raw = subsJstrRawTok(txt, tk, v); // unescaped, or NULL
+                if (raw) {
+                    tmp = raw;
+                    tmpLen = (int)strlen(raw);
+                } else {
+                    // a non-string token still has to be readable as a value
+                    tmpLen = tk[v].end - tk[v].start;
+                    if (tmpLen > 0) {
+                        tmp = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)tmpLen + 1);
+                        if (tmp) { memcpy(tmp, txt + tk[v].start, (size_t)tmpLen); tmp[tmpLen] = 0; }
+                    }
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, tk);
+            HeapFree(GetProcessHeap(), 0, txt);
         }
-        if (v >= 0) {
-            char *raw = subsJstrRawTok(txt, tk, v);
-            // a non-string token still has to be readable as a value
-            char tmp[256];
-            int ln = tk[v].end - tk[v].start;
-            if (raw) { lstrcpynA(tmp, raw, 256); HeapFree(GetProcessHeap(), 0, raw); }
-            else if (ln > 0 && ln < 255) { memcpy(tmp, txt + tk[v].start, (size_t)ln); tmp[ln] = 0; }
-            else tmp[0] = 0;
-            MultiByteToWideChar(CP_UTF8, 0, tmp, -1, val, 256);
-        }
-        HeapFree(GetProcessHeap(), 0, tk);
-        HeapFree(GetProcessHeap(), 0, txt);
     } else if (ga->env && *ga->env) {
-        wchar_t ev[256];
-        DWORD en = GetEnvironmentVariableW(ga->env, ev, 256);
-        if (!en || en >= 256) return 0;
-        lstrcpynW(val, ev, 256);
+        DWORD en = GetEnvironmentVariableW(ga->env, NULL, 0); // required size, or 0
+        if (en) {
+            val = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)en * sizeof(wchar_t));
+            if (val && !GetEnvironmentVariableW(ga->env, val, en)) {
+                HeapFree(GetProcessHeap(), 0, val);
+                val = NULL;
+            }
+        }
     } else if (ga->literal && *ga->literal) {
-        lstrcpynW(val, ga->literal, 256);
-    } else return 0;
-    if (!val[0]) return 0;
-    swprintf(out, cch, L"%ls: %ls%ls\r\n", ga->header, ga->prefix, val);
-    return 1;
+        int ln = lstrlenW(ga->literal);
+        val = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, ((size_t)ln + 1) * sizeof(wchar_t));
+        if (val) lstrcpynW(val, ga->literal, ln + 1);
+    }
+    if (tmp && !val && tmpLen > 0) {
+        int wn = MultiByteToWideChar(CP_UTF8, 0, tmp, tmpLen, NULL, 0);
+        if (wn > 0) {
+            val = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, ((size_t)wn + 1) * sizeof(wchar_t));
+            if (val) { MultiByteToWideChar(CP_UTF8, 0, tmp, tmpLen, val, wn); val[wn] = 0; }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, tmp);
+    int ok = 0;
+    if (val && *val) {
+        // the header line needs room for the fixed parts plus the whole secret
+        int need = *used + lstrlenW(ga->header) + lstrlenW(ga->prefix) + lstrlenW(val) + 3;
+        if (need >= *cap) {
+            int nc = *cap;
+            while (nc <= need) nc *= 2;
+            wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, *buf, (size_t)nc * sizeof(wchar_t));
+            if (nb) { *buf = nb; *cap = nc; }
+            else { HeapFree(GetProcessHeap(), 0, val); return 0; }
+        }
+        *used += swprintf(*buf + *used, *cap - *used, L"%ls: %ls%ls\r\n",
+                          ga->header, ga->prefix, val);
+        ok = 1;
+    }
+    HeapFree(GetProcessHeap(), 0, val);
+    return ok;
 }
 
 // case-insensitive prefix compare (a hand-edited config writes HTTP://; URL
@@ -1733,24 +1775,14 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
         return 0;
     }
 
-    // resolve the auth entries into a header blob
+    // resolve the auth entries into the header blob
     wchar_t *hdrs = NULL;
     int hlen = 512, used = 0;
     hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)hlen * sizeof(wchar_t));
     if (!hdrs) { subsSetState(idx, 0, 0); return 0; }
     hdrs[0] = 0;
-    for (int i = 0; i < sp->nAuth; i++) {
-        wchar_t line[384];
-        if (!subsGenAuthLine(&sp->auth[i], line, 384)) continue;
-        int need = used + lstrlenW(line) + 1;
-        if (need >= hlen) {
-            while (hlen <= need) hlen *= 2;
-            wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, hdrs, (size_t)hlen * sizeof(wchar_t));
-            if (!nb) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
-            hdrs = nb;
-        }
-        used += swprintf(hdrs + used, hlen - used, L"%ls", line);
-    }
+    for (int i = 0; i < sp->nAuth; i++)
+        subsGenAuthLine(&sp->auth[i], &hdrs, &hlen, &used);
     // static headers from the config, appended after the resolved auth
     if (sp->headerBlob && *sp->headerBlob) {
         int need = used + lstrlenW(sp->headerBlob) + 1;
@@ -1777,7 +1809,9 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
             bodyLen = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, body, wl, NULL, NULL);
             if (bodyLen > 0) bodyLen--;
         }
-        resp = subsHttpPost("gen", host, port, path, hdrs, body, bodyLen, insecure, cfg->subsTimeoutMs, &st, &bl);
+        // a generic endpoint is a third-party quota API: it gets the bar's own
+        // identity, never the Antigravity UA the Google calls use
+        resp = subsHttpPost("gen", L"chocobar", host, port, path, hdrs, body, bodyLen, insecure, cfg->subsTimeoutMs, &st, &bl);
         if (body) HeapFree(GetProcessHeap(), 0, body);
     } else {
         resp = subsHttpGet("gen", L"chocobar", host, port, path, hdrs, insecure, cfg->subsTimeoutMs, &st, &bl);

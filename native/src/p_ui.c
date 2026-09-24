@@ -275,31 +275,44 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
     CloseHandle(wr); // the child owns it now; closing ours is what ends the pipe
     char buf[4096];
     DWORD got = 0;
-    wchar_t acc[4096]; int accLen = 0;
-    // One deadline for the whole capture. EOF on the pipe only arrives once
-    // EVERY inherited write handle is gone, so a command that leaves a
-    // background child holding stdout (a `start /b ...` chain, a daemon it
-    // spawned) never ends the pipe - a blocking ReadFile would then wedge this
-    // thread, and with it every other command chip. Read only what is already
-    // available and stop at the same cap the process wait uses.
+    char accb[4000]; int accbLen = 0; // raw bytes, decoded once at the end
+    // One deadline for the whole capture, checked on EVERY iteration. EOF on
+    // the pipe only arrives once EVERY inherited write handle is gone, so a
+    // command that either leaves a background child holding stdout (a
+    // `start /b ...` chain, a daemon it spawned) or just keeps writing never
+    // ends the pipe by itself. A blocking ReadFile would wedge this thread,
+    // and with it every other command chip; so would checking the cap only
+    // while the pipe happened to be empty, which let a chatty command spin
+    // here at 100% of a core forever and never reach the kill net below.
     unsigned long long tStart = GetTickCount64();
     for (;;) {
+        if (GetTickCount64() - tStart >= 5000) break;
         DWORD avail = 0;
         if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) break; // EOF / broken pipe
-        if (avail == 0) {
-            if (GetTickCount64() - tStart >= 5000) break;
-            Sleep(25);
-            continue;
-        }
+        if (avail == 0) { Sleep(25); continue; }
         if (!ReadFile(rd, buf, sizeof(buf) - 1, &got, NULL) || got == 0) break;
-        buf[got] = 0;
-        if (accLen < 4000) {
-            int n = MultiByteToWideChar(CP_UTF8, 0, buf, (int)got, acc + accLen, 4096 - accLen - 1);
-            if (n > 0) accLen += n;
+        if (accbLen < (int)sizeof(accb) - 1) { // bound the copy, never the read
+            int n = (int)got;
+            if (n > (int)sizeof(accb) - 1 - accbLen) n = (int)sizeof(accb) - 1 - accbLen;
+            memcpy(accb + accbLen, buf, (size_t)n);
+            accbLen += n;
         }
+        // a full buffer means more output is already waiting: yield so the
+        // drain cannot spin the pipe at 100% of a core until the cap fires
+        if (got >= sizeof(buf) - 1) Sleep(25);
     }
-    acc[accLen] = 0;
+    accb[accbLen] = 0;
     CloseHandle(rd);
+    // a redirected cmd.exe pipe carries the console's OEM bytes, not UTF-8, so
+    // decode UTF-8 first and fall back to the OEM codepage when that pass
+    // produced replacement characters (GBK on a Chinese-locale box would
+    // otherwise render as U+FFFD and read 0 to the warn band)
+    wchar_t acc[4096];
+    int accLen = MultiByteToWideChar(CP_UTF8, 0, accb, accbLen, acc, 4096 - 1);
+    if ((accLen <= 0 && accbLen > 0) || (accLen > 0 && wcschr(acc, L'\uFFFD')))
+        accLen = MultiByteToWideChar(CP_OEMCP, 0, accb, accbLen, acc, 4096 - 1);
+    if (accLen < 0) accLen = 0;
+    acc[accLen] = 0;
     // never wait forever on a hung command: spend what is left of the same cap,
     // then kill it - an abandoned child would otherwise pile up one process per
     // poll on every chip that misbehaves

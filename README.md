@@ -174,6 +174,8 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 
 Usage semantics per store are in the Token accounting section below.
 
+A config from before the array form (`"sources": { "pi": { "sessionsDir": ... } }`) is still read: each key becomes the app and its `sessionsDir` the store, and one log line says the legacy form was converted. Migrate to the array form at your convenience - entries without a `sessionsDir` (the old sqlite-backed stores) are skipped, as they always were.
+
 ### `subs` - the subscription board
 
 | Key | Default | What it does |
@@ -236,7 +238,7 @@ Each provider entry:
 
 ### Keys the native build ignores
 
-The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapDays`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
+The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapDays`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them; the legacy `sources` object itself is converted, but these two keys carry no `sessionsDir`, so nothing scans them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
 
 ### A complete starting point
 
