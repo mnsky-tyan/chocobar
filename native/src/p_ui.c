@@ -1173,7 +1173,8 @@ static void repaintBar(HWND hwnd) {
     }
 
     int bgA = g_cfg.backdrop && lstrcmpiW(g_cfg.backdrop, L"solid") == 0 ? 255 : g_cfg.backgroundAlpha;
-    if (bgA < 0) bgA = 0; if (bgA > 255) bgA = 255;
+    if (bgA < 0) bgA = 0;
+    if (bgA > 255) bgA = 255;
     COLORREF bg = colorrefFromHex(g_cfg.tint, bgA);
 
     // fill the whole DIB with the premultiplied background (alpha included)
@@ -1270,8 +1271,10 @@ static void repaintBar(HWND hwnd) {
         if (i == g_hover && c->align == 2) {
             int pl = c->r.left - pillPadX, pt = c->r.top + pillPadY;
             int prr = c->r.right + pillPadX, pb = c->r.bottom - pillPadY;
-            if (pl < 0) pl = 0; if (pt < 0) pt = 0;
-            if (prr > g_dibW) prr = g_dibW; if (pb > g_dibH) pb = g_dibH;
+            if (pl < 0) pl = 0;
+            if (pt < 0) pt = 0;
+            if (prr > g_dibW) prr = g_dibW;
+            if (pb > g_dibH) pb = g_dibH;
             for (int yy = pt; yy < pb; yy++) {
                 DWORD *row = px + (size_t)yy * g_dibW;
                 for (int xx = pl; xx < prr; xx++) {
@@ -1780,6 +1783,7 @@ static void dashTableHeadNeeds(HDC dc, HFONT f, int *need) {
 static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
                          const int *xs, const wchar_t *label, COLORREF dot,
                          double share, TokAgg *a, DashTheme *t, HFONT f11, HFONT f9) {
+    (void)f9;
     // zebra-less; share bar behind the label (dash.css .share i)
     if (share > 0.003) {
         int bw = (int)(share * innerW);
@@ -2521,7 +2525,8 @@ static void paintDash(HWND hwnd) {
                 int ky = bodyY + (bodyH - pieD) / 2;
                 int rem = wins[k].rem;
                 int unk = rem < 0; // no fraction reported: em dash, empty ring
-                if (rem < 0) rem = 0; if (rem > 100) rem = 100;
+                if (rem < 0) rem = 0;
+                if (rem > 100) rem = 100;
                 // track + arc (rotate -90: start at 12 o'clock, clockwise)
                 COLORREF track = blendCr(t.card, t.dim, 31);
                 if (g_gdipOk) {
@@ -3071,7 +3076,8 @@ static void tipShow(const wchar_t *text, int cx, int cy, int dark) {
     int x = cx + (int)(6 * g_scale), y = cy + (int)(16 * g_scale);
     if (x + w > sw) x = cx - w - (int)(6 * g_scale);
     if (y + h > sh) y = cy - h - (int)(14 * g_scale);
-    if (x < 0) x = 0; if (y < 0) y = 0;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
     SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
     POINT ptSrc = { 0, 0 };
     SIZE sz = { w, h };

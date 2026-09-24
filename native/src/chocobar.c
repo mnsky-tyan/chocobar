@@ -1,20 +1,29 @@
 // chocobar.c - native Win32 Chocobar bar (v1.0 native rewrite, phase 1)
 //
 // One translation unit, zero runtime dependencies beyond Windows itself.
-// Reads the SAME config file as the Electron build (%USERPROFILE%\.wizbar\
+// Reads the SAME config file as the Electron build (%USERPROFILE%\.wizbar
 // config.json or --config <path>); keys it does not implement are ignored.
 //
-// Phase 1 scope: acrylic bar (DWM system backdrop + Direct2D), terminal
-// follow with z-glue and move/size hands-off, chips (cpu/cputemp/ram/
-// volume/battery/clock + shortcut/pet/custom), tray, hot-reload, template
-// materialization, single instance, no-activate click behavior.
-// Phase 2 (not here): token analytics + dashboards, subscription board,
-// bluetooth battery, autostart writing.
+// Implemented: acrylic bar (DWM system backdrop), terminal follow with
+// z-glue and move/size hands-off, chips (cpu/cputemp/ram/volume/battery/
+// clock + shortcut/pet/custom, incl. command-output chips), tray, hot-reload,
+// template materialization, single instance, no-activate click behavior, the
+// token dashboards, the subscription board (chatgpt / zai / antigravity /
+// config-only generic), theme.icons, and autostart.
+// Still absent: bluetooth (modules.bluetooth is an ignored key).
+// Render path: GDI into a premultiplied DIB + UpdateLayeredWindow - no
+// D2D/DComp, both fail to present on this machine (native/README.md).
 
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
+// -municode already defines these (it is what selects the wide Win32 entry point);
+// the guard keeps a bare gcc invocation from redefining them identically
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #define INITGUID
 
 #include <initguid.h>
@@ -672,7 +681,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->fontFamily = jstrTok(js, t, jobjGet(js, t, bar, "fontFamily"), c->fontFamily);
         c->align      = jintTok(js, t, jobjGet(js, t, bar, "align"), 0) == 2 ? 2 : 1; // 1=right 2=left
         c->barRadius  = jintTok(js, t, jobjGet(js, t, bar, "radius"), c->barRadius);
-        if (c->barRadius < 0) c->barRadius = 0; if (c->barRadius > 26) c->barRadius = 26;
+        if (c->barRadius < 0) c->barRadius = 0;
+        if (c->barRadius > 26) c->barRadius = 26;
     }
     int theme = jobjGet(js, t, root, "theme");
     if (theme >= 0) {
@@ -681,7 +691,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         wideFree(&c->pink); c->pink = jstrTok(js, t, jobjGet(js, t, theme, "pink"), c->pink);
         wideFree(&c->iconColor); c->iconColor = jstrTok(js, t, jobjGet(js, t, theme, "iconColor"), c->iconColor);
         c->iconOpacity = jintTok(js, t, jobjGet(js, t, theme, "iconOpacity"), c->iconOpacity);
-        if (c->iconOpacity < 0) c->iconOpacity = 0; if (c->iconOpacity > 100) c->iconOpacity = 100;
+        if (c->iconOpacity < 0) c->iconOpacity = 0;
+        if (c->iconOpacity > 100) c->iconOpacity = 100;
         {
             int hm = jobjGet(js, t, theme, "heatmap");
             if (hm >= 0 && t[hm].type == JSMN_ARRAY) {
@@ -801,7 +812,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         if (c->subsRotateSec > 3600) c->subsRotateSec = 3600;
         c->subsW = jintTok(js, t, jobjGet(js, t, subs, "width"), c->subsW);
         c->subsH = jintTok(js, t, jobjGet(js, t, subs, "height"), c->subsH);
-        if (c->subsW < 280) c->subsW = 280; if (c->subsH < 180) c->subsH = 180;
+        if (c->subsW < 280) c->subsW = 280;
+        if (c->subsH < 180) c->subsH = 180;
     }
     // token stats surface: which cache file + which harness apps to count
     int toks = jobjGet(js, t, root, "tokens");
@@ -911,7 +923,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     if (dash >= 0 && t[dash].type == JSMN_OBJECT) {
         c->dashW = jintTok(js, t, jobjGet(js, t, dash, "width"), c->dashW);
         c->dashH = jintTok(js, t, jobjGet(js, t, dash, "height"), c->dashH);
-        if (c->dashW < 360) c->dashW = 360; if (c->dashH < 240) c->dashH = 240;
+        if (c->dashW < 360) c->dashW = 360;
+        if (c->dashH < 240) c->dashH = 240;
     }
         int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
         if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
