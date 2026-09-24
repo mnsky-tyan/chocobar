@@ -153,7 +153,7 @@ Every module takes `enabled` (default `true` unless noted). The three leftmost t
 - `format`: wraps the value; `$v` is the trimmed stdout. Without `$v` the format is shown verbatim.
 - `warnAbove` / `warnBelow`: colour the value red outside that band. Either alone is fine; omit both to disable. The band reads the command's raw output, and the colour starts on the first poll that produces output - a chip with no value yet never looks hot.
 
-The poll runs on its own thread, so a command that takes a second never hitches the bar. A failed command keeps the last good text rather than blanking the chip.
+The poll runs on its own thread, so a command that takes a second never hitches the bar; a command gets five seconds and is then killed, and only its first line of output is used. A failed command keeps the last good text rather than blanking the chip.
 
 ### `tokens` - the usage dashboard
 
