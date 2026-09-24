@@ -481,13 +481,17 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   no fixed heartbeat, and `snapshot()` has no always-different `now` field. The bar/
   visibility gates run BEFORE `consumeDirty()` so changes observed while the bar is
   hidden stay pending and flush on restore.
-- Follow loop is ADAPTIVE (src/tracker.js `_scheduleFollow`): 8ms while the
-  terminal is in a modal move/size (120Hz - drag latency is the only place it
-  shows), 16ms for 500ms after a move, 100ms idle. It FOLLOWS LIVE through a
-  drag (the old hands-off freeze made drags read as broken) and the zGluedTo
-  sweep no longer skips mid-drag, so the bar keeps the pane's layer while it
-  moves. Measured 2026-09-21: CPU 10.3% -> ~5% of one core vs the fixed 60Hz
-  loop, RSS ~414 MB (Chromium-baseline dominated).
+- Follow loop is ADAPTIVE **in the retired Electron app** (src/tracker.js
+  `_scheduleFollow`): 8ms while the terminal is in a modal move/size (120Hz -
+  drag latency is the only place it shows), 16ms for 500ms after a move, 100ms
+  idle. It FOLLOWS LIVE through a drag (the old hands-off freeze made drags
+  read as broken) and the zGluedTo sweep no longer skips mid-drag, so the bar
+  keeps the pane's layer while it moves. Measured 2026-09-21: CPU 10.3% -> ~5%
+  of one core vs the fixed 60Hz loop, RSS ~414 MB (Chromium-baseline dominated).
+  The SHIPPED native bar does NOT use that tiered profile: a flat 100 ms
+  `TIMER_FOLLOW` plus a foreground win-event hook, throttled to one sync per
+  120 ms inside the terminal's modal move/size loop (`followTick`,
+  native/src/p_ui.c).
 - Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
   RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
 - Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
@@ -525,7 +529,10 @@ section 4b for the native template).
 
 ## Token usage stores (sharp edge)
 
-Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
+Usage semantics differ by store. `src/tokens.js` is the retired Electron
+app's authoritative reader; the SHIPPED native bar reads the same shapes in
+`native/src/p_tokens.c` (its own needle scan + per-file byte cursor, fed by
+whatever `tokens.sources[]` declares - not a hardcoded store pair):
 
 - zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` (via `scripts/zcode_query.py`).
   On some WSL filesystems a live `-wal` store rejects `mode=ro` mid-query
