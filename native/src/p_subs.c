@@ -46,8 +46,10 @@ static int g_subsThreadStarted = 0;
 static const wchar_t *subsNz(const wchar_t *s) { return (s && *s) ? s : NULL; }
 // readers defined further down (the fetch thread logs what it stored)
 static void subsProvLabel(int i, wchar_t *out, int cb);
+static void subsViewLabel(const Config *v, int i, wchar_t *out, int cb);
 static void subsProvPlan(int i, wchar_t *out, int cb);
 static int subsProvWins(int i, SubsWin *out, int max);
+static int subsProvEnabled(int i);
 
 static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
     // "~" -> %USERPROFILE%, keep absolute paths as-is
@@ -2019,7 +2021,7 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                     wchar_t plan[24]; subsProvPlan(i, plan, 24);
                     if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
                     char line[400];
-                    wchar_t lab[64]; subsProvLabel(i, lab, 64);
+                    wchar_t lab[64]; subsViewLabel(view, i, lab, 64);
                     int off = sprintf(line, "[wizbar] subs[%d] %ls plan=%ls wins=%d stale=%d ::", i,
                                       lab, plan, wn, stale);
                     for (int k = 0; k < wn && off < 360; k++)
@@ -2067,12 +2069,17 @@ static int subsChipRem(void) {
     if (!g_subsLockInit) return -1;
     // scope to the real providers: unused slots are zero-init globals (rem=0,
     // stale=0) that are never reset, so looping MAX_SUBS would read them as a
-    // live provider at 0% and drown every real provider's value
+    // live provider at 0% and drown every real provider's value. A declared
+    // but DISABLED slot is the same shape: subsThreadProc skips it, so its
+    // rem=0 would read as a live provider sitting at 0% and hold the chip in
+    // the "not stale" branch forever.
     int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
     EnterCriticalSection(&g_subsLock);
     int r = -1;
-    for (int i = 0; i < pn; i++)
+    for (int i = 0; i < pn; i++) {
+        if (!subsProvEnabled(i)) continue;
         if (g_subsProvRem[i] >= 0 && (r < 0 || g_subsProvRem[i] < r)) r = g_subsProvRem[i];
+    }
     LeaveCriticalSection(&g_subsLock);
     return r; // -1 = no provider has a number
 }
@@ -2080,14 +2087,15 @@ static int subsChipRem(void) {
 static int subsChipStale(void) {
     if (!g_subsLockInit) return 0;
     // scope to the real providers: an unused slot zero-inits to stale=0, which
-    // would otherwise count as "live" and make stale unreachable
+    // would otherwise count as "live" and make stale unreachable - the same
+    // holds for a declared-but-disabled slot, which never fetches either
     int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
     EnterCriticalSection(&g_subsLock);
     // stale only if every provider that HAS a value failed its last fetch, or
     // nothing has ever succeeded. Any live provider clears it.
     int anyValue = 0, anyLive = 0;
     for (int i = 0; i < pn; i++) {
-        if (g_subsProvRem[i] < 0) continue;
+        if (!subsProvEnabled(i) || g_subsProvRem[i] < 0) continue;
         anyValue = 1;
         if (!g_subsProvStale[i]) anyLive = 1;
     }
@@ -2097,15 +2105,18 @@ static int subsChipStale(void) {
 
 // ---- subs board (dashboard) readers ----------------------------------------
 // provider display label: config label, else the type default (Electron does
-// `p.label || 'ChatGPT'` / 'Z.ai')
-static void subsProvLabel(int i, wchar_t *out, int cb) {
-    const wchar_t *l = i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].label
-                           ? g_cfg.subsProviders[i].label : NULL;
-    int it = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].type : 0;
+// `p.label || 'ChatGPT'` / 'Z.ai'). The view variant reads a PINNED config
+// generation: a fetch thread must report the label of the generation it
+// actually walked, never the live one a concurrent reload may have reordered.
+static void subsViewLabel(const Config *v, int i, wchar_t *out, int cb) {
+    const wchar_t *l = i >= 0 && i < v->subsProviderCount && v->subsProviders[i].label
+                           ? v->subsProviders[i].label : NULL;
+    int it = i >= 0 && i < v->subsProviderCount ? v->subsProviders[i].type : 0;
     if (it == 2) l = L"Antigravity";
     else if (!l || !*l) l = it == 1 ? L"Z.ai" : (it == 3 ? L"generic" : L"ChatGPT");
     lstrcpynW(out, l, cb);
 }
+static void subsProvLabel(int i, wchar_t *out, int cb) { subsViewLabel(&g_cfg, i, out, cb); }
 // provider plan name (Electron p.plan); empty until the first successful fetch
 static void subsProvPlan(int i, wchar_t *out, int cb) {
     out[0] = 0;
