@@ -321,10 +321,17 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
     // then kill it - an abandoned child would otherwise pile up one process per
     // poll on every chip that misbehaves
     unsigned long long spent = GetTickCount64() - tStart;
+    DWORD ec = 1; // pessimistic: a timeout/kill or an unreadable status is a failure
     if (WaitForSingleObject(pi.hProcess, spent >= 5000 ? 0 : (DWORD)(5000 - spent)) != WAIT_OBJECT_0)
         TerminateProcess(pi.hProcess, 1);
+    else
+        GetExitCodeProcess(pi.hProcess, &ec);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    // a non-zero exit is the failure signal (a missing exe, a bad argument, a
+    // command that only wrote its complaint to stderr): report no value so the
+    // chip keeps its last good text instead of publishing the error as a value
+    if (ec != 0) return 0;
     // one value per chip: leading whitespace and blank lines are skipped, then
     // the FIRST line wins - the chip is drawn single-line and the warn band
     // parses this same line with _wtof, so a two-line stdout must never reach
@@ -437,7 +444,6 @@ void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
 long tokLiveScan(const Config *cfg);
 void tokLiveReset(void); // tokens.enabled off: forget cursors + live counters
 long long subsFetchedEpochMs(void);
-void subsCredits(int i, int *avail, int *total);
 static void updCheckStart(void);
 static int updNote(wchar_t *out, int cb);
 void tokLiveInit(void);
@@ -2543,18 +2549,8 @@ static void paintDash(HWND hwnd) {
                 wchar_t plan[24];
                 subsProvPlan(pi2, plan, 24);
                 if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
-                // absolute credits ride the head line (dashboard only): the chip
-                // stays a percentage per the captain's rule
-                wchar_t head2[80];
-                int cav = 0, ctot = 0;
-                subsCredits(pi2, &cav, &ctot);
-                if (cav >= 0 && ctot > 0) {
-                    wchar_t a2[24], b2[24];
-                    fmtNum(cav, a2, 24); fmtNum(ctot, b2, 24);
-                    swprintf(head2, 79, L"%ls \u00b7 %ls of %ls credits", plan, a2, b2);
-                } else lstrcpynW(head2, plan, 79);
                 int lx = px2 + DX(14) + DX(9) + DX(8) + dashStrW(dc, label, f13) + DX(8);
-                dashStr(dc, lx, py2 + DX(14), head2, t.dim, fS10);
+                dashStr(dc, lx, py2 + DX(14), plan, t.dim, fS10);
             }
             // status pill (subs.css .pill): stale / capped / near cap / ok
             {

@@ -34,10 +34,6 @@ typedef struct { wchar_t label[24]; int pct; int rem; int used; int total; long 
 static SubsWin g_subsWin[MAX_SUBS][MAX_GEN_WIN]; // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
 static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
-// absolute prompt credits where the vendor reports them (Antigravity's local
-// GetUserStatus does: availablePromptCredits / monthlyPromptCredits). The chip
-// stays a percentage; the board head shows the numbers.
-static int g_subsCredAvail[MAX_SUBS]; static int g_subsCredTotal[MAX_SUBS];
 static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
 static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
@@ -316,21 +312,6 @@ static void subsSetPlan(int idx, const wchar_t *plan) {
     EnterCriticalSection(&g_subsLock);
     if (plan && *plan) lstrcpynW(g_subsPlan[idx], plan, 24);
     else g_subsPlan[idx][0] = 0;
-    LeaveCriticalSection(&g_subsLock);
-}
-
-// store the credit pair; -1 = unknown (the head then shows no numbers)
-static void subsSetCredits(int idx, int avail, int total) {
-    if (idx < 0 || idx >= MAX_SUBS) return;
-    EnterCriticalSection(&g_subsLock);
-    g_subsCredAvail[idx] = avail; g_subsCredTotal[idx] = total;
-    LeaveCriticalSection(&g_subsLock);
-}
-
-void subsCredits(int i, int *avail, int *total) {
-    if (i < 0 || i >= MAX_SUBS) { *avail = *total = -1; return; }
-    EnterCriticalSection(&g_subsLock);
-    *avail = g_subsCredAvail[i]; *total = g_subsCredTotal[i];
     LeaveCriticalSection(&g_subsLock);
 }
 
@@ -1024,7 +1005,6 @@ static DWORD WINAPI agyQuotaThread(LPVOID lp) {
 }
 
 static int subsFetchAntigravity(const Config *cfg, int idx) {
-    subsSetCredits(idx, -1, -1);
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(cfg, idx, &auth, authPath, MAX_PATH)) {

@@ -13,11 +13,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 ## Sharp edges
 
-- A dead stdout sink (start-wizbar.vbs redirect) makes every `console.*`
-  throw EPIPE, and Electron pops an "A JavaScript error occurred" dialog
-  PER LINE - the app logs every scan, so the dialogs never stop until the
+- A dead stdout sink (the retired Electron launcher's redirect) makes every
+  `console.*` throw EPIPE, and Electron pops an "A JavaScript error occurred"
+  dialog PER LINE - the app logs every scan, so the dialogs never stop until the
   pipe reader comes back. (Electron-era note: main.js is gone with the
-  retired tree; the native bar has no stdout sink to guard.)
+  retired tree; the native bar has no stdout sink to guard, and the
+  start-wizbar.vbs/.cmd launchers were deleted with it.)
 - The native icons are a 1:1 port of `ICONS` of the retired Electron bar (paths now live in `p_icons.c`) (viewBox 24,
   stroke-width 2.2, bow 2). Never hand-redraw them again: port the exact path
   data (rect/circle -> path syntax), and render through the 2x supersample
@@ -63,9 +64,11 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
 User-visible strings (tray/context menu entries, window titles, error dialogs,
 config template comments, README product name) say **Chocobar**; internal
 identifiers stay `wizbar` on purpose (npm/package name, `~/.wizbar` APP_DIR,
-`start-wizbar.vbs/.cmd` file names, the `[wizbar]` console log prefix, the
-registry Run value, `window.wizbar` bridge). A portable test guards the
-depersonalized defaults; don't "fix" the remaining wizbar strings.
+`~/.wizbar` log/config files, the `[wizbar]` console log prefix, the
+`window.wizbar` bridge). The Electron-era `start-wizbar.vbs/.cmd` launchers
+were deleted with that tree; autostart now points at the exe itself. A portable
+test guards the depersonalized defaults; don't "fix" the remaining wizbar
+strings.
 
 ## Terminal follow + subscription source
 
@@ -217,11 +220,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   match or a fresh install silently comes up with a truncated root object -
   jsmn reports a token COUNT for the unbalanced tail, so loadConfig proceeds.
   One object per root key (a duplicate key is dead: `jobjGet` takes the first)
-  and the template guard in `scripts/portable_regression.js` (section 4b) is
-  the only check that catches it: it decodes the C string, strips the `//`
-  comments in JS and calls `JSON.parse`, so it proves the template is valid
-  JSONC and ships neutrally - it does NOT run jsmn or `parseConfigInto`, so
-  the parser half of this note is verified only by a real bar run.
+  and the template guard in `scripts/portable_regression.js` (its `template:`
+  checks: decode the C string, strip the `//` comments in JS, `JSON.parse`,
+  then assert neutrality on the parsed object) is the only check that catches
+  it - it proves the template is valid JSONC and ships neutrally, but it does
+  NOT run jsmn or `parseConfigInto`, so the parser half of this note is
+  verified only by a real bar run.
 - The live config is a GENERATION behind `g_cfgCur` (`#define g_cfg (*g_cfgCur)`,
   chocobar.c): `loadConfig` installs a fresh generation and retires the old one
   instead of freeing it, because the provider fetch threads (a `SubsProvider*`
@@ -557,8 +561,8 @@ stores/pet wiring belongs only in the user-level `~/.wizbar/config.json`
 when nothing is configured. `tokens.enabled` is a true master switch:
 off = zero scans, zero dashboard data, no chip (the dashboard says so via
 `masterEnabled:false`); per-source flags decide which stores are read only when it is on
-(regression: `scripts/portable_regression.js` section 4 for the JS defaults and
-section 4b for the native template).
+(regression: the `template:` checks in `scripts/portable_regression.js`, which
+own the neutral-defaults promise for the shipped template).
 
 ## Token usage stores (sharp edge)
 
@@ -599,13 +603,14 @@ whatever `tokens.sources[]` declares - not a hardcoded store pair):
   absolute byte offset), and the cache version are one contract - change them
   together or a cold start re-reads everything. Cache writes are async+coalesced;
   `flushCacheSync` at quit lands the final cursors.
-- Subscription board (`src/subs.js`, `subs.providers` in config): every provider fetch is
+- Subscription board (`src/subs.js` in the retired Electron app; the shipped bar reads
+  `subs.providers` in config through `native/src/p_subs.c`): every provider fetch is
   bounded by `subs.fetchTimeoutMs` (clamped 3-60s; per-provider `timeoutMs` overrides),
   and a failed cycle keeps the provider's last good windows marked stale (status
   'stale' pill) instead of wiping the board. Disabled providers report status 'disabled'
-  and the board renders no panel and no notes box for them. Tests inject a fake fetch
-  (portable_regression section 10). Both shipped adapters verified live 2026-09-18:
-  chatgpt wham/usage ~0.4-0.7s, zai quota/limit ~0.2-0.5s from this network.
+  and the board renders no panel and no notes box for them. Both shipped adapters
+  verified live 2026-09-18: chatgpt wham/usage ~0.4-0.7s, zai quota/limit ~0.2-0.5s
+  from this network.
 - Bar chips: pinned order is shortcut (bolt, leftmost) - pet (bow, on/off toggle,
   optional `pet.label` prefix) - tokens (diamond) - subs (gauge, exactly right of
   tokens, rotates per enabled provider every minute, shows the week window
