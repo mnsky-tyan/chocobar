@@ -1738,6 +1738,9 @@ static DWORD WINAPI updThread(LPVOID unused) {
         if (verParse(v) > verParse(CB_VER_STR)) {
             g_upd.newer = 1;
             sprintf(g_upd.msg, "Chocobar %s is available (running %s)", v, CB_VER_STR);
+            char lb[224];
+            sprintf(lb, "[wizbar] update check: %s", g_upd.msg);
+            writeLogA(lb);
         } else {
             sprintf(g_upd.msg, "Chocobar %s is the latest release", CB_VER_STR);
         }

@@ -567,10 +567,12 @@ app's authoritative reader; the SHIPPED native bar reads the same shapes in
 `native/src/p_tokens.c` (its own needle scan + per-file byte cursor, fed by
 whatever `tokens.sources[]` declares - not a hardcoded store pair):
 
-- zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` (via `scripts/zcode_query.py`).
-  On some WSL filesystems a live `-wal` store rejects `mode=ro` mid-query
-  ('disk I/O error'); the script falls back to an `immutable=1` snapshot
-  (may miss uncheckpointed rows) instead of failing the whole scan.
+- zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` - the retired Electron app's
+  reader (its `scripts/zcode_query.py` helper was deleted with that tree; the
+  native bar scans JSONL session stores only). On some WSL filesystems a live
+  `-wal` store rejects `mode=ro` mid-query ('disk I/O error'); that scan fell back
+  to an `immutable=1` snapshot (may miss uncheckpointed rows) instead of failing
+  the whole scan.
 - zai: per-message `usage` in `~/.zai/agent/sessions/*.jsonl` (flat; `ZCODE_sess_*` files
   are DB-backed legacy — never count them from disk too, they double-count).
 - pi (new source): `~/.pi/agent/sessions/<project-slug>/*.jsonl` — same per-message
