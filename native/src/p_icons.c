@@ -795,7 +795,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
     if (fw < 0.9f) fw = 0.9f;
     int ix1 = ix0 + (int)(fw * s);
     if (ix1 > ix0) {
-        HBRUSH br = CreateSolidBrush(pct < 10 ? warn : accent);
+        HBRUSH br = CreateSolidBrush((pct < 10) && !ac ? warn : accent); // charging outranks the red fill here too
         RECT fr = { ix0, iy0, ix1, iy1 };
         FillRect(hdc, &fr, br);
         DeleteObject(br);
