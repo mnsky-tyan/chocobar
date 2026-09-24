@@ -116,30 +116,47 @@ static void dbg(const char *fmt, ...) {
 // and provider parsers above can use them
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key);
 static int jtokSpan(const jsmntok_t *t, int i);
+static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_subs
 
 // derive an aggregate key from a session-store path when the config does not
-// name one: ~/.pi/agent/sessions -> "pi". Walks up past the store folder and
-// its parent, then takes that directory with any leading dot stripped.
+// name one: ~/.pi/agent/sessions -> "pi", ~/.claude/projects -> "claude".
+// The path is EXPANDED first (a config string may carry a ~) and trailing
+// separators are dropped, because the key must describe the real store, not
+// the text the user pasted. The walk from the store end then stops at the
+// NEAREST dot-directory and strips its dot. With no dot-directory anywhere the
+// store folder's own name is the key - stable but generic, so a source like
+// that is better served by an explicit app.
 static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
     out[0] = 0;
     if (!dir || !*dir || cch < 2) return;
     wchar_t buf[MAX_PATH];
-    lstrcpynW(buf, dir, MAX_PATH);
-    for (int up = 0; up < 2; up++) { // drop "sessions", then its parent
-        wchar_t *s = wcsrchr(buf, L'\\');
-        wchar_t *f = wcsrchr(buf, L'/');
-        wchar_t *last = (s > f) ? s : f;
-        if (!last) { buf[0] = 0; break; }
-        *last = 0;
+    subsPathExpand(dir, buf, MAX_PATH);
+    int len = (int)lstrlenW(buf);
+    while (len > 0 && (buf[len-1] == L'\\' || buf[len-1] == L'/')) buf[--len] = 0;
+    if (len <= 0) { lstrcpyA(out, "app"); return; }
+    const wchar_t *name = NULL, *nameEnd = NULL;
+    int i = len; // one past the end of the component being tested
+    while (i > 0) {
+        int j = i;
+        while (j > 0 && buf[j-1] != L'\\' && buf[j-1] != L'/') j--;
+        if (j < i) { // a real component [j, i); doubled separators yield none
+            const wchar_t *comp = buf + j;
+            if (!name) { name = comp; nameEnd = buf + i; } // the store folder
+            if (comp[0] == L'.' && comp[1] && comp[1] != L'.') {
+                name = comp + 1; nameEnd = buf + i; // dot stripped, same end
+                break;
+            }
+        }
+        i = j - 1; // step over the separator; j == 0 ends the walk
     }
-    wchar_t *s = wcsrchr(buf, L'\\');
-    wchar_t *f = wcsrchr(buf, L'/');
-    wchar_t *last = (s > f) ? s : f;
-    const wchar_t *name = last ? last + 1 : buf;
-    if (*name == L'.') name++;
-    int i = 0;
-    for (; name[i] && i < cch - 1; i++) out[i] = (char)name[i];
-    out[i] = 0;
+    if (!name || !*name || !lstrcmpW(name, L".") || !lstrcmpW(name, L"..")) {
+        lstrcpyA(out, "app");
+        return;
+    }
+    int n = 0;
+    for (const wchar_t *q = name; q < nameEnd && *q && n < cch - 1; q++, n++)
+        out[n] = (char)*q;
+    out[n] = 0;
     if (!out[0]) lstrcpyA(out, "app");
 }
 

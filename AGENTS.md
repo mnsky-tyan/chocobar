@@ -630,6 +630,13 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   the `tokens.labels` lookup. A field sized differently (the old `char[24]`
   with `i2 < 23`) let a long config name be silently truncated into a different
   key on the way in.
+- The omitted-`app` key is derived by `tokAppFromDir` (chocobar.c) from the
+  EXPANDED path (subsPathExpand first, so a `~` config string is resolved),
+  after trailing separators are stripped: the walk from the store end stops at
+  the NEAREST dot-directory and strips its dot (`~/.claude/projects` ->
+  `claude`, not the old fixed two-levels-up walk that yielded `~`). No
+  dot-directory anywhere -> the store folder's own name. Both separators are
+  accepted and doubled separators yield no component.
 - The bar reads the Electron app's `~/.wizbar/token-cache.json` as the HISTORY
   SEED, then folds in everything newer from the live JSONL session stores
   (`~/.pi/agent/sessions/**`, `~/.zai/agent/sessions/*`) via a per-file BYTE

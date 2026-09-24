@@ -18,12 +18,19 @@ static void writeLogA(const char *s) {
         if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
         ensured = 1;
     }
-    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+    // FILE_APPEND_DATA puts every write at EOF, so one WriteFile per line is
+    // what keeps the subs fetch threads from interleaving each other's lines,
+    // and the shared handle is what stops a second open from failing outright
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_ALWAYS, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     SetFilePointer(h, 0, NULL, FILE_END);
+    char line[512];
+    int n = 0;
+    while (s[n] && n < (int)sizeof(line) - 3) { line[n] = s[n]; n++; }
+    line[n++] = '\r'; line[n++] = '\n';
     DWORD w;
-    WriteFile(h, s, lstrlenA(s), &w, NULL);
-    WriteFile(h, "\r\n", 2, &w, NULL);
+    WriteFile(h, line, (DWORD)n, &w, NULL);
     CloseHandle(h);
 }
 static LONG WINAPI crashHandler(EXCEPTION_POINTERS *e) {
@@ -301,12 +308,16 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
         TerminateProcess(pi.hProcess, 1);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    // trim: leading whitespace, trailing whitespace and any trailing newlines
+    // one value per chip: leading whitespace and blank lines are skipped, then
+    // the FIRST line wins - the chip is drawn single-line and the warn band
+    // parses this same line with _wtof, so a two-line stdout must never reach
+    // it. Its trailing spaces and tabs are trimmed off.
     wchar_t *p = acc;
     while (*p == L' ' || *p == L'\t' || *p == L'\r' || *p == L'\n') p++;
-    int len = (int)lstrlenW(p);
-    while (len > 0 && (p[len-1] == L'\r' || p[len-1] == L'\n' ||
-                       p[len-1] == L' ' || p[len-1] == L'\t')) p[--len] = 0;
+    int len = 0;
+    while (p[len] && p[len] != L'\r' && p[len] != L'\n') len++;
+    p[len] = 0; // everything after the first line is discarded
+    while (len > 0 && (p[len-1] == L' ' || p[len-1] == L'\t')) p[--len] = 0;
     if (len <= 0) return 0;
     lstrcpynW(out, p, cch);
     return 1;

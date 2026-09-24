@@ -166,7 +166,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 ]
 ```
 
-- `app`: the aggregation key (and the `labels` lookup key), up to 19 characters - longer names are truncated at that, because every consumer of the key (the dashboard rows, the `appFilter`, the `labels` table) stores exactly that much. Omitted = the dot-directory above the store, so `~/.pi/agent/sessions` becomes `pi`.
+- `app`: the aggregation key (and the `labels` lookup key), up to 19 characters - longer names are truncated at that, because every consumer of the key (the dashboard rows, the `appFilter`, the `labels` table) stores exactly that much. Omitted = the nearest dot-directory in the expanded path with its dot stripped, so `~/.pi/agent/sessions` becomes `pi` and `~/.claude/projects` becomes `claude`; a path with no dot-directory anywhere falls back to the store folder's own name.
 - `path`: the store. `~` is profile-relative; a UNC path works too.
 - `enabled`: per-source switch, honoured only when `tokens.enabled` is on.
 - `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
