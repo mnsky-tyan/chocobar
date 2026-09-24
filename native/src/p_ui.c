@@ -1063,8 +1063,11 @@ static void buildChips(void) {
             swprintf(v, 48, L"%d%%", g_m.battPct);
             // charging reads green (theme.good), like the Electron bar's
             // .seg-battery.on value, and green WINS over the low warning:
-            // plugged in means the charge is rising, so red would be a lie
-            addChipI(CT_BATTERY, 0, v, low, g_m.battAc ? g_cfg.good : (low ? g_cfg.warn : NULL), 0);
+            // plugged in means the charge is rising, so red would be a lie.
+            // the warn FLAG must not be set while on AC either - paint lets
+            // c->warn override colorOverride (red clobbered green otherwise)
+            addChipI(CT_BATTERY, 0, v, low && !g_m.battAc,
+                     g_m.battAc ? g_cfg.good : (low ? g_cfg.warn : NULL), 0);
             g_chips[g_chipCount - 1].iconSvg = SVG_BAT; // fill tracks the charge
         } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0);
     }
