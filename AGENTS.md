@@ -694,14 +694,43 @@ whatever `tokens.sources[]` declares - not a hardcoded store pair):
   negative `lstrcpynW` count (GetEnvironmentVariableW returns the REQUIRED
   length and writes nothing when the buffer is too small, so `dir + n` is
   already past the array).
-- **The app name is 19 chars, full stop.** `TokSource.app` is `char[20]` and
-  the parse loop copies by `sizeof(ts->app) - 1` so it cannot drift again;
-  `aggRecord` clamps `alen` to 19, and `g_appName[][]`,
-  `tokensApps[][]` and `tokLabelKeys[][]` all hold 20 bytes. Every writer and
-  every sink cap at the same place, so one key reaches the filter, the row and
-  the `tokens.labels` lookup. A field sized differently (the old `char[24]`
-  with `i2 < 23`) let a long config name be silently truncated into a different
-  key on the way in.
+- **The app name is 19 BYTES, full stop.** `TokSource.app` is `char[20]` and
+  the only writer is `tokUtf8Copy` (chocobar.c), which converts the config
+  string with `WideCharToMultiByte(CP_UTF8, ...)` and clamps at 19 bytes
+  WITHOUT splitting a multi-byte sequence - so the stored key is always valid
+  UTF-8 and a non-ASCII `app` still reaches `tokens.appFilter` (a per-wchar
+  narrowing would store invalid bytes that `MultiByteToWideChar(CP_UTF8)`
+  turns into U+FFFD, so the allowlist would never match and the source would
+  be silently dropped from every aggregate). `aggRecord` clamps `alen` to 19,
+  and `g_appName[][]`, `tokensApps[][]` and `tokLabelKeys[][]` all hold 20
+  bytes, so one key reaches the filter, the row and the `tokens.labels` lookup.
+  A field sized differently (the old `char[24]` with `i2 < 23`) let a long
+  config name be silently truncated into a different key on the way in.
+  **The filter's conversion terminates at `MultiByteToWideChar`'s RETURN
+  value, never at the byte count** (`wide[wl > 0 ? wl : 0] = 0`): the API does
+  not terminate when given an explicit input length, and since one byte is no
+  longer one wide character, terminating at `alen` leaves the comparison
+  string reading uninitialized stack - the appFilter then matches nothing and
+  drops every record of that source.
+- **The token scan runs on its own thread with a pinned config generation, and
+  only the UI thread aggregates.** `tokScanThread` (p_tokens.c) walks the
+  session stores and STAGES every record through `tokPendPush` into `g_tokPend`;
+  it must never call `aggRecord` or touch `g_dayTot` / `g_dayApp` / `g_appAgg` /
+  `g_modelAgg` / `g_appCount` / `g_modelCount`, which are UI-thread-affine.
+  The worker configures itself behind `cfgPin()` / `cfgUnpin()` for the whole
+  walk (the `source`, `path` and `fields` it reads live in a generation a
+  reload can retire mid-scan). The apply is `tokDrainPending`, driven by the
+  `WM_APP_TOKSCANDONE` message the worker posts after `InterlockedExchange(&g_tokScanDone, 1)`;
+  the 1s `TIMER_METRICS` tick calls it too as the lost-message fallback, and
+  `g_tokScanBusy` is cleared only AFTER the drain returns. Two invariants hold
+  that up: `g_tokScanDone` is set before the message is posted (so the drain
+  always sees a drained array), and the drain clears `g_tokScanDone` first so a
+  second concurrent drain cannot re-read the same records. A cold scan
+  (~3.3s over the WSL redirector) therefore never freezes the bar - but note
+  it decouples the boundary: `tokDrainPending` calls `dashDayRollover()` at
+  its own top so the day-bucket frame and the `bnd[]` array it just built come
+  from the same instant, otherwise a scan that straddles local midnight files
+  every record one day too old.
 - The omitted-`app` key is derived by `tokAppFromDir` (chocobar.c) from the
   EXPANDED path (subsPathExpand first, so a `~` config string is resolved),
   after trailing separators are stripped: the walk from the store end stops at

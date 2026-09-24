@@ -529,8 +529,11 @@ static void aggRecord(const char *app, int alen, long long ts,
         int ok = 0;
         for (int i = 0; i < g_cfg.tokensAppCount && !ok; i++) {
             wchar_t wide[20];
-            MultiByteToWideChar(CP_UTF8, 0, app, alen, wide, 20);
-            wide[alen] = 0;
+            int wl = MultiByteToWideChar(CP_UTF8, 0, app, alen, wide, 20);
+            // MultiByteToWideChar does NOT terminate on an explicit input
+            // length: terminate at the RETURNED length, because the app key is
+            // UTF-8 and one byte is no longer one wide character
+            wide[wl > 0 ? wl : 0] = 0;
             if (lstrcmpiW(wide, g_cfg.tokensApps[i]) == 0) ok = 1;
         }
         if (!ok) return;
@@ -818,6 +821,11 @@ static long long g_tokScanAdded = 0;    // the "+N tokens" the worker folded in
 // the numbers by a tick instead of freezing them forever.
 static void tokDrainPending(void) {
     if (InterlockedExchange(&g_tokScanDone, 0) != 1) return;
+    // the buckets' frame date and the boundary array built just below must come
+    // from the SAME instant: the scan is off-thread, so local midnight can pass
+    // between the scan start's dashDayRollover and this drain, which would file
+    // a whole scan's records one day too old
+    dashDayRollover();
     long long added = g_tokScanAdded;
     long long bnd[DASH_MAX_DAYS + 1];
     SYSTEMTIME st; GetLocalTime(&st);
