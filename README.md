@@ -348,7 +348,7 @@ Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[
 
 The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The tokens and subscription chips are not on the bar at all until you switch those masters on; with nothing wired behind them they then show an em dash instead of a number. Chocobar has no telemetry. The opt-in `general.checkUpdates` probe (off by default) is the only request the bar makes on its own; a subscription plan you switch on asks that plan's own API with the login that plan already saved here, and a custom chip or shortcut command you set up yourself reaches the network on its own.
 
-Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar` and `start-wizbar.vbs`. The application and all user-visible strings use Chocobar.
+Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar`. The application and all user-visible strings use Chocobar.
 
 ## Tests
 
