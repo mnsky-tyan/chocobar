@@ -236,6 +236,15 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   only the published chip text, never the config.
 - JSON booleans MUST go through `jboolDefault` - `jintTok` uses atoi and
   `atoi("true") == 0` (disabled every subs provider silently).
+- **`tokens.sources` reads BOTH shapes.** The array form is one object per
+  harness; the legacy OBJECT form (`{ "pi": { "sessionsDir": ... } }`) from a
+  pre-array config is CONVERTED, not dropped (key -> `app`, `sessionsDir` ->
+  `path`, `enabled` carries over) with one `native.log` line naming the
+  conversion. Without that branch such a config yields zero sources with no
+  word and the chip/dashboard silently keep serving the cache seed. A converted
+  entry with no `sessionsDir` (the old zcode/opencode sqlite stores) is still
+  skipped - as it always was - so those stores never scan. `enabled` defaults
+  ON in both forms: adding an entry is the act of turning it on.
 - MinGW `swprintf` follows C99: `%s` = char*, NOT wchar_t*. Every wide
   format needs `%ls` or the value truncates to its first byte
   ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
@@ -320,7 +329,19 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   arrays - one provider failing must never stale the others, and the old
   global state did exactly that via a never-set `any` flag); chip states:
   em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
-  board reads the same per-provider window arrays (label/pct/used/total).
+  board reads the same per-provider window arrays (label/pct/used/total)
+  - it asks PER PROVIDER, the chip asks the whole stack.
+- **The chip readers (`subsChipRem` / `subsChipStale`) are scoped to declared
+  AND enabled providers, and "stale" is a verdict on the CHIP, not per
+  provider.** `g_subsProvRem` / `g_subsProvStale` are zero-initialised globals
+  covering all MAX_SUBS slots, and a slot that is unused or declared-but-disabled
+  is never written (subsThreadProc skips it), so it reads as a live provider
+  sitting at 0% and drowns every real provider - hence the `subsProvEnabled`
+  filter in both loops. Stale is set only when EVERY provider that has a value
+  failed its last fetch (or nothing ever succeeded): a provider marked stale
+  still has its last good windows on the board and still worth reporting, and a
+  single timeout used to blank the chip to "stale" while the board showed fresh
+  numbers. One provider failing must never stale the others.
 - Generic (type 3) provider URLs go through `subsCrackUrl`, which is the only
   url decomposition in the file: the SCHEME alone decides TLS, a config
   `insecure` only AUTHORIZES the cleartext scheme (`http://` with `insecure`
@@ -486,10 +507,14 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 ## Perf invariants (do not reintroduce)
 
-- Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);
-  no fixed heartbeat, and `snapshot()` has no always-different `now` field. The bar/
-  visibility gates run BEFORE `consumeDirty()` so changes observed while the bar is
-  hidden stay pending and flush on restore.
+- Stats push is ON-CHANGE **in the retired Electron app** (MetricsEngine `_dirty`
+  + 250ms trailing loop in main.js): no fixed heartbeat, and `snapshot()` has no
+  always-different `now` field. The bar/visibility gates run BEFORE
+  `consumeDirty()` so changes observed while the bar is hidden stay pending and
+  flush on restore. The shipped native bar has no MetricsEngine and no
+  on-change push at all: it repaints from fixed timers (1s metrics, 100ms
+  follow, plus the token and subs cycles), so this discipline is history - the
+  native cost controls are those periods, not a dirty flag.
 - Follow loop is ADAPTIVE **in the retired Electron app** (src/tracker.js
   `_scheduleFollow`): 8ms while the terminal is in a modal move/size (120Hz -
   drag latency is the only place it shows), 16ms for 500ms after a move, 100ms
@@ -501,9 +526,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `TIMER_FOLLOW` plus a foreground win-event hook, throttled to one sync per
   120 ms inside the terminal's modal move/size loop (`followTick`,
   native/src/p_ui.c).
-- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
-  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
-- Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
+- Baseline -> after (4-min Linux samples, 2026-09) - **the retired Electron
+  app's four processes**: CPU 7.12% -> 1.93% of a core; RSS ~429 -> ~426 MB
+  (Chromium-baseline dominated, flat by design). The shipped bar's figures are
+  the ~30 MB / 4-5% of one core the top-level README quotes.
+- Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`
+  in the retired app, `petRunning` in `native/src/p_metrics.c`), ~5ms/3s,
   never a tasklist.exe spawn (~164ms/spawn measured; ~290ms in older notes).
 - The bar's heal interval must die with its window (see `BarWindow` closed/destroy) —
   it used to leak one 400ms timer per rebuild.
@@ -517,7 +545,10 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Personal display files live outside the repo (e.g. `~/.wizbar/personal.json`:
   pet name, token sources on, subs providers) — launched with
   `electron . --config ~/.wizbar/personal.json`. They carry the machine's real
-  names and paths so the repo never has to.
+  names and paths so the repo never has to. **Retired Electron app only**: the
+  native bar takes the same `--config` / `WIZBAR_CONFIG` flag against
+  `~/.wizbar/config.json`, and the two old `personal.json` files are stale
+  display configs (see Release + install above).
 
 ## Public release (de-personalized)
 

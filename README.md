@@ -177,7 +177,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 
 - `app`: the aggregation key (and the `labels` lookup key), up to 19 characters - longer names are truncated at that, because every consumer of the key (the dashboard rows, the `appFilter`, the `labels` table) stores exactly that much. Omitted = the nearest dot-directory in the expanded path with its dot stripped, so `~/.pi/agent/sessions` becomes `pi` and `~/.claude/projects` becomes `claude`; a path with no dot-directory anywhere falls back to the store folder's own name.
 - `path`: the store. `~` is profile-relative; a UNC path works too.
-- `enabled`: per-source switch, honoured only when `tokens.enabled` is on.
+- `enabled`: per-source switch, honoured only when `tokens.enabled` is on. Defaults to **on** - adding an entry is the act of turning it on; the shipped template leaves its two examples off.
 - `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
 - `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
 
@@ -204,6 +204,7 @@ Each provider entry:
   "clientId": "", "clientSecret": "" }
 ```
 
+- `enabled`: per-provider switch, honoured only when the `subs` master above is on. Defaults to **on** - declaring a provider is the act of turning it on; the first-run template ships its four examples off.
 - `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
 - `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
 - `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
@@ -232,7 +233,7 @@ Each provider entry:
 - `require`: a path that must be present, for endpoints that answer `200` with an error body.
 - `insecure`: authorize plain `http` (the scheme decides TLS; without this flag an `http://` URL is refused). Documented risk: it sends the token in the clear.
 
-**Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps the last good windows marked stale.
+**Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps that provider's last good windows marked stale on the board. The gauge chip rotates through your enabled plans, one entry per `rotateSec`, showing each plan's weekly window (or its lowest window when the plan reports no weekly one); it reads `stale` only when every plan that has a number failed its last poll - one timeout no longer blanks a chip that still has fresh data.
 
 ### `dashboard`, `terminal`, `general`
 
