@@ -7,10 +7,6 @@
   "scripts": {
     "build": "bash native/build.sh",
     "start": "bash native/build.sh && native/chocobar.exe",
-    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js && node scripts/model_case_regression.js"
-  },
-  "devDependencies": {
-    "electron": "^33.2.0",
-    "koffi": "^2.9.0"
+    "test": "node scripts/portable_regression.js"
   }
 }

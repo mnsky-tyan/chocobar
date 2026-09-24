@@ -16,8 +16,9 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - A dead stdout sink (start-wizbar.vbs redirect) makes every `console.*`
   throw EPIPE, and Electron pops an "A JavaScript error occurred" dialog
   PER LINE - the app logs every scan, so the dialogs never stop until the
-  pipe reader comes back. main.js swallows stream EPIPE; keep it.
-- The native icons are a 1:1 port of `ICONS` in renderer/bar.js (viewBox 24,
+  pipe reader comes back. (Electron-era note: main.js is gone with the
+  retired tree; the native bar has no stdout sink to guard.)
+- The native icons are a 1:1 port of `ICONS` of the retired Electron bar (paths now live in `p_icons.c`) (viewBox 24,
   stroke-width 2.2, bow 2). Never hand-redraw them again: port the exact path
   data (rect/circle -> path syntax), and render through the 2x supersample
   pass in iconRenderGdip - 1:1 GDI+ AA reads blocky next to Chromium.
@@ -29,18 +30,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 ## Tests & checks
 
-- `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
-  public-release default guarantees, and the native first-run template `g_template`
-  decoded + parsed as JSONC; headless, any platform) + `scripts/pi_source_regression.js`
-  (pi session-log source; synthetic fixture + raw-sum cross-check when a real
-  `~/.pi/agent/sessions` exists) + `scripts/model_case_regression.js` (case-variant
-  model grouping in aggregate(); synthetic, self-skips its optional live-store half).
-  The real-store cross-check takes a stable
-  snapshot (two agreeing raw walks around the scan) because a live pi session
-  appends usage records while the test runs; it SKIPs if the store never quiets.
-  pet_test.js (old tasklist-path E2E) was stripped in the v1.0.0 pass.
-- Windows-side: `scripts/token_regression.js` (zcode+zai attribution; needs those stores),
-  `scripts/cputemp_regression.js` (HWiNFO shm reader, Windows only).
+- `npm test` = `scripts/portable_regression.js`: the native first-run template
+  `g_template` decoded + parsed as JSONC, asserted neutral (every source off, no
+  SQLite paths, pet + subs off, no personal identifiers). Headless, any platform.
+  The suites that guarded the retired Electron app (pi_source / model_case /
+  token / cputemp) were removed together with that tree; do not resurrect them
+  without the tree they tested.
 
 ## Cross-platform architecture (since the portability pass, retired Electron app)
 
