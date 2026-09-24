@@ -80,11 +80,17 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   are DWORD = A<<24 | R<<16 | G<<8 | B. GDI text runs ~15% wider than
   browser metrics at the same nominal px - the bar scales the font by
   0.864 to match Electron's measured layout.
-- Terminal targeting is terminal-agnostic: `terminal.className: ""` (default)
-  probes Windows Terminal / conhost / ConEmu / mintty by Win32 class, then
-  WezTerm / Alacritty / Hyper by owning process (their class is the generic
-  winit/Electron one). Authoritative list + order: `resolveProbe` and the
-  AUTO_PROBE_* constants in `src/tracker.js`.
+- Terminal targeting is terminal-agnostic: with `terminal.className: ""` the
+  NATIVE bar probes four Win32 classes and nothing else - Windows Terminal
+  (`CASCADIA_HOSTING_WINDOW_CLASS`), conhost (`ConsoleWindowClass`), ConEmu
+  (`VirtualConsoleClass`), mintty - in that order; the authoritative list is
+  `findTerminalByProbe` / `isTerminalHwnd` in `native/src/p_ui.c`, and a
+  configured `className` is authoritative (no fallback to the list). The
+  retired Electron tracker ALSO matched WezTerm / Alacritty / Hyper by owning
+  process because their class is the generic winit/Electron one
+  (`resolveProbe` + the AUTO_PROBE_* constants in `src/tracker.js`); the
+  native build has no process probe, so such a terminal must be named in
+  `terminal.className` by hand.
 - The subscription plan-usage source is a file snapshot, not a session store:
   `tokens.sources.subscription.usagePath` points at user JSON
   (`{plans:[{name,total,used,resetsAt}]}`); re-read per rescan, invalid entries
@@ -116,13 +122,22 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   paint is explicit), DWM backdrops are ignored on them, and screen captures
   must use PrintWindow (CopyFromScreen races the follow loop). Sharp edges:
   `native/README.md` - read it before touching the render path.
-- Native bar is FEATURE-PARITY phase 2 (dashboards, subs, icons). The bar
-  window MUST stay WS_EX_TOPMOST (Electron uses alwaysOnTop 'floating') AND
-  the follow tick must SetWindowPos with HWND_TOPMOST: inserting the bar
-  after a normal window (g_term) silently CLEARS the topmost bit and the
-  raised terminal then swallows every click/hover meant for the bar
-  (WindowFromPoint proves it in one call). Hidden bar (terminal minimized)
-  also explains "dead" hover - check IsWindowVisible first.
+- The phase-2 surface (token dashboards, subscription board, theme.icons)
+  is DONE - the phase status is owned by `native/README.md` ("## Status");
+  do not re-derive it here.
+- The bar window MUST stay an OWNED window of the followed terminal
+  (`CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_LAYERED, ...)`, NO
+  WS_EX_TOPMOST, plus `SetWindowLongPtrW(GWLP_HWNDPARENT, g_term)`) AND the
+  follow tick must keep inserting it right after g_term
+  (`SetWindowPos(g_bar, g_term, ...)`): an owned window rides the terminal's
+  own band, so it stays out of the taskbar/Alt-Tab, hides with the terminal,
+  and can never float over an unrelated window the way a topmost bar does -
+  re-adding WS_EX_TOPMOST (or HWND_TOPMOST in the tick) re-breaks both
+  halves. The pair must also stay ADJACENT in z: raising the terminal walks
+  it over the bar, which then swallows every click/hover meant for it
+  (WindowFromPoint proves it in one call) - the tick re-inserts on that
+  drift. A hidden bar (terminal minimized) also explains "dead" hover -
+  check IsWindowVisible first.
 - Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
   pinkDeep), 24-unit paths flattened once, rendered with GDI+
   (SmoothingModeAntiAlias8x8, round caps/joins) into per-icon premultiplied
