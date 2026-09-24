@@ -3617,11 +3617,10 @@ static const char *g_template =
     "// Chocobar (native build) config. Saved on first run; hot-reloads on save.\r\n"
     "// Everything below is optional - delete a key and the built-in default applies.\r\n"
     "{\r\n"
-    "  \"bar\": { \"height\": 24, \"gap\": 8, \"fontSize\": 12,\r\n"
-    "            \"backgroundTint\": \"#FBF2E2\", \"backgroundAlpha\": 110, \"backdrop\": \"acrylic\",\r\n"
-    "            \"radius\": 8 },\r\n"
-    "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#E8C7D0\", \"pinkDeep\": \"#D493AA\",\r\n"
-    "              \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
+    "  \"bar\": { \"height\": 30, \"gap\": 12, \"fontSize\": 10, \"fontFamily\": \"Segoe Print\", \"align\": 1,\r\n"
+    "            \"backgroundTint\": \"#E8D8C3\", \"backgroundAlpha\": 120, \"backdrop\": \"acrylic\", \"radius\": 8 },\r\n"
+    "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#F0DEE4\", \"pinkDeep\": \"#D493AA\", \"pinkBg\": \"#FEF7F9\",\r\n"
+    "              \"yellow\": \"#D8C77A\", \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
     "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
@@ -3644,7 +3643,7 @@ static const char *g_template =
     "    \"ram\":  { \"enabled\": true, \"warnAt\": 90 },\r\n"
     "    \"volume\": { \"enabled\": true },\r\n"
     "    \"battery\": { \"enabled\": true },\r\n"
-    "    \"clock\": { \"enabled\": true, \"format\": \"{MMM} {dd} ({Wkk}) {HH}:{mm}\" },\r\n"
+    "    \"clock\": { \"enabled\": true, \"format\": \"{MMM} {dd}  {HH}:{mm}\" },\r\n"
     "    \"shortcut\": { \"enabled\": false, \"label\": \"\", \"command\": \"\" },\r\n"
     "    \"pet\": { \"enabled\": false, \"label\": \"\", \"exePath\": \"\" },\r\n"
     "    \"custom\": [\r\n"
@@ -3686,7 +3685,6 @@ static const char *g_template =
     "  // autoStart registers the HKCU Run value on FIRST run only; after that the\r\n"
     "  // tray menu's \"Start with Windows\" item is the control (the bar never rewrites this file)\r\n"
     "}\r\n";
-
 
 void writeTemplate(void) {
     HANDLE h = CreateFileW(g_cfgPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

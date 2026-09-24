@@ -1,17 +1,24 @@
 # Chocobar
 
-Chocobar is a lightweight desktop status bar for Windows. It shows live system state in a slim floating bar that follows your terminal window, and provides an optional local usage dashboard and subscription plan board.
+Chocobar is a small bar that sticks to the top of your terminal window. While you work, it quietly shows your computer's health (CPU, memory, temperature, battery), how many AI tokens you have used, and how much of your subscription quota is left. It uses very little of your computer - about **30 MB of memory** and **4-5% of one CPU core** - so it can sit on your screen all day without slowing anything down. Everything is set up in one plain text file called `config.json`, and **all your data stays on your own computer**. Nothing is sent anywhere else.
+
+## What it looks like
+
+The token dashboard - how many tokens you used today, this week, and over time, with a heatmap and a per-app breakdown:
+
+![Chocobar token dashboard](docs/img/tokens-dashboard.png)
+
+The subscription board - how much of each plan's quota you have left, before you hit a limit:
+
+![Chocobar subscription board](docs/img/subscriptions-board.png)
 
 ## Features
 
-- System chips for CPU, GPU, memory, CPU temperature, volume, battery, and local time.
-- Terminal-aware placement: the bar sits above the followed terminal and moves with it. Auto-detection covers Windows Terminal, classic conhost, ConEmu, mintty, WezTerm, Alacritty, and Hyper. Set `terminal.className` to pin one window class when needed.
-- Dashboard with daily heatmap, summary cards, app/model breakdowns, cache details, and request counts.
-- Subscription plan board with live quota windows per provider, laid out for anything from zero to five configured plans.
-- Soft pastel themes, configurable spacing, fonts, alignment, opacity, and corner radius.
-- Tray and bar context actions for the dashboards, `Reload chocobar`, config editing, and quit. Reloading keeps the single app instance and optional companion process intact.
+Chocobar puts a thin, soft bar right above your terminal, and it follows that window as you move it around your screen - so it is always where you are already looking. On the bar sit small readouts for the things you care about while you work: your processor and graphics card, how much memory is free, how hot the CPU is running, the volume, the battery, and the time. Each one turns a warning color when it crosses a limit you choose, so a problem catches your eye before it becomes a surprise.
 
-All usage adapters are opt-in and read local data only. Supported input shapes include provider or CLI SQLite usage databases (zcode is one optional example), JSONL session logs, JSON message stores, local desktop APIs, and subscription plan snapshots. No store is read until you enable its source, even though the toggles ship visible.
+If you use AI coding tools, the bar keeps count for you. It reads the session logs those tools already write on your own disk and adds up how many tokens you have spent, then shows that on the bar and in a dashboard. The dashboard lays out your usage as a daily heatmap, summary cards for today and the last week and month, a breakdown by app and by model, and request counts. A separate board watches your subscription plans and shows, for each one, how much of each time window you have left - so you can see a plan nearing its cap at a glance instead of finding out when it stops working.
+
+None of this is tied to one company or one tool. Every source - a token store, a subscription plan, even a custom chip that prints the output of any command you like - is declared by you in the config file, so a new tool is one small entry away, never a code change. The whole look is yours too: the colors, the font, the spacing, which chips appear, how rounded the corners are, and how see-through the bar is. A right-click menu gives you the two boards, a reload, and a quick way to edit the config, and every change applies the moment you save the file.
 
 ## Install and run
 
