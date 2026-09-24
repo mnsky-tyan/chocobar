@@ -922,12 +922,12 @@ static void fmtTokens(long long n2, wchar_t *out, int cb) {
 }
 
 // call counts: plain digits up to 5 figures so today's layout keeps its
-// measured shape; 100000+ abbreviates ("100.0k") and 7 figures roll to M,
-// so the widest possible value is 6 chars and a big count can never
-// squeeze the name column out of the row
+// measured shape; 100000+ abbreviates ("100.0k") and the k tier hands over to M
+// once it would round to four digits, so the widest possible value is 6 chars
+// and a big count can never squeeze the name column out of the row
 static void fmtCalls(long long n2, wchar_t *out, int cb) {
     if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
-    else if (n2 >= 1000000) swprintf(out, cb, L"%.1fM", n2 / 1e6);
+    else if (n2 >= 999950) swprintf(out, cb, L"%.1fM", n2 / 1e6);
     else if (n2 >= 100000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
     else swprintf(out, cb, L"%lld", n2);
 }
@@ -1056,8 +1056,10 @@ static void buildChips(void) {
         int st = customStateGet(ci);
         customLock();
         if (cc->intervalMs > 0) {
-            // command-output chip: the text is whatever the command last printed
-            lstrcpynW(txt, g_customText[ci], 96);
+            // command-output chip: the text is whatever the command last
+            // printed. Until the first poll produces output there is none, so
+            // the slot reads as an em dash rather than a textless pill
+            lstrcpynW(txt, g_customText[ci][0] ? g_customText[ci] : L"\u2014", 96);
             // warn band: outside [warnBelow, warnAbove] the text goes warn colour.
             // The band is on the command's RAW output, not the formatted text -
             // "temp $v" and "$v C" both parse as 0 in the formatted string. An
