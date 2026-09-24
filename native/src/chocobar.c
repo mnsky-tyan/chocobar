@@ -506,6 +506,7 @@ static void freeConfig(Config *c) {
     wideFree(&c->shortcutLabel); wideFree(&c->shortcutCommand);
     wideFree(&c->petLabel); wideFree(&c->petExePath);
     wideFree(&c->terminalClassName);
+    wideFree(&c->terminalTitle);
     wideFree(&c->clockFormat);
     for (int i = 0; i < c->customCount; i++) {
         wideFree(&c->custom[i].icon); wideFree(&c->custom[i].label);
@@ -515,6 +516,9 @@ static void freeConfig(Config *c) {
     c->customCount = 0;
     for (int i = 0; i < c->subsProviderCount; i++) {
         SubsProvider *sp = &c->subsProviders[i];
+        wideFree(&sp->label); wideFree(&sp->authPath);
+        wideFree(&sp->configPath); wideFree(&sp->vscdbPath);
+        wideFree(&sp->providerName);
         wideFree(&sp->clientId);
         wideFree(&sp->clientSecret);
         genFree(sp);
