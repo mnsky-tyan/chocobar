@@ -26,10 +26,8 @@
 // costs a re-read, never a wrong number, because the ts filter still applies).
 
 // helpers that live in the later parts of the assembled translation unit
-static void aggRecord(const char *app, int alen, long long ts, long long in, long long out,
-                      long long cr, long long cw, const char *model, int mlen, const long long *bnd);
+// (aggRecord and dashMidnightMs are p_ui.c's: the drain owns the aggregates)
 static long long parseLL(const char *p, const char *end);
-static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack);
 static char *readFileUtf8(const wchar_t *path, DWORD *outLen);
 static void stripLineComments(char *s);
 static int jtokSpan(const jsmntok_t *t, int i);
@@ -52,6 +50,54 @@ static long long tokJll(const char *js, const jsmntok_t *t, int parent, const ch
 static wchar_t g_tokCursorPath[MAX_PATH]; // ~/.wizbar/token-cursors.json
 static long long g_cacheMaxTs = 0;     // newest ts the Electron cache holds
 static long long g_cacheMtimeMs = 0;   // when that cache was last written
+
+// ---------------------------------------------------------- pending records --
+// The scan runs on a worker thread, but the dashboard's aggregates stay
+// UI-thread-affine: parsing only STAGES records here and the UI thread
+// applies them through aggRecord when the scan's done message lands
+// (tokDrainPending, p_ui.c). One scan at a time (g_tokScanBusy), so this
+// buffer needs no lock of its own.
+typedef struct {
+    char app[20];   // aggRecord clamps to 19 + NUL
+    char model[41]; // ids longer than the cap keep their prefix
+    short alen, mlen;
+    long long ts, in, out, cr, cw;
+} TokPend;
+static TokPend *g_tokPend = NULL;
+static int g_tokPendN = 0, g_tokPendCap = 0;
+static int g_tokPendSeedReset = 0; // seed re-read: the drain clears aggregates first
+
+static void tokPendPush(const char *app, int alen, long long ts,
+                        long long in, long long out, long long cr, long long cw,
+                        const char *model, int mlen) {
+    if (alen < 0) alen = 0;
+    if (alen > 19) alen = 19;
+    if (mlen < 0) mlen = 0;
+    if (mlen > 40) mlen = 40;
+    if (g_tokPendN >= g_tokPendCap) {
+        int cap = g_tokPendCap ? g_tokPendCap * 2 : 4096;
+        TokPend *p = (TokPend *)(g_tokPend
+            ? HeapReAlloc(GetProcessHeap(), 0, g_tokPend, (size_t)cap * sizeof(TokPend))
+            : HeapAlloc(GetProcessHeap(), 0, (size_t)cap * sizeof(TokPend)));
+        if (!p) return; // dropping records only under-counts, never corrupts
+        g_tokPend = p;
+        g_tokPendCap = cap;
+    }
+    TokPend *r = &g_tokPend[g_tokPendN++];
+    memcpy(r->app, app, (size_t)alen);
+    r->app[alen] = 0;
+    r->alen = (short)alen;
+    if (mlen) memcpy(r->model, model, (size_t)mlen);
+    r->model[mlen] = 0;
+    r->mlen = (short)mlen;
+    r->ts = ts;
+    r->in = in;
+    r->out = out;
+    r->cr = cr;
+    r->cw = cw;
+}
+
+static void tokPendClear(void) { g_tokPendN = 0; }
 
 // ------------------------------------------------------------ small utils ----
 // wide path -> utf8 (for the cursor file, which is plain JSON)
@@ -139,7 +185,7 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
 // read [from, EOF) of a session file and hand every complete line's record to
 // aggRecord. Returns the new cursor (EOF) or -1 on a read error.
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
-                             const long long *bnd, const TokKeys *tk) {
+                             const TokKeys *tk) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
@@ -197,8 +243,10 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
             if (tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs) {
                 long long fld[4] = { r.in, r.out, r.cr, r.cw };
                 long long sum = fld[0] + fld[1] + fld[2] + fld[3];
-                aggRecord(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
-                          r.model, r.modelLen, bnd);
+                // staged, not aggregated: the aggregates are UI-thread-affine
+                // and this runs on the scan worker (the drain applies them)
+                tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
+                            r.model, r.modelLen);
                 g_tokAllLive += sum;
             }
         }
@@ -308,7 +356,7 @@ static void tokCursorSet(const char *path, long long size, long long mtimeMs) {
 }
 
 // ------------------------------------------------------------- directory ----
-static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, const long long *bnd,
+static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
                        const TokKeys *tk) {
     wchar_t pat[MAX_PATH];
     swprintf(pat, MAX_PATH, L"%ls\\*", dir);
@@ -321,7 +369,7 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, c
             if (lstrcmpW(fd.cFileName, L".") == 0 || lstrcmpW(fd.cFileName, L"..") == 0) continue;
             wchar_t sub[MAX_PATH];
             swprintf(sub, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
-            tokScanDir(sub, 1, appName, bnd, tk);
+            tokScanDir(sub, 1, appName, tk);
             continue;
         }
         int nl = lstrlenW(fd.cFileName);
@@ -343,7 +391,7 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName, c
         long long from = c ? c->size : 0;
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
-        long long neu = tokScanFile(full, from, appName, bnd, tk);
+        long long neu = tokScanFile(full, from, appName, tk);
         if (neu >= 0) { g_tokDbgRead += (int)(neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -368,22 +416,19 @@ void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs) {
     g_cacheMtimeMs = cacheMtimeMs;
 }
 
-// Scan every enabled JSONL session store. Returns the number of records added.
-long tokLiveScan(void) {
+// Scan every enabled JSONL session store. Records are STAGED (tokPendPush)
+// for the UI thread's drain; the return is the token sum they carried.
+// cfg is the pinned config generation: this runs on a worker thread.
+long tokLiveScan(const Config *cfg) {
     if (!g_cfgLoaded) return 0;
-    if (!(g_cfg.tokensEnabled)) return 0;
-    long long bnd[191]; // must match DASH_MAX_DAYS (p_ui.c) + 1
-    SYSTEMTIME st; GetLocalTime(&st);
-    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
-    FILETIME fm; SystemTimeToFileTime(&st, &fm);
-    for (int j = 0; j <= 190; j++) bnd[j] = dashMidnightMs(&fm, j - 1);
+    if (!cfg->tokensEnabled) return 0;
     long long before = g_tokAllLive;
     // Self-heal: if the in-memory set was lost (an early config reload used to
     // reset it) but the file still holds entries, reload it. Without this the
     // scan re-reads every active file from byte 0 and DOUBLE COUNTS them.
     if (!g_tokCursorN) tokCursorLoad();
-    for (int i = 0; i < g_cfg.tokSrcCount; i++) {
-        TokSource *s = &g_cfg.tokSrc[i];
+    for (int i = 0; i < cfg->tokSrcCount; i++) {
+        const TokSource *s = &cfg->tokSrc[i];
         if (!s->enabled || !s->sessionsDir || !*s->sessionsDir) continue;
         wchar_t dir[MAX_PATH];
         // the one bounded "~" expansion in the binary: it refuses a profile
@@ -397,10 +442,10 @@ long tokLiveScan(void) {
         int recursive = s->recursive;
         TokKeys tk;
         tokKeysBuild(s, &tk);
-        tokScanDir(dir, recursive, s->app, bnd, &tk);
+        tokScanDir(dir, recursive, s->app, &tk);
     }
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
-    if (g_cfg.debug) {
+    if (cfg->debug) {
         char lb[160];
         sprintf(lb, "[wizbar] token live scan: files=%d cursorHits=%d bytesRead=%d cursors=%d",
                 g_tokDbgFiles, g_tokDbgHits, g_tokDbgRead, g_tokCursorN);

@@ -109,6 +109,10 @@ extern double g_scale; // display scale (dpi/96): defined in chocobar.c (shared 
 static int g_customState[MAX_CUSTOM];
 
 // ------------------------------------------------------------- globals ----
+// scan worker -> UI: the token scan finished, apply the staged records
+// (WM_APP + 1 is already WM_TRAY, chocobar.c)
+#define WM_APP_TOKSCANDONE (WM_APP + 2)
+
 static HWND g_bar;
 // layered-window renderer: draw into a 32bpp premultiplied DIB, then
 // UpdateLayeredWindow. No D2D/DComp - both fail to present on this machine.
@@ -430,7 +434,7 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
 // keeps no totals of its own.
 extern long long g_tokAllLive;
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
-long tokLiveScan(void);
+long tokLiveScan(const Config *cfg);
 void tokLiveReset(void); // tokens.enabled off: forget cursors + live counters
 long long subsFetchedEpochMs(void);
 void subsCredits(int i, int *avail, int *total);
@@ -671,40 +675,32 @@ static void tokDeriveWindows(void) {
 // Electron app rewrites this cache every rescan, we just read it
 // every completed scan (data OR no-data) moves the version, so the open
 // dashboard can repaint on change instead of on a fixed heartbeat
-static void scanTokenCacheInner(void) {
+// g_tokensToday is UI-thread-affine like the aggregates: the worker hands its
+// "today" number over through these and the drain publishes it.
+static long long g_tokInnerToday = 0;
+static int g_tokInnerTodayValid = 0;
+static void tokTodaySet(long long v) { g_tokInnerToday = v; g_tokInnerTodayValid = 1; }
+
+static void scanTokenCacheInner(const Config *cfg) {
     // tokens.enabled is the master switch: off = zero scans (the cache file is
     // never opened), no chip, and the board shows the master-off empty state
-    if (!g_cfg.tokensEnabled) {
-        g_tokensToday = -1;
-        g_cacheReadDone = 0; // a later re-enable must re-read the seed
-        // zero scans, zero dashboard data: drop every aggregate, and the live
-        // cursors with them, so a re-enable is one clean full re-read instead
-        // of resuming from cursors that skipped what arrived while off
-        memset(g_dayTot, 0, sizeof(g_dayTot));
-        memset(g_dayApp, 0, sizeof(g_dayApp));
-        memset(g_appAgg, 0, sizeof(g_appAgg));
-        memset(g_modelAgg, 0, sizeof(g_modelAgg));
-        g_appCount = g_modelCount = 0;
-        tokLiveReset();
-        return;
-    }
     wchar_t path[MAX_PATH];
     path[0] = 0;
-    if (g_cfg.tokenCachePath && *g_cfg.tokenCachePath) {
+    if (cfg->tokenCachePath && *cfg->tokenCachePath) {
         // ~ prefix = relative to the profile dir; else absolute
-        if (g_cfg.tokenCachePath[0] == L'~' && lstrlenW(g_cfg.tokenCachePath) < MAX_PATH - 2) {
+        if (cfg->tokenCachePath[0] == L'~' && lstrlenW(cfg->tokenCachePath) < MAX_PATH - 2) {
             DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-            if (!n) { g_tokensToday = -1; return; }
-            lstrcatW(path, g_cfg.tokenCachePath + 1);
-        } else if (lstrlenW(g_cfg.tokenCachePath) < MAX_PATH) {
-            lstrcpynW(path, g_cfg.tokenCachePath, MAX_PATH);
+            if (!n) { tokTodaySet(-1); return; }
+            lstrcatW(path, cfg->tokenCachePath + 1);
+        } else if (lstrlenW(cfg->tokenCachePath) < MAX_PATH) {
+            lstrcpynW(path, cfg->tokenCachePath, MAX_PATH);
         }
     } else {
         DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-        if (!n || n >= MAX_PATH - 40) { g_tokensToday = -1; return; }
+        if (!n || n >= MAX_PATH - 40) { tokTodaySet(-1); return; }
         lstrcatW(path, L"\\.wizbar\\token-cache.json");
     }
-    if (!path[0]) { g_tokensToday = -1; return; }
+    if (!path[0]) { tokTodaySet(-1); return; }
     // The Electron cache is a 10MB JSON: re-reading and needle-walking it on
     // every rescan is the single biggest CPU line in the whole bar. It only
     // changes when the Electron app writes it (rarely, now that it is retired),
@@ -712,7 +708,7 @@ static void scanTokenCacheInner(void) {
     // the live session scan below is the cheap incremental half that still
     // runs every rescan.
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; return; }
+    if (h == INVALID_HANDLE_VALUE) { tokTodaySet(-1); return; }
     BY_HANDLE_FILE_INFORMATION fi;
     if (GetFileInformationByHandle(h, &fi)) {
         g_cacheMtimeScan = (((long long)fi.ftLastWriteTime.dwHighDateTime) << 32 | fi.ftLastWriteTime.dwLowDateTime) / 10000 - 11644473600000LL;
@@ -724,9 +720,9 @@ static void scanTokenCacheInner(void) {
         }
     }
     DWORD size = GetFileSize(h, NULL), got = 0;
-    if (size == INVALID_FILE_SIZE || !size) { CloseHandle(h); g_tokensToday = -1; return; }
+    if (size == INVALID_FILE_SIZE || !size) { CloseHandle(h); tokTodaySet(-1); return; }
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
-    if (!buf) { CloseHandle(h); g_tokensToday = -1; return; }
+    if (!buf) { CloseHandle(h); tokTodaySet(-1); return; }
     // the Electron app rewrites this file in place: a read can land mid-write.
     // require the full size, retry a few times before trusting the number.
     BOOL ok = FALSE;
@@ -739,7 +735,7 @@ static void scanTokenCacheInner(void) {
         Sleep(150);
     }
     CloseHandle(h);
-    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); g_tokensToday = -1; return; }
+    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); tokTodaySet(-1); return; }
     buf[got] = 0;
 
     SYSTEMTIME st; GetLocalTime(&st);
@@ -747,18 +743,12 @@ static void scanTokenCacheInner(void) {
     FILETIME localMidnight;
     SystemTimeToFileTime(&st, &localMidnight);
     long long midnight = dashMidnightMs(&localMidnight, 0);
-    // one DST-exact boundary per heatmap bucket: bnd[j] opens the bucket that
-    // holds day j-1, so a bucket never straddles a calendar day
-    long long bnd[DASH_MAX_DAYS + 1];
-    for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
     long long total = 0;
     long long tsScanMax = 0; // newest ts in the cache (the live scan's boundary)
-    memset(g_dayTot, 0, sizeof(g_dayTot));
-    memset(g_appAgg, 0, sizeof(g_appAgg));
-    memset(g_dayApp, 0, sizeof(g_dayApp));
-    memset(g_modelAgg, 0, sizeof(g_modelAgg));
-    g_appCount = 0;
-    g_modelCount = 0;
+    // a full re-read re-derives every aggregate from scratch; the memsets
+    // live in the drain now (the aggregates are UI-thread-affine and this
+    // runs on the scan worker), which clears before applying the records
+    g_tokPendSeedReset = 1;
     // records look like ["key",{"app":"<name>","ts":...,...}] - walk by the
     // app key (it precedes ts inside each record)
     const char *p = buf, *end = buf + got;
@@ -795,12 +785,12 @@ static void scanTokenCacheInner(void) {
             if (me > mv) mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
-        aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, bnd);
+        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen);
         if (ts > tsScanMax) tsScanMax = ts;
         p = next ? next : end;
     }
     HeapFree(GetProcessHeap(), 0, buf);
-    g_tokensToday = total;
+    tokTodaySet(total);
     g_lastScanMs = (long long)GetTickCount64();
     g_lastScanEpoch = dashWallNowMs();
     // remember the seed boundary so the live session scan only counts records
@@ -816,19 +806,40 @@ static void scanTokenCacheInner(void) {
 
 
 static DWORD g_tokScanStart = 0;
-static void scanTokenCache(void) {
-    g_tokScanStart = GetTickCount();
-    dashDayRollover();
-    // the Electron cache is the history seed: read it, then fold in whatever
-    // the live session stores hold that is NEWER (p_tokens.c). Without the
-    // live half every number freezes the moment the Electron app stops
-    // writing the file - which is exactly what the captain saw.
-    long long added = 0;
-    scanTokenCacheInner();
-    if (g_cfg.tokensEnabled && g_cfg.tokSrcCount) {
-        tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
-        added = tokLiveScan();
+static volatile LONG g_tokScanBusy = 0; // one scan at a time (busy ticks are skipped)
+static volatile LONG g_tokScanDone = 0; // worker finished: the UI must drain
+static long long g_tokScanAdded = 0;    // the "+N tokens" the worker folded in
+
+// The UI-thread apply of one finished scan - the ONLY writer of the
+// dashboard's aggregates (aggRecord). Runs when the worker's done message
+// lands; the 1s metrics tick calls it too, so a lost message only delays
+// the numbers by a tick instead of freezing them forever.
+static void tokDrainPending(void) {
+    if (InterlockedExchange(&g_tokScanDone, 0) != 1) return;
+    long long added = g_tokScanAdded;
+    long long bnd[DASH_MAX_DAYS + 1];
+    SYSTEMTIME st; GetLocalTime(&st);
+    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
+    FILETIME localMidnight;
+    SystemTimeToFileTime(&st, &localMidnight);
+    // one DST-exact boundary per heatmap bucket: bnd[j] opens the bucket that
+    // holds day j-1, so a bucket never straddles a calendar day
+    for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
+    if (g_tokPendSeedReset) { // a full re-read re-derives from scratch
+        memset(g_dayTot, 0, sizeof(g_dayTot));
+        memset(g_appAgg, 0, sizeof(g_appAgg));
+        memset(g_dayApp, 0, sizeof(g_dayApp));
+        memset(g_modelAgg, 0, sizeof(g_modelAgg));
+        g_appCount = 0;
+        g_modelCount = 0;
+        g_tokPendSeedReset = 0;
     }
+    for (int i = 0; i < g_tokPendN; i++) {
+        TokPend *r = &g_tokPend[i];
+        aggRecord(r->app, r->alen, r->ts, r->in, r->out, r->cr, r->cw, r->model, r->mlen, bnd);
+    }
+    tokPendClear();
+    if (g_tokInnerTodayValid) { g_tokensToday = g_tokInnerToday; g_tokInnerTodayValid = 0; }
     // the stat cards read the same day buckets the heatmap draws, so the two
     // can never disagree once the window slides past a midnight
     tokDeriveWindows();
@@ -838,16 +849,65 @@ static void scanTokenCache(void) {
         writeLogA(lb);
     }
     g_tokDataVersion++;
-    if (g_cfg.debug) { // how long the UI thread was blocked by this scan
+    InterlockedExchange(&g_tokScanBusy, 0);
+    if (g_cfg.debug) { // total scan duration (the bar stayed responsive throughout)
         DWORD dt = GetTickCount() - g_tokScanStart;
         if (dt >= 15) {
             SYSTEMTIME nst; GetLocalTime(&nst);
             char lb[140];
-            sprintf(lb, "[wizbar] token scan took %lu ms (blocked the bar) tick=%d period=%d at %02d:%02d:%02d",
+            sprintf(lb, "[wizbar] token scan took %lu ms (off-thread) tick=%d period=%d at %02d:%02d:%02d",
                     dt, g_tokensTick, g_cfg.tokensRescanSec, nst.wHour, nst.wMinute, nst.wSecond);
             writeLogA(lb);
         }
     }
+}
+
+// The worker: file I/O and parsing only (staged into tokPend), config pinned
+// for the whole walk so a reload cannot pull a generation out from under it.
+static DWORD WINAPI tokScanThread(LPVOID unused) {
+    (void)unused;
+    const Config *cfg = cfgPin(); // a worker must hold a generation alive
+    scanTokenCacheInner(cfg);
+    if (cfg->tokensEnabled && cfg->tokSrcCount) {
+        tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
+        g_tokScanAdded = tokLiveScan(cfg);
+    }
+    cfgUnpin();
+    InterlockedExchange(&g_tokScanDone, 1);
+    // land the apply immediately; the 1s tick drains as a fallback if this
+    // never arrives (e.g. the bar window is already gone at shutdown)
+    PostMessageW(g_bar, WM_APP_TOKSCANDONE, 0, 0);
+    return 0;
+}
+
+// Kick off a scan on a worker thread so the cold read (~3.3s over the WSL
+// redirector) cannot freeze the bar. A tick that lands while a scan is still
+// running is skipped - the next one catches up.
+static void scanTokenCache(void) {
+    if (InterlockedCompareExchange(&g_tokScanBusy, 1, 0) != 0) return;
+    tokPendClear();
+    g_tokPendSeedReset = 0;
+    g_tokInnerTodayValid = 0;
+    g_tokScanAdded = 0;
+    if (!g_cfg.tokensEnabled) {
+        // off = zero scans, zero dashboard data (master switch): drop every
+        // aggregate and the live cursors with them, so a re-enable is one
+        // clean full re-read instead of resuming from cursors that skipped
+        // what arrived while off. Memory-only: apply it inline.
+        g_tokPendSeedReset = 1;
+        g_tokInnerToday = -1;
+        g_tokInnerTodayValid = 1;
+        g_cacheReadDone = 0; // a later re-enable must re-read the seed
+        tokLiveReset();
+        InterlockedExchange(&g_tokScanDone, 1);
+        tokDrainPending();
+        return;
+    }
+    g_tokScanStart = GetTickCount();
+    dashDayRollover();
+    HANDLE th = CreateThread(NULL, 0, tokScanThread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+    else tokScanThread(NULL); // no thread available: run inline, drain follows
 }
 
 // token counts (renderer/dash.js fmt): B / M / k tiers
@@ -931,6 +991,7 @@ static void buildChips(void) {
     g_chipCount = 0;
     // the scan period comes from tokens.rescanMinutes (seconds, 60..3600):
     // a hard-coded 30 ignored the config and scanned twice as often as asked
+    tokDrainPending(); // fallback: apply a finished scan whose message got lost
     if (++g_tokensTick >= g_cfg.tokensRescanSec) { g_tokensTick = 0; scanTokenCache(); }
     if (g_tokensToday < 0 && g_tokensTick == 1) scanTokenCache();
     // left pinned group: shortcut, pet, tokens, subs (Electron order)
@@ -3612,6 +3673,9 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // bar is the only Chocobar surface with no menu at all.
     case WM_RBUTTONUP:
         showTrayMenu(hwnd);
+        return 0;
+    case WM_APP_TOKSCANDONE:
+        tokDrainPending();
         return 0;
     case WM_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) showTrayMenu(hwnd);
