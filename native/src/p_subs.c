@@ -2065,9 +2065,13 @@ static void subsStart(void) {
 // stale only when NO provider has a usable remaining value.
 static int subsChipRem(void) {
     if (!g_subsLockInit) return -1;
+    // scope to the real providers: unused slots are zero-init globals (rem=0,
+    // stale=0) that are never reset, so looping MAX_SUBS would read them as a
+    // live provider at 0% and drown every real provider's value
+    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
     EnterCriticalSection(&g_subsLock);
     int r = -1;
-    for (int i = 0; i < MAX_SUBS; i++)
+    for (int i = 0; i < pn; i++)
         if (g_subsProvRem[i] >= 0 && (r < 0 || g_subsProvRem[i] < r)) r = g_subsProvRem[i];
     LeaveCriticalSection(&g_subsLock);
     return r; // -1 = no provider has a number
@@ -2075,11 +2079,14 @@ static int subsChipRem(void) {
 
 static int subsChipStale(void) {
     if (!g_subsLockInit) return 0;
+    // scope to the real providers: an unused slot zero-inits to stale=0, which
+    // would otherwise count as "live" and make stale unreachable
+    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
     EnterCriticalSection(&g_subsLock);
     // stale only if every provider that HAS a value failed its last fetch, or
     // nothing has ever succeeded. Any live provider clears it.
     int anyValue = 0, anyLive = 0;
-    for (int i = 0; i < MAX_SUBS; i++) {
+    for (int i = 0; i < pn; i++) {
         if (g_subsProvRem[i] < 0) continue;
         anyValue = 1;
         if (!g_subsProvStale[i]) anyLive = 1;
