@@ -68,6 +68,8 @@ Point it somewhere else with `chocobar.exe --config <path>` or the `WIZBAR_CONFI
 
 Everything below is optional: delete a key and the built-in default applies. Sizes are CSS pixels (the bar scales them by the display DPI), colors are `#RRGGBB`.
 
+Every `Default` in the tables below is that built-in fallback, and so is the complete starting point at the end of this section. The template the bar writes on a first run ships a softer look on purpose - a taller bar, the `Segoe Print` font, a pastel tint - so that is what a new install opens with; deleting a key from it brings the fallback listed below back.
+
 ### `bar` - the strip itself
 
 | Key | Default | What it does |
