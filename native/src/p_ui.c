@@ -190,7 +190,7 @@ static int initRender(HWND hwnd) {
 
 // apply translucency: DWM acrylic backdrop, or plain opaque if backdrop=solid
 static void applyBackdrop(HWND hwnd) {
-    MARGINS m = {-1};
+    MARGINS m = {-1, 0, 0, 0}; // four margins spelled out: the short {-1} form warns under -Wmissing-field-initializers
     DwmExtendFrameIntoClientArea(hwnd, &m);
     if (lstrcmpiW(g_cfg.backdrop, L"solid") != 0) {
         DWORD bt = 2; // DWMSBT_TRANSIENTWINDOW (acrylic)

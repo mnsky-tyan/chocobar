@@ -494,14 +494,18 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 ## Public release (de-personalized)
 
-Shipped defaults are neutral: `tokens.enabled=false` with all sources off and empty paths,
-pet chip off, no personal identifiers in repo code/config/docs (a portable test
-guards this). Personal stores/pet wiring belongs only in the user-level
-`~/.wizbar/config.json` (outside the repo). Dashboard shows an explanatory empty state
-(`sourcesEnabled`) when nothing is configured. `tokens.enabled` is a true master switch:
+Shipped defaults are neutral - nothing is read until the user turns a
+source on. The native first-run template ships `tokens.enabled=false` with every
+source off (example store paths, each disabled) and the pet chip and subs board
+off; the retired app's JS defaults ship the master ON with every source off and
+every path empty. No personal identifiers in repo code/config/docs. Personal
+stores/pet wiring belongs only in the user-level `~/.wizbar/config.json`
+(outside the repo). Dashboard shows an explanatory empty state (`sourcesEnabled`)
+when nothing is configured. `tokens.enabled` is a true master switch:
 off = zero scans, zero dashboard data, no chip (the dashboard says so via
 `masterEnabled:false`); per-source flags decide which stores are read only when it is on
-(regression: the master-switch block in `scripts/portable_regression.js`).
+(regression: `scripts/portable_regression.js` section 4 for the JS defaults and
+section 4b for the native template).
 
 ## Token usage stores (sharp edge)
 

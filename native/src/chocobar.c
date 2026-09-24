@@ -47,6 +47,10 @@
 #include "jsmn.h"
 #include "version.h"
 
+// Link directives for the MSVC build only: this project is compiled with
+// the mingw cross toolchain, which links the same libs explicitly (build.sh
+// passes -l flags) and warns on an unknown pragma, so keep them MSVC-only.
+#ifdef _MSC_VER
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -56,6 +60,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#endif
 
 static void writeLogA(const char *s); // p_ui
 
