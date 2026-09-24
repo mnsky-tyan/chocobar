@@ -859,6 +859,17 @@ static void fmtTokens(long long n2, wchar_t *out, int cb) {
     else swprintf(out, cb, L"%lld", n2);
 }
 
+// call counts: plain digits up to 5 figures so today's layout keeps its
+// measured shape; 100000+ abbreviates ("100.0k") and 7 figures roll to M,
+// so the widest possible value is 6 chars and a big count can never
+// squeeze the name column out of the row
+static void fmtCalls(long long n2, wchar_t *out, int cb) {
+    if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
+    else if (n2 >= 1000000) swprintf(out, cb, L"%.1fM", n2 / 1e6);
+    else if (n2 >= 100000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
+    else swprintf(out, cb, L"%lld", n2);
+}
+
 // renderer/subs.js fmtNum: M and k tiers only (no B), values rounded
 static void fmtNum(long long n2, wchar_t *out, int cb) {
     if (n2 < 0) { lstrcpynW(out, L"\u2014", cb); return; }
@@ -1772,7 +1783,7 @@ static void dashTableRowNeeds(HDC dc, HFONT f, const TokAgg *a, int *need) {
     fmtTokens(a->out, vs, 32); w = dashStrW(dc, vs, f); if (w > need[3]) need[3] = w;
     if (a->cr > 0) { fmtTokens(a->cr, vs, 32); w = dashStrW(dc, vs, f); if (w > need[2]) need[2] = w; }
     if (a->cw > 0) { fmtTokens(a->cw, vs, 32); w = dashStrW(dc, vs, f); if (w > need[1]) need[1] = w; }
-    swprintf(vs, 32, L"%lld", a->req); w = dashStrW(dc, vs, f); if (w > need[0]) need[0] = w;
+    fmtCalls(a->req, vs, 32); w = dashStrW(dc, vs, f); if (w > need[0]) need[0] = w;
 }
 static void dashTableHeadNeeds(HDC dc, HFONT f, int *need) {
     static const wchar_t *hd[5] = { L"CALLS", L"CACHE W", L"CACHE R", L"OUTPUT", L"INPUT" };
@@ -1824,7 +1835,7 @@ static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
     fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], y, vs, t->fg, f11);
     if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], y, vs, t->fg, f11); }
     if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], y, vs, t->fg, f11); }
-    swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], y, vs, t->fg, f11);
+    fmtCalls(a->req, vs, 32); dashStrR(dc, xs[0], y, vs, t->fg, f11);
 }
 
 static void dashTableHead(HDC dc, int x0, int y,
@@ -2186,7 +2197,7 @@ static void paintDash(HWND hwnd) {
                         fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], ddy, vs, t.fg, fBody);
                         if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], ddy, vs, t.fg, fBody); }
                         if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody); }
-                        swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
+                        fmtCalls(a->req, vs, 32); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
                         ddDrawn++;
                         ddy += DX(17);
                     }
