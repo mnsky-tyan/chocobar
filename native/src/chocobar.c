@@ -246,6 +246,10 @@ typedef struct {
     int showTray;
     int autoStart;            // fresh installs register the Run value (default on)
     int debug;                 // general.debug: extra scan logging
+    int checkUpdates;          // general.checkUpdates: ONE GitHub version probe at
+                               // startup (default off: a fresh install never
+                               // touches the network). Reports only - never
+                               // downloads or installs anything.
 
     int subsEnabled, subsIntervalMin, subsTimeoutMs, subsRotateSec;
     SubsProvider subsProviders[MAX_SUBS];
@@ -667,6 +671,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->showTray = 1;
     c->autoStart = 1;
     c->debug = 0;
+    c->checkUpdates = 0;
     c->clockFormat = wideDup(L"{MMM} {dd} ({Wkk}) {HH}:{mm}");
     c->subsEnabled = 0; c->subsIntervalMin = 2; c->subsTimeoutMs = 20000; c->subsProviderCount = 0;
     c->subsRotateSec = 60;
@@ -979,5 +984,6 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
         c->autoStart = jboolDefault(js, t, jobjGet(js, t, general, "autoStart"), 1);
         c->debug = jboolDefault(js, t, jobjGet(js, t, general, "debug"), 0);
+        c->checkUpdates = jboolDefault(js, t, jobjGet(js, t, general, "checkUpdates"), 0);
     }
 }

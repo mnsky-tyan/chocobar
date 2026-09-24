@@ -1689,6 +1689,81 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
     return 0;
 }
 
+// ---- opt-in update check -----------------------------------------------------
+// ONE GitHub API call at startup behind general.checkUpdates (default off, so
+// an untouched install still makes zero network requests - the privacy promise
+// in the README stays true). The answer only ever produces a log line + a tray
+// tooltip note: it never downloads, installs, or swaps anything. The tray
+// "Check for updates" entry remains the manual route to the releases page.
+typedef struct { char msg[192]; int newer; } UpdateVerdict;
+static UpdateVerdict g_upd;
+
+// "1.10.2" -> 1010002-ish, so 1.10 > 1.9 (a string compare would say otherwise)
+static long long verParse(const char *s) {
+    long long parts[3] = { 0, 0, 0 };
+    int pi = 0;
+    for (; *s && pi < 3; s++) {
+        if (*s >= '0' && *s <= '9') parts[pi] = parts[pi] * 10 + (*s - '0');
+        else if (*s == '.') pi++;
+        else break;
+    }
+    return parts[0] * 1000000 + parts[1] * 1000 + parts[2];
+}
+
+static DWORD WINAPI updThread(LPVOID unused) {
+    (void)unused;
+    int status = 0, len = 0;
+    char *body = subsHttpGet("update", WINHTTP_USER_AGENT_NATIVE, L"api.github.com", 0,
+                             L"/repos/mnsky-tyan/chocobar/releases/latest",
+                             L"Accept: application/vnd.github+json", 0, 8000, &status, &len);
+    if (!body || status != 200) {
+        char lb[130];
+        sprintf(lb, "[wizbar] update check: no answer (http %d)", status);
+        writeLogA(lb);
+        if (body) HeapFree(GetProcessHeap(), 0, body);
+        return 0;
+    }
+    // tag_name is the release's own version (no json scanner needed for one field)
+    const char *k = strstr(body, "\"tag_name\":\"");
+    if (k) {
+        k += 12;
+        const char *e = k;
+        while (*e && *e != '"' && e - k < 31) e++;
+        char tag[32];
+        int n = (int)(e - k);
+        if (n > 31) n = 31;
+        memcpy(tag, k, (size_t)n);
+        tag[n] = 0;
+        const char *v = (tag[0] == 'v' || tag[0] == 'V') ? tag + 1 : tag;
+        if (verParse(v) > verParse(CB_VER_STR)) {
+            g_upd.newer = 1;
+            sprintf(g_upd.msg, "Chocobar %s is available (running %s)", v, CB_VER_STR);
+        } else {
+            sprintf(g_upd.msg, "Chocobar %s is the latest release", CB_VER_STR);
+        }
+    } else {
+        lstrcpynA(g_upd.msg, "update check: unreadable answer", (int)sizeof(g_upd.msg));
+    }
+    HeapFree(GetProcessHeap(), 0, body);
+    return 0;
+}
+
+// Kick the one probe (called from wWinMain right after the bar exists).
+static void updCheckStart(void) {
+    if (!g_cfg.checkUpdates) return;
+    HANDLE th = CreateThread(NULL, 0, updThread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+    else updThread(NULL);
+}
+
+// The tray tooltip note, appended once the probe has landed (p_ui.c calls this
+// from its trace: the check never blocks the bar).
+static int updNote(wchar_t *out, int cb) {
+    if (!g_upd.msg[0]) return 0;
+    MultiByteToWideChar(CP_UTF8, 0, g_upd.msg, -1, out, cb);
+    return 1;
+}
+
 static void subsStart(void) {
     if (g_subsThreadStarted) return;
     g_subsThreadStarted = 1;

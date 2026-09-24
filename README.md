@@ -239,6 +239,7 @@ Each provider entry:
 | `general.showTray` | `true` | Show the tray icon. |
 | `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. |
 | `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`. |
+| `general.checkUpdates` | `false` | **Reports only** (never downloads or installs). On startup, one request to the GitHub releases API compares the running version with the latest release; when you are behind, one `[wizbar]` log line and the tray tooltip say so. Leave it off and the bar makes no network request of its own. |
 
 ### Keys the native build ignores
 
@@ -299,7 +300,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                 ] }
             ] },
   "terminal": { "className": "", "title": "" },
-  "general": { "showTray": true, "autoStart": true, "debug": false }
+  "general": { "showTray": true, "autoStart": true, "debug": false, "checkUpdates": false }
 }
 ```
 
@@ -345,7 +346,7 @@ Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[
 
 ## Defaults and privacy
 
-The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The tokens and subscription chips are not on the bar at all until you switch those masters on; with nothing wired behind them they then show an em dash instead of a number. Chocobar has no telemetry. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
+The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The tokens and subscription chips are not on the bar at all until you switch those masters on; with nothing wired behind them they then show an em dash instead of a number. Chocobar has no telemetry. The one outbound request the bar itself can make is the opt-in `general.checkUpdates` probe (off by default), which reads a public release tag and reports it. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
 
 Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar` and `start-wizbar.vbs`. The application and all user-visible strings use Chocobar.
 

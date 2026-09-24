@@ -438,6 +438,8 @@ long tokLiveScan(const Config *cfg);
 void tokLiveReset(void); // tokens.enabled off: forget cursors + live counters
 long long subsFetchedEpochMs(void);
 void subsCredits(int i, int *avail, int *total);
+static void updCheckStart(void);
+static int updNote(wchar_t *out, int cb);
 void tokLiveInit(void);
 
 // newest ts + mtime seen in the cache file, for the live scan's seed boundary
@@ -3502,6 +3504,23 @@ static HICON makeBarIcon(int px) {
     return h;
 }
 
+// The opt-in update probe writes g_upd asynchronously; append its one-line
+// verdict to the tray tooltip (and refresh the icon tooltip) when it lands.
+static void trayRetip(void) {
+    if (!g_trayAdded) return;
+    wchar_t note[200];
+    wchar_t tip[256];
+    lstrcpynW(tip, L"Chocobar", 256);
+    if (updNote(note, 200)) {
+        lstrcpynW(tip, L"Chocobar - ", 256);
+        int n = lstrlenW(tip);
+        lstrcpynW(tip + n, note, 256 - n);
+    }
+    if (lstrcmpW(tip, g_nid.szTip) == 0) return;
+    lstrcpynW(g_nid.szTip, tip, 128);
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
 static void trayAdd(HWND hwnd) {
     if (g_trayAdded || !g_cfg.showTray) return;
     memset(&g_nid, 0, sizeof(g_nid));
@@ -3545,6 +3564,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         } else if (wp == TIMER_CONFIG) {
             configCheckTick();
+            trayRetip(); // opt-in update probe landed? append it to the tooltip
             // content-fit: the dash windows are created at the config height and
             // paint their content from the top, so a data change that shrinks
             // the content leaves a trailing blank. Latch the window to the
@@ -3765,7 +3785,9 @@ static const char *g_template =
     "                 ] }\r\n"
     "             ] },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
-    "  \"general\": { \"showTray\": true, \"autoStart\": true }\r\n"
+    "  \"general\": { \"showTray\": true, \"autoStart\": true, \"checkUpdates\": false }\r\n"
+    "  // checkUpdates (off): one startup request to the GitHub releases API that only REPORTS\r\n"
+    "  // when a newer release exists (log line + tray tooltip). It never downloads or installs.\r\n"
     "  // autoStart registers the HKCU Run value on FIRST run only; after that the\r\n"
     "  // tray menu's \"Start with Windows\" item is the control (the bar never rewrites this file)\r\n"
     "}\r\n";
@@ -3926,6 +3948,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
         writeLogA(dbg);
     }
     subsStart();
+    updCheckStart(); // opt-in: one version probe, report-only
     followTick();
 
     MSG msg;
