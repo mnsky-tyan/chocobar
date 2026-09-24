@@ -1,7 +1,11 @@
 // ------------------------------------------------- subscription providers ----
-// Mirrors src/subs.js (Electron) for the chip only: ChatGPT wham/usage and
-// Z.ai quota/limit, lowest remaining window wins. Fetches run on a worker
-// thread (WinHTTP is blocking); the UI timer just reads the latest state.
+// The chip mirrors src/subs.js (Electron): ChatGPT wham/usage and Z.ai quota/
+// limit, lowest remaining window wins. Antigravity and the config-only generic
+// provider (a REST quota endpoint declared entirely in subs.providers[]) have no
+// Electron counterpart - they exist here only.
+// Every enabled provider gets its OWN thread and they run concurrently: each
+// fetch is independent (each writes only its own slot through the locked
+// setters), so a cycle costs the slowest provider rather than the sum.
 //
 // Sharp edges (do not "simplify"):
 //  - The Z.ai endpoint answers HTTP 200 with body {code:500} unless the full

@@ -182,7 +182,7 @@ A config from before the array form (`"sources": { "pi": { "sessionsDir": ... } 
 |---|---|---|
 | `enabled` | `false` | Master switch for the board and the gauge chip. |
 | `intervalMinutes` | `2` | Minutes between quota polls. |
-| `fetchTimeoutMs` | `20000` | Per-provider request deadline (3-60s). |
+| `fetchTimeoutMs` | `20000` | Per-provider deadline: WinHTTP's connect and receive timeouts (resolve and send stay 5s). |
 | `rotateSec` | `60` | Seconds each plan stays on the rotating gauge chip (5-3600). |
 | `width` / `height` | `880` / `580` | Board window size in CSS px. |
 | `providers` | `[]` | Up to 6 entries; the board fits every enabled one. |
@@ -196,6 +196,7 @@ Each provider entry:
 ```
 
 - `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
+- `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
 - `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
 - One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints (the daily endpoint wins), the same source the harness's `/quota` uses - no IDE or language server required.
 
@@ -341,13 +342,13 @@ Exact read sites, for reference:
 - Double-launch Chocobar to open the dashboard when it is already running.
 - Right-click the bar or tray icon for dashboards, reload, config, and quit actions; the menu closes on an outside click or Esc.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
-- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
+- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Following is sticky - the bar keeps one terminal until it closes, then re-probes (foreground terminal first).
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
 - Launch with a specific config file: `chocobar --config <path>` (or the `WIZBAR_CONFIG` environment variable). The file gets the annotated template on first use, so personal wiring stays in personal files while a fresh install just works.
 
 ## Defaults and privacy
 
-The shipped defaults read nothing: every usage source and board provider is off and every path is empty. The three toggle chips are visible so you can find them; with nothing wired they show `–` / `—` and scan nothing. Chocobar has no telemetry. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
+The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The three toggle chips are visible so you can find them; with nothing wired they show `–` / `—` and scan nothing. Chocobar has no telemetry. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
 
 Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar` and `start-wizbar.vbs`. The application and all user-visible strings use Chocobar.
 
