@@ -42,7 +42,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Windows-side: `scripts/token_regression.js` (zcode+zai attribution; needs those stores),
   `scripts/cputemp_regression.js` (HWiNFO shm reader, Windows only).
 
-## Cross-platform architecture (since the portability pass)
+## Cross-platform architecture (since the portability pass, retired Electron app)
+
+Everything below describes the RETIRED Electron app. The shipped bar is one
+mingw cross-compiled Windows exe (`native/`; build/run/verify in
+`native/README.md`) and has no non-Windows path to degrade, so read these as
+history, not as the product's current behavior.
 
 Windows is primary; non-Windows must degrade gracefully, never fake data:
 
@@ -56,7 +61,7 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
 - Platform gates elsewhere: PowerShell GPU/Bluetooth workers + Core Audio volume +
   desktop pet + registry autostart are Windows-only (guarded in `src/metrics.js` /
   `main.js`); `src/tokens.js` probes `python3` when `python` is missing.
-- Non-Windows acryl­ic does not exist: `themePayload` sends the tint SOLID off-Windows.
+- Non-Windows acrylic does not exist: `themePayload` sends the tint SOLID off-Windows.
 
 ## Chocobar naming split (since the menu/dashboard pass)
 
@@ -96,6 +101,10 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   (`{plans:[{name,total,used,resetsAt}]}`); re-read per rescan, invalid entries
   skipped, and the payload rides `tokens.aggregate().subscription` (null = hide
   the dashboard card). Gated by the tokens master switch like every source.
+  **Retired Electron app only** - the native scan reads JSONL session stores, so
+  a legacy `subscription` entry (no `sessionsDir`) is skipped with the rest of
+  the legacy object conversion; the shipped plan-usage surface is
+  `subs.providers[]` and the subscription board.
 
 ## Running on Linux (WSLg) — recipe
 
@@ -498,8 +507,6 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   never a tasklist.exe spawn (~164ms/spawn measured; ~290ms in older notes).
 - The bar's heal interval must die with its window (see `BarWindow` closed/destroy) —
   it used to leak one 400ms timer per rebuild.
-- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
-  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
 
 ## Config surfaces (since the dashboard-config pass)
 
