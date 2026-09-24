@@ -922,11 +922,13 @@ static void fmtTokens(long long n2, wchar_t *out, int cb) {
 }
 
 // call counts: plain digits up to 5 figures so today's layout keeps its
-// measured shape; 100000+ abbreviates ("100.0k") and the k tier hands over to M
-// once it would round to four digits, so the widest possible value is 6 chars
-// and a big count can never squeeze the name column out of the row
+// measured shape; 100000+ abbreviates ("100.0k") and each of the k and M tiers
+// hands over to the next once it would round to four digits, so both stay at
+// most 6 chars wide and a big count can never squeeze the name column out of
+// the row. The B tier is the unbounded catch-all - two decimals run it to
+// "999.95B" (7) and past a trillion to "1000.00B" (8)
 static void fmtCalls(long long n2, wchar_t *out, int cb) {
-    if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
+    if (n2 >= 999950000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
     else if (n2 >= 999950) swprintf(out, cb, L"%.1fM", n2 / 1e6);
     else if (n2 >= 100000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
     else swprintf(out, cb, L"%lld", n2);
