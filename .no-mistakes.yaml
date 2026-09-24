@@ -5,3 +5,4 @@ no_ci: true
 allow_repo_commands: true
 commands:
   test: npm test
+test_agent_timeout: "300m"

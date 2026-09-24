@@ -1,17 +1,24 @@
 # Chocobar
 
-Chocobar is a lightweight desktop status bar for Windows. It shows live system state in a slim floating bar that follows your terminal window, and provides an optional local usage dashboard and subscription plan board.
+Chocobar is a small bar that sticks to the top of your terminal window. While you work, it quietly shows your computer's health (CPU, memory, temperature, battery), how many AI tokens you have used, and how much of your subscription quota is left. It uses very little of your computer - about **30 MB of memory** and **4-5% of one CPU core** - so it can sit on your screen all day without slowing anything down. Everything is set up in one plain text file called `config.json`, and **your token counts stay on your own computer** - the bar reads the logs those tools already write on your disk and never uploads them. Off the shelf it makes no requests at all. Once you switch a subscription plan on, it asks that plan's own website how much quota you have left, using the login that plan already saved here. There is also an opt-in release check that asks GitHub for the latest version number. Those two are the only requests the bar itself ever makes - the only other way anything here reaches the network is a command you set up yourself, such as a custom chip or the shortcut button.
+
+## What it looks like
+
+The token dashboard - how many tokens you used today, this week, and over time, with a heatmap and a per-app breakdown:
+
+![Chocobar token dashboard](docs/img/tokens-dashboard.png)
+
+The subscription board - how much of each plan's quota you have left, before you hit a limit:
+
+![Chocobar subscription board](docs/img/subscriptions-board.png)
 
 ## Features
 
-- System chips for CPU, GPU, memory, CPU temperature, volume, battery, and local time.
-- Terminal-aware placement: the bar sits above the followed terminal and moves with it. Auto-detection covers Windows Terminal, classic conhost, ConEmu, mintty, WezTerm, Alacritty, and Hyper. Set `terminal.className` to pin one window class when needed.
-- Dashboard with daily heatmap, summary cards, app/model breakdowns, cache details, and request counts.
-- Subscription plan board with live quota windows per provider, laid out for anything from zero to five configured plans.
-- Soft pastel themes, configurable spacing, fonts, alignment, opacity, and corner radius.
-- Tray and bar context actions for the dashboards, `Reload chocobar`, config editing, and quit. Reloading keeps the single app instance and optional companion process intact.
+Chocobar puts a thin, soft bar right above your terminal, and it follows that window as you move it around your screen - so it is always where you are already looking. On the bar sit small readouts for the things you care about while you work: your processor and graphics card, how much of your memory is in use, how hot the CPU is running, the volume, the battery, and the time. The CPU, temperature, and memory readouts take a limit you choose and turn a warning color once they cross it, so a problem catches your eye before it becomes a surprise.
 
-All usage adapters are opt-in and read local data only. Supported input shapes include provider or CLI SQLite usage databases (zcode is one optional example), JSONL session logs, JSON message stores, local desktop APIs, and subscription plan snapshots. No store is read until you enable its source, even though the toggles ship visible.
+If you use AI coding tools, the bar keeps count for you. It reads the session logs those tools already write on your own disk and adds up how many tokens you have spent, then shows that on the bar and in a dashboard. The dashboard lays out your usage as a daily heatmap, summary cards for today and the last week and month, a breakdown by app and by model, and request counts. A separate board watches your subscription plans and shows, for each one, how much of each time window you have left - so you can see a plan nearing its cap at a glance instead of finding out when it stops working.
+
+None of this is tied to one company or one tool. Every source - a token store, a subscription plan, even a custom chip that prints the output of any command you like - is declared by you in the config file, so a new tool is one small entry away, never a code change. The whole look is yours too: the colors, the font, the spacing, which chips appear, how rounded the corners are, and how see-through the bar is. A right-click menu gives you the two boards, a reload, and a quick way to edit the config, and every change applies the moment you save the file.
 
 ## Install and run
 
@@ -43,12 +50,6 @@ the Nix mingw toolchain:
 bash native/build.sh   # produces native/chocobar.exe
 ```
 
-### Tests
-
-```bash
-npm test
-```
-
 ## Configuration
 
 The native bar keeps its whole configuration in one JSON file:
@@ -60,6 +61,8 @@ The native bar keeps its whole configuration in one JSON file:
 Point it somewhere else with `chocobar.exe --config <path>` or the `WIZBAR_CONFIG` environment variable (`--config` wins). The file is **hot-reloaded on save** - no restart. On first use of a path the bar writes an annotated template there; after that the bar never writes the file again, so hand edits, comments, and personal wiring all survive (the tray menu's `Start with Windows` item is the one setting that lives in the registry instead, precisely so it cannot be overwritten).
 
 Everything below is optional: delete a key and the built-in default applies. Sizes are CSS pixels (the bar scales them by the display DPI), colors are `#RRGGBB`.
+
+Every `Default` in the tables below is that built-in fallback, and so is the complete starting point at the end of this section. The template the bar writes on a first run ships a softer look on purpose - a taller bar, the `Segoe Print` font, a pastel tint, and a clock without the weekday - and it leaves the token scan and the subscription board switched off, so an untouched install reads nothing; deleting a key from it brings the fallback listed below back.
 
 ### `bar` - the strip itself
 
@@ -132,6 +135,20 @@ Every module takes `enabled` (default `true` unless noted). The three leftmost t
 - `label`: chip text; empty = icon only. `color`: chip color; empty = theme default. `title`: hover tooltip.
 - `command`: what a click runs. `toggle: true` holds an on/off state per run and appends ` on` / ` off` to the command.
 
+**Command-output chips** - set `intervalMs` and the command is polled on a timer instead of on click, and its stdout becomes the chip text. This is the escape hatch for any metric the bar has no reader for:
+
+```json
+{ "enabled": true, "icon": "gpu", "label": "",
+  "command": "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader",
+  "intervalMs": 5000, "format": "$v C", "warnAbove": 80 }
+```
+
+- `intervalMs`: poll period (minimum 1000). The command runs through `cmd.exe /c`, so pipes and redirects work.
+- `format`: wraps the value; `$v` is the trimmed stdout. Without `$v` the format is shown verbatim.
+- `warnAbove` / `warnBelow`: colour the value red outside that band. Either alone is fine; omit both to disable. The band reads the command's raw output, and the colour starts on the first poll that produces output - a chip with no value yet never looks hot.
+
+The poll runs on its own thread, so a command that takes a second never hitches the bar; a command gets five seconds and is then killed, and only its first line of output is used. A failed command keeps the last good text rather than blanking the chip; before the first poll that produces output the chip reads as an em dash.
+
 ### `tokens` - the usage dashboard
 
 | Key | Default | What it does |
@@ -141,10 +158,26 @@ Every module takes `enabled` (default `true` unless noted). The three leftmost t
 | `cachePath` | `""` | Usage-history seed file; empty = `~/.wizbar/token-cache.json`. |
 | `appFilter` | `[]` | Harness allowlist: only these app ids are counted (empty = all). |
 | `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
-| `sources.zai` | – | `{ "enabled": true, "sessionsDir": "~/.zai/agent/sessions" }` - flat JSONL, scanned live. |
-| `sources.pi` | – | `{ "enabled": true, "sessionsDir": "~/.pi/agent/sessions" }` - one directory per project, scanned live. |
+| `sources` | `[]` | Every session store the live scan reads - a user-declared array, see below. |
 
-Only sources with a `sessionsDir` are scanned; the two shipped keys are `zai` and `pi`. Usage semantics per store are in the Token accounting section below.
+**`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else. Up to 8 sources; extras are ignored with no error, so keep the list short enough to count.
+
+```json
+"sources": [
+  { "app": "pi",  "path": "~/.pi/agent/sessions",  "enabled": true, "recursive": true },
+  { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true }
+]
+```
+
+- `app`: the aggregation key (and the `labels` lookup key), up to 19 characters - longer names are truncated at that, because every consumer of the key (the dashboard rows, the `appFilter`, the `labels` table) stores exactly that much. Omitted = the nearest dot-directory in the expanded path with its dot stripped, so `~/.pi/agent/sessions` becomes `pi` and `~/.claude/projects` becomes `claude`; a path with no dot-directory anywhere falls back to the store folder's own name.
+- `path`: the store. `~` is profile-relative; a UNC path works too.
+- `enabled`: per-source switch, honoured only when `tokens.enabled` is on. Defaults to **on** - adding an entry is the act of turning it on; the shipped template leaves its two examples off.
+- `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
+- `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
+
+Usage semantics per store are in the Token accounting section below.
+
+A config from before the array form (`"sources": { "pi": { "sessionsDir": ... } }`) is still read: each key becomes the app and its `sessionsDir` the store, and one log line says the legacy form was converted. Migrate to the array form at your convenience - entries without a `sessionsDir` (the old sqlite-backed stores) are skipped, as they always were.
 
 ### `subs` - the subscription board
 
@@ -152,7 +185,7 @@ Only sources with a `sessionsDir` are scanned; the two shipped keys are `zai` an
 |---|---|---|
 | `enabled` | `false` | Master switch for the board and the gauge chip. |
 | `intervalMinutes` | `2` | Minutes between quota polls. |
-| `fetchTimeoutMs` | `20000` | Per-provider request deadline (3-60s). |
+| `fetchTimeoutMs` | `20000` | Per-provider deadline: WinHTTP's connect and receive timeouts (resolve and send stay 5s). |
 | `rotateSec` | `60` | Seconds each plan stays on the rotating gauge chip (5-3600). |
 | `width` / `height` | `880` / `580` | Board window size in CSS px. |
 | `providers` | `[]` | Up to 6 entries; the board fits every enabled one. |
@@ -165,26 +198,52 @@ Each provider entry:
   "clientId": "", "clientSecret": "" }
 ```
 
-- `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login).
+- `enabled`: per-provider switch, honoured only when the `subs` master above is on. Defaults to **on** - declaring a provider is the act of turning it on; the first-run template ships its four examples off.
+- `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
+- `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
 - `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
 - One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints (the daily endpoint wins), the same source the harness's `/quota` uses - no IDE or language server required.
 
-**Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps the last good windows marked stale.
+**`type: "generic"`** - any REST quota endpoint, declared entirely in config. This is what makes a new subscription plan a config edit rather than a code change:
+
+```json
+{ "type": "generic", "enabled": true, "label": "MyPlan",
+  "url": "https://api.example.com/v1/quota", "method": "GET",
+  "auth": { "header": "Authorization", "prefix": "Bearer ",
+            "path": "~/.example/auth.json", "key": "access_token" },
+  "headers": { "Accept": "application/json" },
+  "windows": [
+    { "label": "5h", "used": "$.data.five_hour.used",
+      "total": "$.data.five_hour.limit", "reset": "$.data.five_hour.resets_at" },
+    { "label": "week", "remaining": "$.data.weekly.remaining",
+      "total": "$.data.weekly.limit" }
+  ] }
+```
+
+- `url` / `method` / `body`: the request. `method` is `GET` unless it says `POST`; `body` is the raw POST body.
+- `auth`: one object, or an array of them (up to 3 per provider). Each entry renders `header: prefix <value>`, where the value comes from `path` + `key` (read from a JSON file at fetch time), `env` (an environment variable), or `literal` (the config itself). Nothing is persisted. A `key` that starts with `$` is a JSON path, so a secret nested inside the file is reachable (`"auth": { "path": "~/x/auth.json", "key": "$.auth.token" }`); any other `key` is one flat top-level key.
+- `headers`: static `Name: value` lines, sent after the resolved auth.
+- `windows[]`: a `label` plus the JSON paths carrying the numbers, up to 6 per provider. Paths are `$.a.b[0].c`. A window needs any two of `used` / `remaining` / `total`; the third is derived. `reset` is an ISO-8601 timestamp.
+- `require`: a path that must be present, for endpoints that answer `200` with an error body.
+- `insecure`: authorize plain `http` (the scheme decides TLS; without this flag an `http://` URL is refused). Documented risk: it sends the token in the clear.
+
+**Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps that provider's last good windows marked stale on the board. The gauge chip rotates through your enabled plans, one entry per `rotateSec`, showing each plan's weekly window (or its lowest window when the plan reports no weekly one); it reads `stale` only when every plan that has a number failed its last poll - one timeout no longer blanks a chip that still has fresh data.
 
 ### `dashboard`, `terminal`, `general`
 
 | Key | Default | What it does |
 |---|---|---|
 | `dashboard.width` / `dashboard.height` | `900` / `520` | Token dashboard window size. |
-| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, mintty, then WezTerm/Alacritty/Hyper by process. |
+| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, and mintty by class, in that order. |
 | `terminal.title` | `""` | Optional title substring to disambiguate. |
 | `general.showTray` | `true` | Show the tray icon. |
 | `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. |
 | `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`. |
+| `general.checkUpdates` | `false` | **Reports only** (never downloads or installs). On startup, one request to the GitHub releases API compares the running version with the latest release; when you are behind, one `[wizbar]` log line and the tray tooltip say so. Leave it off and the bar makes no network request of its own. |
 
 ### Keys the native build ignores
 
-The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapDays`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
+The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapDays`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them; the legacy `sources` object itself is converted, but these two keys carry no `sessionsDir`, so nothing scans them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
 
 ### A complete starting point
 
@@ -213,8 +272,9 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
   },
   "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
               "labels": { "pi": "pi-wsl" },
-              "sources": { "zai": { "enabled": true, "sessionsDir": "~/.zai/agent/sessions" },
-                           "pi":  { "enabled": true, "sessionsDir": "~/.pi/agent/sessions" } } },
+              "sources": [ { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
+                           { "app": "pi",  "path": "~/.pi/agent/sessions", "enabled": true,
+                             "recursive": true } ] },
   "subs": { "enabled": false, "intervalMinutes": 2, "fetchTimeoutMs": 20000,
             "rotateSec": 60, "width": 880, "height": 580,
             "providers": [
@@ -225,10 +285,22 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                 "provider": "builtin:zai-coding-plan" },
               { "type": "antigravity", "enabled": false, "label": "Antigravity",
                 "authPath": "~/.pi/agent/auth.json",
-                "clientId": "", "clientSecret": "" }
+                "clientId": "", "clientSecret": "" },
+              { "type": "generic", "enabled": false, "label": "MyPlan",
+                "url": "https://api.example.com/v1/quota", "method": "GET",
+                "auth": { "header": "Authorization", "prefix": "Bearer ",
+                          "path": "~/.example/auth.json", "key": "access_token" },
+                "headers": { "Accept": "application/json" },
+                "windows": [
+                  { "label": "5h", "used": "$.data.five_hour.used",
+                    "total": "$.data.five_hour.limit",
+                    "reset": "$.data.five_hour.resets_at" },
+                  { "label": "week", "remaining": "$.data.weekly.remaining",
+                    "total": "$.data.weekly.limit" }
+                ] }
             ] },
   "terminal": { "className": "", "title": "" },
-  "general": { "showTray": true, "autoStart": true, "debug": false }
+  "general": { "showTray": true, "autoStart": true, "debug": false, "checkUpdates": false }
 }
 ```
 
@@ -259,52 +331,47 @@ Per source, the raw numbers come from the provider's own usage records:
 | `mimo` | assistant message `tokens` from the local desktop API | `input + output + cache.read + cache.write` (input excludes cache) | `tokens.input` as stored |
 | `subscription` | your plan-usage JSON (`used` / `total` per plan) | n/a (credits, not tokens) | never mixed into token totals |
 
-Exact read sites, for reference:
+Every row is a per-store semantics note, not something you declare: the shipped bar scans only the JSONL session stores in `tokens.sources[]`, and `zcode` / `opencode` / `mimo` / `subscription` have no native reader.
 
-- zcode: `scripts/zcode_query.py` (the SQL) and `_scanZcode` in `src/tokens.js`
-- zai/pi sessions: `_readSessionTail` in `src/tokens.js`
-- opencode: `_scanOpencodeDb` / `_scanOpencodeFiles` in `src/tokens.js`
-- mimo: `_scanMimo` in `src/tokens.js`
-- aggregation: `aggregate()` in `src/tokens.js` (`rowTotal = input + output + cacheRead + cacheWrite`)
-
-`npm test` cross-checks the scanner against a raw walk of a real session store: record counts and per-column sums must match exactly, and the portable suite pins the aggregation contract (totals include cache; input/output columns stay raw).
+Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
 
 ## Use the bar and dashboard
 
-- Click the diamond (tokens) chip or use `Ctrl+Alt+D` to open the dashboard.
-- Double-launch Chocobar to open the dashboard when it is already running.
+- Click the diamond (tokens) chip for the dashboard, the gauge (subscription) chip for the plan board.
 - Right-click the bar or tray icon for dashboards, reload, config, and quit actions; the menu closes on an outside click or Esc.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
-- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Set `terminal.reattachToExisting: true` to use an existing terminal after the followed window closes.
+- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Following is sticky - the bar keeps one terminal until it closes, then re-probes (foreground terminal first). Chocobar runs as a single instance, so launching it a second time does nothing; use the tray menu or a chip click instead.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
 - Launch with a specific config file: `chocobar --config <path>` (or the `WIZBAR_CONFIG` environment variable). The file gets the annotated template on first use, so personal wiring stays in personal files while a fresh install just works.
 
 ## Defaults and privacy
 
-The shipped defaults read nothing: every usage source and board provider is off and every path is empty. The three toggle chips are visible so you can find them; with nothing wired they show `–` / `—` and scan nothing. Chocobar has no telemetry. Enabled sources are read-only and local, except for an explicitly enabled local desktop API adapter.
+The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The tokens and subscription chips are not on the bar at all until you switch those masters on; with nothing wired behind them they then show an em dash instead of a number. Chocobar has no telemetry. The opt-in `general.checkUpdates` probe (off by default) is the only request the bar makes on its own; a subscription plan you switch on asks that plan's own API with the login that plan already saved here, and a custom chip or shortcut command you set up yourself reaches the network on its own.
 
 Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar` and `start-wizbar.vbs`. The application and all user-visible strings use Chocobar.
 
 ## Tests
 
-Tests are headless, use a temporary HOME, and require no GUI:
+Tests are headless and require no GUI:
 
 ```bash
 npm test
 ```
 
-The suite covers portable readers, neutral defaults, token aggregation, subscription snapshots, terminal probe resolution, and session-log scanning. Windows-only checks cover native sensor providers.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers.
 
 ## Layout
 
+The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents.
+
 ```text
-main.js            app entry, tray, IPC, lifecycle, and reload action
-src/config.js      defaults and hot-reloaded user config
-src/tracker.js     terminal detection and follow state machine
-src/native.js      native bindings and portable readers
-src/metrics.js     system metric polling
-src/tokens.js      local usage adapters and aggregation
-src/bar.js         bar BrowserWindow
-renderer/          bar and dashboard HTML, CSS, JavaScript, and preloads
-scripts/           launchers and regression suites
+native/src/chocobar.c   entry, config parser, wWinMain
+native/src/p_metrics.c  cpu / ram / temp / volume / battery / gpu / pet polls
+native/src/p_subs.c     subscription quota fetchers (WinHTTP)
+native/src/p_icons.c    chip icons (flattened SVG paths)
+native/src/p_tokens.c   live session-log scan and byte cursors
+native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
+native/src/p_utils.c    logging, string, and config helpers
+native/README.md        native build, run, and verification notes
+scripts/                launchers, icon tooling, and the regression suite
 ```

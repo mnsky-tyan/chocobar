@@ -18,12 +18,19 @@ static void writeLogA(const char *s) {
         if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
         ensured = 1;
     }
-    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+    // FILE_APPEND_DATA puts every write at EOF, so one WriteFile per line is
+    // what keeps the subs fetch threads from interleaving each other's lines,
+    // and the shared handle is what stops a second open from failing outright
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_ALWAYS, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     SetFilePointer(h, 0, NULL, FILE_END);
+    char line[512];
+    int n = 0;
+    while (s[n] && n < (int)sizeof(line) - 3) { line[n] = s[n]; n++; }
+    line[n++] = '\r'; line[n++] = '\n';
     DWORD w;
-    WriteFile(h, s, lstrlenA(s), &w, NULL);
-    WriteFile(h, "\r\n", 2, &w, NULL);
+    WriteFile(h, line, (DWORD)n, &w, NULL);
     CloseHandle(h);
 }
 static LONG WINAPI crashHandler(EXCEPTION_POINTERS *e) {
@@ -102,6 +109,10 @@ extern double g_scale; // display scale (dpi/96): defined in chocobar.c (shared 
 static int g_customState[MAX_CUSTOM];
 
 // ------------------------------------------------------------- globals ----
+// scan worker -> UI: the token scan finished, apply the staged records
+// (WM_APP + 1 is already WM_TRAY, chocobar.c)
+#define WM_APP_TOKSCANDONE (WM_APP + 2)
+
 static HWND g_bar;
 // layered-window renderer: draw into a 32bpp premultiplied DIB, then
 // UpdateLayeredWindow. No D2D/DComp - both fail to present on this machine.
@@ -183,7 +194,7 @@ static int initRender(HWND hwnd) {
 
 // apply translucency: DWM acrylic backdrop, or plain opaque if backdrop=solid
 static void applyBackdrop(HWND hwnd) {
-    MARGINS m = {-1};
+    MARGINS m = {-1, 0, 0, 0}; // four margins spelled out: the short {-1} form warns under -Wmissing-field-initializers
     DwmExtendFrameIntoClientArea(hwnd, &m);
     if (lstrcmpiW(g_cfg.backdrop, L"solid") != 0) {
         DWORD bt = 2; // DWMSBT_TRANSIENTWINDOW (acrylic)
@@ -195,6 +206,215 @@ static void applyBackdrop(HWND hwnd) {
 }
 
 // --------------------------------------------------------- chip building ----
+// ------------------------------------------------- command-output chips ----
+// A custom chip with intervalMs > 0 runs its command on a background thread and
+// shows the trimmed stdout. This is the escape hatch for any metric the bar has
+// no reader for: one config entry and the command is the whole implementation.
+// The poll NEVER runs on the UI thread - a command that takes a second must not
+// hitch the bar, so the text is stored here and the chip just reads it.
+static wchar_t g_customText[MAX_CUSTOM][96];
+// the command's raw trimmed output, kept beside the formatted chip text: the
+// warn band is a band on the captured NUMBER, and a format like "temp $v"
+// parses as 0 inside the formatted string
+static wchar_t g_customRaw[MAX_CUSTOM][64];
+static volatile long long g_customNextPoll[MAX_CUSTOM];
+static int g_customPollInit = 0;
+
+// loadConfig() installs a new config generation the poll thread must not see
+// half-written, so its reads pin the generation (cfgPin/cfgUnpin). This lock
+// covers only the published text, which the poll thread writes from its own
+// thread while the chip build reads it.
+static CRITICAL_SECTION g_cfgCustomLock;
+static void customLock(void) { EnterCriticalSection(&g_cfgCustomLock); }
+static void customUnlock(void) { LeaveCriticalSection(&g_cfgCustomLock); }
+
+static DWORD WINAPI customPollThread(LPVOID lp);
+
+// One thread walks every command chip. It is started from loadConfig - the one
+// point a startup, a config save and a tray Reload all go through - so a chip
+// added while the bar is already running is polled without a restart.
+static void customPollStart(void) {
+    if (g_customPollInit) return;
+    const Config *v = cfgPin();
+    int any = 0;
+    for (int i = 0; i < v->customCount; i++)
+        if (v->custom[i].enabled && v->custom[i].intervalMs > 0) { any = 1; break; }
+    cfgUnpin();
+    if (!any) return;
+    HANDLE h = CreateThread(NULL, 0, customPollThread, NULL, 0, NULL);
+    if (!h) return;
+    CloseHandle(h); // it runs until quit; the chips read its text, never its handle
+    g_customPollInit = 1;
+}
+
+// run `command` through cmd.exe (so PATH lookup, pipes and redirects all work)
+// and capture what it writes to stdout. Returns a trimmed, bounded copy.
+static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
+    out[0] = 0;
+    if (!command || !*command) return 0;
+    wchar_t cmd[2048];
+    swprintf(cmd, 2048, L"cmd.exe /c %ls", command);
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return 0;
+    STARTUPINFOW si; memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = wr; si.hStdError = wr; si.hStdInput = NULL;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    // Run the command in the user's profile, not the bar's own directory: the
+    // bar can be launched from a UNC cwd (a WSL path, a network share) and
+    // cmd.exe refuses to run at all with one - it just prints its cwd and exits,
+    // which reads as "the chip never updates".
+    wchar_t cwd[MAX_PATH]; cwd[0] = 0;
+    DWORD cl = GetEnvironmentVariableW(L"USERPROFILE", cwd, MAX_PATH);
+    if (!cl || cl >= MAX_PATH) cwd[0] = 0;
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW, NULL, cwd[0] ? cwd : NULL, &si, &pi)) {
+        CloseHandle(rd); CloseHandle(wr);
+        return 0;
+    }
+    CloseHandle(wr); // the child owns it now; closing ours is what ends the pipe
+    char buf[4096];
+    DWORD got = 0;
+    char accb[4000]; int accbLen = 0; // raw bytes, decoded once at the end
+    // One deadline for the whole capture, checked on EVERY iteration. EOF on
+    // the pipe only arrives once EVERY inherited write handle is gone, so a
+    // command that either leaves a background child holding stdout (a
+    // `start /b ...` chain, a daemon it spawned) or just keeps writing never
+    // ends the pipe by itself. A blocking ReadFile would wedge this thread,
+    // and with it every other command chip; so would checking the cap only
+    // while the pipe happened to be empty, which let a chatty command spin
+    // here at 100% of a core forever and never reach the kill net below.
+    unsigned long long tStart = GetTickCount64();
+    for (;;) {
+        if (GetTickCount64() - tStart >= 5000) break;
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL)) break; // EOF / broken pipe
+        if (avail == 0) { Sleep(25); continue; }
+        if (!ReadFile(rd, buf, sizeof(buf) - 1, &got, NULL) || got == 0) break;
+        if (accbLen < (int)sizeof(accb) - 1) { // bound the copy, never the read
+            int n = (int)got;
+            if (n > (int)sizeof(accb) - 1 - accbLen) n = (int)sizeof(accb) - 1 - accbLen;
+            memcpy(accb + accbLen, buf, (size_t)n);
+            accbLen += n;
+        }
+        // a full buffer means more output is already waiting: yield so the
+        // drain cannot spin the pipe at 100% of a core until the cap fires
+        if (got >= sizeof(buf) - 1) Sleep(25);
+    }
+    accb[accbLen] = 0;
+    CloseHandle(rd);
+    // a redirected cmd.exe pipe carries the console's OEM bytes, not UTF-8, so
+    // decode UTF-8 first and fall back to the OEM codepage when that pass
+    // produced replacement characters (GBK on a Chinese-locale box would
+    // otherwise render as U+FFFD and read 0 to the warn band)
+    wchar_t acc[4096];
+    int accLen = MultiByteToWideChar(CP_UTF8, 0, accb, accbLen, acc, 4096 - 1);
+    if ((accLen <= 0 && accbLen > 0) || (accLen > 0 && wcschr(acc, L'\uFFFD')))
+        accLen = MultiByteToWideChar(CP_OEMCP, 0, accb, accbLen, acc, 4096 - 1);
+    if (accLen < 0) accLen = 0;
+    acc[accLen] = 0;
+    // never wait forever on a hung command: spend what is left of the same cap,
+    // then kill it - an abandoned child would otherwise pile up one process per
+    // poll on every chip that misbehaves
+    unsigned long long spent = GetTickCount64() - tStart;
+    if (WaitForSingleObject(pi.hProcess, spent >= 5000 ? 0 : (DWORD)(5000 - spent)) != WAIT_OBJECT_0)
+        TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    // one value per chip: leading whitespace and blank lines are skipped, then
+    // the FIRST line wins - the chip is drawn single-line and the warn band
+    // parses this same line with _wtof, so a two-line stdout must never reach
+    // it. Its trailing spaces and tabs are trimmed off.
+    wchar_t *p = acc;
+    while (*p == L' ' || *p == L'\t' || *p == L'\r' || *p == L'\n') p++;
+    int len = 0;
+    while (p[len] && p[len] != L'\r' && p[len] != L'\n') len++;
+    p[len] = 0; // everything after the first line is discarded
+    while (len > 0 && (p[len-1] == L' ' || p[len-1] == L'\t')) p[--len] = 0;
+    if (len <= 0) return 0;
+    lstrcpynW(out, p, cch);
+    return 1;
+}
+
+// apply the format around the captured value. "$v" is the placeholder; a format
+// without it is used verbatim (the command printed its own text). Takes the
+// strings, not the config entry: the poll thread owns its copy.
+static void customApplyFormat(const wchar_t *f, const wchar_t *val, wchar_t *out, int cch) {
+    if (!f || !*f) { lstrcpynW(out, val, cch); return; }
+    const wchar_t *ph = wcsstr(f, L"$v");
+    if (!ph) { lstrcpynW(out, f, cch); return; }
+    int head = (int)(ph - f);
+    if (head < 0) head = 0;
+    if (head > cch - 1) head = cch - 1;
+    wcsncpy(out, f, (size_t)head); out[head] = 0;
+    wcsncat(out, val, (size_t)(cch - head - 1));
+    wcsncat(out, ph + 2, (size_t)(cch - lstrlenW(out) - 1));
+}
+
+// Copy the fields this chip needs out of a pinned config generation, then run
+// the command on the copy: a reload retires that generation the instant the pin
+// is released, and this code keeps running on its own memory.
+static int customChipCopy(int ci, wchar_t *command, int cchCmd, wchar_t *format, int cchFmt) {
+    const Config *v = cfgPin();
+    int ok = 0;
+    if (ci >= 0 && ci < v->customCount) {
+        const CustomChip *cc = &v->custom[ci];
+        if (cc->enabled && cc->intervalMs > 0 && cc->command && *cc->command) {
+            lstrcpynW(command, cc->command, cchCmd);
+            lstrcpynW(format, cc->format ? cc->format : L"", cchFmt);
+            ok = 1;
+        }
+    }
+    cfgUnpin();
+    return ok;
+}
+
+static void customPollOne(int ci) {
+    wchar_t command[1024], format[256], val[512], txt[96];
+    if (!customChipCopy(ci, command, 1024, format, 256)) return;
+    if (!customRunCapture(command, val, 512)) return; // keep the last good text
+    customApplyFormat(format, val, txt, 96);
+    customLock();
+    lstrcpynW(g_customText[ci], txt, 96);
+    lstrcpynW(g_customRaw[ci], val, 64);
+    customUnlock();
+}
+
+static int customIntervalMs(int ci) {
+    const Config *v = cfgPin();
+    int ms = ci >= 0 && ci < v->customCount ? v->custom[ci].intervalMs : 0;
+    cfgUnpin();
+    return ms;
+}
+
+static DWORD WINAPI customPollThread(LPVOID lp) {
+    (void)lp;
+    for (int i = 0; i < MAX_CUSTOM; i++) {
+        int iv = customIntervalMs(i);
+        if (iv > 0) customPollOne(i); // first read happens immediately
+        g_customNextPoll[i] = GetTickCount64() + iv;
+    }
+    for (;;) {
+        Sleep(100);
+        unsigned long long now = GetTickCount64();
+        const Config *v = cfgPin();
+        int n = v->customCount;
+        cfgUnpin();
+        for (int i = 0; i < n; i++) {
+            int iv = customIntervalMs(i);
+            if (iv <= 0) continue;
+            if (now < (unsigned long long)g_customNextPoll[i]) continue;
+            g_customNextPoll[i] = (long long)now + iv;
+            customPollOne(i);
+        }
+    }
+    return 0;
+}
+
 static int customStateGet(int idx) { return idx >= 0 && idx < MAX_CUSTOM ? g_customState[idx] : 0; }
 
 static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
@@ -214,10 +434,12 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
 // keeps no totals of its own.
 extern long long g_tokAllLive;
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
-long tokLiveScan(void);
+long tokLiveScan(const Config *cfg);
 void tokLiveReset(void); // tokens.enabled off: forget cursors + live counters
 long long subsFetchedEpochMs(void);
 void subsCredits(int i, int *avail, int *total);
+static void updCheckStart(void);
+static int updNote(wchar_t *out, int cb);
 void tokLiveInit(void);
 
 // newest ts + mtime seen in the cache file, for the live scan's seed boundary
@@ -307,8 +529,11 @@ static void aggRecord(const char *app, int alen, long long ts,
         int ok = 0;
         for (int i = 0; i < g_cfg.tokensAppCount && !ok; i++) {
             wchar_t wide[20];
-            MultiByteToWideChar(CP_UTF8, 0, app, alen, wide, 20);
-            wide[alen] = 0;
+            int wl = MultiByteToWideChar(CP_UTF8, 0, app, alen, wide, 20);
+            // MultiByteToWideChar does NOT terminate on an explicit input
+            // length: terminate at the RETURNED length, because the app key is
+            // UTF-8 and one byte is no longer one wide character
+            wide[wl > 0 ? wl : 0] = 0;
             if (lstrcmpiW(wide, g_cfg.tokensApps[i]) == 0) ok = 1;
         }
         if (!ok) return;
@@ -455,40 +680,32 @@ static void tokDeriveWindows(void) {
 // Electron app rewrites this cache every rescan, we just read it
 // every completed scan (data OR no-data) moves the version, so the open
 // dashboard can repaint on change instead of on a fixed heartbeat
-static void scanTokenCacheInner(void) {
+// g_tokensToday is UI-thread-affine like the aggregates: the worker hands its
+// "today" number over through these and the drain publishes it.
+static long long g_tokInnerToday = 0;
+static int g_tokInnerTodayValid = 0;
+static void tokTodaySet(long long v) { g_tokInnerToday = v; g_tokInnerTodayValid = 1; }
+
+static void scanTokenCacheInner(const Config *cfg) {
     // tokens.enabled is the master switch: off = zero scans (the cache file is
     // never opened), no chip, and the board shows the master-off empty state
-    if (!g_cfg.tokensEnabled) {
-        g_tokensToday = -1;
-        g_cacheReadDone = 0; // a later re-enable must re-read the seed
-        // zero scans, zero dashboard data: drop every aggregate, and the live
-        // cursors with them, so a re-enable is one clean full re-read instead
-        // of resuming from cursors that skipped what arrived while off
-        memset(g_dayTot, 0, sizeof(g_dayTot));
-        memset(g_dayApp, 0, sizeof(g_dayApp));
-        memset(g_appAgg, 0, sizeof(g_appAgg));
-        memset(g_modelAgg, 0, sizeof(g_modelAgg));
-        g_appCount = g_modelCount = 0;
-        tokLiveReset();
-        return;
-    }
     wchar_t path[MAX_PATH];
     path[0] = 0;
-    if (g_cfg.tokenCachePath && *g_cfg.tokenCachePath) {
+    if (cfg->tokenCachePath && *cfg->tokenCachePath) {
         // ~ prefix = relative to the profile dir; else absolute
-        if (g_cfg.tokenCachePath[0] == L'~' && lstrlenW(g_cfg.tokenCachePath) < MAX_PATH - 2) {
+        if (cfg->tokenCachePath[0] == L'~' && lstrlenW(cfg->tokenCachePath) < MAX_PATH - 2) {
             DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-            if (!n) { g_tokensToday = -1; return; }
-            lstrcatW(path, g_cfg.tokenCachePath + 1);
-        } else if (lstrlenW(g_cfg.tokenCachePath) < MAX_PATH) {
-            lstrcpynW(path, g_cfg.tokenCachePath, MAX_PATH);
+            if (!n) { tokTodaySet(-1); return; }
+            lstrcatW(path, cfg->tokenCachePath + 1);
+        } else if (lstrlenW(cfg->tokenCachePath) < MAX_PATH) {
+            lstrcpynW(path, cfg->tokenCachePath, MAX_PATH);
         }
     } else {
         DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-        if (!n || n >= MAX_PATH - 40) { g_tokensToday = -1; return; }
+        if (!n || n >= MAX_PATH - 40) { tokTodaySet(-1); return; }
         lstrcatW(path, L"\\.wizbar\\token-cache.json");
     }
-    if (!path[0]) { g_tokensToday = -1; return; }
+    if (!path[0]) { tokTodaySet(-1); return; }
     // The Electron cache is a 10MB JSON: re-reading and needle-walking it on
     // every rescan is the single biggest CPU line in the whole bar. It only
     // changes when the Electron app writes it (rarely, now that it is retired),
@@ -496,7 +713,7 @@ static void scanTokenCacheInner(void) {
     // the live session scan below is the cheap incremental half that still
     // runs every rescan.
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) { g_tokensToday = -1; return; }
+    if (h == INVALID_HANDLE_VALUE) { tokTodaySet(-1); return; }
     BY_HANDLE_FILE_INFORMATION fi;
     if (GetFileInformationByHandle(h, &fi)) {
         g_cacheMtimeScan = (((long long)fi.ftLastWriteTime.dwHighDateTime) << 32 | fi.ftLastWriteTime.dwLowDateTime) / 10000 - 11644473600000LL;
@@ -508,9 +725,9 @@ static void scanTokenCacheInner(void) {
         }
     }
     DWORD size = GetFileSize(h, NULL), got = 0;
-    if (size == INVALID_FILE_SIZE || !size) { CloseHandle(h); g_tokensToday = -1; return; }
+    if (size == INVALID_FILE_SIZE || !size) { CloseHandle(h); tokTodaySet(-1); return; }
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
-    if (!buf) { CloseHandle(h); g_tokensToday = -1; return; }
+    if (!buf) { CloseHandle(h); tokTodaySet(-1); return; }
     // the Electron app rewrites this file in place: a read can land mid-write.
     // require the full size, retry a few times before trusting the number.
     BOOL ok = FALSE;
@@ -523,7 +740,7 @@ static void scanTokenCacheInner(void) {
         Sleep(150);
     }
     CloseHandle(h);
-    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); g_tokensToday = -1; return; }
+    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); tokTodaySet(-1); return; }
     buf[got] = 0;
 
     SYSTEMTIME st; GetLocalTime(&st);
@@ -531,18 +748,12 @@ static void scanTokenCacheInner(void) {
     FILETIME localMidnight;
     SystemTimeToFileTime(&st, &localMidnight);
     long long midnight = dashMidnightMs(&localMidnight, 0);
-    // one DST-exact boundary per heatmap bucket: bnd[j] opens the bucket that
-    // holds day j-1, so a bucket never straddles a calendar day
-    long long bnd[DASH_MAX_DAYS + 1];
-    for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
     long long total = 0;
     long long tsScanMax = 0; // newest ts in the cache (the live scan's boundary)
-    memset(g_dayTot, 0, sizeof(g_dayTot));
-    memset(g_appAgg, 0, sizeof(g_appAgg));
-    memset(g_dayApp, 0, sizeof(g_dayApp));
-    memset(g_modelAgg, 0, sizeof(g_modelAgg));
-    g_appCount = 0;
-    g_modelCount = 0;
+    // a full re-read re-derives every aggregate from scratch; the memsets
+    // live in the drain now (the aggregates are UI-thread-affine and this
+    // runs on the scan worker), which clears before applying the records
+    g_tokPendSeedReset = 1;
     // records look like ["key",{"app":"<name>","ts":...,...}] - walk by the
     // app key (it precedes ts inside each record)
     const char *p = buf, *end = buf + got;
@@ -579,12 +790,12 @@ static void scanTokenCacheInner(void) {
             if (me > mv) mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
-        aggRecord(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, bnd);
+        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen);
         if (ts > tsScanMax) tsScanMax = ts;
         p = next ? next : end;
     }
     HeapFree(GetProcessHeap(), 0, buf);
-    g_tokensToday = total;
+    tokTodaySet(total);
     g_lastScanMs = (long long)GetTickCount64();
     g_lastScanEpoch = dashWallNowMs();
     // remember the seed boundary so the live session scan only counts records
@@ -600,19 +811,45 @@ static void scanTokenCacheInner(void) {
 
 
 static DWORD g_tokScanStart = 0;
-static void scanTokenCache(void) {
-    g_tokScanStart = GetTickCount();
+static volatile LONG g_tokScanBusy = 0; // one scan at a time (busy ticks are skipped)
+static volatile LONG g_tokScanDone = 0; // worker finished: the UI must drain
+static long long g_tokScanAdded = 0;    // the "+N tokens" the worker folded in
+
+// The UI-thread apply of one finished scan - the ONLY writer of the
+// dashboard's aggregates (aggRecord). Runs when the worker's done message
+// lands; the 1s metrics tick calls it too, so a lost message only delays
+// the numbers by a tick instead of freezing them forever.
+static void tokDrainPending(void) {
+    if (InterlockedExchange(&g_tokScanDone, 0) != 1) return;
+    // the buckets' frame date and the boundary array built just below must come
+    // from the SAME instant: the scan is off-thread, so local midnight can pass
+    // between the scan start's dashDayRollover and this drain, which would file
+    // a whole scan's records one day too old
     dashDayRollover();
-    // the Electron cache is the history seed: read it, then fold in whatever
-    // the live session stores hold that is NEWER (p_tokens.c). Without the
-    // live half every number freezes the moment the Electron app stops
-    // writing the file - which is exactly what the captain saw.
-    long long added = 0;
-    scanTokenCacheInner();
-    if (g_cfg.tokensEnabled && g_cfg.tokSrcCount) {
-        tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
-        added = tokLiveScan();
+    long long added = g_tokScanAdded;
+    long long bnd[DASH_MAX_DAYS + 1];
+    SYSTEMTIME st; GetLocalTime(&st);
+    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
+    FILETIME localMidnight;
+    SystemTimeToFileTime(&st, &localMidnight);
+    // one DST-exact boundary per heatmap bucket: bnd[j] opens the bucket that
+    // holds day j-1, so a bucket never straddles a calendar day
+    for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
+    if (g_tokPendSeedReset) { // a full re-read re-derives from scratch
+        memset(g_dayTot, 0, sizeof(g_dayTot));
+        memset(g_appAgg, 0, sizeof(g_appAgg));
+        memset(g_dayApp, 0, sizeof(g_dayApp));
+        memset(g_modelAgg, 0, sizeof(g_modelAgg));
+        g_appCount = 0;
+        g_modelCount = 0;
+        g_tokPendSeedReset = 0;
     }
+    for (int i = 0; i < g_tokPendN; i++) {
+        TokPend *r = &g_tokPend[i];
+        aggRecord(r->app, r->alen, r->ts, r->in, r->out, r->cr, r->cw, r->model, r->mlen, bnd);
+    }
+    tokPendClear();
+    if (g_tokInnerTodayValid) { g_tokensToday = g_tokInnerToday; g_tokInnerTodayValid = 0; }
     // the stat cards read the same day buckets the heatmap draws, so the two
     // can never disagree once the window slides past a midnight
     tokDeriveWindows();
@@ -622,16 +859,65 @@ static void scanTokenCache(void) {
         writeLogA(lb);
     }
     g_tokDataVersion++;
-    if (g_cfg.debug) { // how long the UI thread was blocked by this scan
+    InterlockedExchange(&g_tokScanBusy, 0);
+    if (g_cfg.debug) { // total scan duration (the bar stayed responsive throughout)
         DWORD dt = GetTickCount() - g_tokScanStart;
         if (dt >= 15) {
             SYSTEMTIME nst; GetLocalTime(&nst);
             char lb[140];
-            sprintf(lb, "[wizbar] token scan took %lu ms (blocked the bar) tick=%d period=%d at %02d:%02d:%02d",
+            sprintf(lb, "[wizbar] token scan took %lu ms (off-thread) tick=%d period=%d at %02d:%02d:%02d",
                     dt, g_tokensTick, g_cfg.tokensRescanSec, nst.wHour, nst.wMinute, nst.wSecond);
             writeLogA(lb);
         }
     }
+}
+
+// The worker: file I/O and parsing only (staged into tokPend), config pinned
+// for the whole walk so a reload cannot pull a generation out from under it.
+static DWORD WINAPI tokScanThread(LPVOID unused) {
+    (void)unused;
+    const Config *cfg = cfgPin(); // a worker must hold a generation alive
+    scanTokenCacheInner(cfg);
+    if (cfg->tokensEnabled && cfg->tokSrcCount) {
+        tokLiveSeed(g_cacheMaxTsScan, g_cacheMtimeScan);
+        g_tokScanAdded = tokLiveScan(cfg);
+    }
+    cfgUnpin();
+    InterlockedExchange(&g_tokScanDone, 1);
+    // land the apply immediately; the 1s tick drains as a fallback if this
+    // never arrives (e.g. the bar window is already gone at shutdown)
+    PostMessageW(g_bar, WM_APP_TOKSCANDONE, 0, 0);
+    return 0;
+}
+
+// Kick off a scan on a worker thread so the cold read (~3.3s over the WSL
+// redirector) cannot freeze the bar. A tick that lands while a scan is still
+// running is skipped - the next one catches up.
+static void scanTokenCache(void) {
+    if (InterlockedCompareExchange(&g_tokScanBusy, 1, 0) != 0) return;
+    tokPendClear();
+    g_tokPendSeedReset = 0;
+    g_tokInnerTodayValid = 0;
+    g_tokScanAdded = 0;
+    if (!g_cfg.tokensEnabled) {
+        // off = zero scans, zero dashboard data (master switch): drop every
+        // aggregate and the live cursors with them, so a re-enable is one
+        // clean full re-read instead of resuming from cursors that skipped
+        // what arrived while off. Memory-only: apply it inline.
+        g_tokPendSeedReset = 1;
+        g_tokInnerToday = -1;
+        g_tokInnerTodayValid = 1;
+        g_cacheReadDone = 0; // a later re-enable must re-read the seed
+        tokLiveReset();
+        InterlockedExchange(&g_tokScanDone, 1);
+        tokDrainPending();
+        return;
+    }
+    g_tokScanStart = GetTickCount();
+    dashDayRollover();
+    HANDLE th = CreateThread(NULL, 0, tokScanThread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+    else tokScanThread(NULL); // no thread available: run inline, drain follows
 }
 
 // token counts (renderer/dash.js fmt): B / M / k tiers
@@ -640,6 +926,19 @@ static void fmtTokens(long long n2, wchar_t *out, int cb) {
     if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
     else if (n2 >= 1000000) swprintf(out, cb, L"%.1fM", n2 / 1e6);
     else if (n2 >= 1000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
+    else swprintf(out, cb, L"%lld", n2);
+}
+
+// call counts: plain digits up to 5 figures so today's layout keeps its
+// measured shape; 100000+ abbreviates ("100.0k") and each of the k and M tiers
+// hands over to the next once it would round to four digits, so both stay at
+// most 6 chars wide and a big count can never squeeze the name column out of
+// the row. The B tier is the unbounded catch-all - two decimals run it to
+// "999.95B" (7) and past a trillion to "1000.00B" (8)
+static void fmtCalls(long long n2, wchar_t *out, int cb) {
+    if (n2 >= 999950000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
+    else if (n2 >= 999950) swprintf(out, cb, L"%.1fM", n2 / 1e6);
+    else if (n2 >= 100000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
     else swprintf(out, cb, L"%lld", n2);
 }
 
@@ -704,6 +1003,7 @@ static void buildChips(void) {
     g_chipCount = 0;
     // the scan period comes from tokens.rescanMinutes (seconds, 60..3600):
     // a hard-coded 30 ignored the config and scanned twice as often as asked
+    tokDrainPending(); // fallback: apply a finished scan whose message got lost
     if (++g_tokensTick >= g_cfg.tokensRescanSec) { g_tokensTick = 0; scanTokenCache(); }
     if (g_tokensToday < 0 && g_tokensTick == 1) scanTokenCache();
     // left pinned group: shortcut, pet, tokens, subs (Electron order)
@@ -762,10 +1062,29 @@ static void buildChips(void) {
         CustomChip *cc = &g_cfg.custom[ci];
         if (!cc->enabled) continue;
         wchar_t txt[96];
+        int warn = 0;
         int st = customStateGet(ci);
-        if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
+        customLock();
+        if (cc->intervalMs > 0) {
+            // command-output chip: the text is whatever the command last
+            // printed. Until the first poll produces output there is none, so
+            // the slot reads as an em dash rather than a textless pill
+            lstrcpynW(txt, g_customText[ci][0] ? g_customText[ci] : L"\u2014", 96);
+            // warn band: outside [warnBelow, warnAbove] the text goes warn colour.
+            // The band is on the command's RAW output, not the formatted text -
+            // "temp $v" and "$v C" both parse as 0 in the formatted string. An
+            // empty raw string means no poll has produced a value yet, and
+            // _wtof reads THAT as 0 too, so the band would colour the chip from
+            // the very first paint a "warnBelow" that 0 happens to fall under.
+            if ((cc->warnAbove >= 0 || cc->warnBelow >= 0) && g_customRaw[ci][0]) {
+                double v = _wtof(g_customRaw[ci]);
+                if (cc->warnAbove >= 0 && v > cc->warnAbove) warn = 1;
+                if (cc->warnBelow >= 0 && v < cc->warnBelow) warn = 1;
+            }
+        } else if (cc->toggle) swprintf(txt, 96, L"%ls %ls", cc->label ? cc->label : L"", st ? L"on" : L"off");
         else lstrcpynW(txt, cc->label ? cc->label : L"", 96);
-        addChipI(CT_CUSTOM, ci, txt, 0, cc->color && *cc->color ? cc->color : NULL, 0);
+        customUnlock();
+        addChipI(CT_CUSTOM, ci, txt, warn, cc->color && *cc->color ? cc->color : NULL, 0);
         Chip *c = &g_chips[g_chipCount - 1];
         c->align = 2;
         // built-in name -> id
@@ -830,8 +1149,11 @@ static void buildChips(void) {
             swprintf(v, 48, L"%d%%", g_m.battPct);
             // charging reads green (theme.good), like the Electron bar's
             // .seg-battery.on value, and green WINS over the low warning:
-            // plugged in means the charge is rising, so red would be a lie
-            addChipI(CT_BATTERY, 0, v, low, g_m.battAc ? g_cfg.good : (low ? g_cfg.warn : NULL), 0);
+            // plugged in means the charge is rising, so red would be a lie.
+            // the warn FLAG must not be set while on AC either - paint lets
+            // c->warn override colorOverride (red clobbered green otherwise)
+            addChipI(CT_BATTERY, 0, v, low && !g_m.battAc,
+                     g_m.battAc ? g_cfg.good : (low ? g_cfg.warn : NULL), 0);
             g_chips[g_chipCount - 1].iconSvg = SVG_BAT; // fill tracks the charge
         } else addChipI(CT_BATTERY, 0, L"AC", 0, g_cfg.fgDim, 0);
     }
@@ -940,7 +1262,8 @@ static void repaintBar(HWND hwnd) {
     }
 
     int bgA = g_cfg.backdrop && lstrcmpiW(g_cfg.backdrop, L"solid") == 0 ? 255 : g_cfg.backgroundAlpha;
-    if (bgA < 0) bgA = 0; if (bgA > 255) bgA = 255;
+    if (bgA < 0) bgA = 0;
+    if (bgA > 255) bgA = 255;
     COLORREF bg = colorrefFromHex(g_cfg.tint, bgA);
 
     // fill the whole DIB with the premultiplied background (alpha included)
@@ -1037,8 +1360,10 @@ static void repaintBar(HWND hwnd) {
         if (i == g_hover && c->align == 2) {
             int pl = c->r.left - pillPadX, pt = c->r.top + pillPadY;
             int prr = c->r.right + pillPadX, pb = c->r.bottom - pillPadY;
-            if (pl < 0) pl = 0; if (pt < 0) pt = 0;
-            if (prr > g_dibW) prr = g_dibW; if (pb > g_dibH) pb = g_dibH;
+            if (pl < 0) pl = 0;
+            if (pt < 0) pt = 0;
+            if (prr > g_dibW) prr = g_dibW;
+            if (pb > g_dibH) pb = g_dibH;
             for (int yy = pt; yy < pb; yy++) {
                 DWORD *row = px + (size_t)yy * g_dibW;
                 for (int xx = pl; xx < prr; xx++) {
@@ -1174,7 +1499,9 @@ static void execCmd(const wchar_t *cmd) {
     if (!cmd || !*cmd) return;
     wchar_t params[1200];
     lstrcpynW(params, L"/c ", 1200);
-    lstrcatW(params, cmd);
+    // the command is config data (a shortcut or a custom chip) of any length:
+    // copy it into the room that is left instead of appending it unbounded
+    lstrcpynW(params + 3, cmd, 1200 - 3);
     SHELLEXECUTEINFOW sei;
     memset(&sei, 0, sizeof(sei));
     sei.cbSize = sizeof(sei);
@@ -1531,7 +1858,7 @@ static void dashTableRowNeeds(HDC dc, HFONT f, const TokAgg *a, int *need) {
     fmtTokens(a->out, vs, 32); w = dashStrW(dc, vs, f); if (w > need[3]) need[3] = w;
     if (a->cr > 0) { fmtTokens(a->cr, vs, 32); w = dashStrW(dc, vs, f); if (w > need[2]) need[2] = w; }
     if (a->cw > 0) { fmtTokens(a->cw, vs, 32); w = dashStrW(dc, vs, f); if (w > need[1]) need[1] = w; }
-    swprintf(vs, 32, L"%lld", a->req); w = dashStrW(dc, vs, f); if (w > need[0]) need[0] = w;
+    fmtCalls(a->req, vs, 32); w = dashStrW(dc, vs, f); if (w > need[0]) need[0] = w;
 }
 static void dashTableHeadNeeds(HDC dc, HFONT f, int *need) {
     static const wchar_t *hd[5] = { L"CALLS", L"CACHE W", L"CACHE R", L"OUTPUT", L"INPUT" };
@@ -1545,6 +1872,7 @@ static void dashTableHeadNeeds(HDC dc, HFONT f, int *need) {
 static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
                          const int *xs, const wchar_t *label, COLORREF dot,
                          double share, TokAgg *a, DashTheme *t, HFONT f11, HFONT f9) {
+    (void)f9;
     // zebra-less; share bar behind the label (dash.css .share i)
     if (share > 0.003) {
         int bw = (int)(share * innerW);
@@ -1582,7 +1910,7 @@ static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
     fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], y, vs, t->fg, f11);
     if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], y, vs, t->fg, f11); }
     if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], y, vs, t->fg, f11); }
-    swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], y, vs, t->fg, f11);
+    fmtCalls(a->req, vs, 32); dashStrR(dc, xs[0], y, vs, t->fg, f11);
 }
 
 static void dashTableHead(HDC dc, int x0, int y,
@@ -1944,7 +2272,7 @@ static void paintDash(HWND hwnd) {
                         fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], ddy, vs, t.fg, fBody);
                         if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], ddy, vs, t.fg, fBody); }
                         if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody); }
-                        swprintf(vs, 32, L"%lld", a->req); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
+                        fmtCalls(a->req, vs, 32); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
                         ddDrawn++;
                         ddy += DX(17);
                     }
@@ -2191,8 +2519,8 @@ static void paintDash(HWND hwnd) {
             }
             wchar_t label[48];
             subsProvLabel(pi2, label, 48);
-            SubsWin wins[4];
-            int wn = subsProvWins(pi2, wins, 4);
+            SubsWin wins[MAX_GEN_WIN];
+            int wn = subsProvWins(pi2, wins, MAX_GEN_WIN);
             int stale = wn < 0; if (wn < 0) wn = -wn;
             int px2 = padL;
             int py2 = y + shown * (panelH + gap);
@@ -2286,7 +2614,8 @@ static void paintDash(HWND hwnd) {
                 int ky = bodyY + (bodyH - pieD) / 2;
                 int rem = wins[k].rem;
                 int unk = rem < 0; // no fraction reported: em dash, empty ring
-                if (rem < 0) rem = 0; if (rem > 100) rem = 100;
+                if (rem < 0) rem = 0;
+                if (rem > 100) rem = 100;
                 // track + arc (rotate -90: start at 12 o'clock, clockwise)
                 COLORREF track = blendCr(t.card, t.dim, 31);
                 if (g_gdipOk) {
@@ -2836,7 +3165,8 @@ static void tipShow(const wchar_t *text, int cx, int cy, int dark) {
     int x = cx + (int)(6 * g_scale), y = cy + (int)(16 * g_scale);
     if (x + w > sw) x = cx - w - (int)(6 * g_scale);
     if (y + h > sh) y = cy - h - (int)(14 * g_scale);
-    if (x < 0) x = 0; if (y < 0) y = 0;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
     SetWindowPos(g_tip, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
     POINT ptSrc = { 0, 0 };
     SIZE sz = { w, h };
@@ -2932,8 +3262,8 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
     int n = 0;
     for (int i = 0; i < pn; i++) {
         if (!subsProvEnabled(i)) continue;
-        SubsWin w[4];
-        int wn = subsProvWins(i, w, 4);
+        SubsWin w[MAX_GEN_WIN];
+        int wn = subsProvWins(i, w, MAX_GEN_WIN);
         if (wn < 0) wn = -wn;
         if (wn <= 0) continue;
         int best = -1;
@@ -2955,8 +3285,8 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
         g_subsRotIdx = (g_subsRotIdx + 1) % n;
     }
     int pi2 = pick[g_subsRotIdx] >> 8, k = pick[g_subsRotIdx] & 0xFF;
-    SubsWin w[4];
-    int wn = subsProvWins(pi2, w, 4);
+    SubsWin w[MAX_GEN_WIN];
+    int wn = subsProvWins(pi2, w, MAX_GEN_WIN);
     if (wn < 0) wn = -wn;
     if (k >= wn) k = 0;
     int rem = w[k].rem;
@@ -3186,6 +3516,23 @@ static HICON makeBarIcon(int px) {
     return h;
 }
 
+// The opt-in update probe writes g_upd asynchronously; append its one-line
+// verdict to the tray tooltip (and refresh the icon tooltip) when it lands.
+static void trayRetip(void) {
+    if (!g_trayAdded) return;
+    wchar_t note[200];
+    wchar_t tip[256];
+    lstrcpynW(tip, L"Chocobar", 256);
+    if (updNote(note, 200)) {
+        lstrcpynW(tip, L"Chocobar - ", 256);
+        int n = lstrlenW(tip);
+        lstrcpynW(tip + n, note, 256 - n);
+    }
+    if (lstrcmpW(tip, g_nid.szTip) == 0) return;
+    lstrcpynW(g_nid.szTip, tip, 128);
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
 static void trayAdd(HWND hwnd) {
     if (g_trayAdded || !g_cfg.showTray) return;
     memset(&g_nid, 0, sizeof(g_nid));
@@ -3229,6 +3576,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         } else if (wp == TIMER_CONFIG) {
             configCheckTick();
+            trayRetip(); // opt-in update probe landed? append it to the tooltip
             // content-fit: the dash windows are created at the config height and
             // paint their content from the top, so a data change that shrinks
             // the content leaves a trailing blank. Latch the window to the
@@ -3358,6 +3706,9 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONUP:
         showTrayMenu(hwnd);
         return 0;
+    case WM_APP_TOKSCANDONE:
+        tokDrainPending();
+        return 0;
     case WM_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) showTrayMenu(hwnd);
         return 0;
@@ -3382,15 +3733,25 @@ static const char *g_template =
     "// Chocobar (native build) config. Saved on first run; hot-reloads on save.\r\n"
     "// Everything below is optional - delete a key and the built-in default applies.\r\n"
     "{\r\n"
-    "  \"bar\": { \"height\": 24, \"gap\": 8, \"fontSize\": 12,\r\n"
-    "            \"backgroundTint\": \"#FBF2E2\", \"backgroundAlpha\": 110, \"backdrop\": \"acrylic\",\r\n"
-    "            \"radius\": 8 },\r\n"
-    "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#E8C7D0\", \"pinkDeep\": \"#D493AA\",\r\n"
-    "              \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
+    "  \"bar\": { \"height\": 30, \"gap\": 12, \"fontSize\": 10, \"fontFamily\": \"Segoe Print\", \"align\": 1,\r\n"
+    "            \"backgroundTint\": \"#E8D8C3\", \"backgroundAlpha\": 120, \"backdrop\": \"acrylic\", \"radius\": 8 },\r\n"
+    "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#F0DEE4\", \"pinkDeep\": \"#D493AA\", \"pinkBg\": \"#FEF7F9\",\r\n"
+    "              \"yellow\": \"#D8C77A\", \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
     "              \"iconColor\": \"#D493AA\", \"iconOpacity\": 90,\r\n"
     "              \"heatmap\": [\"#F1ECD8\", \"#F6D8E0\", \"#EFB7C7\", \"#E28FB0\", \"#C95E8F\"] },\r\n"
     "  \"dashboard\": { \"width\": 900, \"height\": 520 },\r\n"
-    "  \"tokens\": { \"enabled\": true, \"appFilter\": [], \"cachePath\": \"\" },\r\n"
+    "  \"tokens\": { \"enabled\": false, \"appFilter\": [], \"cachePath\": \"\",\r\n"
+    "    // sources[]: every session store the live scan reads, up to 8. Add a harness by\r\n"
+    "    // adding an entry - nothing is compiled in. app = the aggregation key (and the\r\n"
+    "    // labels key); path = the store; recursive descends into per-project subdirectories\r\n"
+    "    // (default on, harmless for a flat store); fields renames the usage keys for a\r\n"
+    "    // harness that spells them differently. Shipped off: set tokens.enabled and the\r\n"
+    "    // source you want - nothing is read until you do.\r\n"
+    "    \"sources\": [\r\n"
+    "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": false, \"recursive\": true },\r\n"
+    "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": false }\r\n"
+    "    ],\r\n"
+    "    \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"
     "    \"cpu\":  { \"enabled\": true, \"warnAt\": 85 },\r\n"
@@ -3398,11 +3759,16 @@ static const char *g_template =
     "    \"ram\":  { \"enabled\": true, \"warnAt\": 90 },\r\n"
     "    \"volume\": { \"enabled\": true },\r\n"
     "    \"battery\": { \"enabled\": true },\r\n"
-    "    \"clock\": { \"enabled\": true, \"format\": \"{MMM} {dd} ({Wkk}) {HH}:{mm}\" },\r\n"
+    "    \"clock\": { \"enabled\": true, \"format\": \"{MMM} {dd}  {HH}:{mm}\" },\r\n"
     "    \"shortcut\": { \"enabled\": false, \"label\": \"\", \"command\": \"\" },\r\n"
     "    \"pet\": { \"enabled\": false, \"label\": \"\", \"exePath\": \"\" },\r\n"
     "    \"custom\": [\r\n"
-    "      { \"enabled\": false, \"icon\": \"\", \"label\": \"Example\", \"command\": \"notepad.exe\", \"toggle\": false }\r\n"
+    "      { \"enabled\": false, \"icon\": \"\", \"label\": \"Example\", \"command\": \"notepad.exe\", \"toggle\": false },\r\n"
+    "      // command-output chip: poll a command and show its stdout. format wraps the value\r\n"
+    "      // ($v = the trimmed output); warnAbove / warnBelow colour it outside that band.\r\n"
+    "      { \"enabled\": false, \"icon\": \"gpu\", \"label\": \"\",\r\n"
+    "        \"command\": \"nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader\",\r\n"
+    "        \"intervalMs\": 5000, \"format\": \"$v C\", \"warnAbove\": 80 }\r\n"
     "    ]\r\n"
     "  },\r\n"
     "  \"subs\": { \"enabled\": false, \"intervalMinutes\": 2, \"fetchTimeoutMs\": 20000,\r\n"
@@ -3410,19 +3776,33 @@ static const char *g_template =
     "             \"providers\": [\r\n"
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
-    "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" }\r\n"
     "               // one entry = one panel with two rows: Gemini and Claude/GPT, straight from\r\n"
     "               // fetchAvailableModels on both Google endpoints (daily wins), the same source the\r\n"
     "               // harness's /quota uses - no IDE or language server required.\r\n"
+    "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" },\r\n"
+    "               // generic: ANY rest quota endpoint, declared entirely here. url + optional\r\n"
+    "               // auth (a token from a file, an env var, or the config itself) + windows[]\r\n"
+    "               // with JSON paths into the response. paths are $.a.b[0].c. A window needs\r\n"
+    "               // any two of used / remaining / total; the third is derived.\r\n"
+    "               { \"type\": \"generic\", \"enabled\": false, \"label\": \"MyPlan\",\r\n"
+    "                 \"url\": \"https://api.example.com/v1/quota\", \"method\": \"GET\",\r\n"
+    "                 \"auth\": { \"header\": \"Authorization\", \"prefix\": \"Bearer \",\r\n"
+    "                            \"path\": \"~/.example/auth.json\", \"key\": \"access_token\" },\r\n"
+    "                 \"headers\": { \"Accept\": \"application/json\" },\r\n"
+    "                 \"windows\": [\r\n"
+    "                   { \"label\": \"5h\",  \"used\": \"$.data.five_hour.used\",\r\n"
+    "                     \"total\": \"$.data.five_hour.limit\", \"reset\": \"$.data.five_hour.resets_at\" },\r\n"
+    "                   { \"label\": \"week\", \"remaining\": \"$.data.weekly.remaining\",\r\n"
+    "                     \"total\": \"$.data.weekly.limit\" }\r\n"
+    "                 ] }\r\n"
     "             ] },\r\n"
-    "  \"tokens\": { \"enabled\": false,\r\n"
-    "             \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"terminal\": { \"className\": \"\", \"title\": \"\" },\r\n"
-    "  \"general\": { \"showTray\": true, \"autoStart\": true }\r\n"
+    "  \"general\": { \"showTray\": true, \"autoStart\": true, \"checkUpdates\": false }\r\n"
+    "  // checkUpdates (off): one startup request to the GitHub releases API that only REPORTS\r\n"
+    "  // when a newer release exists (log line + tray tooltip). It never downloads or installs.\r\n"
     "  // autoStart registers the HKCU Run value on FIRST run only; after that the\r\n"
     "  // tray menu's \"Start with Windows\" item is the control (the bar never rewrites this file)\r\n"
     "}\r\n";
-
 
 void writeTemplate(void) {
     HANDLE h = CreateFileW(g_cfgPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -3451,12 +3831,14 @@ void loadConfig(void) {
     if (!toks) { HeapFree(GetProcessHeap(), 0, raw); return; }
     jsmn_init(&parser);
     jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
-    Config next;
-    parseConfigInto(&next, raw, toks, 0);
+    Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
+    if (!next) { HeapFree(GetProcessHeap(), 0, toks); HeapFree(GetProcessHeap(), 0, raw); return; }
+    parseConfigInto(next, raw, toks, 0);
     HeapFree(GetProcessHeap(), 0, toks);
     HeapFree(GetProcessHeap(), 0, raw);
-    freeConfig(&g_cfg);
-    g_cfg = next;
+    // Installing the new generation retires the old one instead of freeing it:
+    // the provider fetch threads and the command poll both walk the live one.
+    cfgInstall(next);
     g_cfgLoaded = 1;
     // A first run (template just written) registers the Run value per
     // general.autoStart; every later run leaves the registry to the menu
@@ -3470,6 +3852,9 @@ void loadConfig(void) {
     // freeConfig above freed every string the chip array points at
     // (colorOverride / iconColorOverride): rebuild before any paint reads them
     buildChips();
+    // A command chip added by this config (a save or a tray Reload, not only a
+    // fresh start) gets its poll thread here - the one point every reload reaches
+    customPollStart();
 }
 
 // --------------------------------------------------------------- wWinMain ----
@@ -3515,6 +3900,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     if (g_scale <= 0) g_scale = 1.0;
 
     resolveConfigPath();
+    // The command poll publishes its text under this lock, and the config swap
+    // below retires generations the fetch threads may still hold.
+    InitializeCriticalSection(&g_cfgCustomLock);
+    InitializeCriticalSection(&g_cfgGenLock);
     // The cursor file MUST be loaded before the config: loadConfig() rebuilds
     // the chips, which runs the first token scan, and that scan is what
     // populates the cursors. Loading them afterwards wiped the in-memory set,
@@ -3571,6 +3960,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
         writeLogA(dbg);
     }
     subsStart();
+    updCheckStart(); // opt-in: one version probe, report-only
     followTick();
 
     MSG msg;

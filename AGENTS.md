@@ -16,8 +16,9 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - A dead stdout sink (start-wizbar.vbs redirect) makes every `console.*`
   throw EPIPE, and Electron pops an "A JavaScript error occurred" dialog
   PER LINE - the app logs every scan, so the dialogs never stop until the
-  pipe reader comes back. main.js swallows stream EPIPE; keep it.
-- The native icons are a 1:1 port of `ICONS` in renderer/bar.js (viewBox 24,
+  pipe reader comes back. (Electron-era note: main.js is gone with the
+  retired tree; the native bar has no stdout sink to guard.)
+- The native icons are a 1:1 port of `ICONS` of the retired Electron bar (paths now live in `p_icons.c`) (viewBox 24,
   stroke-width 2.2, bow 2). Never hand-redraw them again: port the exact path
   data (rect/circle -> path syntax), and render through the 2x supersample
   pass in iconRenderGdip - 1:1 GDI+ AA reads blocky next to Chromium.
@@ -29,19 +30,19 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 ## Tests & checks
 
-- `npm test` = `scripts/portable_regression.js` (portability layer, perf-critical pure logic,
-  public-release default guarantees; headless, any platform) + `scripts/pi_source_regression.js`
-  (pi session-log source; synthetic fixture + raw-sum cross-check when a real
-  `~/.pi/agent/sessions` exists) + `scripts/model_case_regression.js` (case-variant
-  model grouping in aggregate(); synthetic, self-skips its optional live-store half).
-  The real-store cross-check takes a stable
-  snapshot (two agreeing raw walks around the scan) because a live pi session
-  appends usage records while the test runs; it SKIPs if the store never quiets.
-  pet_test.js (old tasklist-path E2E) was stripped in the v1.0.0 pass.
-- Windows-side: `scripts/token_regression.js` (zcode+zai attribution; needs those stores),
-  `scripts/cputemp_regression.js` (HWiNFO shm reader, Windows only).
+- `npm test` = `scripts/portable_regression.js`: the native first-run template
+  `g_template` decoded + parsed as JSONC, asserted neutral (every source off, no
+  SQLite paths, pet + subs off, no personal identifiers). Headless, any platform.
+  The suites that guarded the retired Electron app (pi_source / model_case /
+  token / cputemp) were removed together with that tree; do not resurrect them
+  without the tree they tested.
 
-## Cross-platform architecture (since the portability pass)
+## Cross-platform architecture (since the portability pass, retired Electron app)
+
+Everything below describes the RETIRED Electron app. The shipped bar is one
+mingw cross-compiled Windows exe (`native/`; build/run/verify in
+`native/README.md`) and has no non-Windows path to degrade, so read these as
+history, not as the product's current behavior.
 
 Windows is primary; non-Windows must degrade gracefully, never fake data:
 
@@ -55,7 +56,7 @@ Windows is primary; non-Windows must degrade gracefully, never fake data:
 - Platform gates elsewhere: PowerShell GPU/Bluetooth workers + Core Audio volume +
   desktop pet + registry autostart are Windows-only (guarded in `src/metrics.js` /
   `main.js`); `src/tokens.js` probes `python3` when `python` is missing.
-- Non-Windows acryl­ic does not exist: `themePayload` sends the tint SOLID off-Windows.
+- Non-Windows acrylic does not exist: `themePayload` sends the tint SOLID off-Windows.
 
 ## Chocobar naming split (since the menu/dashboard pass)
 
@@ -79,16 +80,26 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   are DWORD = A<<24 | R<<16 | G<<8 | B. GDI text runs ~15% wider than
   browser metrics at the same nominal px - the bar scales the font by
   0.864 to match Electron's measured layout.
-- Terminal targeting is terminal-agnostic: `terminal.className: ""` (default)
-  probes Windows Terminal / conhost / ConEmu / mintty by Win32 class, then
-  WezTerm / Alacritty / Hyper by owning process (their class is the generic
-  winit/Electron one). Authoritative list + order: `resolveProbe` and the
-  AUTO_PROBE_* constants in `src/tracker.js`.
+- Terminal targeting is terminal-agnostic: with `terminal.className: ""` the
+  NATIVE bar probes four Win32 classes and nothing else - Windows Terminal
+  (`CASCADIA_HOSTING_WINDOW_CLASS`), conhost (`ConsoleWindowClass`), ConEmu
+  (`VirtualConsoleClass`), mintty - in that order; the authoritative list is
+  `findTerminalByProbe` / `isTerminalHwnd` in `native/src/p_ui.c`, and a
+  configured `className` is authoritative (no fallback to the list). The
+  retired Electron tracker ALSO matched WezTerm / Alacritty / Hyper by owning
+  process because their class is the generic winit/Electron one
+  (`resolveProbe` + the AUTO_PROBE_* constants in `src/tracker.js`); the
+  native build has no process probe, so such a terminal must be named in
+  `terminal.className` by hand.
 - The subscription plan-usage source is a file snapshot, not a session store:
   `tokens.sources.subscription.usagePath` points at user JSON
   (`{plans:[{name,total,used,resetsAt}]}`); re-read per rescan, invalid entries
   skipped, and the payload rides `tokens.aggregate().subscription` (null = hide
   the dashboard card). Gated by the tokens master switch like every source.
+  **Retired Electron app only** - the native scan reads JSONL session stores, so
+  a legacy `subscription` entry (no `sessionsDir`) is skipped with the rest of
+  the legacy object conversion; the shipped plan-usage surface is
+  `subs.providers[]` and the subscription board.
 
 ## Running on Linux (WSLg) — recipe
 
@@ -115,13 +126,22 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   paint is explicit), DWM backdrops are ignored on them, and screen captures
   must use PrintWindow (CopyFromScreen races the follow loop). Sharp edges:
   `native/README.md` - read it before touching the render path.
-- Native bar is FEATURE-PARITY phase 2 (dashboards, subs, icons). The bar
-  window MUST stay WS_EX_TOPMOST (Electron uses alwaysOnTop 'floating') AND
-  the follow tick must SetWindowPos with HWND_TOPMOST: inserting the bar
-  after a normal window (g_term) silently CLEARS the topmost bit and the
-  raised terminal then swallows every click/hover meant for the bar
-  (WindowFromPoint proves it in one call). Hidden bar (terminal minimized)
-  also explains "dead" hover - check IsWindowVisible first.
+- The phase-2 surface (token dashboards, subscription board, theme.icons)
+  is DONE - the phase status is owned by `native/README.md` ("## Status");
+  do not re-derive it here.
+- The bar window MUST stay an OWNED window of the followed terminal
+  (`CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_LAYERED, ...)`, NO
+  WS_EX_TOPMOST, plus `SetWindowLongPtrW(GWLP_HWNDPARENT, g_term)`) AND the
+  follow tick must keep inserting it right after g_term
+  (`SetWindowPos(g_bar, g_term, ...)`): an owned window rides the terminal's
+  own band, so it stays out of the taskbar/Alt-Tab, hides with the terminal,
+  and can never float over an unrelated window the way a topmost bar does -
+  re-adding WS_EX_TOPMOST (or HWND_TOPMOST in the tick) re-breaks both
+  halves. The pair must also stay ADJACENT in z: raising the terminal walks
+  it over the bar, which then swallows every click/hover meant for it
+  (WindowFromPoint proves it in one call) - the tick re-inserts on that
+  drift. A hidden bar (terminal minimized) also explains "dead" hover -
+  check IsWindowVisible first.
 - Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
   pinkDeep), 24-unit paths flattened once, rendered with GDI+
   (SmoothingModeAntiAlias8x8, round caps/joins) into per-icon premultiplied
@@ -163,10 +183,12 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Native config surface (all hot-reload): theme colors incl iconColor +
   iconOpacity + heatmap[5], bar.radius/backgroundAlpha/tint/font, dashboard
   + subs popup sizes, tokens.cachePath override + tokens.appFilter
-  (harness allowlist for the chip/dash), subs providers/interval/timeout
-  (which plans to check), modules toggles + warnAt, custom chips (label/
-  icon/color/title/command/toggle), terminal.className/title. Template
-  (writeTemplate) documents all of it.
+  (harness allowlist for the chip/dash), terminal.className/title.
+  The rest of the surface is the agnostic part and the README's Configuration
+  section owns it: `tokens.sources[]` (any harness = one config entry),
+  `subs.providers[].type: "generic"`, and the command-output custom chips
+  (`intervalMs`/`format`/`warnAbove`/`warnBelow`). The first-run template
+  (writeTemplate) ships every one of those keys with an inline annotation.
 - Screenshot verification of Windows windows only works while the session is
   UNLOCKED; when locked, captures show the lock screen for every window.
   PW captures of the LAYERED bar return the raw premultiplied DIB (tint
@@ -191,8 +213,33 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `1 + jtokSpan(value)`; `jtokSpan` (chocobar.c) counts object children as
   pairs. The old ad-hoc walk silently skipped top-level keys that follow a
   deeply nested sibling (general/terminal/tokens/subs were never parsed!).
+- The first-run template (`g_template`) is a JSONC string whose braces must
+  match or a fresh install silently comes up with a truncated root object -
+  jsmn reports a token COUNT for the unbalanced tail, so loadConfig proceeds.
+  One object per root key (a duplicate key is dead: `jobjGet` takes the first)
+  and the template guard in `scripts/portable_regression.js` (section 4b) is
+  the only check that catches it: it decodes the C string, strips the `//`
+  comments in JS and calls `JSON.parse`, so it proves the template is valid
+  JSONC and ships neutrally - it does NOT run jsmn or `parseConfigInto`, so
+  the parser half of this note is verified only by a real bar run.
+- The live config is a GENERATION behind `g_cfgCur` (`#define g_cfg (*g_cfgCur)`,
+  chocobar.c): `loadConfig` installs a fresh generation and retires the old one
+  instead of freeing it, because the provider fetch threads (a `SubsProvider*`
+  held across a multi-second WinHTTP call) and the command-chip poll read it.
+  A worker thread that walks the config must `cfgPin()` / `cfgUnpin()`; a reader
+  with no pin is confined to the UI thread. `g_cfgCustomLock` (p_ui.c) covers
+  only the published chip text, never the config.
 - JSON booleans MUST go through `jboolDefault` - `jintTok` uses atoi and
   `atoi("true") == 0` (disabled every subs provider silently).
+- **`tokens.sources` reads BOTH shapes.** The array form is one object per
+  harness; the legacy OBJECT form (`{ "pi": { "sessionsDir": ... } }`) from a
+  pre-array config is CONVERTED, not dropped (key -> `app`, `sessionsDir` ->
+  `path`, `enabled` carries over) with one `native.log` line naming the
+  conversion. Without that branch such a config yields zero sources with no
+  word and the chip/dashboard silently keep serving the cache seed. A converted
+  entry with no `sessionsDir` (the old zcode/opencode sqlite stores) is still
+  skipped - as it always was - so those stores never scan. `enabled` defaults
+  ON in both forms: adding an entry is the act of turning it on.
 - MinGW `swprintf` follows C99: `%s` = char*, NOT wchar_t*. Every wide
   format needs `%ls` or the value truncates to its first byte
   ("Authorization: b" -> 401 token expired). Bit pet-kill, custom chips,
@@ -262,9 +309,10 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`,
   `tokens.heatmapDays`, `theme.surfaces`, `terminal.reattachToExisting`, and
   `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores are
-  SQLite and reach the board only through the `tokens.cachePath` seed; the live
-  scan covers `sources.zai` and `sources.pi` JSONL only). `bar.align` is 1=right,
-  2=left (there is no "center").
+  SQLite and reach the board only through the `tokens.cachePath` seed). What the
+  live scan covers is NOT a fixed list: it walks every entry of the
+  `tokens.sources[]` array, so any harness the user declares is scanned.
+  `bar.align` is 1=right, 2=left (there is no "center").
 - `subs` supports 0-5 providers per the captain's ask (MAX_SUBS stays 6); one
   antigravity entry = one panel with two rows.
 
@@ -276,7 +324,46 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   arrays - one provider failing must never stale the others, and the old
   global state did exactly that via a never-set `any` flag); chip states:
   em dash (no data), "stale", `N%` colored good/dim/warn at 70/30. The subs
-  board reads the same per-provider window arrays (label/pct/used/total).
+  board reads the same per-provider window arrays (label/pct/used/total)
+  - it asks PER PROVIDER, the chip asks the whole stack.
+- **The chip readers (`subsChipRem` / `subsChipStale`) are scoped to declared
+  AND enabled providers, and "stale" is a verdict on the CHIP, not per
+  provider.** `g_subsProvRem` / `g_subsProvStale` are zero-initialised globals
+  covering all MAX_SUBS slots, and a slot that is unused or declared-but-disabled
+  is never written (subsThreadProc skips it), so it reads as a live provider
+  sitting at 0% and drowns every real provider - hence the `subsProvEnabled`
+  filter in both loops. Stale is set only when EVERY provider that has a value
+  failed its last fetch (or nothing ever succeeded): a provider marked stale
+  still has its last good windows on the board and still worth reporting, and a
+  single timeout used to blank the chip to "stale" while the board showed fresh
+  numbers. One provider failing must never stale the others.
+- Generic (type 3) provider URLs go through `subsCrackUrl`, which is the only
+  url decomposition in the file: the SCHEME alone decides TLS, a config
+  `insecure` only AUTHORIZES the cleartext scheme (`http://` with `insecure`
+  unset is refused, never sent with the token in the clear; `https://` with
+  `insecure` set is still TLS - a downgraded https request would post the
+  token to port 80), the host stops at the first `/` OR `:`, and an explicit
+  `:port` is split out because `WinHttpConnect` wants a bare server name beside
+  the port (leaving `:8443` inside the host breaks name resolution). The scheme
+  match is case-insensitive, and scheme-less or `https:host` (no `//`) urls
+  are rejected with a log line rather than silently assumed to be https.
+  `subsHttpGet`/`subsHttpPost` take the port (0 = the scheme default); the two
+  debug log lines format it with `snprintf` into `sizeof`-bounded buffers
+  because `host` and the provider label are config-sized (the old `sprintf`
+  overflowed a 160-byte stack buffer).
+- `expectStatus` is GONE from the generic provider: `require` (a path that must
+  exist) plus the default 2xx acceptance - with 401/403 called out first - cover
+  every case a status list could express, and a per-provider status whitelist is
+  one more key to forget. Do not re-add it.
+- Generic capacities are ONE constant each and the README documents them:
+  `windows[]` is `MAX_GEN_WIN` = **6** per provider and `auth` is
+  `MAX_GEN_AUTH` = 3. The parser field, `g_subsWin[MAX_SUBS][MAX_GEN_WIN]`,
+  `subsSetWins`' clamp and every reader's local array all size off the same
+  constant - a literal 4 anywhere is a silent drop of a declared window. A
+  generic auth `key` starting with `$` is a JSON path (a secret nested in the
+  auth file is reachable as `$.auth.token`); any other key is one flat
+  top-level key. An unrecognized `type` string logs a line naming it, because a
+  typo otherwise silently becomes a chatgpt quota fetch.
 - **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints
   merged with daily/sandbox OVERWRITING production, per family key priority -
   byte-for-byte the same source the harness's /quota uses** (pi-quota ->
@@ -289,11 +376,22 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
   excluded from the CAPPED/lowest math. Never reintroduce a persistence layer
   or "local wins" policy without evidence - a fabricated cache file once fed
   the captain stale numbers for hours.
+- **`agyFetchModels` launches one thread PER HOST and tracks that as a per-host
+  mask, never a count.** A count (`mthN`) collapses "host 1's thread could not
+  start" into "only one thread was started", so the sequential fallback then
+  fetches host 0 a SECOND time inline and drops the started thread's `mj[0].resp`
+  on the floor (a pure leak, and a doubled endpoint). The mask keeps each host's
+  result - a host whose thread failed is exactly and only that host.
 - The Z.ai gateway 200s with body `{code:401,msg:"token expired or
   incorrect"}` for a bad key and 200+`{code:500}` for missing identity
   headers - check the body `code`, not just HTTP status.
-- Fetches run on a worker thread (WinHTTP, AUTOMATIC_PROXY); the UI timer
-  only reads the latest state. HTTP failures log one line to native.log.
+- Providers fetch CONCURRENTLY: `subsThreadProc` starts one thread per enabled
+  provider (WinHTTP, AUTOMATIC_PROXY) and waits for them, because every fetch
+  is independent and each writes only its own slot through the locked setters -
+  a cycle costs the slowest provider, not the sum (5.9s -> 1.9s END TO END on
+  the captain's box with three providers; the fanout step alone measured 2.6s,
+  as the comment in `subsThreadProc` records). The UI timer only reads the
+  latest state; HTTP failures log one line to native.log.
 - Antigravity (type 2) reads the pi auth store `~/.pi/agent/auth.json` key
   `antigravity` ({access, refresh, expires(epoch MS), projectId}) and
   refreshes with Google's public desktop-client pair; grouped quota summary
@@ -404,25 +502,34 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 
 ## Perf invariants (do not reintroduce)
 
-- Stats push is ON-CHANGE (MetricsEngine `_dirty` + 250ms trailing loop in main.js);
-  no fixed heartbeat, and `snapshot()` has no always-different `now` field. The bar/
-  visibility gates run BEFORE `consumeDirty()` so changes observed while the bar is
-  hidden stay pending and flush on restore.
-- Follow loop is ADAPTIVE (src/tracker.js `_scheduleFollow`): 8ms while the
-  terminal is in a modal move/size (120Hz - drag latency is the only place it
-  shows), 16ms for 500ms after a move, 100ms idle. It FOLLOWS LIVE through a
-  drag (the old hands-off freeze made drags read as broken) and the zGluedTo
-  sweep no longer skips mid-drag, so the bar keeps the pane's layer while it
-  moves. Measured 2026-09-21: CPU 10.3% -> ~5% of one core vs the fixed 60Hz
-  loop, RSS ~414 MB (Chromium-baseline dominated).
-- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
-  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
-- Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`, ~5ms/3s),
+- Stats push is ON-CHANGE **in the retired Electron app** (MetricsEngine `_dirty`
+  + 250ms trailing loop in main.js): no fixed heartbeat, and `snapshot()` has no
+  always-different `now` field. The bar/visibility gates run BEFORE
+  `consumeDirty()` so changes observed while the bar is hidden stay pending and
+  flush on restore. The shipped native bar has no MetricsEngine and no
+  on-change push at all: it repaints from fixed timers (1s metrics, 100ms
+  follow, plus the token and subs cycles), so this discipline is history - the
+  native cost controls are those periods, not a dirty flag.
+- Follow loop is ADAPTIVE **in the retired Electron app** (src/tracker.js
+  `_scheduleFollow`): 8ms while the terminal is in a modal move/size (120Hz -
+  drag latency is the only place it shows), 16ms for 500ms after a move, 100ms
+  idle. It FOLLOWS LIVE through a drag (the old hands-off freeze made drags
+  read as broken) and the zGluedTo sweep no longer skips mid-drag, so the bar
+  keeps the pane's layer while it moves. Measured 2026-09-21: CPU 10.3% -> ~5%
+  of one core vs the fixed 60Hz loop, RSS ~414 MB (Chromium-baseline dominated).
+  The SHIPPED native bar does NOT use that tiered profile: a flat 100 ms
+  `TIMER_FOLLOW` plus a foreground win-event hook, throttled to one sync per
+  120 ms inside the terminal's modal move/size loop (`followTick`,
+  native/src/p_ui.c).
+- Baseline -> after (4-min Linux samples, 2026-09) - **the retired Electron
+  app's four processes**: CPU 7.12% -> 1.93% of a core; RSS ~429 -> ~426 MB
+  (Chromium-baseline dominated, flat by design). The shipped bar's figures are
+  the ~30 MB / 4-5% of one core the top-level README quotes.
+- Pet presence = in-process Toolhelp32 snapshot (`native.findProcessIdByName`
+  in the retired app, `petRunning` in `native/src/p_metrics.c`), ~5ms/3s,
   never a tasklist.exe spawn (~164ms/spawn measured; ~290ms in older notes).
 - The bar's heal interval must die with its window (see `BarWindow` closed/destroy) —
   it used to leak one 400ms timer per rebuild.
-- Baseline -> after (4-min Linux samples, 2026-09): CPU 7.12% -> 1.93% of a core;
-  RSS ~429 -> ~426 MB (Chromium-baseline dominated, flat by design).
 
 ## Config surfaces (since the dashboard-config pass)
 
@@ -433,27 +540,39 @@ depersonalized defaults; don't "fix" the remaining wizbar strings.
 - Personal display files live outside the repo (e.g. `~/.wizbar/personal.json`:
   pet name, token sources on, subs providers) — launched with
   `electron . --config ~/.wizbar/personal.json`. They carry the machine's real
-  names and paths so the repo never has to.
+  names and paths so the repo never has to. **Retired Electron app only**: the
+  native bar takes the same `--config` / `WIZBAR_CONFIG` flag against
+  `~/.wizbar/config.json`, and the two old `personal.json` files are stale
+  display configs (see Release + install above).
 
 ## Public release (de-personalized)
 
-Shipped defaults are neutral: `tokens.enabled=false` with all sources off and empty paths,
-pet chip off, no personal identifiers in repo code/config/docs (a portable test
-guards this). Personal stores/pet wiring belongs only in the user-level
-`~/.wizbar/config.json` (outside the repo). Dashboard shows an explanatory empty state
-(`sourcesEnabled`) when nothing is configured. `tokens.enabled` is a true master switch:
+Shipped defaults are neutral - nothing is read until the user turns a
+source on. The native first-run template ships `tokens.enabled=false` with every
+source off (example store paths, each disabled) and the pet chip and subs board
+off; the retired app's JS defaults ship the master ON with every source off and
+every path empty. No personal identifiers in repo code/config/docs. Personal
+stores/pet wiring belongs only in the user-level `~/.wizbar/config.json`
+(outside the repo). Dashboard shows an explanatory empty state (`sourcesEnabled`)
+when nothing is configured. `tokens.enabled` is a true master switch:
 off = zero scans, zero dashboard data, no chip (the dashboard says so via
 `masterEnabled:false`); per-source flags decide which stores are read only when it is on
-(regression: the master-switch block in `scripts/portable_regression.js`).
+(regression: `scripts/portable_regression.js` section 4 for the JS defaults and
+section 4b for the native template).
 
 ## Token usage stores (sharp edge)
 
-Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
+Usage semantics differ by store. `src/tokens.js` is the retired Electron
+app's authoritative reader; the SHIPPED native bar reads the same shapes in
+`native/src/p_tokens.c` (its own needle scan + per-file byte cursor, fed by
+whatever `tokens.sources[]` declares - not a hardcoded store pair):
 
-- zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` (via `scripts/zcode_query.py`).
-  On some WSL filesystems a live `-wal` store rejects `mode=ro` mid-query
-  ('disk I/O error'); the script falls back to an `immutable=1` snapshot
-  (may miss uncheckpointed rows) instead of failing the whole scan.
+- zcode CLI: `~/.zcode/cli/db/db.sqlite` `turn_usage` - the retired Electron app's
+  reader (its `scripts/zcode_query.py` helper was deleted with that tree; the
+  native bar scans JSONL session stores only). On some WSL filesystems a live
+  `-wal` store rejects `mode=ro` mid-query ('disk I/O error'); that scan fell back
+  to an `immutable=1` snapshot (may miss uncheckpointed rows) instead of failing
+  the whole scan.
 - zai: per-message `usage` in `~/.zai/agent/sessions/*.jsonl` (flat; `ZCODE_sess_*` files
   are DB-backed legacy — never count them from disk too, they double-count).
 - pi (new source): `~/.pi/agent/sessions/<project-slug>/*.jsonl` — same per-message
@@ -537,9 +656,12 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   (a) `Get-Process LogonUI` tells you whether you are looking at a lock screen
   at all - check it BEFORE trusting any capture; (b) PrintWindow works on the
   NON-layered dash/subs popups (ChocobarDash), so dashboard changes are still
-  visually verifiable; (c) for the bar itself, a `-DDBG_CHIPS` build that dumps
-  the chip table (align/L/R/w/ico/cp/text) after layout is the only ground
-  truth - strip it again afterwards, it logs once per paint.
+  visually verifiable; (c) the layered bar is verified by GEOMETRY
+  (`GetWindowRect`, and `WindowFromPoint` for hit areas) or a `general.debug`
+  log line, never by pixels - the full recipe is in native/README.md
+  "Verifying on the machine". There is no chip-dump build flag: for the chip
+  table, drop a temporary `writeLogA` in `chipClick` (p_ui.c) printing
+  `g_chips[idx].r` and the chip type, then strip it again.
 - Config gotchas found in his `~/.wizbar/config.json`: the shortcut module key
   was missing entirely (bolt chip silently absent) and the pet lived under
   `modules.remielle`, a name the parser no longer reads - it must be
@@ -548,12 +670,82 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
 
 ## Native token live scan (p_tokens.c) - sharp edges
 
+- **`tokens.sources[]` guard and storage must be the same number.** The loop
+  admits `MAX_TOK_SRC` entries (8) and stores into `TokSource
+  tokSrc[MAX_TOK_SRC]`- a literal smaller than the guard makes the 5th source
+  overwrite `theme.icons[]`, which sits right behind it in `Config`, and the
+  8th write runs past the whole heap generation (`loadConfig` installs a
+  heap-allocated `Config`). When a config array grows a guard, grow the field
+  with it in the same commit.
+- **`tokKeysBuild` markers stop at the COLON** (`"model":`, 8 bytes), not at the
+  value's opening quote as the Electron reader's 9-byte `"model":"` did. The
+  extractor in `tokParseLine` must therefore step over any spaces/TABs and the
+  opening `"` before scanning for the closing one - a marker-ending-at-colon
+  left as-is stops on the very first byte and yields modelLen=0, which silently
+  empties the dashboard's BY MODEL table (every record then fails `aggRecord`'s
+  `model && mlen > 0` gate) while every other section keeps counting. The
+  timestamp extractor right above has always skipped whitespace + quoted
+  strings; the model extractor must do the same.
+- **One bounded `~` expansion: `subsPathExpand`** (p_subs.c).
+  Both `~`-relative config paths in the token scan call it (the source store and
+  the cursor file). It refuses a `%USERPROFILE%` that does not fit
+  (`!n || n >= MAX_PATH`) and truncates the remainder into the room that is
+  left - inlining `GetEnvironmentVariableW` again would reintroduce the
+  negative `lstrcpynW` count (GetEnvironmentVariableW returns the REQUIRED
+  length and writes nothing when the buffer is too small, so `dir + n` is
+  already past the array).
+- **The app name is 19 BYTES, full stop.** `TokSource.app` is `char[20]` and
+  the only writer is `tokUtf8Copy` (chocobar.c), which converts the config
+  string with `WideCharToMultiByte(CP_UTF8, ...)` and clamps at 19 bytes
+  WITHOUT splitting a multi-byte sequence - so the stored key is always valid
+  UTF-8 and a non-ASCII `app` still reaches `tokens.appFilter` (a per-wchar
+  narrowing would store invalid bytes that `MultiByteToWideChar(CP_UTF8)`
+  turns into U+FFFD, so the allowlist would never match and the source would
+  be silently dropped from every aggregate). `aggRecord` clamps `alen` to 19,
+  and `g_appName[][]`, `tokensApps[][]` and `tokLabelKeys[][]` all hold 20
+  bytes, so one key reaches the filter, the row and the `tokens.labels` lookup.
+  A field sized differently (the old `char[24]` with `i2 < 23`) let a long
+  config name be silently truncated into a different key on the way in.
+  **The filter's conversion terminates at `MultiByteToWideChar`'s RETURN
+  value, never at the byte count** (`wide[wl > 0 ? wl : 0] = 0`): the API does
+  not terminate when given an explicit input length, and since one byte is no
+  longer one wide character, terminating at `alen` leaves the comparison
+  string reading uninitialized stack - the appFilter then matches nothing and
+  drops every record of that source.
+- **The token scan runs on its own thread with a pinned config generation, and
+  only the UI thread aggregates.** `tokScanThread` (p_tokens.c) walks the
+  session stores and STAGES every record through `tokPendPush` into `g_tokPend`;
+  it must never call `aggRecord` or touch `g_dayTot` / `g_dayApp` / `g_appAgg` /
+  `g_modelAgg` / `g_appCount` / `g_modelCount`, which are UI-thread-affine.
+  The worker configures itself behind `cfgPin()` / `cfgUnpin()` for the whole
+  walk (the `source`, `path` and `fields` it reads live in a generation a
+  reload can retire mid-scan). The apply is `tokDrainPending`, driven by the
+  `WM_APP_TOKSCANDONE` message the worker posts after `InterlockedExchange(&g_tokScanDone, 1)`;
+  the 1s `TIMER_METRICS` tick calls it too as the lost-message fallback, and
+  `g_tokScanBusy` is cleared only AFTER the drain returns. Two invariants hold
+  that up: `g_tokScanDone` is set before the message is posted (so the drain
+  always sees a drained array), and the drain clears `g_tokScanDone` first so a
+  second concurrent drain cannot re-read the same records. A cold scan
+  (~3.3s over the WSL redirector) therefore never freezes the bar - but note
+  it decouples the boundary: `tokDrainPending` calls `dashDayRollover()` at
+  its own top so the day-bucket frame and the `bnd[]` array it just built come
+  from the same instant, otherwise a scan that straddles local midnight files
+  every record one day too old.
+- The omitted-`app` key is derived by `tokAppFromDir` (chocobar.c) from the
+  EXPANDED path (subsPathExpand first, so a `~` config string is resolved),
+  after trailing separators are stripped: the walk from the store end stops at
+  the NEAREST dot-directory and strips its dot (`~/.claude/projects` ->
+  `claude`, not the old fixed two-levels-up walk that yielded `~`). No
+  dot-directory anywhere -> the store folder's own name. Both separators are
+  accepted and doubled separators yield no component.
 - The bar reads the Electron app's `~/.wizbar/token-cache.json` as the HISTORY
-  SEED, then folds in everything newer from the live JSONL session stores
-  (`~/.pi/agent/sessions/**`, `~/.zai/agent/sessions/*`) via a per-file BYTE
-  cursor in `~/.wizbar/token-cursors.json`. Only records with `ts > cacheMaxTs`
-  are counted, so nothing is double counted. The Electron app is retired, so
-  this is now the only thing keeping "Today" non-zero.
+  SEED, then folds in everything newer from the live JSONL session stores -
+  whichever ones `tokens.sources[]` declares (not a hardcoded pi/zai pair: a new
+  harness is a config entry, and `recursive` decides whether that store is
+  walked flat or per project) - via a per-file BYTE cursor in
+  `~/.wizbar/token-cursors.json`. Only records with `ts > cacheMaxTs` are
+  counted, so nothing is double counted. The Electron app is retired, so this
+  is now the only thing keeping "Today" non-zero.
 - **`tokLiveInit()` MUST run before `loadConfig()`** in wWinMain. loadConfig
   rebuilds the chips, which runs the FIRST token scan, and that scan is what
   populates the cursors; loading them afterwards wiped the in-memory set, so the
@@ -648,7 +840,7 @@ Usage semantics differ by store; `src/tokens.js` is the authoritative reader:
   loses its last character. This clipped "CLAUDE/GPT WEEK" to "CLAUDE/GPT WEE".
 - The subs panel pie is sized from the WIDEST window label (`cellW - labNeed -
   DX(20)`), never by fixed tiers: a pie that takes the whole cell clips the
-  label. Providers with 4 windows get a smaller pie, never a dropped window.
+  label. Providers with many windows get a smaller pie, never a dropped window.
 - Table name columns must end at the first numeric column (`xs[4] - DX(6)`),
   not a hard-coded width - a fixed `DX(150)` ellipsized real model ids
   ("xiaomi/mimo-x-flash-preview") even in a 500px card.

@@ -1,7 +1,11 @@
 // ------------------------------------------------- subscription providers ----
-// Mirrors src/subs.js (Electron) for the chip only: ChatGPT wham/usage and
-// Z.ai quota/limit, lowest remaining window wins. Fetches run on a worker
-// thread (WinHTTP is blocking); the UI timer just reads the latest state.
+// The chip mirrors src/subs.js (Electron): ChatGPT wham/usage and Z.ai quota/
+// limit, lowest remaining window wins. Antigravity and the config-only generic
+// provider (a REST quota endpoint declared entirely in subs.providers[]) have no
+// Electron counterpart - they exist here only.
+// Every enabled provider gets its OWN thread and they run concurrently: each
+// fetch is independent (each writes only its own slot through the locked
+// setters), so a cycle costs the slowest provider rather than the sum.
 //
 // Sharp edges (do not "simplify"):
 //  - The Z.ai endpoint answers HTTP 200 with body {code:500} unless the full
@@ -27,7 +31,7 @@ static int g_subsLockInit = 0;
 // truncated before the window is appended, which used to garble every row of
 // the antigravity panel ("CLAUDE AND GPT" lost its window suffix).
 typedef struct { wchar_t label[24]; int pct; int rem; int used; int total; long long resetAt; } SubsWin;
-static SubsWin g_subsWin[MAX_SUBS][4];  // last good windows per provider
+static SubsWin g_subsWin[MAX_SUBS][MAX_GEN_WIN]; // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
 static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
 // absolute prompt credits where the vendor reports them (Antigravity's local
@@ -35,15 +39,16 @@ static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
 // stays a percentage; the board head shows the numbers.
 static int g_subsCredAvail[MAX_SUBS]; static int g_subsCredTotal[MAX_SUBS];
 static int g_subsProvRem[MAX_SUBS];     // lowest remaining window pct, -1 = never fetched
-static int g_agyLocalOk[MAX_SUBS];      // this slot has a live local-API reading
 static int g_subsProvStale[MAX_SUBS];   // last cycle failed but an older value is shown
 static int g_subsThreadStarted = 0;
 
 static const wchar_t *subsNz(const wchar_t *s) { return (s && *s) ? s : NULL; }
 // readers defined further down (the fetch thread logs what it stored)
 static void subsProvLabel(int i, wchar_t *out, int cb);
+static void subsViewLabel(const Config *v, int i, wchar_t *out, int cb);
 static void subsProvPlan(int i, wchar_t *out, int cb);
 static int subsProvWins(int i, SubsWin *out, int max);
+static int subsProvEnabled(int i);
 
 static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
     // "~" -> %USERPROFILE%, keep absolute paths as-is
@@ -52,7 +57,10 @@ static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
         DWORD n = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
         if (!n || n >= MAX_PATH) { out[0] = 0; return; }
         lstrcpynW(out, up, outCch);
-        lstrcatW(out, in + 1);
+        // the remainder has to stay inside the caller's buffer: a long profile
+        // plus a long path would otherwise run off the end of it
+        int ul = lstrlenW(out);
+        if (ul < outCch) lstrcpynW(out + ul, in + 1, outCch - ul);
     } else {
         lstrcpynW(out, in, outCch);
     }
@@ -80,24 +88,29 @@ static wchar_t *subsJstr(const char *js, jsmntok_t *t, int obj, const char *key)
     return jstrTok(js, t, k, NULL);
 }
 
-// same, but the raw UTF-8 bytes (caller frees) - for values parsed in place
-// (ISO timestamps), where a wide round-trip would only add work
-static char *subsJstrRaw(const char *js, jsmntok_t *t, int obj, const char *key) {
-    int k = jobjGet(js, t, obj, key);
-    if (k < 0 || t[k].type != JSMN_STRING) return NULL;
-    int len = t[k].end - t[k].start;
+// the raw UTF-8 bytes of ONE ALREADY SELECTED token (caller frees), NULL if it
+// is not a string - for values parsed in place (ISO timestamps), where a wide
+// round-trip would only add work
+static char *subsJstrRawTok(const char *js, const jsmntok_t *t, int tok) {
+    if (tok < 0 || t[tok].type != JSMN_STRING) return NULL;
+    int len = t[tok].end - t[tok].start;
     char *out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 1);
     if (!out) return NULL;
-    memcpy(out, js + t[k].start, len);
+    memcpy(out, js + t[tok].start, (size_t)len);
     out[len] = 0;
     return out;
 }
 
+// same, but the string value of obj[key] (caller frees), NULL if absent
+static char *subsJstrRaw(const char *js, jsmntok_t *t, int obj, const char *key) {
+    return subsJstrRawTok(js, t, jobjGet(js, t, obj, key));
+}
+
 // ---- ChatGPT (wham/usage) ---------------------------------------------------
 // auth.json: { auth_mode: "chatgpt", tokens: { access_token: "..." } }
-static wchar_t *subsChatgptToken(int idx) {
+static wchar_t *subsChatgptToken(const Config *cfg, int idx) {
     wchar_t path[MAX_PATH];
-    const wchar_t *rawAuth = subsNz(g_cfg.subsProviders[idx].authPath);
+    const wchar_t *rawAuth = subsNz(cfg->subsProviders[idx].authPath);
     if (!rawAuth) rawAuth = L"~/.codex/auth.json";
     subsPathExpand(rawAuth, path, MAX_PATH);
     int len = 0;
@@ -126,8 +139,8 @@ static wchar_t *subsChatgptToken(int idx) {
 
 // ---- Z.ai key ---------------------------------------------------------------
 // config.json: { provider: { "builtin:zai-coding-plan": { enabled, options: { apiKey } } } }
-static wchar_t *subsZaiKey(int providerIdx, wchar_t **deviceMid) {
-    SubsProvider *sp = &g_cfg.subsProviders[providerIdx];
+static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceMid) {
+    const SubsProvider *sp = &cfg->subsProviders[providerIdx];
     wchar_t path[MAX_PATH];
     const wchar_t *rawCfg = subsNz(sp->configPath);
     if (!rawCfg) rawCfg = L"~/.zcode/v2/config.json";
@@ -197,8 +210,9 @@ static wchar_t *subsZaiKey(int providerIdx, wchar_t **deviceMid) {
 }
 
 // ---- HTTP GET via WinHTTP ---------------------------------------------------
-static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, const wchar_t *path, const wchar_t *headers,
-                         int timeoutMs, int *outStatus, int *outLen) {
+static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, int port,
+                         const wchar_t *path, const wchar_t *headers,
+                         int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
     HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
@@ -207,10 +221,12 @@ static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host
     HINTERNET con = NULL, req = NULL;
     do {
         WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+        con = WinHttpConnect(ses, host, port ? (INTERNET_PORT)port
+                                                    : (insecure ? INTERNET_DEFAULT_HTTP_PORT
+                                                                : INTERNET_DEFAULT_HTTPS_PORT), 0);
         if (!con) { writeLogA("subs: connect failed"); break; }
         req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER,
-                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
         if (!req) break;
         if (headers && *headers) {
             WinHttpAddRequestHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
@@ -286,7 +302,7 @@ static void subsSetState(int idx, int rem, int success) {
 
 static void subsSetWins(int idx, const SubsWin *w, int n) {
     if (idx < 0 || idx >= MAX_SUBS) return;
-    if (n > 4) n = 4;
+    if (n > MAX_GEN_WIN) n = MAX_GEN_WIN;
     EnterCriticalSection(&g_subsLock);
     memcpy(g_subsWin[idx], w, n * sizeof(SubsWin));
     g_subsWinN[idx] = n;
@@ -318,8 +334,8 @@ void subsCredits(int i, int *avail, int *total) {
     LeaveCriticalSection(&g_subsLock);
 }
 
-static int subsFetchChatgpt(int idx) {
-    wchar_t *tok = subsChatgptToken(idx);
+static int subsFetchChatgpt(const Config *cfg, int idx) {
+    wchar_t *tok = subsChatgptToken(cfg, idx);
     if (!tok) { writeLogA("subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(idx, 0, 0); return 0; }
     // access_token is a multi-KB JWT: build the header block at its full size
     int need = 32 + lstrlenW(tok) + 64;
@@ -328,7 +344,7 @@ static int subsFetchChatgpt(int idx) {
     swprintf(hdrs, need, L"Authorization: Bearer %ls\r\nAccept: application/json", tok);
     wideFree(&tok);
     int status = 0, len = 0;
-    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", L"/backend-api/wham/usage", hdrs, g_cfg.subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("chatgpt", L"node", L"chatgpt.com", 0, L"/backend-api/wham/usage", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
     HeapFree(GetProcessHeap(), 0, hdrs);
     SubsWin wins[2];
     int nwin = 0;
@@ -383,9 +399,9 @@ static int subsFetchChatgpt(int idx) {
     return 1;
 }
 
-static int subsFetchZai(int idx) {
+static int subsFetchZai(const Config *cfg, int idx) {
     wchar_t *mid = NULL;
-    wchar_t *key = subsZaiKey(idx, &mid);
+    wchar_t *key = subsZaiKey(cfg, idx, &mid);
     if (!key) { subsSetState(idx, 0, 0); return 0; }
     wchar_t hdrs[1600];
     swprintf(hdrs, 1600,
@@ -407,7 +423,7 @@ static int subsFetchZai(int idx) {
     wideFree(&key);
     wideFree(&mid);
     int status = 0, len = 0;
-    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", L"/api/monitor/usage/quota/limit", hdrs, g_cfg.subsTimeoutMs, &status, &len);
+    char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", 0, L"/api/monitor/usage/quota/limit", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
 
     if (!body) { subsSetState(idx, 0, 0); return 0; }
     jsmntok_t t[1024];
@@ -425,7 +441,7 @@ static int subsFetchZai(int idx) {
         subsSetState(idx, 0, 0);
         return 0;
     }
-    SubsWin wins[4];
+    SubsWin wins[MAX_GEN_WIN];
     int nwin = 0;
     double lo = 100;
     int limits = jobjGet(body, t, 0, "data");
@@ -447,7 +463,7 @@ static int subsFetchZai(int idx) {
                     double rem = 100 - pct;
                     lo = found ? (rem < lo ? rem : lo) : rem;
                     found = 1;
-                    if (nwin < 4) {
+                    if (nwin < MAX_GEN_WIN) {
                         int unit = subsJint(body, t, k, "unit", -1);
                         int num = subsJint(body, t, k, "number", 5);
                         memset(&wins[nwin], 0, sizeof(SubsWin));
@@ -530,21 +546,23 @@ static long long subsIsoToMs(const char *s, int len) {
 }
 
 // POST via WinHTTP (the GET helper above is GET-only); returns the body.
-static char *subsHttpPost(const char *tag, const wchar_t *host, const wchar_t *path,
+static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *host, int port, const wchar_t *path,
                           const wchar_t *headers, const char *body, int bodyLen,
-                          int timeoutMs, int *outStatus, int *outLen) {
+                          int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
-    HINTERNET ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
-    if (!ses) ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
+    if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!ses) { writeLogA("subs agy: open failed"); return NULL; }
     char *result = NULL;
     HINTERNET con = NULL, req = NULL;
     do {
         WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+        con = WinHttpConnect(ses, host, port ? (INTERNET_PORT)port
+                                                    : (insecure ? INTERNET_DEFAULT_HTTP_PORT
+                                                                : INTERNET_DEFAULT_HTTPS_PORT), 0);
         if (!con) { writeLogA("subs agy: connect failed"); break; }
         req = WinHttpOpenRequest(con, L"POST", path, NULL, WINHTTP_NO_REFERER,
-                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
         if (!req) break;
         if (headers && *headers) {
             WinHttpAddRequestHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
@@ -620,9 +638,9 @@ typedef struct {
 
 // auth.json: { "antigravity": { access, refresh, expires, projectId } }
 // Fallback: the IDE state.vscdb needle "apiKey":"ya29...." (no refresh).
-static int subsAgyReadAuth(int idx, AgyAuth *out, wchar_t *authPathOut, int cch) {
+static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *authPathOut, int cch) {
     memset(out, 0, sizeof(*out));
-    const wchar_t *raw = subsNz(g_cfg.subsProviders[idx].authPath);
+    const wchar_t *raw = subsNz(cfg->subsProviders[idx].authPath);
     if (!raw) raw = L"~/.pi/agent/auth.json";
     subsPathExpand(raw, authPathOut, cch);
     int len = 0;
@@ -651,7 +669,7 @@ static int subsAgyReadAuth(int idx, AgyAuth *out, wchar_t *authPathOut, int cch)
         if (*out->access || out->hasRefresh) return 1;
     }
     // IDE fallback: binary needle scan over the vscdb row blob
-    const wchar_t *vraw = subsNz(g_cfg.subsProviders[idx].vscdbPath);
+    const wchar_t *vraw = subsNz(cfg->subsProviders[idx].vscdbPath);
     if (vraw && *vraw) {
         wchar_t vpath[MAX_PATH];
         subsPathExpand(vraw, vpath, MAX_PATH);
@@ -825,8 +843,8 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
         cid, cs, a->refresh);
     if (bl <= 0 || bl >= (int)sizeof(body)) return 0;
     int status = 0, len = 0;
-    char *resp = subsHttpPost("token", L"oauth2.googleapis.com", L"/token",
-                              L"Content-Type: application/json", body, bl, 20000, &status, &len);
+    char *resp = subsHttpPost("token", AGY_UA, L"oauth2.googleapis.com", 0, L"/token",
+                              L"Content-Type: application/json", body, bl, 0, 20000, &status, &len);
     if (!resp || (status != 200 && status != 207)) {
         char dbg[64];
         sprintf(dbg, "subs agy: token refresh HTTP %d", status);
@@ -868,377 +886,156 @@ static void subsAgyHeaders(wchar_t *hdrs, int cch, const wchar_t *token) {
 }
 
 
-// ------------------------------------------------- local language server ----
-// The quota the IDE itself shows lives on Antigravity's LOCAL language server,
-// not on the cloud summary endpoint: GetUserStatus reports one fraction per
-// model FAMILY (Gemini vs Claude/GPT) and its numbers are exactly what the
-// captain's /quota prints. The server is spawned by the IDE with the port and
-// CSRF token on its command line - neither is persisted anywhere - so the bar
-// reads them the way a debugger would: PEB -> ProcessParameters -> CommandLine,
-// then the owning PID's listening ports from the TCP table.
-// Prefix, not a full name: the installed IDE ships language_server.exe (from
-// resources\bin), older/secondary builds ship language_server_windows_x64.exe.
-// A case-insensitive prefix match accepts both; a candidate is still confirmed
-// by its --csrf_token command line and a live GetUserStatus before it is trusted.
-#define AGY_LS_EXE L"language_server"
-#define AGY_LS_EXE_LEN 15
-
+// one fetchAvailableModels call; runs on its own thread so the two endpoints
+// are fetched concurrently instead of back to back
 typedef struct {
-    DWORD pid;
-    int port;
-    int daily;                // command line pointed at the sandbox endpoint
-    int ports[16];            // every listener the pid owns
-    int portN;
-    wchar_t token[80];
-} AgyLocal;
-
-// another process's command line: PEB -> ProcessParameters -> CommandLine.
-// PEB/UNICODE_STRING offsets vary across Windows builds, so every candidate is
-// validated: only a decoded path-like string is accepted, and one containing
-// the needle (e.g. "--csrf_token") always wins over a bare ImagePathName.
-static BOOL subsAgyCmdLine(DWORD pid, const wchar_t *needle, wchar_t *out, int cb) {
-    out[0] = 0;
-    typedef LONG (WINAPI *NtQIP)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
-    if (!nt) return FALSE;
-    NtQIP q = (NtQIP)(void *)GetProcAddress(nt, "NtQueryInformationProcess");
-    if (!q) return FALSE;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (!h) return FALSE;
-    BOOL ok = FALSE;
-    BYTE pbi[64];
-    if (q(h, 0 /*ProcessBasicInformation*/, pbi, sizeof(pbi), NULL) == 0) {
-        static const DWORD pebOffs[2] = { 0x10, 0x08 }; // PebBaseAddress candidates
-        for (int po = 0; po < 2 && !ok; po++) {
-            DWORD_PTR peb = *(DWORD_PTR *)(pbi + pebOffs[po]);
-            if (!peb || (peb & 0xFFF)) continue; // a PEB is page aligned
-            DWORD_PTR pp = 0;
-            if (!ReadProcessMemory(h, (LPCVOID)(peb + 0x20), &pp, sizeof(pp), NULL) || !pp) continue;
-            BYTE blk[0x100];
-            SIZE_T got = 0;
-            if (!ReadProcessMemory(h, (LPCVOID)pp, blk, sizeof(blk), &got) || got < 0xA0) continue;
-            static const DWORD cmdOffs[5] = { 0x70, 0x78, 0x80, 0x88, 0x68 };
-            for (int co = 0; co < 5 && !ok; co++) {
-                DWORD o = cmdOffs[co];
-                USHORT ln = *(USHORT *)(blk + o);
-                DWORD_PTR bp = *(DWORD_PTR *)(blk + o + 8);
-                if (!ln || ln > 8000 || !bp) continue;
-                wchar_t tmp[2048];
-                SIZE_T rd = 0;
-                int want = ln < (int)sizeof(tmp) - 2 ? ln : (int)sizeof(tmp) - 2;
-                if (!ReadProcessMemory(h, (LPCVOID)bp, tmp, (SIZE_T)want, &rd) || rd < 8) continue;
-                tmp[rd / 2] = 0;
-                // validate: looks like a command line (quoted path or drive letter)
-                BOOL pathlike = (tmp[0] == L'"') ||
-                                ((tmp[0] >= L'A' && tmp[0] <= L'Z') || (tmp[0] >= L'a' && tmp[0] <= L'z')) &&
-                                (tmp[1] == L':') && (tmp[2] == L'\\' || tmp[2] == L'/');
-                if (!pathlike) continue;
-                if (needle && wcsstr(tmp, needle)) {
-                    int n = (int)(rd / 2);
-                    if (n > cb - 1) n = cb - 1;
-                    memcpy(out, tmp, (size_t)n * 2);
-                    out[n] = 0;
-                    ok = TRUE; // the needle decides: ImagePathName also matches
-                } else if (!out[0]) {
-                    int n = (int)(rd / 2);
-                    if (n > cb - 1) n = cb - 1;
-                    memcpy(out, tmp, (size_t)n * 2);
-                    out[n] = 0; // first path-like candidate as the fallback
-                }
-            }
-        }
-    }
-    CloseHandle(h);
-    return out[0] != 0;
-}
-
-// listening TCP ports owned by pid (GetExtendedTcpTable, not a netstat spawn)
-static int subsAgyListenPorts(DWORD pid, int *ports, int max) {
-    DWORD size = 0;
-    if (GetExtendedTcpTable(NULL, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) != ERROR_INSUFFICIENT_BUFFER)
-        return 0;
-    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, size);
-    if (!buf) return 0;
-    int n = 0;
-    if (GetExtendedTcpTable(buf, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) == ERROR_SUCCESS) {
-        MIB_TCPTABLE_OWNER_PID *t = (MIB_TCPTABLE_OWNER_PID *)buf;
-        DWORD i2;
-        for (i2 = 0; i2 < t->dwNumEntries && n < max; i2++) {
-            if (t->table[i2].dwOwningPid != pid) continue;
-            DWORD lp = t->table[i2].dwLocalPort & 0xFFFF;
-            ports[n] = (int)(((lp & 0xFF) << 8) | ((lp >> 8) & 0xFF));
-            n++;
-        }
-    }
-    HeapFree(GetProcessHeap(), 0, buf);
-    return n;
-}
-
-// find the language server + its csrf token. Prefers the PRODUCTION endpoint
-// (the sandbox/daily instance reports the same shapes but different numbers).
-static BOOL subsAgyLocalFind(AgyLocal *out) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return FALSE;
-    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
-    DWORD pids[8]; int np = 0, total = 0;
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            total++;
-            if (np < 8 && _wcsnicmp(pe.szExeFile, AGY_LS_EXE, AGY_LS_EXE_LEN) == 0) pids[np++] = pe.th32ProcessID;
-            else if (g_cfg.debug && total < 400 && (wcsstr(pe.szExeFile, L"anguage") || wcsstr(pe.szExeFile, L"ntigravity"))) {
-                char lb[300];
-                WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, lb, 200, NULL, NULL);
-                char lb2[260];
-                sprintf(lb2, "[wizbar] subs agy: sees \"%s\" pid=%lu", lb, (unsigned long)pe.th32ProcessID);
-                writeLogA(lb2);
-            }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
-    if (g_cfg.debug) {
-        char lb[96];
-        sprintf(lb, "[wizbar] subs agy find: %d of %d processes are the language server", np, total);
-        writeLogA(lb);
-    }
-    AgyLocal best; memset(&best, 0, sizeof(best));
-    BOOL have = FALSE;
-    for (int i = 0; i < np; i++) {
-        wchar_t cl[4096];
-        if (!subsAgyCmdLine(pids[i], L"--csrf_token", cl, 4096)) {
-            if (g_cfg.debug) writeLogA("[wizbar] subs agy: cmd line read failed");
-            continue;
-        }
-        wchar_t *tk = wcsstr(cl, L"--csrf_token");
-        if (!tk) continue;
-        tk += 12;
-        while (*tk == L' ') tk++;
-        if (*tk == L'"') tk++;
-        AgyLocal c; memset(&c, 0, sizeof(c));
-        c.pid = pids[i];
-        int j = 0;
-        while (tk[j] && !wcschr(L" \"", tk[j]) && j < 78) { c.token[j] = tk[j]; j++; }
-        c.token[j] = 0;
-        if (!c.token[0]) continue;
-        c.daily = wcsstr(cl, L"daily-cloudcode") != NULL;
-        c.portN = subsAgyListenPorts(c.pid, c.ports, 16);
-        c.port = c.portN > 0 ? c.ports[0] : 0;
-        if (g_cfg.debug) {
-            char lb[220];
-            sprintf(lb, "[wizbar] subs agy cand pid=%lu daily=%d ports=%d port=%d",
-                    (unsigned long)c.pid, c.daily, c.portN, c.port);
-            writeLogA(lb);
-        }
-        if (!c.port) continue;
-        if (!have || (!c.daily && best.daily)) { best = c; have = TRUE; }
-    }
-    if (!have) return FALSE;
-    *out = best;
-    return TRUE;
-}
-
-// POST to 127.0.0.1:<port> over plain HTTP with the csrf header
-static char *subsAgyLocalPost(const AgyLocal *c, const char *body, int bodyLen,
-                              int timeoutMs, int *outStatus, int *outLen) {
-    *outStatus = 0; *outLen = 0;
-    HINTERNET ses = WinHttpOpen(AGY_UA, WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
-    if (!ses) return NULL;
-    char *result = NULL;
-    HINTERNET con = NULL, req = NULL;
-    wchar_t hdrs[160];
-    swprintf(hdrs, 159, L"X-Codeium-Csrf-Token: %ls\r\nContent-Type: application/json\r\n", c->token);
-    do {
-        WinHttpSetTimeouts(ses, 2000, timeoutMs, 2000, timeoutMs);
-        con = WinHttpConnect(ses, L"127.0.0.1", (INTERNET_PORT)c->port, 0);
-        if (!con) break;
-        req = WinHttpOpenRequest(con, L"POST",
-            L"/exa.language_server_pb.LanguageServerService/GetUserStatus", NULL,
-            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0); // plain HTTP
-        if (!req) break;
-        WinHttpAddRequestHeaders(req, hdrs, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
-        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)body,
-                                (DWORD)bodyLen, (DWORD)bodyLen, 0)) break;
-        if (!WinHttpReceiveResponse(req, NULL)) break;
-        DWORD status = 0, sz = sizeof(status);
-        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
-        *outStatus = (int)status;
-        int cap = 64 * 1024, len = 0;
-        result = (char *)HeapAlloc(GetProcessHeap(), 0, cap);
-        if (!result) break;
-        for (;;) {
-            DWORD rd = 0;
-            if (len + 8192 > cap) {
-                int ncap = cap * 2;
-                char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, result, ncap);
-                if (!nb) break;
-                result = nb; cap = ncap;
-            }
-            if (!WinHttpReadData(req, result + len, 8192, &rd)) break;
-            if (!rd) break;
-            len += (int)rd;
-        }
-        if (result) result[len] = 0;
-        *outLen = len;
-    } while (0);
-    if (req) WinHttpCloseHandle(req);
-    if (con) WinHttpCloseHandle(con);
-    WinHttpCloseHandle(ses);
-    return result;
-}
-
-
-// ---- the LOCAL source: GetUserStatus on Antigravity's language server -------
-// Groups clientModelConfigs by family the way the IDE's own status bar does:
-// "Gemini" vs everything else (Claude/GPT). Every model in a family shares the
-// same fraction and reset, so the group fraction IS the model quota.
-static int subsAgyQuotaKeyN(const char *label) {
-    char lo[80];
-    int i;
-    for (i = 0; label[i] && i < 79; i++)
-        lo[i] = (label[i] >= 'A' && label[i] <= 'Z') ? (char)(label[i] + 32) : label[i];
-    lo[i] = 0;
-    return strstr(lo, "gemini") ? 0 : 1;
-}
-
-static int subsAgyQuotaKey(const wchar_t *label) {
-    // 0 = Gemini family, 1 = Claude/GPT (and any other non-Gemini model)
-    wchar_t lo[80];
-    int i;
-    for (i = 0; label[i] && i < 79; i++) {
-        wchar_t ch = label[i];
-        lo[i] = (ch >= L'A' && ch <= L'Z') ? (wchar_t)(ch + 32) : ch;
-    }
-    lo[i] = 0;
-    return wcsstr(lo, L"gemini") ? 0 : 1;
-}
-
-static int subsAgyLocalApply(int idx, int fam, int port, char *resp, int bl) {
-    jsmntok_t *t = NULL;
-    int n = subsParseBig(resp, bl, &t);
-    if (n <= 0 || t[0].type != JSMN_OBJECT) {
-        HeapFree(GetProcessHeap(), 0, resp);
-        if (t) HeapFree(GetProcessHeap(), 0, t);
-        return 0;
-    }
-    int us = jobjGet(resp, t, 0, "userStatus");
-    if (us < 0 || t[us].type != JSMN_OBJECT) {
-        HeapFree(GetProcessHeap(), 0, resp); HeapFree(GetProcessHeap(), 0, t);
-        return 0;
-    }
-    wchar_t plan[24] = L"Antigravity";
-    {
-        int ps = jobjGet(resp, t, us, "planStatus");
-        int pi2 = ps >= 0 ? jobjGet(resp, t, ps, "planInfo") : -1;
-        if (pi2 >= 0) {
-            wchar_t *nm = subsJstr(resp, t, pi2, "planName");
-            if (nm && *nm) { lstrcpynW(plan, nm, 24); }
-            wideFree(&nm);
-        }
-        // absolute prompt credits (dashboard only, per the captain's rule)
-        double avail = -1, monthly = -1;
-        if (ps >= 0) avail = subsJdouble(resp, t, ps, "availablePromptCredits", -1);
-        if (pi2 >= 0) monthly = subsJdouble(resp, t, pi2, "monthlyPromptCredits", -1);
-        if (avail >= 0 && monthly > 0) {
-            int left = (int)(avail + 0.5);
-            subsSetCredits(idx, left, (int)(monthly + 0.5));
-        }
-    }
-    SubsWin wins[2];
-    double frac[2] = { -1, -1 };
-    long long reset[2] = { 0, 0 };
-    int cmd = jobjGet(resp, t, us, "cascadeModelConfigData");
-    cmd = cmd >= 0 ? jobjGet(resp, t, cmd, "clientModelConfigs") : -1;
-    if (cmd >= 0 && t[cmd].type == JSMN_ARRAY) {
-        int cnt = t[cmd].size;
-        int k = cmd + 1;
-        for (int i = 0; i < cnt; i++, k += jtokSpan(t, k)) {
-            if (t[k].type != JSMN_OBJECT) continue;
-            wchar_t *label = subsJstr(resp, t, k, "label");
-            if (!label) continue;
-            int mf = subsAgyQuotaKey(label);
-            wideFree(&label);
-            int qi = jobjGet(resp, t, k, "quotaInfo");
-            if (qi < 0) continue;
-            double f = subsJdouble(resp, t, qi, "remainingFraction", -1);
-            if (f < 0 || f > 1) continue;
-            long long rms = 0;
-            char *iso = subsJstrRaw(resp, t, qi, "resetTime");
-            if (iso) { rms = subsIsoToMs(iso, (int)strlen(iso)); HeapFree(GetProcessHeap(), 0, iso); }
-            if (frac[mf] < 0 || f < frac[mf]) { frac[mf] = f; reset[mf] = rms; }
-        }
-    }
-    HeapFree(GetProcessHeap(), 0, t);
-    HeapFree(GetProcessHeap(), 0, resp);
-    // TWO 5h windows, one per model family - the same two rows the IDE's
-    // /quota shows (Gemini and Claude/GPT each have their own rolling 5h
-    // window with its own reset time; there is no weekly quota). The chip
-    // shows the tighter of the two.
-    if (frac[0] < 0 && frac[1] < 0) return 0;
-    int nw = 0, loRem = 101;
-    static const wchar_t *famNames[2] = { L"Gemini 5H", L"Claude/GPT 5H" };
-    for (int f = 0; f < 2; f++) {
-        if (frac[f] < 0) continue;
-        memset(&wins[nw], 0, sizeof(wins[nw]));
-        lstrcpynW(wins[nw].label, famNames[f], 24);
-        wins[nw].rem = (int)(frac[f] * 100.0 + 0.5);
-        wins[nw].pct = 100 - wins[nw].rem;
-        wins[nw].used = -1; wins[nw].total = -1;
-        wins[nw].resetAt = reset[f];
-        if (wins[nw].rem < loRem) loRem = wins[nw].rem;
-        nw++;
-    }
-    subsSetWins(idx, wins, nw);
-    subsSetState(idx, loRem, 1);
-    subsSetPlan(idx, plan);
-    if (g_cfg.debug) {
-        char lb[240];
-        sprintf(lb, "[wizbar] subs agy local: port=%d rem=%d gemini=%.3f claude=%.3f",
-                port, wins[0].rem, frac[0] < 0 ? -1 : frac[0], frac[1] < 0 ? -1 : frac[1]);
-        writeLogA(lb);
-    }
-    return 1;
-}
-
-static int subsFetchAgyLocal(int idx, int fam) {
-    AgyLocal lc;
-    if (!subsAgyLocalFind(&lc)) return 0; // not running: caller falls back
-    static const char *body = "{}";
-    // Try EVERY listener the pid owns: which one serves the JSON endpoint
-    // varies per boot (an LSP/gRPC listener plus the JSON one), and the wrong
-    // one answers 400/401 or closes the connection - the pid/ports/token are
-    // all valid, only the pairing is wrong.
-    for (int p = 0; p < lc.portN; p++) {
-        if (lc.ports[p] <= 0) continue;
-        lc.port = lc.ports[p];
-        int st = 0, bl = 0;
-        char *resp = subsAgyLocalPost(&lc, body, 2, g_cfg.subsTimeoutMs, &st, &bl);
-        if (!resp || st != 200) {
-            if (g_cfg.debug) {
-                char lb[128];
-                sprintf(lb, "[wizbar] subs agy local: port %d st=%d (%s)", lc.port, st, resp ? "ok" : "null");
-                writeLogA(lb);
-            }
-            if (resp) HeapFree(GetProcessHeap(), 0, resp);
-            continue;
-        }
-        if (subsAgyLocalApply(idx, fam, lc.port, resp, bl)) return 1;
-    }
+    const wchar_t *host; const wchar_t *hdrs; const wchar_t *project;
+    int timeoutMs; int st, bl; char *resp;
+} AgyModelsJob;
+static DWORD WINAPI agyModelsThread(LPVOID lp) {
+    AgyModelsJob *j = (AgyModelsJob *)lp;
+    char mbody[256];
+    int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", j->project);
+    if (ml <= 0 || ml >= (int)sizeof(mbody)) { j->resp = NULL; return 0; }
+    j->resp = subsHttpPost("models", AGY_UA, j->host, 0, L"/v1internal:fetchAvailableModels", j->hdrs,
+                           mbody, ml, 0, j->timeoutMs, &j->st, &j->bl);
     return 0;
 }
 
-static int subsFetchAntigravity(int idx) {
+// per-family model keys in priority order, exactly the keys pi-quota-inject
+// picks: the first key that carries a quotaInfo wins for that family
+static const char *agyFamKeys[2][5] = {
+    { "gemini-3.8-flash-tiered", "gemini-3.7-flash-tiered", "gemini-3.6-flash-high", "gemini-pro-agent", NULL },
+    { "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", NULL, NULL }
+};
+
+// Fetch /v1internal:fetchAvailableModels on BOTH endpoints CONCURRENTLY and
+// merge them into the family slots: production first, then the daily/sandbox
+// endpoint OVERWRITING it - byte-for-byte the Object.assign order of
+// pi-quota-inject.mjs. Each call costs ~1 s of pure server latency for ~160 KB,
+// so serialising them doubled the most expensive part of a subs cycle.
+// Returns 1 if both endpoints were attempted, 0 if neither, -1 on a 401.
+static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, const wchar_t *project,
+                          int timeoutMs, int debug,
+                          double *famRf, long long *famReset, int *famHave) {
+    AgyModelsJob mj[2];
+    HANDLE mth[2]; int started[2] = { 0, 0 };
+    for (int h = 0; h < 2; h++) {
+        memset(&mj[h], 0, sizeof(mj[h]));
+        mj[h].host = hosts[h];
+        mj[h].hdrs = hdrs; mj[h].project = project; mj[h].timeoutMs = timeoutMs;
+        mth[h] = CreateThread(NULL, 0, agyModelsThread, &mj[h], 0, NULL);
+        // the mask is PER HOST, not a count: a thread that could not start
+        // leaves only ITS host to the inline fetch below, while a host whose
+        // thread did start keeps that thread's result
+        if (mth[h]) started[h] = 1; else break;
+    }
+    // join and close every thread that was created: a thread that is still
+    // running keeps writing into mj[] (and, when this was called speculatively,
+    // into the CALLER's stack frame) after this function returns
+    for (int h = 0; h < 2; h++) {
+        if (!started[h]) continue;
+        WaitForSingleObject(mth[h], INFINITE);
+        CloseHandle(mth[h]);
+    }
+    int attempted = 0, auth401 = 0;
+    for (int h = 0; h < 2; h++) {
+        int st = 0, bl = 0; char *resp;
+        if (started[h]) { st = mj[h].st; bl = mj[h].bl; resp = mj[h].resp; }
+        else {
+            char mbody[256];
+            int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", project);
+            if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
+            resp = subsHttpPost("models", AGY_UA, hosts[h], 0, L"/v1internal:fetchAvailableModels", hdrs,
+                                mbody, ml, 0, timeoutMs, &st, &bl);
+        }
+        attempted = 1;
+        if (debug) {
+            char lb[160];
+            sprintf(lb, "[wizbar] subs agy models host=%d st=%d bl=%d", h, st, bl);
+            writeLogA(lb);
+        }
+        if (!resp) continue;
+        if (st == 401) { auth401 = 1; HeapFree(GetProcessHeap(), 0, resp); continue; }
+        if (st != 200) { HeapFree(GetProcessHeap(), 0, resp); continue; }
+        jsmntok_t *t = NULL;
+        int n = subsParseBig(resp, bl, &t);
+        if (n > 0 && t[0].type == JSMN_OBJECT) {
+            int models = jobjGet(resp, t, 0, "models");
+            if (models >= 0 && t[models].type == JSMN_OBJECT) {
+                int cnt = t[models].size; // object: size = number of KEYS
+                int k = models + 1;
+                for (int i = 0; i < cnt; i++) {
+                    // object children are key+value PAIRS: advance 1 + span(value)
+                    if (t[k + 1].type == JSMN_OBJECT) {
+                        int klen = t[k].end - t[k].start;
+                        const char *ks = resp + t[k].start;
+                        for (int f = 0; f < 2; f++) {
+                            int matched = 0;
+                            for (int ki = 0; agyFamKeys[f][ki]; ki++) {
+                                int kl = (int)strlen(agyFamKeys[f][ki]);
+                                if (klen != kl || strncmp(ks, agyFamKeys[f][ki], klen) != 0) continue;
+                                // tracked key: OVERWRITE the slot unconditionally,
+                                // exactly like Object.assign in pi-quota-inject
+                                // (the later endpoint's entry replaces the whole
+                                // model, quotaInfo or not)
+                                int q = jobjGet(resp, t, k + 1, "quotaInfo");
+                                famHave[f] = q >= 0 && t[q].type == JSMN_OBJECT;
+                                famRf[f] = -1;
+                                famReset[f] = 0;
+                                if (famHave[f]) {
+                                    famRf[f] = subsJdouble(resp, t, q, "remainingFraction", -1);
+                                    if (famRf[f] > 1) famRf[f] = 1;
+                                    char *rt = subsJstrRaw(resp, t, q, "resetTime");
+                                    if (rt) {
+                                        famReset[f] = subsIsoToMs(rt, (int)strlen(rt));
+                                        HeapFree(GetProcessHeap(), 0, rt);
+                                    }
+                                }
+                                matched = 1;
+                                break;
+                            }
+                            if (matched) break;
+                        }
+                    }
+                    k += 1 + jtokSpan(t, k + 1);
+                }
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, t);
+        HeapFree(GetProcessHeap(), 0, resp);
+    }
+    return auth401 ? -1 : (attempted ? 1 : 0);
+}
+
+// the same fetch driven from a thread, so it can overlap loadCodeAssist
+typedef struct {
+    const wchar_t *const *hosts; const wchar_t *hdrs;
+    wchar_t project[128];   // a COPY: the caller rewrites its own buffer
+    int timeoutMs, debug;
+    double famRf[2]; long long famReset[2]; int famHave[2];
+    int result;
+} AgyQuotaJob;
+static DWORD WINAPI agyQuotaThread(LPVOID lp) {
+    AgyQuotaJob *j = (AgyQuotaJob *)lp;
+    j->result = agyFetchModels(j->hosts, j->hdrs, j->project, j->timeoutMs, j->debug,
+                               j->famRf, j->famReset, j->famHave);
+    return 0;
+}
+
+static int subsFetchAntigravity(const Config *cfg, int idx) {
     subsSetCredits(idx, -1, -1);
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
-    if (!subsAgyReadAuth(idx, &auth, authPath, MAX_PATH)) {
+    if (!subsAgyReadAuth(cfg, idx, &auth, authPath, MAX_PATH)) {
         writeLogA("subs agy: no login (open Antigravity once)");
         subsSetState(idx, 0, 0);
         return 0;
     }
     // refresh a near-expired token before any quota call
     if (auth.hasRefresh && (!*auth.access || auth.expires < subsNowMs() + AGY_REFRESH_MARGIN_MS)) {
-        const wchar_t *cid = idx >= 0 && idx < g_cfg.subsProviderCount ? g_cfg.subsProviders[idx].clientId : NULL;
-        const wchar_t *cs  = idx >= 0 && idx < g_cfg.subsProviderCount ? g_cfg.subsProviders[idx].clientSecret : NULL;
+        const wchar_t *cid = idx >= 0 && idx < cfg->subsProviderCount ? cfg->subsProviders[idx].clientId : NULL;
+        const wchar_t *cs  = idx >= 0 && idx < cfg->subsProviderCount ? cfg->subsProviders[idx].clientSecret : NULL;
         if (!subsAgyRefresh(&auth, cid, cs)) {
             writeLogA("subs agy: token refresh failed (re-login)");
             subsSetState(idx, 0, 0);
@@ -1246,11 +1043,29 @@ static int subsFetchAntigravity(int idx) {
         }
         subsAgySaveAuth(authPath, auth.access, auth.refresh, auth.expires);
     }
+    unsigned long long tAgy = GetTickCount64();
     if (!*auth.access) { subsSetState(idx, 0, 0); return 0; }
     wchar_t hdrs[4600];
     subsAgyHeaders(hdrs, 4600, auth.access);
     const wchar_t *hosts[2] = { L"cloudcode-pa.googleapis.com", L"daily-cloudcode-pa.sandbox.googleapis.com" };
     wchar_t plan[24] = L"Antigravity";
+    // The models calls are the expensive half of the cycle (~1 s of pure server
+    // latency each) and they need only a project id, which the auth file already
+    // carries. Fire them NOW, with the id we have, so the loadCodeAssist round
+    // trip below overlaps them instead of running back to back: a cycle then
+    // costs the LONGER of the two rather than their sum. If loadCodeAssist comes
+    // back with a DIFFERENT id the speculative result is discarded and fetched
+    // again, so a stale id can never show another project's numbers.
+    wchar_t usedProject[128]; usedProject[0] = 0;
+    HANDLE qth = NULL; AgyQuotaJob qj;
+    if (*auth.projectId) {
+        memset(&qj, 0, sizeof(qj));
+        qj.hosts = hosts; qj.hdrs = hdrs;
+        lstrcpynW(qj.project, auth.projectId, 128);
+        qj.timeoutMs = cfg->subsTimeoutMs; qj.debug = cfg->debug;
+        lstrcpynW(usedProject, auth.projectId, 128);
+        qth = CreateThread(NULL, 0, agyQuotaThread, &qj, 0, NULL);
+    }
     // Plan label + project discovery. loadCodeAssist runs on EVERY cycle:
     // the stored projectId used to short-circuit it, so the panel kept the
     // fallback label instead of the account's real tier ("Google AI Pro").
@@ -1259,9 +1074,9 @@ static int subsFetchAntigravity(int idx) {
         // the length MUST be the full literal: a hard-coded count that was 4
         // short truncated the JSON, so Google answered 400 on every call
         const char *assistBody = "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
-        char *resp = subsHttpPost("assist", hosts[h], L"/v1internal:loadCodeAssist", hdrs,
-            assistBody, (int)strlen(assistBody), g_cfg.subsTimeoutMs, &st, &bl);
-        if (g_cfg.debug) {
+        char *resp = subsHttpPost("assist", AGY_UA, hosts[h], 0, L"/v1internal:loadCodeAssist", hdrs,
+            assistBody, (int)strlen(assistBody), 0, cfg->subsTimeoutMs, &st, &bl);
+        if (cfg->debug) {
             char lb[160];
             sprintf(lb, "[wizbar] subs agy loadCodeAssist host=%d st=%d bl=%d resp=%s", h, st, bl, resp ? "ok" : "NULL");
             writeLogA(lb);
@@ -1272,7 +1087,7 @@ static int subsFetchAntigravity(int idx) {
             int n = subsParseBig(resp, bl, &t);
             if (n > 0 && t[0].type == JSMN_OBJECT) {
                 int paid = jobjGet(resp, t, 0, "paidTier");
-                if (g_cfg.debug && paid < 0)
+                if (cfg->debug && paid < 0)
                     writeLogA("[wizbar] subs agy loadCodeAssist: 200 but no paidTier (plan stays generic)");
                 if (paid >= 0 && t[paid].type == JSMN_OBJECT) {
                     wchar_t *nm = subsJstr(resp, t, paid, "name");
@@ -1296,6 +1111,32 @@ static int subsFetchAntigravity(int idx) {
         HeapFree(GetProcessHeap(), 0, resp);
         if (st == 200 || st == 403) break; // definitive answer
     }
+    if (cfg->debug) { char lb[80]; sprintf(lb, "[wizbar] subs agy: loadCodeAssist phase %llu ms", GetTickCount64() - tAgy); writeLogA(lb); }
+    static const wchar_t *famNames[2] = { L"Gemini", L"Claude/GPT" };
+    double famRf[2] = { -1, -1 };
+    long long famReset[2] = { 0, 0 };
+    int famHave[2] = { 0, 0 };
+    // Collect the speculative fetch that overlapped loadCodeAssist. The thread
+    // writes into qj, a local of THIS frame, so it is joined HERE - above every
+    // early return below - and its lifetime can never depend on which branch
+    // the code takes.
+    int needModels = 1;
+    if (qth) {
+        WaitForSingleObject(qth, INFINITE);
+        CloseHandle(qth);
+        if (qj.result < 0) { // 401: the token is no good
+            writeLogA("subs agy: models 401 (re-login)");
+            subsSetState(idx, 0, 0);
+            return 0;
+        }
+        if (lstrcmpW(usedProject, auth.projectId) == 0) {
+            // loadCodeAssist confirmed the id we already fetched with
+            famRf[0] = qj.famRf[0]; famRf[1] = qj.famRf[1];
+            famReset[0] = qj.famReset[0]; famReset[1] = qj.famReset[1];
+            famHave[0] = qj.famHave[0]; famHave[1] = qj.famHave[1];
+            needModels = 0;
+        }
+    }
     if (!*auth.projectId) {
         writeLogA("subs agy: no project id");
         subsSetState(idx, 0, 0);
@@ -1312,79 +1153,20 @@ static int subsFetchAntigravity(int idx) {
     // carry only a resetTime and no remainingFraction (the Claude/GPT pool
     // between resets): the row stays on the board, its fraction renders as an
     // em dash.
-    static const char *famKeys[2][5] = {
-        { "gemini-3.8-flash-tiered", "gemini-3.7-flash-tiered", "gemini-3.6-flash-high", "gemini-pro-agent", NULL },
-        { "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", NULL, NULL }
-    };
-    static const wchar_t *famNames[2] = { L"Gemini", L"Claude/GPT" };
-    double famRf[2] = { -1, -1 };
-    long long famReset[2] = { 0, 0 };
-    int famHave[2] = { 0, 0 };
-    for (int h = 0; h < 2; h++) { // production first, daily WINS (overwrite)
-        int st = 0, bl = 0;
-        char mbody[256];
-        int ml = snprintf(mbody, sizeof(mbody), "{\"project\":\"%ls\"}", auth.projectId);
-        if (ml <= 0 || ml >= (int)sizeof(mbody)) break;
-        char *resp = subsHttpPost("models", hosts[h], L"/v1internal:fetchAvailableModels", hdrs,
-                                  mbody, ml, g_cfg.subsTimeoutMs, &st, &bl);
-        if (g_cfg.debug) {
-            char lb[160];
-            sprintf(lb, "[wizbar] subs agy models host=%d st=%d bl=%d", h, st, bl);
-            writeLogA(lb);
-        }
-        if (!resp) continue;
-        if (st == 401) {
+    if (needModels) {
+        int r = agyFetchModels(hosts, hdrs, auth.projectId, cfg->subsTimeoutMs, cfg->debug,
+                               famRf, famReset, famHave);
+        if (r < 0) {
             writeLogA("subs agy: models 401 (re-login)");
-            HeapFree(GetProcessHeap(), 0, resp);
             subsSetState(idx, 0, 0);
             return 0;
         }
-        if (st != 200) { HeapFree(GetProcessHeap(), 0, resp); break; }
-        jsmntok_t *t = NULL;
-        int n = subsParseBig(resp, bl, &t);
-        if (n > 0 && t[0].type == JSMN_OBJECT) {
-            int models = jobjGet(resp, t, 0, "models");
-            if (models >= 0 && t[models].type == JSMN_OBJECT) {
-                int cnt = t[models].size; // object: size = number of KEYS
-                int k = models + 1;
-                for (int i = 0; i < cnt; i++) {
-                    // object children are key+value PAIRS: advance 1 + span(value)
-                    if (t[k + 1].type == JSMN_OBJECT) {
-                        int klen = t[k].end - t[k].start;
-                        const char *ks = resp + t[k].start;
-                        int matched = 0;
-                        for (int f = 0; f < 2 && !matched; f++) {
-                            for (int ki = 0; famKeys[f][ki]; ki++) {
-                                int kl = (int)strlen(famKeys[f][ki]);
-                                if (klen != kl || strncmp(ks, famKeys[f][ki], klen) != 0) continue;
-                                // tracked key: OVERWRITE the slot unconditionally,
-                                // exactly like Object.assign in pi-quota-inject
-                                // (the later endpoint's entry replaces the whole
-                                // model, quotaInfo or not)
-                                int q = jobjGet(resp, t, k + 1, "quotaInfo");
-                                famHave[f] = q >= 0 && t[q].type == JSMN_OBJECT;
-                                famRf[f] = -1;
-                                famReset[f] = 0;
-                                if (famHave[f]) {
-                                    famRf[f] = subsJdouble(resp, t, q, "remainingFraction", -1);
-                                    if (famRf[f] > 1) famRf[f] = 1;
-                                    char *rt = subsJstrRaw(resp, t, q, "resetTime");
-                                    if (rt) {
-                                        famReset[f] = subsIsoToMs(rt, (int)strlen(rt));
-                                        HeapFree(GetProcessHeap(), 0, rt);
-                                    }
-                                }
-                                matched = 1;
-                                break;
-                            }
-                        }
-                    }
-                    k += 1 + jtokSpan(t, k + 1);
-                }
-            }
-        }
-        HeapFree(GetProcessHeap(), 0, t);
-        HeapFree(GetProcessHeap(), 0, resp);
+    }
+    if (cfg->debug) {
+        char lb[96];
+        sprintf(lb, "[wizbar] subs agy: models phase %llu ms (overlapped=%d)",
+                GetTickCount64() - tAgy, !needModels);
+        writeLogA(lb);
     }
     SubsWin wins[2];
     int nw = 0, loRem = -1;
@@ -1403,7 +1185,7 @@ static int subsFetchAntigravity(int idx) {
     if (nw > 0) {
         subsSetWins(idx, wins, nw);
         subsSetPlan(idx, plan);
-        if (g_cfg.debug) {
+        if (cfg->debug) {
             char lb[128];
             sprintf(lb, "[wizbar] subs agy: gemini=%d%% claude=%d%% (-1 = not reported)",
                     famRf[0] < 0 ? -1 : (int)(famRf[0] * 100.0 + 0.5),
@@ -1411,6 +1193,363 @@ static int subsFetchAntigravity(int idx) {
             writeLogA(lb);
         }
         // loRem -1 = both fractions unreported: rows still shown, chip em dash
+        subsSetState(idx, loRem, 1);
+        return 1;
+    }
+    subsSetState(idx, 0, 0);
+    return 0;
+}
+
+// ---------------------------------------------------------------- generic ----
+// A JSONPath subset good enough for a quota endpoint: "$.a.b[0].c". It walks the
+// token tree directly - no string building, no allocation. Returns the token
+// index or -1. Deliberately narrow: an unsupported path just yields nothing and
+// the window is skipped, which is a visible config error rather than a crash.
+static int subsJsonPath(const char *js, const jsmntok_t *t, int root, const char *path) {
+    if (!path || path[0] != '$') return -1;
+    int cur = root;
+    const char *p = path + 1;
+    while (*p && cur >= 0) {
+        if (*p == '.') {
+            p++;
+            if (!*p) break;
+            const char *ks = p;
+            while (*p && *p != '.' && *p != '[') p++;
+            int kl = (int)(p - ks);
+            if (t[cur].type != JSMN_OBJECT) return -1;
+            int n = t[cur].size, k = cur + 1, hit = -1;
+            for (int i = 0; i < n; i++, k += 1 + jtokSpan(t, k + 1)) {
+                if (t[k].type == JSMN_STRING && (t[k].end - t[k].start) == kl
+                    && strncmp(js + t[k].start, ks, (size_t)kl) == 0) { hit = k + 1; break; }
+            }
+            // a parent with no children (or no matching one) yields nothing -
+            // staying on the parent would feed an unrelated token to the
+            // require guard and to every window path
+            if (hit < 0) return -1;
+            cur = hit;
+        } else if (*p == '[') {
+            p++;
+            int idx = 0, any = 0;
+            while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; any = 1; }
+            if (*p == ']') p++;
+            if (!any || t[cur].type != JSMN_ARRAY) return -1;
+            // the array's own tokens run from cur+1 to cur+jtokSpan(t,cur); an
+            // index past the last element is a config typo, not a licence to
+            // keep walking into whatever token follows in document order
+            int k = cur + 1, end = cur + jtokSpan(t, cur);
+            for (int i = 0; i < idx; i++) {
+                if (k >= end) return -1;
+                k += jtokSpan(t, k);
+            }
+            if (k >= end) return -1;
+            cur = k;
+        } else break;
+    }
+    return cur;
+}
+
+// the token at a JSONPath, as a double. Non-numbers (a stringified "1234")
+// are accepted, so an endpoint that quotes its counts still works.
+static double subsPathDouble(const char *js, const jsmntok_t *t, int root, const char *path, double dflt) {
+    int i = subsJsonPath(js, t, root, path);
+    if (i < 0) return dflt;
+    char buf[64];
+    int n = t[i].end - t[i].start;
+    if (n <= 0 || n >= (int)sizeof(buf)) return dflt;
+    memcpy(buf, js + t[i].start, (size_t)n);
+    buf[n] = 0;
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (end == buf) return dflt;
+    return v;
+}
+
+// resolve one auth entry and append its header line to the caller's blob,
+// growing the blob as needed. The secret comes from a JSON file, an env var or
+// the config itself and NONE of the three has a length the code may assume - a
+// JWT is already past a kilobyte - so the line is sized from the secret
+// instead of a fixed buffer that would truncate it mid-signature. The secret
+// is read at fetch time and never written anywhere - the bar has no state
+// that outlives the request.
+static int subsGenAuthLine(const GenAuth *ga, wchar_t **buf, int *cap, int *used) {
+    char *tmp = NULL; int tmpLen = 0;   // the secret as UTF-8 bytes
+    wchar_t *val = NULL;                // ... and as wide chars
+    if (ga->path && *ga->path) {
+        wchar_t path[MAX_PATH];
+        subsPathExpand(ga->path, path, MAX_PATH); // "~/..." like every other read
+        int txtLen = 0;
+        char *txt = subsReadFileUtf8(path, &txtLen);
+        if (txt) {
+            // the file is small (an auth.json); parse it in place
+            jsmntok_t *tk = NULL;
+            int n = subsParseBig(txt, (int)strlen(txt), &tk);
+            int v = -1;
+            if (n > 0) {
+                // a key that starts with $ is a json path (a secret nested in
+                // the file, "$.auth.token"); anything else is one flat key
+                if (ga->key[0] == '$') v = subsJsonPath(txt, tk, 0, ga->key);
+                else v = jobjGet(txt, tk, 0, ga->key);
+            }
+            if (v >= 0) {
+                char *raw = subsJstrRawTok(txt, tk, v); // unescaped, or NULL
+                if (raw) {
+                    tmp = raw;
+                    tmpLen = (int)strlen(raw);
+                } else {
+                    // a non-string token still has to be readable as a value
+                    tmpLen = tk[v].end - tk[v].start;
+                    if (tmpLen > 0) {
+                        tmp = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)tmpLen + 1);
+                        if (tmp) { memcpy(tmp, txt + tk[v].start, (size_t)tmpLen); tmp[tmpLen] = 0; }
+                    }
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, tk);
+            HeapFree(GetProcessHeap(), 0, txt);
+        }
+    } else if (ga->env && *ga->env) {
+        DWORD en = GetEnvironmentVariableW(ga->env, NULL, 0); // required size, or 0
+        if (en) {
+            val = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)en * sizeof(wchar_t));
+            if (val && !GetEnvironmentVariableW(ga->env, val, en)) {
+                HeapFree(GetProcessHeap(), 0, val);
+                val = NULL;
+            }
+        }
+    } else if (ga->literal && *ga->literal) {
+        int ln = lstrlenW(ga->literal);
+        val = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, ((size_t)ln + 1) * sizeof(wchar_t));
+        if (val) lstrcpynW(val, ga->literal, ln + 1);
+    }
+    if (tmp && !val && tmpLen > 0) {
+        int wn = MultiByteToWideChar(CP_UTF8, 0, tmp, tmpLen, NULL, 0);
+        if (wn > 0) {
+            val = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, ((size_t)wn + 1) * sizeof(wchar_t));
+            if (val) { MultiByteToWideChar(CP_UTF8, 0, tmp, tmpLen, val, wn); val[wn] = 0; }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, tmp);
+    int ok = 0;
+    if (val && *val) {
+        // the header line needs room for the fixed parts, the whole secret,
+        // the CRLF AND the terminator: swprintf returns -1 and leaves the line
+        // half-written if it does not all fit
+        int need = *used + lstrlenW(ga->header) + lstrlenW(ga->prefix) + lstrlenW(val) + 5;
+        if (need >= *cap) {
+            int nc = *cap;
+            while (nc <= need) nc *= 2;
+            wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, *buf, (size_t)nc * sizeof(wchar_t));
+            if (nb) { *buf = nb; *cap = nc; }
+            else { HeapFree(GetProcessHeap(), 0, val); return 0; }
+        }
+        int n = swprintf(*buf + *used, *cap - *used, L"%ls: %ls%ls\r\n",
+                         ga->header, ga->prefix, val);
+        if (n > 0) *used += n; // never let a negative return poison the length
+        ok = 1;
+    }
+    HeapFree(GetProcessHeap(), 0, val);
+    return ok;
+}
+
+// case-insensitive prefix compare (a hand-edited config writes HTTP://; URL
+// schemes are ASCII by definition, so folding A-Z is exact)
+static int subsPreI(const wchar_t *s, const wchar_t *p) {
+    while (*p) {
+        wchar_t a = *s, b = *p;
+        if (a >= L'A' && a <= L'Z') a += 32;
+        if (b >= L'A' && b <= L'Z') b += 32;
+        if (a != b) return 0;
+        s++;
+        p++;
+    }
+    return *s != 0; // the remainder must exist: "https" is not "https://"
+}
+
+// one quota url into the pieces WinHTTP wants: the server name, the port
+// and the request path (query included). The SCHEME decides TLS, and a config
+// "insecure" flag may only AUTHORIZE the cleartext scheme - it must never turn
+// an https url into one. Returns 0 (and logs why) for anything else.
+static int subsCrackUrl(const wchar_t *url, wchar_t *host, int cchHost, int *port,
+                        wchar_t *path, int cchPath, int *tls) {
+    host[0] = 0; path[0] = 0; *port = 0; *tls = 0;
+    if (!url || !*url) return 0;
+    const wchar_t *rest;
+    if (subsPreI(url, L"http://")) { *tls = 0; rest = url + 7; }
+    else if (subsPreI(url, L"https://")) { *tls = 1; rest = url + 8; }
+    else { writeLogA("subs gen: unsupported url scheme"); return 0; }
+    // the host runs to the first '/', ':' (an explicit port) or end of string
+    const wchar_t *p = rest;
+    while (*p && *p != L'/' && *p != L':') p++;
+    int hl = (int)(p - rest);
+    if (hl <= 0 || hl >= cchHost) { writeLogA("subs gen: url host is empty or too long"); return 0; }
+    memcpy(host, rest, (size_t)hl * sizeof(wchar_t));
+    host[hl] = 0;
+    // an explicit :port (a bare colon with no digits is a config typo)
+    if (*p == L':') {
+        p++;
+        int n = 0, digits = 0;
+        while (*p >= L'0' && *p <= L'9') {
+            n = n * 10 + (*p - L'0');
+            p++;
+            digits++;
+            if (n > 65535) { writeLogA("subs gen: url port out of range"); return 0; }
+        }
+        if (!digits || n <= 0) { writeLogA("subs gen: url port is not a number"); return 0; }
+        *port = n;
+    }
+    // the path keeps its query string; "http://host" on its own means "/"
+    if (*p == L'/') lstrcpynW(path, p, cchPath);
+    else lstrcpynW(path, L"/", cchPath);
+    return 1;
+}
+
+// Fetch a provider declared entirely in config: one REST call, then the quota
+// windows lifted out of the response by JSON path. This is the escape hatch for
+// any subscription service the bar has no built-in adapter for.
+static int subsFetchGeneric(const Config *cfg, int idx) {
+    if (idx < 0 || idx >= MAX_SUBS) return 0; // every caller clamps to MAX_SUBS
+    const SubsProvider *sp = &cfg->subsProviders[idx];
+    if (!sp->url || !*sp->url) { subsSetState(idx, 0, 0); return 0; }
+
+    // host + port + path, and TLS only from the scheme
+    wchar_t host[256], path[1024]; int port = 0, tls = 0;
+    if (!subsCrackUrl(sp->url, host, 256, &port, path, 1024, &tls)) {
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    // the flag authorizes the cleartext scheme; without it an http url is
+    // refused rather than sent with the token in the clear
+    int insecure = !tls;
+    if (!tls && !sp->insecure) {
+        writeLogA("subs gen: http url needs insecure: true");
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+
+    // resolve the auth entries into the header blob
+    wchar_t *hdrs = NULL;
+    int hlen = 512, used = 0;
+    hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)hlen * sizeof(wchar_t));
+    if (!hdrs) { subsSetState(idx, 0, 0); return 0; }
+    hdrs[0] = 0;
+    for (int i = 0; i < sp->nAuth; i++)
+        subsGenAuthLine(&sp->auth[i], &hdrs, &hlen, &used);
+    // static headers from the config, appended after the resolved auth
+    if (sp->headerBlob && *sp->headerBlob) {
+        int need = used + lstrlenW(sp->headerBlob) + 1;
+        if (need >= hlen) {
+            while (hlen <= need) hlen *= 2;
+            wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, hdrs, (size_t)hlen * sizeof(wchar_t));
+            if (!nb) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
+            hdrs = nb;
+        }
+        used += swprintf(hdrs + used, hlen - used, L"%ls", sp->headerBlob);
+    }
+
+    unsigned long long t0 = GetTickCount64();
+    int st = 0, bl = 0; char *resp = NULL;
+    int isPost = (sp->method && lstrcmpiW(sp->method, L"POST") == 0);
+    if (isPost) {
+        char *body = NULL; int bodyLen = 0;
+        if (sp->reqBody && *sp->reqBody) {
+            int wl = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, NULL, 0, NULL, NULL);
+            body = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)wl);
+            if (!body) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
+            // the conversion reports the terminator: Content-Length must be the
+            // bytes actually sent, or the request carries a trailing NUL
+            bodyLen = WideCharToMultiByte(CP_UTF8, 0, sp->reqBody, -1, body, wl, NULL, NULL);
+            if (bodyLen > 0) bodyLen--;
+        }
+        // a generic endpoint is a third-party quota API: it gets the bar's own
+        // identity, never the Antigravity UA the Google calls use
+        resp = subsHttpPost("gen", L"chocobar", host, port, path, hdrs, body, bodyLen, insecure, cfg->subsTimeoutMs, &st, &bl);
+        if (body) HeapFree(GetProcessHeap(), 0, body);
+    } else {
+        resp = subsHttpGet("gen", L"chocobar", host, port, path, hdrs, insecure, cfg->subsTimeoutMs, &st, &bl);
+    }
+    HeapFree(GetProcessHeap(), 0, hdrs);
+    if (cfg->debug) {
+        char lb[160];
+        // the host is user config, so the wide string can be far longer than the
+        // line: format it bounded - a precision AND the buffer bound mean a long
+        // host truncates the log line instead of tripping the analyzer
+        snprintf(lb, sizeof(lb), "[wizbar] subs gen %.92ls: st=%d bl=%d %llu ms", host, st, bl, GetTickCount64() - t0);
+        writeLogA(lb);
+    }
+    if (!resp) { subsSetState(idx, 0, 0); return 0; }
+    if (st == 401 || st == 403) {
+        writeLogA("subs gen: 401/403 (auth rejected)");
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    if (st < 200 || st >= 300) {
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+
+    jsmntok_t *tk = NULL;
+    int n = subsParseBig(resp, bl, &tk);
+    if (n <= 0) {
+        HeapFree(GetProcessHeap(), 0, tk);
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+    // a 200 can still be an error envelope (the zai gateway does exactly that):
+    // "require" names a path that must be present for the body to count
+    if (sp->requirePath[0] && subsJsonPath(resp, tk, 0, sp->requirePath) < 0) {
+        writeLogA("subs gen: response missing the required path");
+        HeapFree(GetProcessHeap(), 0, tk);
+        HeapFree(GetProcessHeap(), 0, resp);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
+
+    SubsWin wins[MAX_GEN_WIN];
+    int nw = 0, loRem = -1;
+    for (int i = 0; i < sp->nWin && nw < MAX_GEN_WIN; i++) {
+        const GenWin *gw = &sp->win[i];
+        double usedV = -1, remV = -1, totV = -1;
+        if (gw->used[0])      usedV = subsPathDouble(resp, tk, 0, gw->used, -1);
+        if (gw->remaining[0]) remV  = subsPathDouble(resp, tk, 0, gw->remaining, -1);
+        if (gw->total[0])     totV  = subsPathDouble(resp, tk, 0, gw->total, -1);
+        // a window with no numbers at all is skipped, not shown as an em dash
+        if (usedV < 0 && remV < 0 && totV < 0) continue;
+        // derive whichever of the three is missing from the other two
+        if (totV >= 0 && usedV >= 0 && remV < 0) remV = totV - usedV;
+        if (totV >= 0 && remV >= 0 && usedV < 0) usedV = totV - remV;
+        if (usedV >= 0 && remV >= 0 && totV < 0) totV = usedV + remV;
+        memset(&wins[nw], 0, sizeof(SubsWin));
+        lstrcpynW(wins[nw].label, gw->label, 24);
+        wins[nw].used  = usedV < 0 ? -1 : (long long)usedV;
+        wins[nw].total = totV < 0 ? -1 : (long long)totV;
+        wins[nw].rem = (remV < 0 || totV <= 0) ? -1 : (int)(remV * 100.0 / totV + 0.5);
+        if (wins[nw].rem < 0) wins[nw].rem = -1;
+        else if (wins[nw].rem > 100) wins[nw].rem = 100;
+        wins[nw].pct = wins[nw].rem < 0 ? -1 : 100 - wins[nw].rem;
+        if (gw->reset[0]) {
+            int r = subsJsonPath(resp, tk, 0, gw->reset);
+            if (r >= 0) {
+                char *rt = subsJstrRawTok(resp, tk, r);
+                if (rt) {
+                    wins[nw].resetAt = subsIsoToMs(rt, (int)strlen(rt));
+                    HeapFree(GetProcessHeap(), 0, rt);
+                }
+            }
+        }
+        if (wins[nw].rem >= 0 && (loRem < 0 || wins[nw].rem < loRem)) loRem = wins[nw].rem;
+        nw++;
+    }
+    HeapFree(GetProcessHeap(), 0, tk);
+    HeapFree(GetProcessHeap(), 0, resp);
+
+    if (nw > 0) {
+        subsSetWins(idx, wins, nw);
+        // the panel head is the config label (a plan name would be one more
+        // path to configure); "generic" only when even that is missing
+        subsSetPlan(idx, (sp->label && *sp->label) ? sp->label : L"generic");
         subsSetState(idx, loRem, 1);
         return 1;
     }
@@ -1444,51 +1583,103 @@ unsigned subsFetchedAgoSec(void) {
 // wall-clock epoch ms of the last completed cycle, 0 = never fetched
 long long subsFetchedEpochMs(void) { return g_subsFetchedEpoch; }
 
+// one provider's fetch, dispatched by type. Runs on its own thread when
+// more than one provider is enabled (see the cycle below): the cycle time is
+// then the slowest provider instead of the sum of all of them.
+static void subsProviderFetch(const Config *cfg, int i) {
+    switch (cfg->subsProviders[i].type) {
+        case 0:  subsFetchChatgpt(cfg, i);    break;
+        case 1:  subsFetchZai(cfg, i);        break;
+        case 3:  subsFetchGeneric(cfg, i);    break;
+        default: subsFetchAntigravity(cfg, i); break;
+    }
+}
+
+typedef struct { int idx; const Config *cfg; } SubsJob;
+static DWORD WINAPI subsProviderThread(LPVOID lp) {
+    SubsJob *j = (SubsJob *)lp;
+    subsProviderFetch(j->cfg, j->idx);
+    return 0;
+}
+
 static DWORD WINAPI subsThreadProc(LPVOID lp) {
     (void)lp;
     for (;;) {
-        if (g_cfg.subsEnabled) { // master switch off: no polls, no requests
+        // ONE pin per cycle, taken before the master switch and released after
+        // the interval is read: every config access in this loop goes through
+        // it. Every fetch holds a SubsProvider* for the whole (multi-second)
+        // request, so a reload that lands mid-fetch retires that generation
+        // instead of freeing it, and the whole cycle reads one consistent
+        // snapshot.
+        const Config *view = cfgPin();
+        if (view->subsEnabled) { // master switch off: no polls, no requests
             int anyEnabled = 0;
-            int n = g_cfg.subsProviderCount;
+            unsigned long long tCycle = GetTickCount64();
+            int n = view->subsProviderCount;
             if (n > MAX_SUBS) n = MAX_SUBS;
+            // Fan the enabled providers out over their own threads. Every fetch
+            // is independent (each writes only its own slot through the locked
+            // setters), so the wall time of a cycle drops from the SUM of the
+            // providers to the slowest one - 5.9s -> 2.6s for the captain's
+            // three providers at this step alone. The whole cycle measured
+            // 1.9s once the antigravity model calls and loadCodeAssist
+            // overlapped those fetches too (the perf commit, 3c533f2).
+            HANDLE th[MAX_SUBS]; SubsJob jobs[MAX_SUBS]; int nth = 0;
             for (int i = 0; i < n; i++) {
-                if (!g_cfg.subsProviders[i].enabled) continue;
+                if (!view->subsProviders[i].enabled) continue;
                 anyEnabled = 1;
-                if (g_cfg.debug) {
+                if (view->debug) {
                     char lb[64];
-                    sprintf(lb, "[wizbar] subs cycle: provider %d type %d enter", i, g_cfg.subsProviders[i].type);
+                    sprintf(lb, "[wizbar] subs cycle: provider %d type %d enter", i, view->subsProviders[i].type);
                     writeLogA(lb);
                 }
-                if (g_cfg.subsProviders[i].type == 0) subsFetchChatgpt(i);
-                else if (g_cfg.subsProviders[i].type == 1) subsFetchZai(i);
-                else subsFetchAntigravity(i);
+                jobs[nth].idx = i;
+                jobs[nth].cfg = view;
+                HANDLE h = CreateThread(NULL, 0, subsProviderThread, &jobs[nth], 0, NULL);
+                if (h) th[nth++] = h;
+                else subsProviderFetch(view, i); // could not spawn: do it inline
+            }
+            if (nth > 1) {
+                WaitForMultipleObjects((DWORD)nth, th, TRUE, INFINITE);
+                for (int i = 0; i < nth; i++) CloseHandle(th[i]);
+            } else if (nth == 1) {
+                // a lone provider already ran to completion on its thread
+                WaitForSingleObject(th[0], INFINITE);
+                CloseHandle(th[0]);
             }
             if (!anyEnabled) {
                 for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
             }
             g_subsFetchedTick = GetTickCount64();
+            if (view->debug) {
+                char lb[64];
+                sprintf(lb, "[wizbar] subs cycle: total %llu ms", GetTickCount64() - tCycle);
+                writeLogA(lb);
+            }
             g_subsFetchedEpoch = subsLocalStampMs();
-            if (g_cfg.debug) { // one line per provider: what the board will show
+            if (view->debug) { // one line per provider: what the board will show
                 for (int i = 0; i < n; i++) {
-                    if (!g_cfg.subsProviders[i].enabled) continue;
-                    SubsWin w[4];
-                    int wn = subsProvWins(i, w, 4);
+                    if (!view->subsProviders[i].enabled) continue;
+                    SubsWin w[MAX_GEN_WIN];
+                    int wn = subsProvWins(i, w, MAX_GEN_WIN);
                     int stale = wn < 0; if (wn < 0) wn = -wn;
                     wchar_t plan[24]; subsProvPlan(i, plan, 24);
                     if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
                     char line[400];
-                    wchar_t lab[64]; subsProvLabel(i, lab, 64);
+                    wchar_t lab[64]; subsViewLabel(view, i, lab, 64);
                     int off = sprintf(line, "[wizbar] subs[%d] %ls plan=%ls wins=%d stale=%d ::", i,
                                       lab, plan, wn, stale);
                     for (int k = 0; k < wn && off < 360; k++)
-                        off += sprintf(line + off, " [%ls rem=%d pct=%d used=%d total=%d]",
-                                       w[k].label, w[k].rem, w[k].pct, w[k].used, w[k].total);
+                        off += snprintf(line + off, sizeof(line) - (size_t)off,
+                                        " [%ls rem=%d pct=%d used=%d total=%d]",
+                                        w[k].label, w[k].rem, w[k].pct, w[k].used, w[k].total);
                     writeLogA(line);
                 }
             }
         }
         // sleep the interval, but a kick (refresh button) breaks out early
-        int ivl = g_cfg.subsIntervalMin > 0 ? g_cfg.subsIntervalMin * 60000 : 120000;
+        int ivl = view->subsIntervalMin > 0 ? view->subsIntervalMin * 60000 : 120000;
+        cfgUnpin(); // the sleeps below read no config: let a retired generation go
         for (int waited = 0; waited < ivl; waited += 250) {
             if (InterlockedCompareExchange(&g_subsKick, 0, 0)) break;
             Sleep(250);
@@ -1496,6 +1687,84 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
         InterlockedExchange(&g_subsKick, 0);
     }
     return 0;
+}
+
+// ---- opt-in update check -----------------------------------------------------
+// ONE GitHub API call at startup behind general.checkUpdates (default off, so
+// an untouched install still makes zero network requests - the privacy promise
+// in the README stays true). The answer only ever produces a log line + a tray
+// tooltip note: it never downloads, installs, or swaps anything. The tray
+// "Check for updates" entry remains the manual route to the releases page.
+typedef struct { char msg[192]; int newer; } UpdateVerdict;
+static UpdateVerdict g_upd;
+
+// "1.10.2" -> 1010002-ish, so 1.10 > 1.9 (a string compare would say otherwise)
+static long long verParse(const char *s) {
+    long long parts[3] = { 0, 0, 0 };
+    int pi = 0;
+    for (; *s && pi < 3; s++) {
+        if (*s >= '0' && *s <= '9') parts[pi] = parts[pi] * 10 + (*s - '0');
+        else if (*s == '.') pi++;
+        else break;
+    }
+    return parts[0] * 1000000 + parts[1] * 1000 + parts[2];
+}
+
+static DWORD WINAPI updThread(LPVOID unused) {
+    (void)unused;
+    int status = 0, len = 0;
+    char *body = subsHttpGet("update", WINHTTP_USER_AGENT_NATIVE, L"api.github.com", 0,
+                             L"/repos/mnsky-tyan/chocobar/releases/latest",
+                             L"Accept: application/vnd.github+json", 0, 8000, &status, &len);
+    if (!body || status != 200) {
+        char lb[130];
+        sprintf(lb, "[wizbar] update check: no answer (http %d)", status);
+        writeLogA(lb);
+        if (body) HeapFree(GetProcessHeap(), 0, body);
+        return 0;
+    }
+    // tag_name is the release's own version (no json scanner needed for one field)
+    const char *k = strstr(body, "\"tag_name\":\"");
+    if (k) {
+        k += 12;
+        const char *e = k;
+        while (*e && *e != '"' && e - k < 31) e++;
+        char tag[32];
+        int n = (int)(e - k);
+        if (n > 31) n = 31;
+        memcpy(tag, k, (size_t)n);
+        tag[n] = 0;
+        const char *v = (tag[0] == 'v' || tag[0] == 'V') ? tag + 1 : tag;
+        if (verParse(v) > verParse(CB_VER_STR)) {
+            g_upd.newer = 1;
+            sprintf(g_upd.msg, "Chocobar %s is available (running %s)", v, CB_VER_STR);
+            char lb[224];
+            sprintf(lb, "[wizbar] update check: %s", g_upd.msg);
+            writeLogA(lb);
+        } else {
+            sprintf(g_upd.msg, "Chocobar %s is the latest release", CB_VER_STR);
+        }
+    } else {
+        lstrcpynA(g_upd.msg, "update check: unreadable answer", (int)sizeof(g_upd.msg));
+    }
+    HeapFree(GetProcessHeap(), 0, body);
+    return 0;
+}
+
+// Kick the one probe (called from wWinMain right after the bar exists).
+static void updCheckStart(void) {
+    if (!g_cfg.checkUpdates) return;
+    HANDLE th = CreateThread(NULL, 0, updThread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+    else updThread(NULL);
+}
+
+// The tray tooltip note, appended once the probe has landed (p_ui.c calls this
+// from its trace: the check never blocks the bar).
+static int updNote(wchar_t *out, int cb) {
+    if (!g_upd.msg[0]) return 0;
+    MultiByteToWideChar(CP_UTF8, 0, g_upd.msg, -1, out, cb);
+    return 1;
 }
 
 static void subsStart(void) {
@@ -1511,39 +1780,66 @@ static void subsStart(void) {
     if (h) CloseHandle(h);
 }
 
-// chip state readers (UI thread): lowest remaining across providers with data
+// chip state readers (UI thread): lowest remaining across providers with data.
+//
+// "stale" here means the chip has NOTHING to show, not that some provider
+// failed its last poll. A provider is marked stale when a fetch fails, but its
+// last known windows are still on the board and still worth reporting - so a
+// single timeout used to blank the whole chip to "stale" while the dashboard
+// (which asks per provider) happily showed fresh, correct numbers. The chip is
+// stale only when NO provider has a usable remaining value.
 static int subsChipRem(void) {
     if (!g_subsLockInit) return -1;
+    // scope to the real providers: unused slots are zero-init globals (rem=0,
+    // stale=0) that are never reset, so looping MAX_SUBS would read them as a
+    // live provider at 0% and drown every real provider's value. A declared
+    // but DISABLED slot is the same shape: subsThreadProc skips it, so its
+    // rem=0 would read as a live provider sitting at 0% and hold the chip in
+    // the "not stale" branch forever.
+    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
     EnterCriticalSection(&g_subsLock);
     int r = -1;
-    for (int i = 0; i < MAX_SUBS; i++)
+    for (int i = 0; i < pn; i++) {
+        if (!subsProvEnabled(i)) continue;
         if (g_subsProvRem[i] >= 0 && (r < 0 || g_subsProvRem[i] < r)) r = g_subsProvRem[i];
-    int stale = 0;
-    for (int i = 0; i < MAX_SUBS; i++) if (g_subsProvStale[i]) stale = 1;
+    }
     LeaveCriticalSection(&g_subsLock);
-    return stale ? -2 : r; // -2 = stale, -1 = no data
+    return r; // -1 = no provider has a number
 }
 
 static int subsChipStale(void) {
     if (!g_subsLockInit) return 0;
+    // scope to the real providers: an unused slot zero-inits to stale=0, which
+    // would otherwise count as "live" and make stale unreachable - the same
+    // holds for a declared-but-disabled slot, which never fetches either
+    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
     EnterCriticalSection(&g_subsLock);
-    int s = 0;
-    for (int i = 0; i < MAX_SUBS; i++) if (g_subsProvStale[i]) s = 1;
+    // stale only if every provider that HAS a value failed its last fetch, or
+    // nothing has ever succeeded. Any live provider clears it.
+    int anyValue = 0, anyLive = 0;
+    for (int i = 0; i < pn; i++) {
+        if (!subsProvEnabled(i) || g_subsProvRem[i] < 0) continue;
+        anyValue = 1;
+        if (!g_subsProvStale[i]) anyLive = 1;
+    }
     LeaveCriticalSection(&g_subsLock);
-    return s;
+    return anyValue && !anyLive;
 }
 
 // ---- subs board (dashboard) readers ----------------------------------------
 // provider display label: config label, else the type default (Electron does
-// `p.label || 'ChatGPT'` / 'Z.ai')
-static void subsProvLabel(int i, wchar_t *out, int cb) {
-    const wchar_t *l = i >= 0 && i < g_cfg.subsProviderCount && g_cfg.subsProviders[i].label
-                           ? g_cfg.subsProviders[i].label : NULL;
-    int it = i >= 0 && i < g_cfg.subsProviderCount ? g_cfg.subsProviders[i].type : 0;
+// `p.label || 'ChatGPT'` / 'Z.ai'). The view variant reads a PINNED config
+// generation: a fetch thread must report the label of the generation it
+// actually walked, never the live one a concurrent reload may have reordered.
+static void subsViewLabel(const Config *v, int i, wchar_t *out, int cb) {
+    const wchar_t *l = i >= 0 && i < v->subsProviderCount && v->subsProviders[i].label
+                           ? v->subsProviders[i].label : NULL;
+    int it = i >= 0 && i < v->subsProviderCount ? v->subsProviders[i].type : 0;
     if (it == 2) l = L"Antigravity";
-    else if (!l || !*l) l = it == 1 ? L"Z.ai" : L"ChatGPT";
+    else if (!l || !*l) l = it == 1 ? L"Z.ai" : (it == 3 ? L"generic" : L"ChatGPT");
     lstrcpynW(out, l, cb);
 }
+static void subsProvLabel(int i, wchar_t *out, int cb) { subsViewLabel(&g_cfg, i, out, cb); }
 // provider plan name (Electron p.plan); empty until the first successful fetch
 static void subsProvPlan(int i, wchar_t *out, int cb) {
     out[0] = 0;
