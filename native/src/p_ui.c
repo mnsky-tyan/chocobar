@@ -854,7 +854,7 @@ static void tokDrainPending(void) {
         TokPend *r = &g_tokPend[i];
         aggRecord(r->app, r->alen, r->ts, r->in, r->out, r->cr, r->cw, r->model, r->mlen, bnd);
     }
-    tokPendClear();
+    tokPendShrink(); // the applied scan's high-water mark is no longer needed
     if (g_tokInnerTodayValid) { g_tokensToday = g_tokInnerToday; g_tokInnerTodayValid = 0; }
     // the stat cards read the same day buckets the heatmap draws, so the two
     // can never disagree once the window slides past a midnight
