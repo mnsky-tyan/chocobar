@@ -63,6 +63,7 @@ typedef struct {
     short alen, mlen;
     long long ts, in, out, cr, cw;
 } TokPend;
+#define TOK_PEND_MIN 4096
 static TokPend *g_tokPend = NULL;
 static int g_tokPendN = 0, g_tokPendCap = 0;
 static int g_tokPendSeedReset = 0; // seed re-read: the drain clears aggregates first
@@ -75,7 +76,7 @@ static void tokPendPush(const char *app, int alen, long long ts,
     if (mlen < 0) mlen = 0;
     if (mlen > 40) mlen = 40;
     if (g_tokPendN >= g_tokPendCap) {
-        int cap = g_tokPendCap ? g_tokPendCap * 2 : 4096;
+        int cap = g_tokPendCap ? g_tokPendCap * 2 : TOK_PEND_MIN;
         TokPend *p = (TokPend *)(g_tokPend
             ? HeapReAlloc(GetProcessHeap(), 0, g_tokPend, (size_t)cap * sizeof(TokPend))
             : HeapAlloc(GetProcessHeap(), 0, (size_t)cap * sizeof(TokPend)));
@@ -98,6 +99,19 @@ static void tokPendPush(const char *app, int alen, long long ts,
 }
 
 static void tokPendClear(void) { g_tokPendN = 0; }
+
+// The arena only ever grows, and a cold seed re-read sizes it for every record
+// the Electron cache holds (10k+ on the captain's box). Hand it back once a
+// scan used a small fraction of that, so the bar's RSS tracks the warm steady
+// state instead of the one-time peak.
+static void tokPendShrink(void) {
+    if (g_tokPendCap > TOK_PEND_MIN && g_tokPendN * 4 < g_tokPendCap) {
+        HeapFree(GetProcessHeap(), 0, g_tokPend);
+        g_tokPend = NULL;
+        g_tokPendCap = 0;
+    }
+    g_tokPendN = 0;
+}
 
 // ------------------------------------------------------------ small utils ----
 // wide path -> utf8 (for the cursor file, which is plain JSON)
@@ -258,11 +272,12 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
 }
 
 // ---------------------------------------------------------- cursor file ----
-static void tokCursorLoad(void) {
+// cfg is the caller's pinned generation: this also runs on the scan worker.
+static void tokCursorLoad(const Config *cfg) {
     g_tokCursorN = 0;
     DWORD len = 0;
     char *raw = readFileUtf8(g_tokCursorPath, &len);
-    if (g_cfg.debug) {
+    if (cfg->debug) {
         char lb[200];
         sprintf(lb, "[wizbar] tokCursorLoad: file=%s len=%lu", raw ? "ok" : "missing", (unsigned long)len);
         writeLogA(lb);
@@ -426,7 +441,7 @@ long tokLiveScan(const Config *cfg) {
     // Self-heal: if the in-memory set was lost (an early config reload used to
     // reset it) but the file still holds entries, reload it. Without this the
     // scan re-reads every active file from byte 0 and DOUBLE COUNTS them.
-    if (!g_tokCursorN) tokCursorLoad();
+    if (!g_tokCursorN) tokCursorLoad(cfg);
     for (int i = 0; i < cfg->tokSrcCount; i++) {
         const TokSource *s = &cfg->tokSrc[i];
         if (!s->enabled || !s->sessionsDir || !*s->sessionsDir) continue;
@@ -459,5 +474,5 @@ void tokLiveInit(void) {
     if (g_cfg.debug) writeLogA("[wizbar] tokLiveInit called");
     // ~/.wizbar/token-cursors.json
     subsPathExpand(L"~\\.wizbar\\token-cursors.json", g_tokCursorPath, MAX_PATH);
-    tokCursorLoad();
+    tokCursorLoad(&g_cfg);
 }
