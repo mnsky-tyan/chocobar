@@ -202,7 +202,7 @@ Each provider entry:
 - `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
 - `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
 - `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
-- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints (the daily endpoint wins), the same source the harness's `/quota` uses - no IDE or language server required.
+- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints: production is authoritative per family, so the daily endpoint only fills a family production does not report and the 5h pool survives. Each row is labeled with the pool it holds (`5h` or `day`). Same source as the harness's `/quota`; no IDE or language server required.
 
 **`type: "generic"`** - any REST quota endpoint, declared entirely in config. This is what makes a new subscription plan a config edit rather than a code change:
 

@@ -891,14 +891,15 @@ static const char *agyFamKeys[2][5] = {
 };
 
 // Fetch /v1internal:fetchAvailableModels on BOTH endpoints CONCURRENTLY and
-// merge them into the family slots: production first, then the daily/sandbox
-// endpoint OVERWRITING it - byte-for-byte the Object.assign order of
-// pi-quota-inject.mjs. Each call costs ~1 s of pure server latency for ~160 KB,
+// merge them into the family slots: production is AUTHORITATIVE, the
+// daily/sandbox endpoint only fills a family production does not report, so
+// the 5h pool survives (pi-quota-inject.mjs's Object.assign let the daily
+// entry ERASE it). Each call costs ~1 s of pure server latency for ~160 KB,
 // so serialising them doubled the most expensive part of a subs cycle.
 // Returns 1 if both endpoints were attempted, 0 if neither, -1 on a 401.
 static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, const wchar_t *project,
                           int timeoutMs, int debug,
-                          double *famRf, long long *famReset, int *famHave) {
+                          double *famRf, long long *famReset, int *famHave, int *famSrc) {
     AgyModelsJob mj[2];
     HANDLE mth[2]; int started[2] = { 0, 0 };
     for (int h = 0; h < 2; h++) {
@@ -956,16 +957,17 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
                             for (int ki = 0; agyFamKeys[f][ki]; ki++) {
                                 int kl = (int)strlen(agyFamKeys[f][ki]);
                                 if (klen != kl || strncmp(ks, agyFamKeys[f][ki], klen) != 0) continue;
-                                // tracked key: keep the SHORTEST-period window for
+                                // tracked key: production is AUTHORITATIVE for
                                 // this family. The two endpoints report DIFFERENT
                                 // pools under the same family (production: a 5h
                                 // rolling window; the daily endpoint: a ~24h one),
                                 // and the old merge was an unconditional
                                 // overwrite - Object.assign in pi-quota-inject -
-                                // so the later endpoint's entry ERASED the 5h pool
+                                // so the daily endpoint's entry ERASED the 5h pool
                                 // and the board silently lost 5h tracking. The
-                                // earliest reset wins, so the 5h pool survives; a
-                                // tie keeps the later endpoint, as before.
+                                // daily endpoint only fills a family production
+                                // does not report; within one endpoint the
+                                // earliest reset (the shorter-period pool) wins.
                                 int q = jobjGet(resp, t, k + 1, "quotaInfo");
                                 if (q >= 0 && t[q].type == JSMN_OBJECT) {
                                     double rf = subsJdouble(resp, t, q, "remainingFraction", -1);
@@ -976,10 +978,14 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
                                         rst = subsIsoToMs(rt, (int)strlen(rt));
                                         HeapFree(GetProcessHeap(), 0, rt);
                                     }
-                                    int better = !famHave[f] || !famReset[f]
-                                                || (rst && rst <= famReset[f]);
+                                    int better;
+                                    if (!famHave[f]) better = 1;
+                                    else if (h == famSrc[f])
+                                        better = !famReset[f] || (rst && rst <= famReset[f]);
+                                    else better = (h == 0);
                                     if (better) {
                                         famHave[f] = 1;
+                                        famSrc[f] = h;
                                         famRf[f] = rf;
                                         famReset[f] = rst;
                                     }
@@ -1005,28 +1011,14 @@ typedef struct {
     const wchar_t *const *hosts; const wchar_t *hdrs;
     wchar_t project[128];   // a COPY: the caller rewrites its own buffer
     int timeoutMs, debug;
-    double famRf[2]; long long famReset[2]; int famHave[2];
+    double famRf[2]; long long famReset[2]; int famHave[2]; int famSrc[2];
     int result;
 } AgyQuotaJob;
 static DWORD WINAPI agyQuotaThread(LPVOID lp) {
     AgyQuotaJob *j = (AgyQuotaJob *)lp;
     j->result = agyFetchModels(j->hosts, j->hdrs, j->project, j->timeoutMs, j->debug,
-                               j->famRf, j->famReset, j->famHave);
+                               j->famRf, j->famReset, j->famHave, j->famSrc);
     return 0;
-}
-
-// Antigravity row label suffix: the pool's period, derived from how far
-// away its reset is. The two families do not report the same period - a family
-// with a 5h pool keeps it (earliest reset wins in the merge) and one whose only
-// pool is the ~24h one says so. Without the suffix, a 24h row sitting where a
-// 5h row used to be is exactly the "is this the week limit?" confusion.
-static const wchar_t *agyPeriod(long long resetAt) {
-    if (!resetAt) return L"";
-    long long h = (resetAt - subsNowMs()) / 3600000;
-    if (h <= 0) return L"";
-    if (h <= 6) return L"5h";
-    if (h <= 42) return L"day";
-    return L"week";
 }
 
 static int subsFetchAntigravity(const Config *cfg, int idx) {
@@ -1121,6 +1113,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     double famRf[2] = { -1, -1 };
     long long famReset[2] = { 0, 0 };
     int famHave[2] = { 0, 0 };
+    int famSrc[2] = { 0, 0 };
     // Collect the speculative fetch that overlapped loadCodeAssist. The thread
     // writes into qj, a local of THIS frame, so it is joined HERE - above every
     // early return below - and its lifetime can never depend on which branch
@@ -1139,6 +1132,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
             famRf[0] = qj.famRf[0]; famRf[1] = qj.famRf[1];
             famReset[0] = qj.famReset[0]; famReset[1] = qj.famReset[1];
             famHave[0] = qj.famHave[0]; famHave[1] = qj.famHave[1];
+            famSrc[0] = qj.famSrc[0]; famSrc[1] = qj.famSrc[1];
             needModels = 0;
         }
     }
@@ -1149,18 +1143,19 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     }
     // THE quota source, matching the harness's /quota exactly (pi-quota ->
     // quota-axi -> pi-quota-inject.mjs): /v1internal:fetchAvailableModels on
-    // BOTH endpoints, merged with the daily/sandbox endpoint OVERWRITING
-    // production, then per family the first model key in priority order whose
-    // (merged) entry carries a quotaInfo. retrieveUserQuotaSummary is what
-    // reported gemini as a constant rf=1 untracked pool (the "100% while
-    // /quota is correct" bug); the two endpoints carry DIFFERENT quota
-    // figures and the sandbox is what actually serves Gemini. A quotaInfo may
-    // carry only a resetTime and no remainingFraction (the Claude/GPT pool
-    // between resets): the row stays on the board, its fraction renders as an
-    // em dash.
+    // BOTH endpoints, production authoritative per family (the daily/sandbox
+    // endpoint only fills a family production does not report, so the 5h pool
+    // survives - the one deliberate difference from pi-quota-inject's
+    // Object.assign), then per family the model key whose entry carries a
+    // quotaInfo. retrieveUserQuotaSummary is what reported gemini as a
+    // constant rf=1 untracked pool (the "100% while /quota is correct" bug);
+    // the two endpoints carry DIFFERENT quota figures and the sandbox is what
+    // actually serves Gemini. A quotaInfo may carry only a resetTime and no
+    // remainingFraction (the Claude/GPT pool between resets): the row stays on
+    // the board, its fraction renders as an em dash.
     if (needModels) {
         int r = agyFetchModels(hosts, hdrs, auth.projectId, cfg->subsTimeoutMs, cfg->debug,
-                               famRf, famReset, famHave);
+                               famRf, famReset, famHave, famSrc);
         if (r < 0) {
             writeLogA("subs agy: models 401 (re-login)");
             subsSetState(idx, 0, 0);
@@ -1179,11 +1174,12 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         if (!famHave[f]) continue;
         memset(&wins[nw], 0, sizeof(SubsWin));
         lstrcpynW(wins[nw].label, famNames[f], 24);
-        const wchar_t *per = agyPeriod(famReset[f]);
-        if (*per) {
-            int ln = lstrlenW(wins[nw].label);
-            if (ln < 23) { wins[nw].label[ln++] = L' '; lstrcpynW(wins[nw].label + ln, per, 24 - ln); }
-        }
+        // the label names the pool the row holds - a property of the endpoint
+        // that reported it (production = the 5h window, the daily endpoint =
+        // the ~24h one), never inferred from how far away the reset is
+        const wchar_t *per = famSrc[f] == 0 ? L"5h" : L"day";
+        int ln = lstrlenW(wins[nw].label);
+        if (ln < 23) { wins[nw].label[ln++] = L' '; lstrcpynW(wins[nw].label + ln, per, 24 - ln); }
         wins[nw].rem = famRf[f] < 0 ? -1 : (int)(famRf[f] * 100.0 + 0.5);
         wins[nw].pct = wins[nw].rem < 0 ? -1 : 100 - wins[nw].rem;
         wins[nw].used = -1;

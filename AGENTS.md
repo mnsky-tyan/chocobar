@@ -368,10 +368,14 @@ strings.
   auth file is reachable as `$.auth.token`); any other key is one flat
   top-level key. An unrecognized `type` string logs a line naming it, because a
   typo otherwise silently becomes a chatgpt quota fetch.
-- **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints
-  merged with daily/sandbox OVERWRITING production, per family key priority -
-  byte-for-byte the same source the harness's /quota uses** (pi-quota ->
-  quota-axi -> pi-quota-inject.mjs). Production's `retrieveUserQuotaSummary`
+- **The Antigravity source is `fetchAvailableModels` on BOTH Google endpoints,
+  production AUTHORITATIVE per family: the daily/sandbox endpoint only fills a
+  family production does not report, so the 5h pool survives - the same source
+  the harness's /quota uses** (pi-quota -> quota-axi -> pi-quota-inject.mjs,
+  whose Object.assign let the daily entry ERASE the 5h pool - the one
+  deliberate difference from it). Rows are labeled with the pool they hold
+  (`5h` from production, `day` from the daily endpoint), never inferred from
+  how far away the reset is. Production's `retrieveUserQuotaSummary`
   reports gemini as a constant rf=1 untracked pool and production/sandbox
   carry DIFFERENT quota figures - reading the summary endpoint was the
   "board 100% while /quota correct" bug. A quotaInfo may carry only a

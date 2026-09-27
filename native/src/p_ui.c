@@ -2885,12 +2885,12 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (nowt < g_btnBusyUntil) return 0; // already refreshing
                 g_subsBusyEpoch = subsFetchedEpochMs();
                 // subs completes on its worker thread (epoch change clears the
-                // busy state); tokens runs inline, so it needs a cooldown FLOOR
-                // - a warm scan finishes in ~150 ms and without the floor the
-                // very next click would re-scan
+                // busy state); the token scan is off-thread too and drains
+                // asynchronously, so this floor is a click DEBOUNCE, not a wait
+                // for the scan - without it the very next click would re-scan
                 g_btnBusyUntil = nowt + (g_dashType == 0 ? 1500ull : 12000ull);
                 InvalidateRect(hwnd, NULL, FALSE);
-                UpdateWindow(hwnd); // paint the "..." before the blocking scan
+                UpdateWindow(hwnd); // paint the "..." before returning
                 if (g_dashType == 0) scanTokenCache();
                 else subsRefetchNow();
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -3768,8 +3768,10 @@ static const char *g_template =
     "               { \"type\": \"chatgpt\", \"enabled\": false, \"label\": \"ChatGPT\", \"authPath\": \"~/.codex/auth.json\" },\r\n"
     "               { \"type\": \"zai\", \"enabled\": false, \"label\": \"Z.ai\", \"configPath\": \"~/.zcode/v2/config.json\", \"provider\": \"builtin:zai-coding-plan\" },\r\n"
     "               // one entry = one panel with two rows: Gemini and Claude/GPT, straight from\r\n"
-    "               // fetchAvailableModels on both Google endpoints (daily wins), the same source the\r\n"
-    "               // harness's /quota uses - no IDE or language server required.\r\n"
+    "               // fetchAvailableModels on both Google endpoints (production wins per family, so\r\n"
+    "               // the 5h pool survives; the daily endpoint only fills a family production does\r\n"
+    "               // not report), the same source the harness's /quota uses - no IDE or language\r\n"
+    "               // server required.\r\n"
     "               { \"type\": \"antigravity\", \"enabled\": false, \"authPath\": \"~/.pi/agent/auth.json\" },\r\n"
     "               // generic: ANY rest quota endpoint, declared entirely here. url + optional\r\n"
     "               // auth (a token from a file, an env var, or the config itself) + windows[]\r\n"
