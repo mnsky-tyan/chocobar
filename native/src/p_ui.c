@@ -161,6 +161,17 @@ enum { CT_SHORTCUT, CT_PET, CT_CUSTOM, CT_GPU, CT_CPU, CT_CPUTEMP, CT_RAM, CT_VO
 static Chip g_chips[MAX_CHIPS];
 static int g_chipCount = 0;
 
+// One predicate owns whether a chip's click does anything, so the hand cursor
+// and the hover pill cannot invite a click that chipClick silently drops: a
+// command-output chip (intervalMs > 0) is display-only, its command runs on the
+// timer and never on click.
+static int chipClickable(const Chip *c) {
+    if (c->type == CT_SHORTCUT || c->type == CT_PET) return 1;
+    if (c->type != CT_CUSTOM) return 0;
+    if (c->customIdx < 0 || c->customIdx >= MAX_CUSTOM) return 1; // the dashboard openers
+    return g_cfg.custom[c->customIdx].intervalMs <= 0;
+}
+
 // --------------------------------------------------------- d2d plumbing ----
 static int initRender(HWND hwnd) {
     (void)hwnd;
@@ -309,6 +320,9 @@ static int customRunCapture(const wchar_t *command, wchar_t *out, int cch) {
     // otherwise render as U+FFFD and read 0 to the warn band)
     wchar_t acc[4096];
     int accLen = MultiByteToWideChar(CP_UTF8, 0, accb, accbLen, acc, 4096 - 1);
+    // MultiByteToWideChar does NOT terminate on an explicit input length, so
+    // the replacement scan below reads uninitialized stack without this
+    acc[accLen > 0 ? accLen : 0] = 0;
     if ((accLen <= 0 && accbLen > 0) || (accLen > 0 && wcschr(acc, L'\uFFFD')))
         accLen = MultiByteToWideChar(CP_OEMCP, 0, accb, accbLen, acc, 4096 - 1);
     if (accLen < 0) accLen = 0;
@@ -1359,7 +1373,7 @@ static void repaintBar(HWND hwnd) {
                  | (DWORD)(GetBValue(pinkHover) * 128 / 255);
     for (int i = 0; i < g_chipCount; i++) {
         Chip *c = &g_chips[i];
-        if (i == g_hover && c->align == 2) {
+        if (i == g_hover && c->align == 2 && chipClickable(c)) {
             int pl = c->r.left - pillPadX, pt = c->r.top + pillPadY;
             int prr = c->r.right + pillPadX, pb = c->r.bottom - pillPadY;
             if (pl < 0) pl = 0;
@@ -3671,10 +3685,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int clickable = 0;
             if (ci >= 0) {
                 Chip *c = &g_chips[ci];
-                clickable = c->type == CT_SHORTCUT || c->type == CT_PET
-                    || (c->type == CT_CUSTOM && (c->iconSvg == SVG_DIAMOND
-                                              || c->iconSvg == SVG_GAUGE
-                                              || c->customIdx >= 0));
+                clickable = chipClickable(c);
             }
             SetCursor(LoadCursor(NULL, clickable ? IDC_HAND : IDC_ARROW));
             return TRUE;

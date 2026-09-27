@@ -478,17 +478,16 @@ static int subsFetchZai(const Config *cfg, int idx) {
 }
 
 // ---- Antigravity (Google Cloud Code) ----------------------------------------
-// Mirrors src/subs.js _fetchAntigravity: the pi auth.json OAuth entry refreshed
-// with Google's public desktop-client creds, grouped quota summary (paid tier)
-// with a per-model fallback on 403 SUBSCRIPTION_REQUIRED (free tier - NOT an
-// auth failure). Sharp edges:
+// The pi auth.json OAuth entry refreshed with Google's public desktop-client
+// creds, then /v1internal:fetchAvailableModels on BOTH Google endpoints
+// (production authoritative per family) as the quota source. Sharp edges:
 //  - auth.json "expires" is epoch MILLISECONDS (not seconds).
 //  - The IDE fallback needle is "apiKey":"ya29...." - keep the ya29. prefix.
 //  - MinGW swprintf is C99: %s = char*, %ls = wchar_t*.
 // The Google desktop OAuth pair is NOT compiled in: it is personal wiring and
 // lives in the user config (subs.providers[].clientId / clientSecret, like
-// authPath). The local language-server source needs no credentials at all;
-// only the cloud fallback does, and it reports "not configured" without them.
+// authPath). A token that needs refreshing without it fails the whole fetch -
+// the local language-server source is gone, so there is nothing to fall back to.
 #define AGY_UA            L"antigravity/1.15.8 windows/amd64"
 #define AGY_REFRESH_MARGIN_MS (5 * 60 * 1000)
 
@@ -812,7 +811,7 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
 // Refresh the access token; 1 = ok (token + refresh + expiry in out)
 static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *clientSecret) {
     if (!clientId || !*clientId || !clientSecret || !*clientSecret) {
-        writeLogA("subs agy: no OAuth pair in config (local source still works)");
+        writeLogA("subs agy: no OAuth pair in config (cannot refresh the access token)");
         return 0;
     }
     char cid[256], cs[256];
