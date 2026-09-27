@@ -2039,7 +2039,8 @@ static void paintDash(HWND hwnd) {
         bx -= cw + DX(6);
         // "..." while a refresh is in flight; keep the SAME measured width so
         // the button never reflows under the cursor mid-click
-        const wchar_t *rf = GetTickCount64() < g_btnBusyUntil ? L"..." : L"refresh";
+        const wchar_t *rf = (GetTickCount64() < g_btnBusyUntil
+                             || (g_dashType == 0 && g_tokScanBusy)) ? L"..." : L"refresh";
         int rw = dashStrW(dc, L"refresh", fBtn) + DX(18);
         g_btnRefresh.right = bx; g_btnRefresh.left = bx - rw;
         g_btnRefresh.top = ty - DX(3); g_btnRefresh.bottom = ty + DX(11) + DX(6);
@@ -2898,10 +2899,10 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 unsigned long long nowt = GetTickCount64();
                 if (nowt < g_btnBusyUntil) return 0; // already refreshing
                 g_subsBusyEpoch = subsFetchedEpochMs();
-                // subs completes on its worker thread (epoch change clears the
-                // busy state); the token scan is off-thread too and drains
-                // asynchronously, so this floor is a click DEBOUNCE, not a wait
-                // for the scan - without it the very next click would re-scan
+                // subs clears its busy state on the epoch change when the fetch
+                // lands; the token board's "..." tracks g_tokScanBusy until the
+                // off-thread scan drains - this floor is only a click DEBOUNCE
+                // that stops the next click re-scanning
                 g_btnBusyUntil = nowt + (g_dashType == 0 ? 1500ull : 12000ull);
                 InvalidateRect(hwnd, NULL, FALSE);
                 UpdateWindow(hwnd); // paint the "..." before returning
