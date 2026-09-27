@@ -956,21 +956,32 @@ static int agyFetchModels(const wchar_t *const *hosts, const wchar_t *hdrs, cons
                             for (int ki = 0; agyFamKeys[f][ki]; ki++) {
                                 int kl = (int)strlen(agyFamKeys[f][ki]);
                                 if (klen != kl || strncmp(ks, agyFamKeys[f][ki], klen) != 0) continue;
-                                // tracked key: OVERWRITE the slot unconditionally,
-                                // exactly like Object.assign in pi-quota-inject
-                                // (the later endpoint's entry replaces the whole
-                                // model, quotaInfo or not)
+                                // tracked key: keep the SHORTEST-period window for
+                                // this family. The two endpoints report DIFFERENT
+                                // pools under the same family (production: a 5h
+                                // rolling window; the daily endpoint: a ~24h one),
+                                // and the old merge was an unconditional
+                                // overwrite - Object.assign in pi-quota-inject -
+                                // so the later endpoint's entry ERASED the 5h pool
+                                // and the board silently lost 5h tracking. The
+                                // earliest reset wins, so the 5h pool survives; a
+                                // tie keeps the later endpoint, as before.
                                 int q = jobjGet(resp, t, k + 1, "quotaInfo");
-                                famHave[f] = q >= 0 && t[q].type == JSMN_OBJECT;
-                                famRf[f] = -1;
-                                famReset[f] = 0;
-                                if (famHave[f]) {
-                                    famRf[f] = subsJdouble(resp, t, q, "remainingFraction", -1);
-                                    if (famRf[f] > 1) famRf[f] = 1;
+                                if (q >= 0 && t[q].type == JSMN_OBJECT) {
+                                    double rf = subsJdouble(resp, t, q, "remainingFraction", -1);
+                                    if (rf > 1) rf = 1;
+                                    long long rst = 0;
                                     char *rt = subsJstrRaw(resp, t, q, "resetTime");
                                     if (rt) {
-                                        famReset[f] = subsIsoToMs(rt, (int)strlen(rt));
+                                        rst = subsIsoToMs(rt, (int)strlen(rt));
                                         HeapFree(GetProcessHeap(), 0, rt);
+                                    }
+                                    int better = !famHave[f] || !famReset[f]
+                                                || (rst && rst <= famReset[f]);
+                                    if (better) {
+                                        famHave[f] = 1;
+                                        famRf[f] = rf;
+                                        famReset[f] = rst;
                                     }
                                 }
                                 matched = 1;
@@ -1002,6 +1013,20 @@ static DWORD WINAPI agyQuotaThread(LPVOID lp) {
     j->result = agyFetchModels(j->hosts, j->hdrs, j->project, j->timeoutMs, j->debug,
                                j->famRf, j->famReset, j->famHave);
     return 0;
+}
+
+// Antigravity row label suffix: the pool's period, derived from how far
+// away its reset is. The two families do not report the same period - a family
+// with a 5h pool keeps it (earliest reset wins in the merge) and one whose only
+// pool is the ~24h one says so. Without the suffix, a 24h row sitting where a
+// 5h row used to be is exactly the "is this the week limit?" confusion.
+static const wchar_t *agyPeriod(long long resetAt) {
+    if (!resetAt) return L"";
+    long long h = (resetAt - subsNowMs()) / 3600000;
+    if (h <= 0) return L"";
+    if (h <= 6) return L"5h";
+    if (h <= 42) return L"day";
+    return L"week";
 }
 
 static int subsFetchAntigravity(const Config *cfg, int idx) {
@@ -1154,6 +1179,11 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         if (!famHave[f]) continue;
         memset(&wins[nw], 0, sizeof(SubsWin));
         lstrcpynW(wins[nw].label, famNames[f], 24);
+        const wchar_t *per = agyPeriod(famReset[f]);
+        if (*per) {
+            int ln = lstrlenW(wins[nw].label);
+            if (ln < 23) { wins[nw].label[ln++] = L' '; lstrcpynW(wins[nw].label + ln, per, 24 - ln); }
+        }
         wins[nw].rem = famRf[f] < 0 ? -1 : (int)(famRf[f] * 100.0 + 0.5);
         wins[nw].pct = wins[nw].rem < 0 ? -1 : 100 - wins[nw].rem;
         wins[nw].used = -1;
