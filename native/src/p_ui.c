@@ -901,6 +901,7 @@ static void scanTokenCache(void) {
     g_tokPendSeedReset = 0;
     g_tokInnerTodayValid = 0;
     g_tokScanAdded = 0;
+    g_tokScanStart = GetTickCount();
     if (!g_cfg.tokensEnabled) {
         // off = zero scans, zero dashboard data (master switch): drop every
         // aggregate and the live cursors with them, so a re-enable is one
@@ -915,7 +916,6 @@ static void scanTokenCache(void) {
         tokDrainPending();
         return;
     }
-    g_tokScanStart = GetTickCount();
     dashDayRollover();
     HANDLE th = CreateThread(NULL, 0, tokScanThread, NULL, 0, NULL);
     if (th) CloseHandle(th);
@@ -3224,6 +3224,7 @@ static void chipClick(int idx) {
             break;
         }
         CustomChip *cc = &g_cfg.custom[c->customIdx];
+        if (cc->intervalMs > 0) break;
         if (!cc->command) break;
         if (cc->toggle) {
             g_customState[c->customIdx] = !g_customState[c->customIdx];
