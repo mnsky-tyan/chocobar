@@ -21,7 +21,9 @@
 
 static void writeLogA(const char *s); // p_ui
 
-#define WINHTTP_USER_AGENT_NATIVE L"WizBar/1.0"
+#define CB_WSTR_(x) L##x
+#define CB_WSTR(x)  CB_WSTR_(x)
+#define WINHTTP_UA_UPDATE L"Chocobar/" CB_WSTR(CB_VER_STR)
 
 static CRITICAL_SECTION g_subsLock;
 static int g_subsLockInit = 0;
@@ -1718,7 +1720,7 @@ static long long verParse(const char *s) {
 static DWORD WINAPI updThread(LPVOID unused) {
     (void)unused;
     int status = 0, len = 0;
-    char *body = subsHttpGet("update", WINHTTP_USER_AGENT_NATIVE, L"api.github.com", 0,
+    char *body = subsHttpGet("update", WINHTTP_UA_UPDATE, L"api.github.com", 0,
                              L"/repos/mnsky-tyan/chocobar/releases/latest",
                              L"Accept: application/vnd.github+json", 0, 8000, &status, &len);
     if (!body || status != 200) {
@@ -1728,17 +1730,16 @@ static DWORD WINAPI updThread(LPVOID unused) {
         if (body) HeapFree(GetProcessHeap(), 0, body);
         return 0;
     }
-    // tag_name is the release's own version (no json scanner needed for one field)
-    const char *k = strstr(body, "\"tag_name\":\"");
-    if (k) {
-        k += 12;
-        const char *e = k;
-        while (*e && *e != '"' && e - k < 31) e++;
+    // tag_name is the release's own version, read with the same jsmn reader every
+    // other provider uses - GitHub pretty-prints its JSON, so a compact
+    // "tag_name":" needle would never match
+    jsmntok_t *t = NULL;
+    char *raw = subsParseBig(body, len, &t) > 0 ? subsJstrRaw(body, t, 0, "tag_name") : NULL;
+    if (t) HeapFree(GetProcessHeap(), 0, t);
+    if (raw) {
         char tag[32];
-        int n = (int)(e - k);
-        if (n > 31) n = 31;
-        memcpy(tag, k, (size_t)n);
-        tag[n] = 0;
+        lstrcpynA(tag, raw, (int)sizeof(tag));
+        HeapFree(GetProcessHeap(), 0, raw);
         const char *v = (tag[0] == 'v' || tag[0] == 'V') ? tag + 1 : tag;
         if (verParse(v) > verParse(CB_VER_STR)) {
             g_upd.newer = 1;
