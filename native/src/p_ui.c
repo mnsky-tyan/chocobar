@@ -3750,7 +3750,7 @@ static const char *g_template =
     "    \"ram\":  { \"enabled\": true, \"warnAt\": 90 },\r\n"
     "    \"volume\": { \"enabled\": true },\r\n"
     "    \"battery\": { \"enabled\": true },\r\n"
-    "    \"clock\": { \"enabled\": true, \"format\": \"{MMM} {dd}  {HH}:{mm}\" },\r\n"
+    "    \"clock\": { \"enabled\": true, \"format\": \"{MMM} {dd} ({Wkk}) {HH}:{mm}\" },\r\n"
     "    \"shortcut\": { \"enabled\": false, \"label\": \"\", \"command\": \"\" },\r\n"
     "    \"pet\": { \"enabled\": false, \"label\": \"\", \"exePath\": \"\" },\r\n"
     "    \"custom\": [\r\n"
