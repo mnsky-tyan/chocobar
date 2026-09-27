@@ -192,18 +192,14 @@ static int initRender(HWND hwnd) {
     return 1;
 }
 
-// apply translucency: DWM acrylic backdrop, or plain opaque if backdrop=solid
-static void applyBackdrop(HWND hwnd) {
-    MARGINS m = {-1, 0, 0, 0}; // four margins spelled out: the short {-1} form warns under -Wmissing-field-initializers
-    DwmExtendFrameIntoClientArea(hwnd, &m);
-    if (lstrcmpiW(g_cfg.backdrop, L"solid") != 0) {
-        DWORD bt = 2; // DWMSBT_TRANSIENTWINDOW (acrylic)
-        DwmSetWindowAttribute(hwnd, 38 /*DWMWA_SYSTEMBACKDROP_TYPE*/, &bt, sizeof(bt));
-    } else {
-        DWORD bt = 1; // DWMSBT_NONE
-        DwmSetWindowAttribute(hwnd, 38, &bt, sizeof(bt));
-    }
-}
+// NOTE: do NOT apply a DWM system backdrop to the bar. It is a WS_EX_LAYERED
+// window composited from a per-pixel-alpha DIB (UpdateLayeredWindow), and the
+// "acrylic" look is exactly that translucency - backgroundAlpha over whatever
+// is behind. Calling DwmExtendFrameIntoClientArea + DWMWA_SYSTEMBACKDROP_TYPE
+// here (the old tray-Reload path) made DWM composite its blurred backdrop
+// material behind the layered surface, which read as the tint going stale and
+// solid - the captain's "acrylic is gone after reload" report. backdrop=solid
+// is honoured where it belongs: in paint, via the opaque bgA.
 
 // --------------------------------------------------------- chip building ----
 // ------------------------------------------------- command-output chips ----
@@ -3429,7 +3425,6 @@ static void showTrayMenu(HWND hwnd) {
         ShellExecuteExW(&sei);
     } else if (id == 3) {
         loadConfig();
-        applyBackdrop(g_bar);
         clockFmtReload();
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
