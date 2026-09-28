@@ -1539,8 +1539,8 @@ static int evictRivalBars(void) {
     if (now - g_rivalEvictTick < 2000) return 0; // re-eviction throttle
     HWND h = NULL;
     DWORD self = GetCurrentProcessId();
-    DWORD firstPid = 0, older = 0;
-    int hits = 0;
+    DWORD firstPid = 0, stuckPid = 0, older = 0;
+    int closed = 0, stuck = 0;
     for (;;) {
         h = FindWindowExW(NULL, h, APP_CLASS, NULL);
         if (!h) break;
@@ -1550,11 +1550,18 @@ static int evictRivalBars(void) {
         if (!pid || pid == self) continue;
         if (GetWindow(h, GW_OWNER) != g_term) continue; // another terminal: legitimate
         if (pid < self) { older = pid; continue; } // the older follower owns this terminal
-        ULONG_PTR res = 0;
         // SMTO_ABORTIFHUNG: a hung rival must never stall our follow tick
-        SendMessageTimeoutW(h, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 300, &res);
-        if (!firstPid) firstPid = pid;
-        hits++;
+        SendMessageTimeoutW(h, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 300, NULL);
+        // the send is not the outcome: a rival that is hung, UIPI-blocked, or
+        // swallows WM_CLOSE keeps its window, and only a window that is gone
+        // was actually evicted
+        if (IsWindow(h)) {
+            if (!stuckPid) stuckPid = pid;
+            stuck++;
+        } else {
+            if (!firstPid) firstPid = pid;
+            closed++;
+        }
     }
     if (older) {
         g_rivalEvictTick = now;
@@ -1567,13 +1574,21 @@ static int evictRivalBars(void) {
         PostMessageW(g_bar, WM_CLOSE, 0, 0);
         return 1;
     }
-    if (hits) {
+    if (closed) {
         char lb[96];
         sprintf(lb, "[wizbar] evicted %d rival bar window(s) from our terminal (first pid %lu)",
-                hits, (unsigned long)firstPid);
+                closed, (unsigned long)firstPid);
         writeLogA(lb);
-        g_rivalEvictTick = now;
     }
+    if (stuck) {
+        char lb[128];
+        snprintf(lb, sizeof(lb), "[wizbar] could not close %d rival bar window(s) on our terminal (first pid %lu, hung or blocked)",
+                 stuck, (unsigned long)stuckPid);
+        writeLogA(lb);
+    }
+    // a rival that would not close must not re-arm the send on every 100ms
+    // follow tick: the 300ms timeout would then stall the tick itself
+    if (closed || stuck) g_rivalEvictTick = now;
     return 0;
 }
 
