@@ -472,6 +472,17 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
   names (parsed in chocobar.c, applied in p_ui.c's appLabelW). Aggregation keys,
   byte cursors and the appFilter keep the RAW key; only rendered row text swaps.
 
+## Deploy discipline (captain's rule, 2026-09-28)
+
+- The installed bar (`C:\Users\tyanw\Chocobar\chocobar.exe`) is updated ONLY
+  from a tagged GitHub release build. Never copy a branch/test build over it,
+  even for an urgent bug - cut the release first, then deploy the release exe.
+- Test builds live in temp dirs with a test config (`--config`), never the
+  captain's default config path, and are killed and deleted when the round
+  ends. A test bar with `tokens.enabled: false` deletes the byte-cursor file,
+  which forces the next real bar to do a cold re-scan (the token dashboard
+  reads empty until it drains) - expect and mention that transient.
+
 ## Dev bar etiquette
 
 - The native dev bar runs on its OWN shell: spawn a `wt` window titled
