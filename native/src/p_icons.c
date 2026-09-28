@@ -737,7 +737,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                     t_GdipSetSmoothingMode(g, 6);
                     float fw = pct <= 0 ? 0.0f : 12.4f * (float)(bucket * 2) / 100.0f;
                     if (fw < 0.9f) fw = 0.9f; // never zero-width sliver floor
-                    int low = (pct < 10);
+                    int low = (pct < 10) && !ac; // charging outranks the red fill too
                     COLORREF fc = low ? warn : accent;
                     unsigned int alpha = low ? 230u : 191u; // 0.9 / 0.75
                     GpPath *fp = NULL;
@@ -795,7 +795,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
     if (fw < 0.9f) fw = 0.9f;
     int ix1 = ix0 + (int)(fw * s);
     if (ix1 > ix0) {
-        HBRUSH br = CreateSolidBrush(pct < 10 ? warn : accent);
+        HBRUSH br = CreateSolidBrush((pct < 10) && !ac ? warn : accent); // charging outranks the red fill here too
         RECT fr = { ix0, iy0, ix1, iy1 };
         FillRect(hdc, &fr, br);
         DeleteObject(br);

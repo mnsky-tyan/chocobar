@@ -1,20 +1,29 @@
 // chocobar.c - native Win32 Chocobar bar (v1.0 native rewrite, phase 1)
 //
 // One translation unit, zero runtime dependencies beyond Windows itself.
-// Reads the SAME config file as the Electron build (%USERPROFILE%\.wizbar\
+// Reads the SAME config file as the Electron build (%USERPROFILE%\.wizbar
 // config.json or --config <path>); keys it does not implement are ignored.
 //
-// Phase 1 scope: acrylic bar (DWM system backdrop + Direct2D), terminal
-// follow with z-glue and move/size hands-off, chips (cpu/cputemp/ram/
-// volume/battery/clock + shortcut/pet/custom), tray, hot-reload, template
-// materialization, single instance, no-activate click behavior.
-// Phase 2 (not here): token analytics + dashboards, subscription board,
-// bluetooth battery, autostart writing.
+// Implemented: acrylic bar (DWM system backdrop), terminal follow with
+// z-glue and move/size hands-off, chips (cpu/cputemp/ram/volume/battery/
+// clock + shortcut/pet/custom, incl. command-output chips), tray, hot-reload,
+// template materialization, single instance, no-activate click behavior, the
+// token dashboards, the subscription board (chatgpt / zai / antigravity /
+// config-only generic), theme.icons, and autostart.
+// Still absent: bluetooth (modules.bluetooth is an ignored key).
+// Render path: GDI into a premultiplied DIB + UpdateLayeredWindow - no
+// D2D/DComp, both fail to present on this machine (native/README.md).
 
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
+// -municode already defines these (it is what selects the wide Win32 entry point);
+// the guard keeps a bare gcc invocation from redefining them identically
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #define INITGUID
 
 #include <initguid.h>
@@ -38,6 +47,10 @@
 #include "jsmn.h"
 #include "version.h"
 
+// Link directives for the MSVC build only: this project is compiled with
+// the mingw cross toolchain, which links the same libs explicitly (build.sh
+// passes -l flags) and warns on an unknown pragma, so keep them MSVC-only.
+#ifdef _MSC_VER
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -47,6 +60,9 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#endif
+
+static void writeLogA(const char *s); // p_ui
 
 #define APP_CLASS   L"ChocobarBar"
 #define APP_MUTEX   L"ChocobarSingleInstanceMutex"
@@ -54,16 +70,49 @@
 #define TIMER_METRICS 1
 #define TIMER_FOLLOW  2
 #define TIMER_CONFIG  3
-// a live token source: the JSONL session store the in-process scan reads
+// a live token source: the JSONL session store the in-process scan reads.
+// Declared by the user in tokens.sources[], so any harness that logs per-message
+// usage as JSONL is supported without a code change. `app` is the aggregation
+// key (and the tokens.labels lookup key); the field names default to the pi/zai
+// shape and can be overridden per source for a harness that spells them
+// differently.
 typedef struct {
-    int enabled;            // source flag inside tokens.sources.<name>
-    const char *app;        // aggregate key ("pi", "zai") - matches the cache
+    int enabled;
+    char app[20];           // aggregate key ("pi", "zai", anything); 19 chars is what
+                            // g_appName and the appFilter/labels tables hold
     wchar_t *sessionsDir;   // ~ prefixed = profile relative, else absolute/UNC
+    int recursive;          // descend into per-project subdirectories
+    char kIn[24], kOut[24], kCr[24], kCw[24], kTs[24], kModel[24];
 } TokSource;
 
+#define MAX_TOK_SRC 8
 #define MAX_CUSTOM 16
 #define MAX_SUBS 6
 #define MAX_USER_ICONS 16
+#define MAX_GEN_AUTH 3
+#define MAX_GEN_WIN 6
+#define MAX_GEN_PATH 96
+
+// one auth credential for a generic provider: where the secret comes from and
+// which header carries it. Resolved at fetch time, never persisted.
+typedef struct {
+    wchar_t header[40];     // header name, e.g. "authorization"
+    wchar_t prefix[48];     // prepended verbatim, e.g. "Bearer "
+    wchar_t *path;          // JSON file to read the token from
+    char key[MAX_GEN_PATH]; // path inside that file, e.g. "access_token"
+    wchar_t *env;           // environment variable holding the token
+    wchar_t *literal;       // token written straight into the config
+} GenAuth;
+
+// one quota window of a generic provider: label plus the paths that carry the
+// numbers. A window with neither used nor remaining is skipped.
+typedef struct {
+    wchar_t label[24];
+    char used[MAX_GEN_PATH];
+    char remaining[MAX_GEN_PATH];
+    char total[MAX_GEN_PATH];
+    char reset[MAX_GEN_PATH];
+} GenWin;
 
 // a config-defined icon: name (referenced by modules.custom[].icon), SVG path
 // data in the 24-unit viewBox the built-in icons use, and a stroke width.
@@ -77,17 +126,109 @@ static void dbg(const char *fmt, ...) {
     (void)fmt;
 }
 
+// jsmn helpers live with the config parser below; declared here so the source
+// and provider parsers above can use them
+static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key);
+static int jtokSpan(const jsmntok_t *t, int i);
+static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_subs
+
+// one bounded, NUL-terminated UTF-8 copy of a config string. Every reader of
+// the aggregation key decodes it back as UTF-8 (aggRecord's appFilter loop,
+// appLabelW), so a copy that narrowed each wchar to one byte would store
+// invalid bytes for a non-ASCII name and the key would never round-trip - the
+// allowlist would silently drop every record of that source. The copy also
+// stops inside cch and only on a whole character, because a half-copied
+// sequence is a key no lookup can ever match either.
+static void tokUtf8Copy(const wchar_t *w, char *out, int cch) {
+    out[0] = 0;
+    if (!w || !*w || cch < 2) return;
+    char tmp[128];
+    int cap = (int)sizeof(tmp);
+    if (cap > cch - 1) cap = cch - 1;
+    int take = lstrlenW(w), n = 0;
+    while (take > 0) {
+        n = WideCharToMultiByte(CP_UTF8, 0, w, take, tmp, cap, NULL, NULL);
+        if (n > 0) break; // the whole prefix fit: complete sequences only
+        if (w[take - 1] >= 0xD800 && w[take - 1] <= 0xDBFF) take--; // half a surrogate pair
+        take--;
+    }
+    if (n <= 0) return;
+    memcpy(out, tmp, (size_t)n);
+    out[n] = 0;
+}
+
+// derive an aggregate key from a session-store path when the config does not
+// name one: ~/.pi/agent/sessions -> "pi", ~/.claude/projects -> "claude".
+// The path is EXPANDED first (a config string may carry a ~) and trailing
+// separators are dropped, because the key must describe the real store, not
+// the text the user pasted. The walk from the store end then stops at the
+// NEAREST dot-directory and strips its dot. With no dot-directory anywhere the
+// store folder's own name is the key - stable but generic, so a source like
+// that is better served by an explicit app.
+static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
+    out[0] = 0;
+    if (!dir || !*dir || cch < 2) return;
+    wchar_t buf[MAX_PATH];
+    subsPathExpand(dir, buf, MAX_PATH);
+    int len = (int)lstrlenW(buf);
+    while (len > 0 && (buf[len-1] == L'\\' || buf[len-1] == L'/')) buf[--len] = 0;
+    if (len <= 0) { lstrcpyA(out, "app"); return; }
+    wchar_t *name = NULL, *nameEnd = NULL;
+    int i = len; // one past the end of the component being tested
+    while (i > 0) {
+        int j = i;
+        while (j > 0 && buf[j-1] != L'\\' && buf[j-1] != L'/') j--;
+        if (j < i) { // a real component [j, i); doubled separators yield none
+            wchar_t *comp = buf + j;
+            if (!name) { name = comp; nameEnd = buf + i; } // the store folder
+            if (comp[0] == L'.' && comp[1] && comp[1] != L'.') {
+                name = comp + 1; nameEnd = buf + i; // dot stripped, same end
+                break;
+            }
+        }
+        i = j - 1; // step over the separator; j == 0 ends the walk
+    }
+    if (!name || !*name || !lstrcmpW(name, L".") || !lstrcmpW(name, L"..")) {
+        lstrcpyA(out, "app");
+        return;
+    }
+    // the component is a run inside buf: terminate it in place and convert it
+    // as one key, exactly the way tokAppSet stores an explicit app
+    wchar_t tail = *nameEnd;
+    *nameEnd = 0;
+    tokUtf8Copy(name, out, cch);
+    *nameEnd = tail;
+    if (!out[0]) lstrcpyA(out, "app");
+}
+
+// copy one usage-field name out of the config, falling back to the default
+static void tokFieldCopy(char *dst, int cch, const char *js, jsmntok_t *t, int obj,
+                         const char *key, const char *dflt) {
+    lstrcpynA(dst, dflt, cch);
+    int k = jobjGet(js, t, obj, key);
+    if (k < 0 || t[k].type != JSMN_STRING) return;
+    int n = t[k].end - t[k].start;
+    if (n <= 0 || n >= cch) return;
+    memcpy(dst, js + t[k].start, (size_t)n);
+    dst[n] = 0;
+}
 
 // --------------------------------------------------------------- config ----
 typedef struct {
     int enabled;
     wchar_t *icon, *label, *color, *title, *command;
     int toggle;
+    // command-output chip: when intervalMs > 0 the command is polled and its
+    // stdout becomes the chip text (the escape hatch for any metric the bar
+    // does not know about). format is wrapped around the trimmed output.
+    int intervalMs;
+    wchar_t *format;
+    double warnAbove, warnBelow;   // -1 = disabled
 } CustomChip;
 
 // subscription provider (chip fetcher; mirrors config.subs.providers)
 typedef struct {
-    int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity
+    int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity, 3 = generic
     int family;          // antigravity only: 0 = Gemini, 1 = GPT/Claude
     int enabled;
     wchar_t *label;
@@ -97,6 +238,15 @@ typedef struct {
     wchar_t *configPath;   // zai config.json
     wchar_t *vscdbPath;    // antigravity IDE fallback token store
     wchar_t *providerName; // zai provider key
+    // ---- generic (type 3): a REST quota endpoint declared entirely in config
+    wchar_t *url;          // https://host/path (http allowed with insecure)
+    wchar_t *method;       // GET (default) or POST
+    wchar_t *reqBody;      // POST body
+    wchar_t *headerBlob;   // static "Name: value\r\n" lines, pre-joined
+    int insecure;          // 1 = allow plain http (sends the token in clear)
+    char requirePath[MAX_GEN_PATH]; // response must contain this path
+    int nAuth; GenAuth auth[MAX_GEN_AUTH];
+    int nWin;  GenWin  win[MAX_GEN_WIN];
 } SubsProvider;
 
 typedef struct {
@@ -123,6 +273,10 @@ typedef struct {
     int showTray;
     int autoStart;            // fresh installs register the Run value (default on)
     int debug;                 // general.debug: extra scan logging
+    int checkUpdates;          // general.checkUpdates: ONE GitHub version probe at
+                               // startup (default off: a fresh install never
+                               // touches the network). Reports only - never
+                               // downloads or installs anything.
 
     int subsEnabled, subsIntervalMin, subsTimeoutMs, subsRotateSec;
     SubsProvider subsProviders[MAX_SUBS];
@@ -145,7 +299,7 @@ typedef struct {
     int tokLabelCount;
     int tokensEnabled;            // master switch: off = zero scans
     int tokensRescanSec;          // tokens.rescanMinutes -> seconds between scans
-    TokSource tokSrc[4];          // JSONL session stores for the live scan
+    TokSource tokSrc[MAX_TOK_SRC];  // JSONL session stores for the live scan
     int tokSrcCount;
     UserIcon icons[MAX_USER_ICONS]; // theme.icons[]: new named icons
     int iconCount;
@@ -154,7 +308,13 @@ typedef struct {
 double g_scale = 1.0;        // display scale (dpi/96): config values are in DIPs (shared)
 double g_iconOpacity = 1.0;  // theme.iconOpacity/100 (used by the icon renderer)
 
-static Config g_cfg;
+// The live config is swapped wholesale by loadConfig while the provider fetch
+// threads (each holds a SubsProvider* across a multi-second HTTP call) and the
+// command-chip poll read it, so it lives behind an indirection: a swap installs
+// a new generation and retires the previous one, and the last reader frees it.
+static Config g_cfgGen0;              // generation 0: the static buffer, never heap-freed
+static Config *g_cfgCur = &g_cfgGen0;
+#define g_cfg (*g_cfgCur)
 static FILETIME g_cfgMtime;
 static int g_cfgLoaded = 0;
 
@@ -261,6 +421,124 @@ static int jboolDefault(const char *js, const jsmntok_t *t, int i, int def) {
     return def;
 }
 
+// copy a JSON string into a bounded narrow buffer (generic paths/key names)
+static void jstrCopyA(char *dst, int cch, const char *js, const jsmntok_t *t, int i,
+                      const char *dflt) {
+    if (dflt) lstrcpynA(dst, dflt, cch); else dst[0] = 0;
+    if (i < 0 || t[i].type != JSMN_STRING) return;
+    int n = t[i].end - t[i].start;
+    if (n <= 0 || n >= cch) return;
+    memcpy(dst, js + t[i].start, (size_t)n);
+    dst[n] = 0;
+}
+
+// one auth entry of a generic provider: "header: prefix <value>" where the
+// value comes from a JSON file, an environment variable, or the config itself.
+static void genParseAuth(const char *js, const jsmntok_t *t, int obj, GenAuth *ga) {
+    memset(ga, 0, sizeof(*ga));
+    wchar_t *h = jstrTok(js, t, jobjGet(js, t, obj, "header"), L"Authorization");
+    lstrcpynW(ga->header, h, 40); wideFree(&h);
+    wchar_t *p = jstrTok(js, t, jobjGet(js, t, obj, "prefix"), L"Bearer ");
+    lstrcpynW(ga->prefix, p, 48); wideFree(&p);
+    ga->path   = jstrTok(js, t, jobjGet(js, t, obj, "path"), NULL);
+    jstrCopyA(ga->key, sizeof(ga->key), js, t, jobjGet(js, t, obj, "key"), "access_token");
+    ga->env    = jstrTok(js, t, jobjGet(js, t, obj, "env"), NULL);
+    ga->literal = jstrTok(js, t, jobjGet(js, t, obj, "literal"), NULL);
+}
+
+// one quota window: a label plus the response paths carrying the numbers
+static void genParseWin(const char *js, const jsmntok_t *t, int obj, GenWin *gw) {
+    memset(gw, 0, sizeof(*gw));
+    wchar_t *l = jstrTok(js, t, jobjGet(js, t, obj, "label"), L"");
+    lstrcpynW(gw->label, l, 24); wideFree(&l);
+    jstrCopyA(gw->used,      sizeof(gw->used),      js, t, jobjGet(js, t, obj, "used"),      "");
+    jstrCopyA(gw->remaining, sizeof(gw->remaining), js, t, jobjGet(js, t, obj, "remaining"), "");
+    jstrCopyA(gw->total,     sizeof(gw->total),     js, t, jobjGet(js, t, obj, "total"),     "");
+    jstrCopyA(gw->reset,     sizeof(gw->reset),     js, t, jobjGet(js, t, obj, "reset"),     "");
+}
+
+// join static header lines into one \r\n-separated blob for WinHTTP
+static wchar_t *genHeadersBlob(const char *js, const jsmntok_t *t, int obj) {
+    int h = jobjGet(js, t, obj, "headers");
+    if (h < 0 || t[h].type != JSMN_OBJECT) return NULL;
+    int n = t[h].size, k = h + 1, cch = 256;
+    wchar_t *blob = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)cch * sizeof(wchar_t));
+    if (!blob) return NULL;
+    int len = 0;
+    for (int i = 0; i < n; i++) {
+        wchar_t *nm = jstrTok(js, t, k, NULL);
+        wchar_t *vl = jstrTok(js, t, k + 1, NULL);
+        k += 1 + jtokSpan(t, k + 1);
+        if (nm && vl) {
+            int need = len + lstrlenW(nm) + lstrlenW(vl) + 8;
+            if (need >= cch) {
+                while (cch <= need) cch *= 2;
+                wchar_t *nb = (wchar_t *)HeapReAlloc(GetProcessHeap(), 0, blob, (size_t)cch * sizeof(wchar_t));
+                if (!nb) { wideFree(&nm); wideFree(&vl); wideFree(&blob); return NULL; }
+                blob = nb;
+            }
+            len += swprintf(blob + len, cch - len, L"%ls: %ls\r\n", nm, vl);
+        }
+        wideFree(&nm); wideFree(&vl);
+    }
+    if (!len) { wideFree(&blob); return NULL; }
+    return blob;
+}
+
+// a type-3 provider: url, optional auth list, static headers, quota windows.
+// Everything a new service needs lives here, so wiring one up is a config edit.
+static void genParse(SubsProvider *sp, const char *js, const jsmntok_t *t, int obj) {
+    sp->url       = jstrTok(js, t, jobjGet(js, t, obj, "url"), NULL);
+    sp->method    = jstrTok(js, t, jobjGet(js, t, obj, "method"), L"GET");
+    sp->reqBody   = jstrTok(js, t, jobjGet(js, t, obj, "body"), NULL);
+    sp->insecure  = jboolDefault(js, t, jobjGet(js, t, obj, "insecure"), 0);
+    jstrCopyA(sp->requirePath, sizeof(sp->requirePath), js, t,
+              jobjGet(js, t, obj, "require"), "");
+    // auth may be one object or a list of them (api key + bearer, say)
+    int a = jobjGet(js, t, obj, "auth");
+    if (a >= 0) {
+        if (t[a].type == JSMN_OBJECT) {
+            genParseAuth(js, t, a, &sp->auth[0]);
+            sp->nAuth = 1;
+        } else if (t[a].type == JSMN_ARRAY) {
+            int n = t[a].size; if (n > MAX_GEN_AUTH) n = MAX_GEN_AUTH;
+            int k = a + 1;
+            for (int i = 0; i < n && sp->nAuth < MAX_GEN_AUTH; i++) {
+                if (t[k].type == JSMN_OBJECT)
+                    genParseAuth(js, t, k, &sp->auth[sp->nAuth++]);
+                k += jtokSpan(t, k);
+            }
+        }
+    }
+    sp->headerBlob = genHeadersBlob(js, t, obj);
+    // windows[]: a label plus the paths carrying the numbers
+    int w = jobjGet(js, t, obj, "windows");
+    if (w >= 0 && t[w].type == JSMN_ARRAY) {
+        int n = t[w].size; if (n > MAX_GEN_WIN) n = MAX_GEN_WIN;
+        int k = w + 1;
+        for (int i = 0; i < n && sp->nWin < MAX_GEN_WIN; i++) {
+            if (t[k].type == JSMN_OBJECT)
+                genParseWin(js, t, k, &sp->win[sp->nWin++]);
+            k += jtokSpan(t, k);
+        }
+    }
+}
+
+// release every generic allocation; called from the config teardown so a
+// reload cannot leak the previous set of paths
+static void genFree(SubsProvider *sp) {
+    wideFree(&sp->url); wideFree(&sp->method); wideFree(&sp->reqBody);
+    wideFree(&sp->headerBlob);
+    for (int i = 0; i < sp->nAuth; i++) {
+        wideFree(&sp->auth[i].path);
+        wideFree(&sp->auth[i].env);
+        wideFree(&sp->auth[i].literal);
+    }
+    sp->nAuth = 0;
+    sp->nWin = 0;
+}
+
+
 static void freeConfig(Config *c) {
     wideFree(&c->tint); wideFree(&c->backdrop); wideFree(&c->fontFamily);
     wideFree(&c->fg); wideFree(&c->fgDim); wideFree(&c->pink); wideFree(&c->pinkDeep); wideFree(&c->divider);
@@ -270,16 +548,22 @@ static void freeConfig(Config *c) {
     wideFree(&c->shortcutLabel); wideFree(&c->shortcutCommand);
     wideFree(&c->petLabel); wideFree(&c->petExePath);
     wideFree(&c->terminalClassName);
+    wideFree(&c->terminalTitle);
     wideFree(&c->clockFormat);
     for (int i = 0; i < c->customCount; i++) {
         wideFree(&c->custom[i].icon); wideFree(&c->custom[i].label);
         wideFree(&c->custom[i].color); wideFree(&c->custom[i].title);
-        wideFree(&c->custom[i].command);
+        wideFree(&c->custom[i].command); wideFree(&c->custom[i].format);
     }
     c->customCount = 0;
     for (int i = 0; i < c->subsProviderCount; i++) {
-        wideFree(&c->subsProviders[i].clientId);
-        wideFree(&c->subsProviders[i].clientSecret);
+        SubsProvider *sp = &c->subsProviders[i];
+        wideFree(&sp->label); wideFree(&sp->authPath);
+        wideFree(&sp->configPath); wideFree(&sp->vscdbPath);
+        wideFree(&sp->providerName);
+        wideFree(&sp->clientId);
+        wideFree(&sp->clientSecret);
+        genFree(sp);
     }
     for (int i = 0; i < c->tokSrcCount; i++) wideFree(&c->tokSrc[i].sessionsDir);
     c->tokSrcCount = 0;
@@ -287,6 +571,96 @@ static void freeConfig(Config *c) {
         wideFree(&c->icons[i].name); wideFree(&c->icons[i].d);
     }
     c->iconCount = 0;
+}
+
+// ---- config lifetime -------------------------------------------------------
+// A reader pins the generation it is about to walk; loadConfig retires the
+// generation it replaces and the last reader out frees it, so an in-flight
+// fetch can never read a provider struct the UI thread has already freed.
+static CRITICAL_SECTION g_cfgGenLock;
+static long g_cfgGenRefs = 0;
+// generations a reader may still walk, newest last (empty whenever nobody pins)
+static Config **g_cfgRetired = NULL;
+static int g_cfgRetiredN = 0, g_cfgRetiredCap = 0;
+
+static const Config *cfgPin(void) {
+    EnterCriticalSection(&g_cfgGenLock);
+    const Config *v = g_cfgCur;
+    g_cfgGenRefs++;
+    LeaveCriticalSection(&g_cfgGenLock);
+    return v;
+}
+
+static void cfgUnpin(void) {
+    EnterCriticalSection(&g_cfgGenLock);
+    if (--g_cfgGenRefs <= 0) {
+        g_cfgGenRefs = 0;
+        while (g_cfgRetiredN > 0) {
+            Config *r = g_cfgRetired[--g_cfgRetiredN];
+            freeConfig(r);
+            if (r != &g_cfgGen0) HeapFree(GetProcessHeap(), 0, r);
+        }
+    }
+    LeaveCriticalSection(&g_cfgGenLock);
+}
+
+// remember a replaced generation until its last reader is done
+static void cfgRetire(Config *old) {
+    if (g_cfgRetiredN == g_cfgRetiredCap) {
+        int cap = g_cfgRetiredCap ? g_cfgRetiredCap * 2 : 8;
+        Config **p = (Config **)HeapReAlloc(GetProcessHeap(), 0, g_cfgRetired,
+                                            (SIZE_T)cap * sizeof(Config *));
+        if (!p) return; // cannot be tracked: lose it rather than free a live one
+        g_cfgRetired = p;
+        g_cfgRetiredCap = cap;
+    }
+    g_cfgRetired[g_cfgRetiredN++] = old;
+}
+
+// install a freshly parsed generation (caller keeps no reference to it)
+static void cfgInstall(Config *next) {
+    EnterCriticalSection(&g_cfgGenLock);
+    Config *old = g_cfgCur;
+    g_cfgCur = next;
+    if (g_cfgGenRefs > 0) cfgRetire(old); // readers still walk it
+    else {
+        freeConfig(old);
+        if (old != &g_cfgGen0) HeapFree(GetProcessHeap(), 0, old);
+    }
+    LeaveCriticalSection(&g_cfgGenLock);
+}
+
+// the aggregation key: an explicit app name, capacity-capped at the 19 bytes
+// every sink stores (cut on a character boundary), else derived from the store
+// path
+static void tokAppSet(TokSource *ts, const wchar_t *app) {
+    if (app && *app) tokUtf8Copy(app, ts->app, sizeof(ts->app));
+    else tokAppFromDir(ts->sessionsDir, ts->app, sizeof(ts->app));
+}
+
+// the rest of a source entry, shared by the array form and the converted
+// legacy object form. Returns 1 when the entry is a usable source (it has a
+// store and a key); a sessionless entry is dropped instead of counted.
+static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj) {
+    // recursion defaults ON: a flat store has no subdirectories to descend
+    // into, a nested one needs it
+    ts->recursive = jboolDefault(js, t, jobjGet(js, t, obj, "recursive"), 1);
+    int fl = jobjGet(js, t, obj, "fields");
+    if (fl >= 0 && t[fl].type == JSMN_OBJECT) {
+        tokFieldCopy(ts->kIn,    sizeof(ts->kIn),    js, t, fl, "input",     "input");
+        tokFieldCopy(ts->kOut,   sizeof(ts->kOut),   js, t, fl, "output",    "output");
+        tokFieldCopy(ts->kCr,    sizeof(ts->kCr),    js, t, fl, "cacheRead", "cacheRead");
+        tokFieldCopy(ts->kCw,    sizeof(ts->kCw),    js, t, fl, "cacheWrite","cacheWrite");
+        tokFieldCopy(ts->kTs,    sizeof(ts->kTs),    js, t, fl, "timestamp", "timestamp");
+        tokFieldCopy(ts->kModel, sizeof(ts->kModel), js, t, fl, "model",     "model");
+    } else {
+        lstrcpyA(ts->kIn, "input"); lstrcpyA(ts->kOut, "output");
+        lstrcpyA(ts->kCr, "cacheRead"); lstrcpyA(ts->kCw, "cacheWrite");
+        lstrcpyA(ts->kTs, "timestamp"); lstrcpyA(ts->kModel, "model");
+    }
+    if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) return 1;
+    wideFree(&ts->sessionsDir);
+    return 0;
 }
 
 static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
@@ -320,6 +694,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->showTray = 1;
     c->autoStart = 1;
     c->debug = 0;
+    c->checkUpdates = 0;
     c->clockFormat = wideDup(L"{MMM} {dd} ({Wkk}) {HH}:{mm}");
     c->subsEnabled = 0; c->subsIntervalMin = 2; c->subsTimeoutMs = 20000; c->subsProviderCount = 0;
     c->subsRotateSec = 60;
@@ -339,7 +714,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->fontFamily = jstrTok(js, t, jobjGet(js, t, bar, "fontFamily"), c->fontFamily);
         c->align      = jintTok(js, t, jobjGet(js, t, bar, "align"), 0) == 2 ? 2 : 1; // 1=right 2=left
         c->barRadius  = jintTok(js, t, jobjGet(js, t, bar, "radius"), c->barRadius);
-        if (c->barRadius < 0) c->barRadius = 0; if (c->barRadius > 26) c->barRadius = 26;
+        if (c->barRadius < 0) c->barRadius = 0;
+        if (c->barRadius > 26) c->barRadius = 26;
     }
     int theme = jobjGet(js, t, root, "theme");
     if (theme >= 0) {
@@ -348,7 +724,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         wideFree(&c->pink); c->pink = jstrTok(js, t, jobjGet(js, t, theme, "pink"), c->pink);
         wideFree(&c->iconColor); c->iconColor = jstrTok(js, t, jobjGet(js, t, theme, "iconColor"), c->iconColor);
         c->iconOpacity = jintTok(js, t, jobjGet(js, t, theme, "iconOpacity"), c->iconOpacity);
-        if (c->iconOpacity < 0) c->iconOpacity = 0; if (c->iconOpacity > 100) c->iconOpacity = 100;
+        if (c->iconOpacity < 0) c->iconOpacity = 0;
+        if (c->iconOpacity > 100) c->iconOpacity = 100;
         {
             int hm = jobjGet(js, t, theme, "heatmap");
             if (hm >= 0 && t[hm].type == JSMN_ARRAY) {
@@ -441,6 +818,15 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     cc->color   = jstrTok(js, t, jobjGet(js, t, k, "color"), L"");
                     cc->title   = jstrTok(js, t, jobjGet(js, t, k, "title"), NULL);
                     cc->command = jstrTok(js, t, jobjGet(js, t, k, "command"), L"");
+                    // command-output chip: intervalMs > 0 polls the command and
+                    // its stdout becomes the chip text; format wraps it and
+                    // warnAbove/warnBelow colour it. All three are optional.
+                    cc->intervalMs = (int)jintTok(js, t, jobjGet(js, t, k, "intervalMs"), 0);
+                    if (cc->intervalMs < 0) cc->intervalMs = 0;
+                    if (cc->intervalMs > 0 && cc->intervalMs < 1000) cc->intervalMs = 1000;
+                    cc->format = jstrTok(js, t, jobjGet(js, t, k, "format"), NULL);
+                    cc->warnAbove = jdoubleTok(js, t, jobjGet(js, t, k, "warnAbove"), -1);
+                    cc->warnBelow = jdoubleTok(js, t, jobjGet(js, t, k, "warnBelow"), -1);
                     c->customCount++;
                 }
                 // advance k past this element
@@ -459,13 +845,14 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         if (c->subsRotateSec > 3600) c->subsRotateSec = 3600;
         c->subsW = jintTok(js, t, jobjGet(js, t, subs, "width"), c->subsW);
         c->subsH = jintTok(js, t, jobjGet(js, t, subs, "height"), c->subsH);
-        if (c->subsW < 280) c->subsW = 280; if (c->subsH < 180) c->subsH = 180;
+        if (c->subsW < 280) c->subsW = 280;
+        if (c->subsH < 180) c->subsH = 180;
     }
     // token stats surface: which cache file + which harness apps to count
     int toks = jobjGet(js, t, root, "tokens");
     if (toks >= 0 && t[toks].type == JSMN_OBJECT) {
         c->tokensEnabled = jboolDefault(js, t, jobjGet(js, t, toks, "enabled"), 1);
-        // minutes -> seconds, clamped 5..3600: the metrics tick is 1s, so this
+        // minutes -> seconds, clamped 1..60 MINUTES: the metrics tick is 1s, so this
         // is the tick count between token scans
         int rm = jintTok(js, t, jobjGet(js, t, toks, "rescanMinutes"), 1);
         if (rm < 1) rm = 1;
@@ -512,24 +899,55 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 k += 1 + jtokSpan(t, k + 1); // key + whole value subtree
             }
         }
-        // tokens.sources[]: the session stores the live scan reads. Only the
-        // JSONL ones are scanned in-process (pi nests per project, zai is flat);
-        // the SQLite stores (zcode/opencode) keep coming from the cache seed.
+        // tokens.sources[]: EVERY session store the live scan reads, declared
+        // by the user. An array of { app, path, enabled, recursive, fields }
+        // entries, so a new harness needs a config line and nothing else.
         int srcs = jobjGet(js, t, toks, "sources");
-        if (srcs >= 0 && t[srcs].type == JSMN_OBJECT) {
-            static const struct { const char *key; const char *app; } known[] = {
-                { "zai", "zai" }, { "pi", "pi" },
-            };
-            for (unsigned s = 0; s < sizeof(known) / sizeof(known[0]) && c->tokSrcCount < 4; s++) {
-                int se = jobjGet(js, t, srcs, known[s].key);
-                if (se < 0 || t[se].type != JSMN_OBJECT) continue;
-                TokSource *ts = &c->tokSrc[c->tokSrcCount];
-                memset(ts, 0, sizeof(*ts));
-                ts->app = known[s].app;
-                ts->enabled = jboolDefault(js, t, jobjGet(js, t, se, "enabled"), 1);
-                ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, se, "sessionsDir"), NULL);
-                if (ts->sessionsDir && *ts->sessionsDir) c->tokSrcCount++;
-                else wideFree(&ts->sessionsDir);
+        if (srcs >= 0 && t[srcs].type == JSMN_ARRAY) {
+            int n2 = t[srcs].size;
+            if (n2 > MAX_TOK_SRC) n2 = MAX_TOK_SRC;
+            int k = srcs + 1;
+            for (int j = 0; j < n2 && c->tokSrcCount < MAX_TOK_SRC; j++) {
+                if (t[k].type == JSMN_OBJECT) {
+                    TokSource *ts = &c->tokSrc[c->tokSrcCount];
+                    memset(ts, 0, sizeof(*ts));
+                    ts->enabled = jboolDefault(js, t, jobjGet(js, t, k, "enabled"), 1);
+                    ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, k, "path"), NULL);
+                    // app: explicit, else the dot-directory above the store
+                    // (~/.pi/agent/sessions -> "pi"). It is the aggregation key
+                    // and the tokens.labels lookup key.
+                    wchar_t *app = jstrTok(js, t, jobjGet(js, t, k, "app"), NULL);
+                    tokAppSet(ts, app);
+                    wideFree(&app);
+                    if (tokSourceFinish(ts, js, t, k)) c->tokSrcCount++;
+                }
+                // advance k past this element
+                k += jtokSpan(t, k);
+            }
+        } else if (srcs >= 0 && t[srcs].type == JSMN_OBJECT) {
+            // pre-array configs wrote sources as an OBJECT keyed by app
+            // ({"pi": {"sessionsDir": ...}}). Without this branch such a
+            // config yields zero sources with no word, so the chip and the
+            // dashboard silently keep serving the stale cache seed. Convert it:
+            // the key becomes the app, sessionsDir the store, enabled carries
+            // over. Entries without a sessionsDir (the old zcode/opencode
+            // sqlite stores) are skipped exactly as they always were.
+            writeLogA("[wizbar] tokens: sources uses the legacy object form - "
+                      "converting to the array form; update config.json");
+            int k = srcs + 1;
+            for (int j = 0; j < t[srcs].size && c->tokSrcCount < MAX_TOK_SRC; j++) {
+                // object children are key+value PAIRS
+                if (t[k].type == JSMN_STRING && t[k+1].type == JSMN_OBJECT) {
+                    TokSource *ts = &c->tokSrc[c->tokSrcCount];
+                    memset(ts, 0, sizeof(*ts));
+                    ts->enabled = jboolDefault(js, t, jobjGet(js, t, k+1, "enabled"), 1);
+                    ts->sessionsDir = jstrTok(js, t, jobjGet(js, t, k+1, "sessionsDir"), NULL);
+                    wchar_t *app = jstrTok(js, t, k, NULL); // the key is the app
+                    tokAppSet(ts, app);
+                    wideFree(&app);
+                    if (tokSourceFinish(ts, js, t, k+1)) c->tokSrcCount++;
+                }
+                k += 1 + jtokSpan(t, k+1); // key + whole value subtree
             }
         }
     }
@@ -538,9 +956,10 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     if (dash >= 0 && t[dash].type == JSMN_OBJECT) {
         c->dashW = jintTok(js, t, jobjGet(js, t, dash, "width"), c->dashW);
         c->dashH = jintTok(js, t, jobjGet(js, t, dash, "height"), c->dashH);
-        if (c->dashW < 360) c->dashW = 360; if (c->dashH < 240) c->dashH = 240;
+        if (c->dashW < 360) c->dashW = 360;
+        if (c->dashH < 240) c->dashH = 240;
     }
-        int arr = jobjGet(js, t, subs, "providers");
+        int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
         if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
             int n2 = t[arr].size;
             if (n2 > MAX_SUBS) n2 = MAX_SUBS;
@@ -551,8 +970,18 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
                     memset(sp, 0, sizeof(*sp));
                     int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
-                    wchar_t *ty = subs == -1 ? NULL : jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
-                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1 : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2 : 0;
+                    wchar_t *ty = jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
+                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
+                             : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
+                             : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
+                    // an absent type falls back to chatgpt by design, but a
+                    // MISSPELLED one must say so: otherwise a typo silently
+                    // reads another provider's quota (the chatgpt fetch)
+                    if (ty && *ty && sp->type == 0 && lstrcmpiW(ty, L"chatgpt") != 0) {
+                        char tw[160];
+                        snprintf(tw, sizeof(tw), "[wizbar] subs: unknown provider type \"%ls\" - using chatgpt", ty);
+                        writeLogA(tw);
+                    }
                     wideFree(&ty);
                     sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
                     sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
@@ -561,6 +990,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                     sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
                     sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                     sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
+                    if (sp->type == 3) genParse(sp, js, t, k);
                     c->subsProviderCount++;
                 }
                 // advance k past this element
@@ -577,5 +1007,6 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->showTray = jboolDefault(js, t, jobjGet(js, t, general, "showTray"), 1);
         c->autoStart = jboolDefault(js, t, jobjGet(js, t, general, "autoStart"), 1);
         c->debug = jboolDefault(js, t, jobjGet(js, t, general, "debug"), 0);
+        c->checkUpdates = jboolDefault(js, t, jobjGet(js, t, general, "checkUpdates"), 0);
     }
 }
