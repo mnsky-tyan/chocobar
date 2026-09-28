@@ -23,8 +23,10 @@ When updating this file, preserve this bar for all agents and keep entries conci
   stroke-width 2.2, bow 2). Never hand-redraw them again: port the exact path
   data (rect/circle -> path syntax), and render through the 2x supersample
   pass in iconRenderGdip - 1:1 GDI+ AA reads blocky next to Chromium.
-  Per-chip icon colors live in bar.css (#seg-tokens .ico = yellow, all
-  others pinkDeep).
+  Per-chip icon colors were bar.css in the retired bar (#seg-tokens .ico =
+  yellow, all others pinkDeep); the native build keeps that single exception
+  through `iconColorOverride` (p_ui.c buildChips), every other icon follows
+  `theme.iconColor`.
 - pw_native.ps1-style PrintWindow captures of the LAYERED bar return the raw
   premultiplied DIB at LOGICAL size if the bitmap is not rect x2; analyze at
   x2 physical or every position reads wrong.
@@ -106,6 +108,11 @@ strings.
 
 ## Running on Linux (WSLg) — recipe
 
+Retired Electron app only: package.json no longer carries an `electron`
+dependency and the app tree is gone, so this recipe cannot be run against the
+shipped bar. It is kept as the provenance of the Linux measurements quoted in
+"Perf invariants".
+
 - Repo electron's binary needs system libs WSL lacks; use the nix-wrapped one:
   `nix run nixpkgs#electron -- . --no-sandbox --disable-gpu` (add
   `--extra-experimental-features 'nix-command flakes'`), with
@@ -173,7 +180,8 @@ strings.
   the bar - a lingering topmost tip reads as a second bar ghost). Clicking
   empty bar raises the followed terminal. Token dashboard + subs board =
   WS_POPUP WS_EX_APPWINDOW "ChocobarDash" windows (DWM-rounded via
-  DwmSetWindowAttribute 33), a 1:1 port of renderer/dash.css + subs.css:
+  DwmSetWindowAttribute 33), a 1:1 port of the retired Electron renderer's
+  dash.css + subs.css:
   stat cards white25 over pinkBg, plan-usage rows, 26-week heatmap (cell
   radius 2.5 NOT the card 10, month labels, Sun/Fri rows, quantile
   thresholds, click = day detail), by-app + by-model tables (sorted by
@@ -277,7 +285,8 @@ strings.
   every `modules.*.intervalMs` plus `gpu.mode` / `volume.role`, all of
   `modules.bluetooth` and `modules.agents`, `terminal.reattachToExisting`,
   `tokens.showOnBar`, `tokens.heatmapWeeks`, and `tokens.sources.zcode` /
-  `opencode` / `mimo` (only `zai` and `pi` are scanned).
+  `opencode` / `mimo` (the live scan walks every entry of the `tokens.sources[]`
+  array, so those three read nothing only because they carry no `sessionsDir`).
 
 
 ## Verifying the dashboards' z-order on the live box
@@ -311,7 +320,7 @@ strings.
 - Electron-era keys the native parser does NOT read (safe to delete, no effect
   when present): `bar.position`, `bar.insetX`, `bar.segmentSpacing`,
   `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`,
-  `tokens.heatmapDays`, `theme.surfaces`, `terminal.reattachToExisting`, and
+  `tokens.heatmapWeeks`, `theme.surfaces`, `terminal.reattachToExisting`, and
   `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores are
   SQLite and reach the board only through the `tokens.cachePath` seed). What the
   live scan covers is NOT a fixed list: it walks every entry of the
@@ -402,25 +411,29 @@ strings.
   latest state; HTTP failures log one line to native.log.
 - Antigravity (type 2) reads the pi auth store `~/.pi/agent/auth.json` key
   `antigravity` ({access, refresh, expires(epoch MS), projectId}) and
-  refreshes with Google's public desktop-client pair; grouped quota summary
-  first, per-model `fetchAvailableModels` on 403 SUBSCRIPTION_REQUIRED
-  (free tier - NOT an auth failure). ISO-8601 reset times go through
-  `subsIsoToMs` (civil-days, no libc date code). The models body is ~150KB,
-  so it parses through a grown token array (`subsParseBig`), never a fixed
-  one. The refresh-token write-back is targeted text surgery inside the
+  refreshes with Google's public desktop-client pair (the config's
+  `clientId` / `clientSecret` - without them a refresh fails the whole fetch,
+  there is no second source). Each cycle then runs `loadCodeAssist` for the
+  plan label and project id and takes the quota from `fetchAvailableModels`
+  (the Antigravity source bullet above owns that rule); the models call is fired
+  speculatively with the stored project id so it overlaps `loadCodeAssist`
+  instead of running back to back. ISO-8601 reset times go through `subsIsoToMs`
+  (civil-days, no libc date code). The models body is ~150KB, so it parses
+  through a grown token array (`subsParseBig`), never a fixed one. The
+  refresh-token write-back is targeted text surgery inside the
   `"antigravity"` object and ABORTS on any doubt - a corrupted auth.json
   breaks the captain's whole toolchain, not just this bar.
 
-## Antigravity local quota source (DEAD CODE since 2026-09-23)
+## Antigravity local quota source (EXCISED 2026-09-28)
 
 - The local language-server path (subsFetchAgyLocal/subsAgyLocalApply +
-  PEB/TCP-table discovery) is NO LONGER CALLED: the captain's ground truth is
-  his /quota command, which never used the language server - it reads
+  PEB/TCP-table discovery) is GONE from the tree: the captain's ground truth
+  is his /quota command, which never used the language server - it reads
   fetchAvailableModels over HTTPS with the pi auth token (works with the IDE
-  closed). The local numbers (tiered 5h pools) DIVERGE from /quota, so letting
-  them feed the board reintroduces the mismatch. The dead helpers are still
-  compiled (excise in a dedicated pass); do not wire them back into the fetch
-  chain. Historical notes below still hold for that machinery:
+  closed). The local numbers (tiered 5h pools) DIVERGE from /quota, so a local
+  reader must never be wired back into the fetch chain - the panel has no
+  fallback, which is the point. The notes below are HISTORY for the deleted
+  machinery (how the IDE's own /quota panel gets its numbers), not a to-do:
 - The IDE's own /quota numbers come from its LOCAL language server, not the
   cloud: find `language_server*.exe`, read `--csrf_token` from its
   command line, POST `{}` to `http://127.0.0.1:<port>/exa.language_server_pb.
@@ -435,14 +448,16 @@ strings.
   validated (page-aligned PEB, path-like decoded string); never hard-code one.
   Listening ports come from GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)
   (build.sh links iphlpapi). Prefer the non-daily endpoint instance.
-- One panel per config entry shows TWO 5h rows - GEMINI 5H and CLAUDE/GPT 5H -
-  the same two rows the IDE's /quota panel shows. No weekly row: Antigravity
+- One panel per config entry shows TWO rows - Gemini and Claude/GPT - the same
+  two families the IDE's /quota panel shows, each labeled with the pool it
+  holds (`5h` from production, `day` from the daily endpoint; `famSrc` in
+  subsFetchAntigravity keeps the family split). No weekly row: Antigravity
   exposes no weekly quota (the cloud summary returns one; it never resets and
   reads stale - dropped). NOT one combined
   pie (reversed after the captain compared against /quota 2026-09-22): each
-  family owns its own rolling 5h window with its own reset, so the binding
+  family owns its own rolling window with its own reset, so the binding
   constraint (chip) is the MIN remainingFraction across both families while the
-  board shows both. subsAgyQuotaKey keeps the family split.
+  board shows both.
 - The JSON endpoint port must be TRIED, not assumed: the language server owns
   several listeners (LSP/gRPC + the JSON one + the extension server) and which
   one serves GetUserStatus varies per boot (a 2026-09-22 boot answered 400 on
@@ -450,9 +465,9 @@ strings.
   now tries every listener of the chosen pid until a 200 with a parseable body.
 - The Google desktop OAuth pair is NOT in the repo (removed 2026-09-22 after the
   captain refused to allowlist a public secret): subs.providers[].clientId /
-  clientSecret carry it in the USER config, and only the cloud fallback needs
-  it (the local language server needs none). History was scrubbed of the pair,
-  so a fresh clone never trips push protection.
+  clientSecret carry it in the USER config, and the token refresh needs it -
+  with the local source gone there is nothing left to fall back to. History
+  was scrubbed of the pair, so a fresh clone never trips push protection.
 - tokens.labels ({ "pi": "pi-wsl" }) maps raw source keys to dashboard display
   names (parsed in chocobar.c, applied in p_ui.c's appLabelW). Aggregation keys,
   byte cursors and the appFilter keep the RAW key; only rendered row text swaps.
@@ -462,15 +477,20 @@ strings.
 - The native dev bar runs on its OWN shell: spawn a `wt` window titled
   `chocobar-dev` away from the captain's workspace, then launch the bar so
   it attaches to that window (sticky follow keeps it there). NEVER launch
-  it on the captain's terminal: his Electron bar lives there too, and two
-  always-on-top bars fight (his disappears under the dev bar). A closed or
-  zombie dev shell leaves the bar hidden at -1000,-1000 400x26; recreate
-  with `wt -w new nt --title chocobar-dev` (a dead shell can also linger as
-  an offscreen 157x25 rect - EnumWindows finds it, GetWindowRect fails).
+  it on the captain's terminal: his own bar lives there too, and two bars on
+  one terminal fight. A closed or zombie dev shell leaves the bar hidden
+  off-screen (created at -2000,-2000); recreate with
+  `wt -w new nt --title chocobar-dev` (a dead shell can also linger as a
+  small offscreen rect - EnumWindows finds it, GetWindowRect fails).
 - `terminal.className` in config is AUTHORITATIVE: when set, the probe tries
   only that class and never falls back to the generic terminal class list.
 
 ## Never leave an Electron debug port open (cost the captain his bar once)
+
+Retired Electron app only - the shipped native bar has no CDP port and no
+renderer to hijack, so nothing below can be reproduced against it. It is kept
+as the operative lesson for any future browser-based surface: a debug port is
+an open door for browser tooling, so close it when done.
 
 - 2026-09-21: an agent relaunched the app with `--remote-debugging-port=9222`
   to dump the renderer DOM and left it open. Another agent's browser
@@ -584,11 +604,12 @@ whatever `tokens.sources[]` declares - not a hardcoded store pair):
 - zai: per-message `usage` in `~/.zai/agent/sessions/*.jsonl` (flat; `ZCODE_sess_*` files
   are DB-backed legacy — never count them from disk too, they double-count).
 - pi (new source): `~/.pi/agent/sessions/<project-slug>/*.jsonl` — same per-message
-  `usage` records, nested per project; scanned by the shared `_scanPiSessions`
-  (zai = 'zf:' keys/flat, pi = 'pf:' keys/nested, per-source mtime cursors).
-  Timestamp shape: `message.timestamp` is epoch-ms int (verified 1402 real records);
-  the ISO string lives on the line-level top-level `timestamp` the scanner never reads —
-  don't 'fix' the `Number()` parse, it is correct (a review round was burned on this).
+  `usage` records, nested per project; the shipped scan walks it with
+  `recursive: true` in `tokens.sources[]` and the same per-file byte cursor a
+  flat store uses (p_tokens.c). Timestamp shape: `message.timestamp` is epoch-ms
+  int (verified 1402 real records); the ISO string lives on the line-level
+  top-level `timestamp` the scanner never reads - don't 'fix' that parse, it is
+  correct (a review round was burned on this).
 - opencode: assistant message `tokens` in the SQLite `message.data` JSON
   (dbPath preferred) or the legacy `msg_*.json` tree; a second WSL-distro
   store can be copied in read-only and counts as its own app
@@ -600,13 +621,18 @@ whatever `tokens.sources[]` declares - not a hardcoded store pair):
   'Token accounting' section. Cache version pinning: the stored record
   shape is `token-cache.json v4` — bump the version whenever record
   semantics change or stale values are silently kept.
-- Session JSONL scans use per-file BYTE cursors (`_readSessionTail`, cache
-  `v:4` with `progress`): warm scans read only appends (ms, not the old
-  multi-second whole-file re-read that froze the bar every rescan; event-loop
-  lag across rescans measured 0ms). Cursor shape, key stability (message id or
-  absolute byte offset), and the cache version are one contract - change them
-  together or a cold start re-reads everything. Cache writes are async+coalesced;
-  `flushCacheSync` at quit lands the final cursors.
+- Session stores are scanned with a per-file BYTE cursor in
+  `~/.wizbar/token-cursors.json`: one entry per file,
+  `{"<path>": {"size": N, "mtime": M}}`, with no version field - the entry
+  shape, the skip rule (`c->size == fsz && c->mtimeMs == mt`, both taken from
+  the directory enumeration) and the resume point (`from = c->size`) are one
+  contract; change them together or a warm rescan re-reads or skips records.
+  The `ts > cacheMaxTs` filter is the second line of defence: a wrong cursor
+  can only cost a re-read, never a double count. The file is written at the end
+  of any scan that changed it (no quit-time flush to forget), it is deleted
+  when `tokens.enabled` flips off (`tokLiveReset`), and losing it costs one
+  full re-read. This is the SHIPPED contract; the retired Electron reader's
+  `_readSessionTail` (`v:4` + `progress`) is gone with its tree.
 - Subscription board (`src/subs.js` in the retired Electron app; the shipped bar reads
   `subs.providers` in config through `native/src/p_subs.c`): every provider fetch is
   bounded by `subs.fetchTimeoutMs` (clamped 3-60s; per-provider `timeoutMs` overrides),
@@ -641,8 +667,10 @@ whatever `tokens.sources[]` declares - not a hardcoded store pair):
 
 - The bar window needs its own `WM_RBUTTONUP` -> `showTrayMenu`. The tray icon
   path (WM_TRAY) is the only one that existed, so right-clicking the BAR itself
-  did nothing. The menu mirrors main.js `buildChocobarMenu` (token dashboard,
-  subscription dashboard, edit config, open config folder, reload, quit).
+  did nothing. The menu mirrors the retired Electron bar's `buildChocobarMenu`,
+  plus two native entries (`kMenuItems` in p_ui.c: token dashboard, subscription
+  dashboard, Start with Windows, edit config, open config folder, check for
+  updates, reload, quit).
 - Bar edge padding is 16/18 CSS px (`padL`/`padR` in repaintBar), matching
   `#bar { padding: 0 18px 0 16px }`. The rounded corners need it too.
 - Battery value color: `battAc ? good : (low ? warn : NULL)` - charging green
