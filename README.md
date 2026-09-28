@@ -201,7 +201,7 @@ Each provider entry:
 - `enabled`: per-provider switch, honoured only when the `subs` master above is on. Defaults to **on** - declaring a provider is the act of turning it on; the first-run template ships its four examples off.
 - `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
 - `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
-- `clientId` / `clientSecret`: **only** the Antigravity cloud fallback needs them (the token refresh pair). They are personal - keep them in your own config file, never in the repo.
+- `clientId` / `clientSecret`: the Antigravity token refresh needs them (the Google desktop-client pair); there is no other quota source to fall back to, so a token that needs refreshing without them leaves the panel with no data. They are personal - keep them in your own config file, never in the repo.
 - One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints: production is authoritative per family, so the daily endpoint only fills a family production does not report and the 5h pool survives. Each row is labeled with the pool it holds (`5h` or `day`). Same source as the harness's `/quota`; no IDE or language server required.
 
 **`type: "generic"`** - any REST quota endpoint, declared entirely in config. This is what makes a new subscription plan a config edit rather than a code change:
@@ -243,7 +243,7 @@ Each provider entry:
 
 ### Keys the native build ignores
 
-The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapDays`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them; the legacy `sources` object itself is converted, but these two keys carry no `sessionsDir`, so nothing scans them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
+The bar grew out of an Electron app, and a few old keys still appear in configs from that era. The native parser does not read them: `bar.position`, `bar.insetX`, `bar.segmentSpacing`, `bar.roundCorners`, `modules.bluetooth`, `tokens.showOnBar`, `tokens.dashboard`, `tokens.heatmapWeeks`, `tokens.sources.zcode` / `tokens.sources.opencode` (those two stores come from the `cachePath` seed, as the retired app last wrote them; the legacy `sources` object itself is converted, but these two keys carry no `sessionsDir`, so nothing scans them), `theme.surfaces`, `terminal.reattachToExisting`. Deleting them is safe; adding them back does nothing.
 
 ### A complete starting point
 

@@ -1,10 +1,12 @@
-# Chocobar native (phase 1)
+# Chocobar native
 
-Native Win32 rewrite of the Electron bar. One C translation unit, no runtime
-dependencies beyond Windows itself. Reads the SAME config file as the Electron
-build (`--config <path>`, `WIZBAR_CONFIG`, or `%USERPROFILE%\.wizbar\config.json`);
-keys it does not implement are ignored. Launch with the same `--config` the
-Electron bar uses (`runbar.ps1` passes the personal config).
+Native Win32 bar - the shipped product. The Electron app it replaced was
+removed from the repository, so this is no longer a "rewrite" alongside it.
+One C translation unit, no runtime dependencies beyond Windows itself. It reads
+the config file the retired Electron build used (`--config <path>`,
+`WIZBAR_CONFIG`, or `%USERPROFILE%\.wizbar\config.json`); keys it does not
+implement are ignored. Launch it with the personal config (`runbar.ps1` passes
+it).
 
 ## Status
 
