@@ -260,10 +260,12 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
 ## Release + install (since v1.1.0)
 
 - Release = one exe, no installer: `git tag -a vX.Y.Z`, `bash native/build.sh`,
-  `gh release create vX.Y.Z native/chocobar.exe`. The version lives ONLY in
-  `native/src/version.h` - it feeds the startup log line (`writeLogA("chocobar "
-  CB_VER_STR " start")`), the windres version resource, and the tag. Bump it
-  there or the three disagree.
+  `gh release create vX.Y.Z native/chocobar.exe`. The version lives in TWO
+  files that must move together: `native/src/version.h` (it feeds the startup
+  log line (`writeLogA("chocobar " CB_VER_STR " start")` and the windres
+  version resource) and `package.json`, whose `package-lock.json` mirrors it
+  (regenerate with `npm install --package-lock-only`). Bump both or the log
+  line, the resource, the tag and the package disagree.
 - `v1.0.0` is ALREADY TAKEN by the PR #11 integration point and was never
   released, so the first release is v1.1.0. Do not move a published tag.
 - Installed location is `%USERPROFILE%\Chocobar\chocobar.exe`, autostart is the
@@ -472,14 +474,28 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
   names (parsed in chocobar.c, applied in p_ui.c's appLabelW). Aggregation keys,
   byte cursors and the appFilter keep the RAW key; only rendered row text swaps.
 
+## Deploy discipline (captain's rule, 2026-09-28)
+
+- The installed bar (`C:\Users\tyanw\Chocobar\chocobar.exe`) is updated ONLY
+  from a tagged GitHub release build. Never copy a branch/test build over it,
+  even for an urgent bug - cut the release first, then deploy the release exe.
+- Test builds live in temp dirs with a test config (`--config`), never the
+  captain's default config path, and are killed and deleted when the round
+  ends. A test bar with `tokens.enabled: false` deletes the byte-cursor file,
+  which forces the next real bar to do a cold re-scan (the token dashboard
+  reads empty until it drains) - expect and mention that transient.
+
 ## Dev bar etiquette
 
 - The native dev bar runs on its OWN shell: spawn a `wt` window titled
   `chocobar-dev` away from the captain's workspace, then launch the bar so
   it attaches to that window (sticky follow keeps it there). NEVER launch
-  it on the captain's terminal: his own bar lives there too, and two bars on
-  one terminal fight. A closed or zombie dev shell leaves the bar hidden
-  off-screen (created at -2000,-2000); recreate with
+  it on the captain's terminal: his own bar lives there too, and a second
+  ChocobarBar on one terminal z-fights with it on every follow tick until the
+  eviction in `evictRivalBars` (p_ui.c) resolves it by pid order - the lowest
+  pid keeps the terminal, the later build closes itself. A closed or zombie
+  dev shell leaves the bar hidden off-screen (created at -2000,-2000);
+  recreate with
   `wt -w new nt --title chocobar-dev` (a dead shell can also linger as a
   small offscreen rect - EnumWindows finds it, GetWindowRect fails).
 - `terminal.className` in config is AUTHORITATIVE: when set, the probe tries
