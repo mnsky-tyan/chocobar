@@ -1511,6 +1511,51 @@ static void hideBar(void) {
     if (g_barVisible && g_bar) { ShowWindow(g_bar, SW_HIDE); g_barVisible = 0; }
 }
 
+// --- rival bar eviction ------------------------------------------------------
+// Sanctioned builds can never coexist: wWinMain takes the
+// ChocobarSingleInstanceMutex and a second sanctioned instance exits at start
+// (true since the phase-1 rewrite). So a ChocobarBar window from ANOTHER
+// process whose owner is OUR terminal is by construction a build that skips
+// that check (a doctored dev/test binary) - and two followers on one terminal
+// fight forever: every follow tick each one re-inserts its bar against the
+// shared terminal. Measured 2026-09-28 (two test builds on one dev shell):
+// the window directly above the terminal alternated between the two pids on
+// consecutive samples, ~20 z-order mutations a second around the window the
+// captain is typing in - the same interleaving his z-order anomaly log caught
+// from chocobar + chocobar-v110. Evict with WM_CLOSE: no chocobar build
+// handles WM_CLOSE, so DefWindowProc destroys the window and WM_DESTROY posts
+// the quit. A sibling owned by a DIFFERENT terminal is left alone.
+static DWORD g_rivalEvictTick = 0;
+static void evictRivalBars(void) {
+    if (!g_term) return;
+    DWORD now = GetTickCount();
+    if (now - g_rivalEvictTick < 2000) return; // re-eviction throttle
+    HWND h = NULL;
+    DWORD firstPid = 0;
+    int hits = 0;
+    for (;;) {
+        h = FindWindowExW(NULL, h, APP_CLASS, NULL);
+        if (!h) break;
+        if (h == g_bar) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (!pid || pid == GetCurrentProcessId()) continue;
+        if (GetWindow(h, GW_OWNER) != g_term) continue; // another terminal: legitimate
+        ULONG_PTR res = 0;
+        // SMTO_ABORTIFHUNG: a hung rival must never stall our follow tick
+        SendMessageTimeoutW(h, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 300, &res);
+        if (!firstPid) firstPid = pid;
+        hits++;
+    }
+    if (hits) {
+        char lb[96];
+        sprintf(lb, "[wizbar] evicted %d rival bar window(s) from our terminal (first pid %lu)",
+                hits, (unsigned long)firstPid);
+        writeLogA(lb);
+        g_rivalEvictTick = now;
+    }
+}
+
 static void execCmd(const wchar_t *cmd) {
     if (!cmd || !*cmd) return;
     wchar_t params[1200];
@@ -1579,6 +1624,7 @@ static void followTick(void) {
         if (g_owner) { SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, 0); g_owner = NULL; }
         return;
     }
+    evictRivalBars();
 
     // Own the bar by the terminal: an owned window rides in its owner's band,
     // stays out of the taskbar/Alt+Tab, and is hidden when the owner is
