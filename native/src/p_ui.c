@@ -1525,13 +1525,21 @@ static void hideBar(void) {
 // from chocobar + chocobar-v110. Evict with WM_CLOSE: no chocobar build
 // handles WM_CLOSE, so DefWindowProc destroys the window and WM_DESTROY posts
 // the quit. A sibling owned by a DIFFERENT terminal is left alone.
+//
+// The rule is ORDERED, because an unordered one annihilates both claimants:
+// the lowest pid on a terminal is its only follower, so a build evicts every
+// pid above it and closes itself for the pid below it. Two builds that both
+// carry this rule then converge on exactly one survivor in either start order,
+// where evict-each-other destroyed both windows and left the terminal with no
+// bar at all.
 static DWORD g_rivalEvictTick = 0;
-static void evictRivalBars(void) {
-    if (!g_term) return;
+static int evictRivalBars(void) {
+    if (!g_term) return 0;
     DWORD now = GetTickCount();
-    if (now - g_rivalEvictTick < 2000) return; // re-eviction throttle
+    if (now - g_rivalEvictTick < 2000) return 0; // re-eviction throttle
     HWND h = NULL;
-    DWORD firstPid = 0;
+    DWORD self = GetCurrentProcessId();
+    DWORD firstPid = 0, older = 0;
     int hits = 0;
     for (;;) {
         h = FindWindowExW(NULL, h, APP_CLASS, NULL);
@@ -1539,13 +1547,25 @@ static void evictRivalBars(void) {
         if (h == g_bar) continue;
         DWORD pid = 0;
         GetWindowThreadProcessId(h, &pid);
-        if (!pid || pid == GetCurrentProcessId()) continue;
+        if (!pid || pid == self) continue;
         if (GetWindow(h, GW_OWNER) != g_term) continue; // another terminal: legitimate
+        if (pid < self) { older = pid; continue; } // the older follower owns this terminal
         ULONG_PTR res = 0;
         // SMTO_ABORTIFHUNG: a hung rival must never stall our follow tick
         SendMessageTimeoutW(h, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 300, &res);
         if (!firstPid) firstPid = pid;
         hits++;
+    }
+    if (older) {
+        g_rivalEvictTick = now;
+        char lb[96];
+        sprintf(lb, "[wizbar] yielding this bar to the older follower on our terminal (pid %lu)",
+                (unsigned long)older);
+        writeLogA(lb);
+        // posted, never sent: this tick still owns g_bar, so the close has to
+        // land in the message loop after it
+        PostMessageW(g_bar, WM_CLOSE, 0, 0);
+        return 1;
     }
     if (hits) {
         char lb[96];
@@ -1554,6 +1574,7 @@ static void evictRivalBars(void) {
         writeLogA(lb);
         g_rivalEvictTick = now;
     }
+    return 0;
 }
 
 static void execCmd(const wchar_t *cmd) {
@@ -1624,7 +1645,7 @@ static void followTick(void) {
         if (g_owner) { SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, 0); g_owner = NULL; }
         return;
     }
-    evictRivalBars();
+    if (evictRivalBars()) return; // the older follower owns this terminal: we are closing
 
     // Own the bar by the terminal: an owned window rides in its owner's band,
     // stays out of the taskbar/Alt+Tab, and is hidden when the owner is
