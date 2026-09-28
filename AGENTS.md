@@ -518,15 +518,11 @@ an open door for browser tooling, so close it when done.
   `--remote-debugging-port` in a long-running instance. A stale instance also
   holds the single-instance lock, so a "relaunch" that silently quits is
   usually an old process still alive - kill the whole tree first.
-- Restore recipe if it ever happens again: with the port up,
-  `curl -s 127.0.0.1:9222/json/list`, find the target whose url is NOT
-  `file:///.../bar.html`, and `Page.navigate` it back to
-  `file:///C:/Users/tyanw/review/chocobar/renderer/bar.html`. Dependency-
-  free CDP client recipe: raw `net` + `crypto` websocket handshake
-  (Runtime.enable / Runtime.evaluate / Page.navigate). ALWAYS read the
-  webSocketDebuggerUrl from the LIVE /json/list - a hardcoded/stale page id
-  makes Page.navigate time out and reads as "the attack failed" when nothing
-  was ever tested.
+- The restore recipe is GONE with the tree it restored: the Electron renderer
+  it navigated back to no longer exists, and the native bar has no debug port
+  to leave open, so the whole hazard class died with the Electron tree. Read
+  the layers above as the history of why the native bar must never grow an
+  equivalent (no CDP, no remote debugging port, no web-content renderer).
 
 ## Perf invariants (do not reintroduce)
 
