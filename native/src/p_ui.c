@@ -1671,30 +1671,42 @@ static void followTick(void) {
     // beneath it ("opens behind the terminal"), and this bar - pinned right
     // after the terminal in z - is dragged up with it, burying unrelated
     // foreground apps (the zorder-watch.log Z-ANOMALY lines caught exactly
-    // that: fg=WhatsApp / explorer / HWiNFO blocked-by [Chocobar]). Demote at
-    // tick rate: a GetWindowLong probe is nanoseconds and heals the state
-    // faster than the external PowerShell guard could poll it, and the bar can
-    // then never ride the topmost band in the first place.
+    // that: fg=WhatsApp / explorer / HWiNFO blocked-by [Chocobar]). Probe at
+    // tick rate and demote on the first observation (a GetWindowLong is
+    // nanoseconds): the state heals faster than the external PowerShell guard
+    // could poll it, and the bar can then never ride the topmost band in the
+    // first place.
     static DWORD s_topmostFailTick = 0;
     if (GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST) {
-        // raise the foreground window FIRST: HWND_NOTOPMOST drops the terminal
-        // at the top of the normal band, which would bury whatever the user
-        // just activated under it (the external guard's FG-RAISE half)
-        HWND fg = GetForegroundWindow();
-        SetWindowPos(g_term, HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        if (fg && fg != g_term && fg != g_bar && IsWindowVisible(fg)
-            && !(GetWindowLongW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST))
-            SetWindowPos(fg, HWND_TOP, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        if (!(GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-            char lb[64];
-            sprintf(lb, "[wizbar] demoted the terminal out of a stuck TOPMOST band");
-            writeLogA(lb);
-        } else {
-            DWORD now = GetTickCount();
-            if (now - s_topmostFailTick >= 2000) {
-                s_topmostFailTick = now;
+        DWORD tickNow = GetTickCount();
+        // a demote that did not take is retried every 2s, never on every 100ms
+        // tick: two cross-process z mutations ten times a second is the very
+        // pathology the eviction throttle exists to stop
+        if (tickNow - s_topmostFailTick >= 2000) {
+            // raise the foreground window immediately AFTER the demote:
+            // HWND_TOP only raises within the non-topmost band, so raising it
+            // first would leave it buried under the terminal, which lands at
+            // the top of the normal band (the external guard's FG-RAISE half)
+            HWND fg = GetForegroundWindow();
+            // SetWindowPos delivers WM_WINDOWPOSCHANGING/CHANGED synchronously,
+            // so a target whose thread stopped pumping would block the follow
+            // tick and with it the metrics timer, tray and clicks
+            if (!IsHungAppWindow(g_term)) {
+                SetWindowPos(g_term, HWND_NOTOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if (fg && fg != g_term && fg != g_bar && IsWindowVisible(fg)
+                    && !(GetWindowLongW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST)
+                    && !IsHungAppWindow(fg))
+                    SetWindowPos(fg, HWND_TOP, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            if (!(GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+                s_topmostFailTick = 0; // a fresh arm is demoted at once
+                char lb[64];
+                sprintf(lb, "[wizbar] demoted the terminal out of a stuck TOPMOST band");
+                writeLogA(lb);
+            } else {
+                s_topmostFailTick = tickNow;
                 char lb[96];
                 snprintf(lb, sizeof(lb),
                          "[wizbar] could not demote the terminal out of the TOPMOST band (hung, blocked, or elevated)");
