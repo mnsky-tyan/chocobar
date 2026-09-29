@@ -1676,8 +1676,16 @@ static void followTick(void) {
     // faster than the external PowerShell guard could poll it, and the bar can
     // then never ride the topmost band in the first place.
     if (GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST) {
+        // raise the foreground window FIRST: HWND_NOTOPMOST drops the terminal
+        // at the top of the normal band, which would bury whatever the user
+        // just activated under it (the external guard's FG-RAISE half)
+        HWND fg = GetForegroundWindow();
         SetWindowPos(g_term, HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (fg && fg != g_term && fg != g_bar && IsWindowVisible(fg)
+            && !(GetWindowLongW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST))
+            SetWindowPos(fg, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         char lb[64];
         sprintf(lb, "[wizbar] demoted the terminal out of a stuck TOPMOST band");
         writeLogA(lb);
