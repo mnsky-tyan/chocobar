@@ -1533,6 +1533,7 @@ static void hideBar(void) {
 // where evict-each-other destroyed both windows and left the terminal with no
 // bar at all.
 static DWORD g_rivalEvictTick = 0;
+static int g_nonrudeSet = 0; // NonRudeHWND applied to the current g_term
 static int evictRivalBars(void) {
     if (!g_term) return 0;
     DWORD now = GetTickCount();
@@ -1662,11 +1663,37 @@ static void followTick(void) {
     }
     if (evictRivalBars()) return; // the older follower owns this terminal: we are closing
 
+    // Enforce the no-topmost contract on the followed terminal. The shell's
+    // stuck-topmost race (microsoft/terminal#16476 - it acquires and RETAINS
+    // HWND_TOPMOST around login, new-window churn and the Win+D repro; on this
+    // machine the always-topmost desktop mascot arms it permanently) drops the
+    // terminal into the TOPMOST band, whereupon every Win+N activation lands
+    // beneath it ("opens behind the terminal"), and this bar - pinned right
+    // after the terminal in z - is dragged up with it, burying unrelated
+    // foreground apps (the zorder-watch.log Z-ANOMALY lines caught exactly
+    // that: fg=WhatsApp / explorer / HWiNFO blocked-by [Chocobar]). Demote at
+    // tick rate: a GetWindowLong probe is nanoseconds and heals the state
+    // faster than the external PowerShell guard could poll it, and the bar can
+    // then never ride the topmost band in the first place.
+    if (GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST) {
+        SetWindowPos(g_term, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        char lb[64];
+        sprintf(lb, "[wizbar] demoted the terminal out of a stuck TOPMOST band");
+        writeLogA(lb);
+    }
+    // NonRudeHWND: the shell's fullscreen ("rude") detection treats a
+    // maximized terminal as a game, which suppresses the auto-hide taskbar
+    // reveal and flips do-not-disturb on. The property is the documented
+    // off-switch; set it once per terminal (WT never clears it).
+    if (!g_nonrudeSet && SetPropW(g_term, L"NonRudeHWND", (HANDLE)(INT_PTR)1)) g_nonrudeSet = 1;
+
     // Own the bar by the terminal: an owned window rides in its owner's band,
     // stays out of the taskbar/Alt+Tab, and is hidden when the owner is
     // minimized. Only re-parent on an actual change - it is an expensive
     // cross-process operation that also repositions in z.
     if (g_owner != g_term) {
+        g_nonrudeSet = 0; // new terminal: the property must be set on it too
         LONG_PTR prev = SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, (LONG_PTR)g_term);
         if (prev || GetLastError() == 0) g_owner = g_term; // a failed set leaves the old owner
     }
