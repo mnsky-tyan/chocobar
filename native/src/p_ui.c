@@ -1675,6 +1675,7 @@ static void followTick(void) {
     // tick rate: a GetWindowLong probe is nanoseconds and heals the state
     // faster than the external PowerShell guard could poll it, and the bar can
     // then never ride the topmost band in the first place.
+    static DWORD s_topmostFailTick = 0;
     if (GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST) {
         // raise the foreground window FIRST: HWND_NOTOPMOST drops the terminal
         // at the top of the normal band, which would bury whatever the user
@@ -1686,9 +1687,20 @@ static void followTick(void) {
             && !(GetWindowLongW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST))
             SetWindowPos(fg, HWND_TOP, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        char lb[64];
-        sprintf(lb, "[wizbar] demoted the terminal out of a stuck TOPMOST band");
-        writeLogA(lb);
+        if (!(GetWindowLongW(g_term, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+            char lb[64];
+            sprintf(lb, "[wizbar] demoted the terminal out of a stuck TOPMOST band");
+            writeLogA(lb);
+        } else {
+            DWORD now = GetTickCount();
+            if (now - s_topmostFailTick >= 2000) {
+                s_topmostFailTick = now;
+                char lb[96];
+                snprintf(lb, sizeof(lb),
+                         "[wizbar] could not demote the terminal out of the TOPMOST band (hung, blocked, or elevated)");
+                writeLogA(lb);
+            }
+        }
     }
     // NonRudeHWND: the shell's fullscreen ("rude") detection treats a
     // maximized terminal as a game, which suppresses the auto-hide taskbar
