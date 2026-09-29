@@ -1763,7 +1763,10 @@ static void followTick(void) {
     // on the unchanged fast path.
     int drifted = !g_haveTarget || memcmp(&target, &g_lastTarget, sizeof(RECT)) != 0 || !g_barVisible;
     if (!drifted) {
-        HWND below = GetWindow(g_bar, GW_HWNDPREV);
+        // GW_HWNDNEXT is directly BELOW the bar. PREV is above it, so
+        // comparing PREV with the owner re-inserts the pair every 100ms and
+        // can lift the terminal over a newly activated foreground window.
+        HWND below = GetWindow(g_bar, GW_HWNDNEXT);
         drifted = (below != g_term);
     }
     if (drifted) {
