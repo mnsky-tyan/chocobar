@@ -1717,7 +1717,8 @@ static void followTick(void) {
     // NonRudeHWND: the shell's fullscreen ("rude") detection treats a
     // maximized terminal as a game, which suppresses the auto-hide taskbar
     // reveal and flips do-not-disturb on. The property is the documented
-    // off-switch; set it once per terminal (WT never clears it).
+    // off-switch; WT never clears it, so the latch is what keeps that
+    // cross-process SetPropW off the follow tick.
     if (!g_nonrudeSet && SetPropW(g_term, L"NonRudeHWND", (HANDLE)(INT_PTR)1)) g_nonrudeSet = 1;
 
     // Own the bar by the terminal: an owned window rides in its owner's band,
@@ -1725,7 +1726,7 @@ static void followTick(void) {
     // minimized. Only re-parent on an actual change - it is an expensive
     // cross-process operation that also repositions in z.
     if (g_owner != g_term) {
-        g_nonrudeSet = 0; // new terminal: the property must be set on it too
+        g_nonrudeSet = 0; // the owner changed: re-arm the latch for the new terminal
         LONG_PTR prev = SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, (LONG_PTR)g_term);
         if (prev || GetLastError() == 0) g_owner = g_term; // a failed set leaves the old owner
     }
