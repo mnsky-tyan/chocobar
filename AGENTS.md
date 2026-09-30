@@ -295,6 +295,24 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
   array, so those three read nothing only because they carry no `sessionsDir`).
 
 
+## Tracing z-order failures passively (how the 2026-09-30 sink was proven)
+
+- When the captain reports "the focused window sinks behind the terminal / the
+  second window I minimize reveals the wrong stack", do not theorize: run a
+  PASSIVE WinEvent tracer (SetWinEventHook on EVENT_SYSTEM_FOREGROUND /
+  MINIMIZESTART / MINIMIZEEND / OBJECT_SHOW, out-of-context, plus a 100ms
+  GetTopWindow walk) built as a mingw C PE launched from WSL bash - a
+  WSL-launched PowerShell is desktop-blind and sees nothing. It must never
+  activate, move, raise, or minimize a window, and must log NO titles (pid/exe/
+  class/hwnd/rect/rank only). Sample rank from the z-walk directly: rank of the
+  foreground window vs rank of the followed terminal is the whole measurement.
+  The failure signature this found: foreground window at rank 36, bar 42,
+  NON-topmost terminal 43 - and 19ms later the SAME window still foreground at
+  rank 43 with the pair jumped above it. That pointed at the tick, not at a
+  shell race. Verify the fix the same way: count focused-window samples that sit
+  below the terminal (pre-fix 4/345, post-fix 0/679), then reap the tracer.
+
+
 ## Verifying the dashboards' z-order on the live box
 
 - `WindowFromPoint` and the `GW_HWNDPREV` walk both LIE when an unrelated window
