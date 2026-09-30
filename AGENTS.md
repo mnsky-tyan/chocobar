@@ -153,9 +153,9 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
   drift. The adjacency probe MUST use `GetWindow(g_bar, GW_HWNDNEXT) == g_term`:
   NEXT is immediately BELOW the bar; PREV is above it. Checking PREV made
   every 100ms tick reinsert the bar and its owner, lifting the terminal over
-  unrelated foreground windows (live trace: WhatsApp remained foreground but
-  dropped below the normal-band terminal 19ms after activation). A hidden bar
-  (terminal minimized) also explains "dead" hover - check IsWindowVisible first.
+  unrelated foreground windows (the rank trace that caught it: "Tracing
+  z-order failures passively" below). A hidden bar (terminal minimized) also
+  explains "dead" hover - check IsWindowVisible first.
 - Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
   pinkDeep), 24-unit paths flattened once, rendered with GDI+
   (SmoothingModeAntiAlias8x8, round caps/joins) into per-icon premultiplied
