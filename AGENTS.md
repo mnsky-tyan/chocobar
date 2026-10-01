@@ -153,9 +153,9 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
   drift. The adjacency probe MUST use `GetWindow(g_bar, GW_HWNDNEXT) == g_term`:
   NEXT is immediately BELOW the bar; PREV is above it. Checking PREV made
   every 100ms tick reinsert the bar and its owner, lifting the terminal over
-  unrelated foreground windows (live trace: WhatsApp remained foreground but
-  dropped below the normal-band terminal 19ms after activation). A hidden bar
-  (terminal minimized) also explains "dead" hover - check IsWindowVisible first.
+  unrelated foreground windows (the rank trace that caught it: "Tracing
+  z-order failures passively" below). A hidden bar (terminal minimized) also
+  explains "dead" hover - check IsWindowVisible first.
 - Icons (p_icons.c) = ONE stroke color each (theme.iconColor, default
   pinkDeep), 24-unit paths flattened once, rendered with GDI+
   (SmoothingModeAntiAlias8x8, round caps/joins) into per-icon premultiplied
@@ -293,6 +293,24 @@ shipped bar. It is kept as the provenance of the Linux measurements quoted in
   `tokens.showOnBar`, `tokens.heatmapWeeks`, and `tokens.sources.zcode` /
   `opencode` / `mimo` (the live scan walks every entry of the `tokens.sources[]`
   array, so those three read nothing only because they carry no `sessionsDir`).
+
+
+## Tracing z-order failures passively (how the 2026-09-30 sink was proven)
+
+- When the captain reports "the focused window sinks behind the terminal / the
+  second window I minimize reveals the wrong stack", do not theorize: run a
+  PASSIVE WinEvent tracer (SetWinEventHook on EVENT_SYSTEM_FOREGROUND /
+  MINIMIZESTART / MINIMIZEEND / OBJECT_SHOW, out-of-context, plus a 100ms
+  GetTopWindow walk) built as a mingw C PE launched from WSL bash - a
+  WSL-launched PowerShell is desktop-blind and sees nothing. It must never
+  activate, move, raise, or minimize a window, and must log NO titles (pid/exe/
+  class/hwnd/rect/rank only). Sample rank from the z-walk directly: rank of the
+  foreground window vs rank of the followed terminal is the whole measurement.
+  The failure signature this found: foreground window at rank 36, bar 42,
+  NON-topmost terminal 43 - and 19ms later the SAME window still foreground at
+  rank 43 with the pair jumped above it. That pointed at the tick, not at a
+  shell race. Verify the fix the same way: count focused-window samples that sit
+  below the terminal (pre-fix 4/345, post-fix 0/679), then reap the tracer.
 
 
 ## Verifying the dashboards' z-order on the live box
