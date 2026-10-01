@@ -49,10 +49,10 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 ## Sharp edges (learned the hard way - do not "simplify" these)
 
 - **Render path is GDI + UpdateLayeredWindow** (deliberate). The original
-  D2D-over-DComp-swapchain pipeline is dead on this machine: with
-  `D2D1_BITMAP_OPTIONS_TARGET` alone `CreateBitmapFromDxgiSurface` fails
-  E_INVALIDARG on EVERY frame; adding `CANNOT_DRAW` makes it "succeed" but
-  every EndDraw returns D2DERR_WRONG_STATE. Do not resurrect that design.
+  D2D-over-DComp-swapchain pipeline is dead: with `D2D1_BITMAP_OPTIONS_TARGET`
+  alone `CreateBitmapFromDxgiSurface` fails E_INVALIDARG on EVERY frame; adding
+  `CANNOT_DRAW` makes it "succeed" but every EndDraw returns
+  D2DERR_WRONG_STATE. Do not resurrect that design.
 - The window is `WS_EX_LAYERED`; content = a 32bpp top-down premultiplied
   DIB selected into a memory DC (tint at `backgroundAlpha`, chips drawn
   right-aligned with DrawTextW), handed to DWM via `UpdateLayeredWindow`
