@@ -209,7 +209,7 @@ static int initRender(HWND hwnd) {
 // is behind. Calling DwmExtendFrameIntoClientArea + DWMWA_SYSTEMBACKDROP_TYPE
 // here (the old tray-Reload path) made DWM composite its blurred backdrop
 // material behind the layered surface, which read as the tint going stale and
-// solid - the captain's "acrylic is gone after reload" report. backdrop=solid
+// solid - a "acrylic is gone after reload" bug report. backdrop=solid
 // is honoured where it belongs: in paint, via the opaque bgA.
 
 // --------------------------------------------------------- chip building ----
@@ -471,7 +471,7 @@ static int g_tokensTick = 0;
 #define DASH_MAX_MODELS 64
 #define DASH_MAX_DAYS 190
 // displayed by-model rows (Electron capped at 7; this store has 13 models and
-// the captain asked for the space to be used, so the table reaches further)
+// a request asked for the space to be used, so the table reaches further)
 #define DASH_MODEL_ROWS 13
 // token-cache record fields kept separately: the Electron dash shows the
 // input/output/cache R/cache W/calls table columns, not one lumped sum
@@ -1501,8 +1501,15 @@ static HWND findTerminalByProbe(void) {
         L"VirtualConsoleClass", L"mintty"
     };
     for (int i = 0; i < 4; i++) {
-        HWND h = FindWindowW(classes[i], NULL);
-        if (h && h != g_bar) return h;
+        HWND h = NULL;
+        for (;;) {
+            h = FindWindowExW(NULL, h, classes[i], NULL);
+            if (!h) break;
+            // isTerminalHwnd applies the configured title substring too - the
+            // generic path used to return the FIRST window of each class, so a
+            // terminal.title filter only ever took effect with a className
+            if (isTerminalHwnd(h)) return h;
+        }
     }
     return NULL;
 }
@@ -1520,9 +1527,9 @@ static void hideBar(void) {
 // fight forever: every follow tick each one re-inserts its bar against the
 // shared terminal. Measured 2026-09-28 (two test builds on one dev shell):
 // the window directly above the terminal alternated between the two pids on
-// consecutive samples, ~20 z-order mutations a second around the window the
-// captain is typing in - the same interleaving his z-order anomaly log caught
-// from chocobar + chocobar-v110. Evict with WM_CLOSE: no chocobar build
+// consecutive samples, ~20 z-order mutations a second around the window in
+// use - the same interleaving a z-order anomaly log caught from two bar
+// builds running at once. Evict with WM_CLOSE: no chocobar build
 // handles WM_CLOSE, so DefWindowProc destroys the window and WM_DESTROY posts
 // the quit. A sibling owned by a DIFFERENT terminal is left alone.
 //
@@ -1665,9 +1672,9 @@ static void followTick(void) {
 
     // Enforce the no-topmost contract on the followed terminal. The shell's
     // stuck-topmost race (microsoft/terminal#16476 - it acquires and RETAINS
-    // HWND_TOPMOST around login, new-window churn and the Win+D repro; on this
-    // machine the always-topmost desktop mascot arms it permanently) drops the
-    // terminal into the TOPMOST band, whereupon every Win+N activation lands
+    // HWND_TOPMOST around login, new-window churn and the Win+D repro; any
+    // permanently-always-on-top window on the desktop arms it continuously)
+    // drops the terminal into the TOPMOST band, whereupon every Win+N activation lands
     // beneath it ("opens behind the terminal"), and this bar - pinned right
     // after the terminal in z - is dragged up with it, burying unrelated
     // foreground apps (the zorder-watch.log Z-ANOMALY lines caught exactly
@@ -2800,7 +2807,7 @@ static void paintDash(HWND hwnd) {
                 // ink ~11 CSS px below the draw origin, so the old fixed
                 // offsets (15/11/6) left the number 3.5 CSS px low and the
                 // caption dragged the pair lower still (measured +6.5 CSS off
-                // centre in the captain's screenshot)
+                // centre in a screenshot)
                 dashStr(dc, cx0, cyc - DX(18.5), pctS, t.pinkDeep, fPct);
                 if (!unk) dashStr(dc, cx0 + nw + DX(1), cyc - DX(14.5), L"%", t.pinkDeep, fS10);
                 dashStr(dc, kx + (pieD - dashStrW(dc, L"left", fS9)) / 2, cyc + DX(2.5), L"left", t.dim, fS9);
@@ -3106,7 +3113,7 @@ static void dashToggle(int type) {
         if (th2 > dashMaxH()) th2 = dashMaxH();
         // HWND_TOP raises the board above the terminal and every other normal
         // window; SWP_NOACTIVATE keeps the keyboard with the terminal. Both are
-        // needed - SetForegroundWindow alone stole the captain's keystrokes,
+        // needed - SetForegroundWindow alone stole the user's keystrokes,
         // and SW_SHOWNA alone left the board sunk behind his windows.
         SetWindowPos(g_dash, HWND_TOP, (tsw - tw) / 2, (dashMaxH() + 40 - th2) / 2, tw, th2, SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
@@ -3128,17 +3135,17 @@ static void dashToggle(int type) {
     RegisterClassW(&wc);
     g_dashType = type;
     // TOOLWINDOW: the dashboard must NOT put a button in the taskbar (the
-    // captain's ask - the blank default icon there read as a second app).
+    // design request - the blank default icon there read as a second app).
     // Tool windows still take the foreground normally, so clicking the board
     // keeps working; it just stays out of the taskbar and Alt-Tab.
     // WS_VISIBLE is deliberately absent: the first paint (and the content-fit
     // resize it triggers) happens while the window is still hidden, so the
-    // captain sees ONE window at its final size instead of a board that grows
+    // user sees ONE window at its final size instead of a board that grows
     // into place.
     // OWNED by the bar (the bar is itself owned by the followed terminal), with
     // NO WS_EX_TOOLWINDOW. Two reasons, both load-bearing:
     //   1. An owned popup never gets a taskbar button or an Alt-Tab entry - the
-    //      captain's ask - so hiding the taskbar icon no longer costs anything.
+    //      design request - so hiding the taskbar icon no longer costs anything.
     //   2. WS_EX_TOOLWINDOW made Windows SKIP this window when choosing the next
     //      window to activate: the moment the window above the board was
     //      minimized or closed, activation fell through to the terminal and
@@ -3157,10 +3164,10 @@ static void dashToggle(int type) {
     InvalidateRect(g_dash, NULL, FALSE);
     UpdateWindow(g_dash); // forces the WM_PAINT -> paint + fit, off screen
     // Raise the board to the top of the z-order WITHOUT activating it.
-    // HWND_TOP lifts it above the terminal and every other normal window (the
-    // captain's "it sinks behind my windows"), while SWP_NOACTIVATE keeps the
-    // keyboard where he was typing - the old SetForegroundWindow here made his
-    // next keystrokes (" like") land on the dashboard instead of his editor.
+    // HWND_TOP lifts it above the terminal and every other normal window (an
+    // "it sinks behind my windows" bug report), while SWP_NOACTIVATE keeps the
+    // keyboard where the user was typing - the old SetForegroundWindow here
+    // made the next keystrokes land on the dashboard instead of the editor.
     // The bar stays topmost and above the board; a click on the board still
     // activates it (the buttons and title-drag need that), and Esc closes it.
     SetWindowPos(g_dash, HWND_TOP, 0, 0, 0, 0,
@@ -3444,8 +3451,8 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
     if (k >= wn) k = 0;
     int rem = w[k].rem;
     // The chip stays a percentage (it is a meter); the absolute credit
-    // count belongs on the board rows and in this tooltip, which is where the
-    // captain asked to see it.
+    // count belongs on the board rows and in this tooltip, which is the
+    // requested home for it.
     int hasNum = (w[k].used >= 0 && w[k].total > 0);
     long long left = hasNum ? ((long long)w[k].total - w[k].used) : 0;
     if (left < 0) left = 0;
@@ -3513,7 +3520,7 @@ static void autoStartSet(int on) {
 
 // Menu width: the widest row label + padding + room for the autostart check
 // at the RIGHT edge. A fixed DX(210) left the drawer wider than its content
-// (the captain's "a little bit too big"); this tracks the labels instead.
+// (a "a little bit too big" report); this tracks the labels instead.
 static int menuWidthPx(void) {
     static int cached = 0;
     static double cachedScale = 0;
@@ -4078,9 +4085,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
 
     // NO WS_EX_TOOLWINDOW and NO WS_EX_TOPMOST. A tool window sits in a
     // band above ordinary windows, so it would keep floating over unrelated
-    // windows no matter where SetWindowPos put it (the captain's screenshot
-    // showed the bar painted across a Brave window while its terminal sat
-    // behind it). Making the bar an OWNED window of the terminal instead keeps
+    // windows no matter where SetWindowPos put it (a user screenshot showed
+    // the bar painted across a browser window while its terminal sat behind
+    // it). Making the bar an OWNED window of the terminal instead keeps
     // it out of the taskbar/Alt+Tab and pins it in the terminal's own band.
     g_bar = CreateWindowExW(
         WS_EX_NOACTIVATE | WS_EX_LAYERED,

@@ -302,8 +302,8 @@ static SvgFlat g_flat[SVG_COUNT][SVG_MAXPARTS];
 static int g_flatN[SVG_COUNT];
 
 // ---- config-defined icons -------------------------------------------------
-// The bar's own icons are a static table, but the captain wants NEW icons from
-// the config (the buttons he can add by name). A user icon keeps the same
+// The bar's own icons are a static table, but NEW icons are wanted from the
+// config (the buttons a user can add by name). A user icon keeps the same
 // flattened-path representation, so it renders through the identical GDI+ AA
 // path and the same per-icon DIB cache - only the id is shifted past SVG_COUNT.
 #define SVG_USER_MAX 16

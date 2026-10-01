@@ -2,8 +2,8 @@
 //
 // WHY: the bar used to read ONLY the Electron app's ~/.wizbar/token-cache.json.
 // With the Electron bar gone nothing rewrites that file, so every number
-// froze at the moment it died (the captain's "token dashboard is stale, still
-// 0" - the cache's last record was 2h old and local midnight had rolled over).
+// froze at the moment it died (a "token dashboard is stale, still 0" report -
+// the cache's last record was 2h old and local midnight had rolled over).
 //
 // This file reads whatever session stores the user declares in
 // tokens.sources[] - any harness that logs per-message usage as JSONL, with the
@@ -101,7 +101,7 @@ static void tokPendPush(const char *app, int alen, long long ts,
 static void tokPendClear(void) { g_tokPendN = 0; }
 
 // The arena only ever grows, and a cold seed re-read sizes it for every record
-// the Electron cache holds (10k+ on the captain's box). Hand it back once a
+// the Electron cache holds (10k+ on a large store). Hand it back once a
 // scan used a small fraction of that, so the bar's RSS tracks the warm steady
 // state instead of the one-time peak.
 static void tokPendShrink(void) {
