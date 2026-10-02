@@ -22,7 +22,7 @@ static char *readFileUtf8(const wchar_t *path, int *outLen) {
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
     if (!buf) { CloseHandle(h); return NULL; }
     DWORD got = 0;
-    BOOL ok = ReadFile(h, buf, size, &got, NULL);
+    BOOL ok = ReadFile(h, buf, size, &got, NULL) && got == size;
     CloseHandle(h);
     if (!ok) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
     buf[got] = 0;
