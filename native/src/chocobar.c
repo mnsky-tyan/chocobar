@@ -675,7 +675,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     lstrcpynW(c->heatmap[0], L"#F1ECD8", 12); lstrcpynW(c->heatmap[1], L"#F6D8E0", 12);
     lstrcpynW(c->heatmap[2], L"#EFB7C7", 12); lstrcpynW(c->heatmap[3], L"#E28FB0", 12);
     lstrcpynW(c->heatmap[4], L"#C95E8F", 12);
-    // sized to the captain's 1440x900 CSS desktop: wide enough that the two
+    // sized to a 1440x900 CSS desktop: wide enough that the two
     // tables are not squeezed into half-width columns, tall enough that the
     // content-fit never has to grow it past the screen
     c->dashW = 900; c->dashH = 520; c->subsW = 880; c->subsH = 580;

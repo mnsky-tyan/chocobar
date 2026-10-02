@@ -683,7 +683,7 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
 
 // Best-effort persist of a rotated token into the pi auth store. Targeted
 // text surgery inside the "antigravity" object only - any doubt aborts the
-// write (a corrupted auth.json would break the captain's tooling).
+// write (a corrupted auth.json would break the user's tooling).
 static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wchar_t *refresh,
                             long long expiresMs) {
     if (!path || !*path) return;
@@ -1572,8 +1572,8 @@ static volatile unsigned long long g_subsFetchedTick = 0; // cycle end (GetTickC
 static volatile long long g_subsFetchedEpoch = 0;
 
 // Local wall clock in the frame dashFmtTime renders (it reinterprets its input
-// as UTC), so the board footer shows the captain's local time. subsNowMs() is a
-// TRUE UTC epoch and would print UTC - 8 hours off in HKT.
+// as UTC), so the board footer shows the user's local time. subsNowMs() is a
+// TRUE UTC epoch and would print UTC - hours off in a UTC+8 timezone.
 static long long subsLocalStampMs(void) {
     SYSTEMTIME now; GetLocalTime(&now);
     FILETIME ft;
@@ -1627,8 +1627,8 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             // Fan the enabled providers out over their own threads. Every fetch
             // is independent (each writes only its own slot through the locked
             // setters), so the wall time of a cycle drops from the SUM of the
-            // providers to the slowest one - 5.9s -> 2.6s for the captain's
-            // three providers at this step alone. The whole cycle measured
+            // providers to the slowest one - 5.9s -> 2.6s for three
+            // providers at this step alone. The whole cycle measured
             // 1.9s once the antigravity model calls and loadCodeAssist
             // overlapped those fetches too (the perf commit, 3c533f2).
             HANDLE th[MAX_SUBS]; SubsJob jobs[MAX_SUBS]; int nth = 0;

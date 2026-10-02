@@ -235,7 +235,7 @@ Each provider entry:
 |---|---|---|
 | `dashboard.width` / `dashboard.height` | `900` / `520` | Token dashboard window size. |
 | `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, and mintty by class, in that order. |
-| `terminal.title` | `""` | Optional title substring to disambiguate. |
+| `terminal.title` | `""` | Optional title substring a followed window must contain (case-insensitive). Empty = any window of a probed class qualifies. |
 | `general.showTray` | `true` | Show the tray icon. |
 | `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. |
 | `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`. |
@@ -340,7 +340,7 @@ Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[
 - Click the diamond (tokens) chip for the dashboard, the gauge (subscription) chip for the plan board.
 - Right-click the bar or tray icon for dashboards, reload, config, and quit actions; the menu closes on an outside click or Esc.
 - The clock format supports `{Wkk}` (weekday, `Mon`..`Sun`), for example `{MMM} {dd} ({Wkk}) {HH}:{mm}` renders `Sep 17 (Thu) 23:33` in local time.
-- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the first match in probe order. With the default empty `terminal.className`, it probes common terminals in documented order. Following is sticky - the bar keeps one terminal until it closes, then re-probes (foreground terminal first). Chocobar runs as a single instance, so launching it a second time does nothing; use the tray menu or a chip click instead.
+- The bar follows the terminal you are in: the foreground window wins when it is a supported terminal, otherwise the probe walks the documented class list in order and returns the first window that also passes the `terminal.title` filter. Following is sticky - the bar keeps one terminal until it closes, then re-probes (foreground terminal first). Chocobar runs as a single instance, so launching it a second time does nothing; use the tray menu or a chip click instead.
 - If there is no room above a terminal, the bar hides until room returns instead of relocating unexpectedly.
 - Launch with a specific config file: `chocobar --config <path>` (or the `WIZBAR_CONFIG` environment variable). The file gets the annotated template on first use, so personal wiring stays in personal files while a fresh install just works.
 
@@ -373,5 +373,5 @@ native/src/p_tokens.c   live session-log scan and byte cursors
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-scripts/                launchers, icon tooling, and the regression suite
+scripts/                icon tooling and the regression suite
 ```
