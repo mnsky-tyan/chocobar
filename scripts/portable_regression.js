@@ -28,7 +28,13 @@ function check(name, ok, detail) {
   const m = c.match(/static const char \*g_template =([\s\S]*?);\n/);
   const decode = (body) => (body.match(/"((?:[^"\\]|\\.)*)"/g) || [])
     .map((s) => s.slice(1, -1))
-    .map((s) => s.replace(/\\(.)/g, (_m, ch) => ({ n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' }[ch] || ch)))
+    .map((s) => s.replace(/\\(.)/g, (_m, ch) => {
+      // fail loudly: a mishandled escape would let the neutrality checks pass
+      // against mangled text instead of the shipped template
+      const map = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' }[ch];
+      if (map === undefined) throw new Error('unsupported escape \\' + ch + ' in g_template - teach decode() about it');
+      return map;
+    }))
     .join('');
   const stripComments = (s) => {
     let out = '', inStr = false;

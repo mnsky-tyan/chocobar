@@ -5,8 +5,7 @@ removed from the repository, so this is no longer a "rewrite" alongside it.
 One C translation unit, no runtime dependencies beyond Windows itself. It reads
 the config file the retired Electron build used (`--config <path>`,
 `WIZBAR_CONFIG`, or `%USERPROFILE%\.wizbar\config.json`); keys it does not
-implement are ignored. Launch it with the personal config (`runbar.ps1` passes
-it).
+implement are ignored.
 
 ## Status
 
@@ -49,17 +48,19 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 ## Sharp edges (learned the hard way - do not "simplify" these)
 
 - **Render path is GDI + UpdateLayeredWindow** (deliberate). The original
-  D2D-over-DComp-swapchain pipeline is dead: with `D2D1_BITMAP_OPTIONS_TARGET`
-  alone `CreateBitmapFromDxgiSurface` fails E_INVALIDARG on EVERY frame; adding
-  `CANNOT_DRAW` makes it "succeed" but every EndDraw returns
-  D2DERR_WRONG_STATE. Do not resurrect that design.
+  D2D-over-DComp-swapchain pipeline is dead and removed: with
+  `D2D1_BITMAP_OPTIONS_TARGET` alone `CreateBitmapFromDxgiSurface` fails
+  E_INVALIDARG on EVERY frame; adding `CANNOT_DRAW` makes it "succeed" but every
+  EndDraw returns D2DERR_WRONG_STATE. Do not resurrect that design - its
+  hand-declared COM vtables, the d2d1/d3d11/dxgi/dwrite includes and the
+  matching `-l` flags are gone, so a revival has to re-add all of them.
 - The window is `WS_EX_LAYERED`; content = a 32bpp top-down premultiplied
   DIB selected into a memory DC (tint at `backgroundAlpha`, chips drawn
   right-aligned with DrawTextW), handed to DWM via `UpdateLayeredWindow`
   (`AC_SRC_ALPHA`). DWM backdrop attributes are ignored on layered
   windows - the tint alpha itself provides the translucency.
 - **Layered windows never receive WM_PAINT.** The first frame must be
-  drawn explicitly (`paint(g_bar)` in wWinMain after `initRender`);
+  drawn explicitly (`repaintBar(g_bar)` in wWinMain after `initRender`);
   otherwise the bar stays invisible forever.
 - The bar FOLLOWS the terminal, so screen captures at probed coordinates
   race the follow loop (stale rect = black/empty screenshots). The bar itself

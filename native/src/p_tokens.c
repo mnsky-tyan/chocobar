@@ -28,7 +28,7 @@
 // helpers that live in the later parts of the assembled translation unit
 // (aggRecord and dashMidnightMs are p_ui.c's: the drain owns the aggregates)
 static long long parseLL(const char *p, const char *end);
-static char *readFileUtf8(const wchar_t *path, DWORD *outLen);
+static char *readFileUtf8(const wchar_t *path, int *outLen);
 static void stripLineComments(char *s);
 static int jtokSpan(const jsmntok_t *t, int i);
 static void writeLogA(const char *s);
@@ -275,11 +275,11 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
 // cfg is the caller's pinned generation: this also runs on the scan worker.
 static void tokCursorLoad(const Config *cfg) {
     g_tokCursorN = 0;
-    DWORD len = 0;
+    int len = 0;
     char *raw = readFileUtf8(g_tokCursorPath, &len);
     if (cfg->debug) {
         char lb[200];
-        sprintf(lb, "[wizbar] tokCursorLoad: file=%s len=%lu", raw ? "ok" : "missing", (unsigned long)len);
+        sprintf(lb, "[wizbar] tokCursorLoad: file=%s len=%d", raw ? "ok" : "missing", len);
         writeLogA(lb);
     }
     if (!raw) return;
@@ -314,24 +314,15 @@ static void tokCursorLoad(const Config *cfg) {
     HeapFree(GetProcessHeap(), 0, raw);
 }
 
-// JSON number token -> long long (jsmn primitives are strings in the buffer)
+// JSON number token -> long long (jsmn primitives are strings in the buffer).
+// The key lookup is jobjGet's job - it already walks the same key/value pairs.
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def) {
-    if (parent < 0 || t[parent].type != JSMN_OBJECT) return def;
-    int cnt = t[parent].size;
-    int k = parent + 1;
-    int kl = (int)strlen(key);
-    for (int i = 0; i < cnt; i++) {
-        if (t[k].type == JSMN_STRING && t[k].end - t[k].start == kl
-            && memcmp(js + t[k].start, key, kl) == 0) {
-            if (t[k + 1].type == JSMN_PRIMITIVE) {
-                char b[32]; int l = t[k + 1].end - t[k + 1].start;
-                if (l > 0 && l < 31) { memcpy(b, js + t[k + 1].start, l); b[l] = 0; return _atoi64(b); }
-            }
-            return def;
-        }
-        k += 1 + jtokSpan(t, k + 1);
-    }
-    return def;
+    int k = jobjGet(js, t, parent, key);
+    if (k < 0 || t[k].type != JSMN_PRIMITIVE) return def;
+    char b[32]; int l = t[k].end - t[k].start;
+    if (l <= 0 || l >= (int)sizeof(b)) return def;
+    memcpy(b, js + t[k].start, l); b[l] = 0;
+    return _atoi64(b);
 }
 
 static void tokCursorSave(void) {
@@ -393,7 +384,7 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         swprintf(full, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
         // mtime+size come straight from the directory enumeration: a separate
         // GetFileAttributesExW per file is another WSL-redirector round trip
-        long long mt = ((long long)fd.ftLastWriteTime.dwHighDateTime << 32 | fd.ftLastWriteTime.dwLowDateTime) / 10000 - 11644473600000LL;
+        long long mt = fileTimeToUnixMs(&fd.ftLastWriteTime);
         long long fsz = (long long)fd.nFileSizeLow + ((long long)fd.nFileSizeHigh << 32);
         if (mt && g_cacheMtimeMs && mt <= g_cacheMtimeMs) continue; // the Electron cache already covers it
         char pathA[520];
