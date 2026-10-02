@@ -64,20 +64,6 @@ static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
     }
 }
 
-static char *subsReadFileUtf8(const wchar_t *path, int *outLen) {
-    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return NULL;
-    DWORD size = GetFileSize(h, NULL), got = 0;
-    if (size == INVALID_FILE_SIZE || !size || size > 32 * 1024 * 1024) { CloseHandle(h); return NULL; }
-    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
-    if (!buf) { CloseHandle(h); return NULL; }
-    BOOL ok = ReadFile(h, buf, size, &got, NULL) && got == size;
-    CloseHandle(h);
-    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
-    buf[got] = 0;
-    *outLen = (int)got;
-    return buf;
-}
 
 // jsmn helper: string value of obj[key] as wide (caller frees), NULL if absent
 static wchar_t *subsJstr(const char *js, jsmntok_t *t, int obj, const char *key) {
@@ -112,7 +98,7 @@ static wchar_t *subsChatgptToken(const Config *cfg, int idx) {
     if (!rawAuth) rawAuth = L"~/.codex/auth.json";
     subsPathExpand(rawAuth, path, MAX_PATH);
     int len = 0;
-    char *buf = subsReadFileUtf8(path, &len);
+    char *buf = readFileUtf8(path, &len);
 
     wchar_t *tok = NULL;
     jsmntok_t t[256];
@@ -144,7 +130,7 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
     if (!rawCfg) rawCfg = L"~/.zcode/v2/config.json";
     subsPathExpand(rawCfg, path, MAX_PATH);
     int len = 0;
-    char *buf = subsReadFileUtf8(path, &len);
+    char *buf = readFileUtf8(path, &len);
 
     wchar_t *key = NULL;
     jsmntok_t t[512];
@@ -192,7 +178,7 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
             *slash = 0;
             swprintf(tpath, MAX_PATH * 2, L"%ls\\telemetry-state.json", dir);
             int tl = 0;
-            char *tb = subsReadFileUtf8(tpath, &tl);
+            char *tb = readFileUtf8(tpath, &tl);
             if (tb) {
                 jsmntok_t tt[128];
                 jsmn_parser tp2;
@@ -207,14 +193,19 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
     return key;
 }
 
-// ---- HTTP GET via WinHTTP ---------------------------------------------------
-static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, int port,
-                         const wchar_t *path, const wchar_t *headers,
-                         int insecure, int timeoutMs, int *outStatus, int *outLen) {
+// ---- HTTP via WinHTTP -------------------------------------------------------
+// One client for both verbs: the GET and POST paths had drifted into two
+// near-identical copies (proxy fallback, timeouts, TLS flag, status read,
+// grow-on-demand body loop), so anything fixed in one had to be remembered in
+// the other. The verb and the request body are the only real differences.
+static char *subsHttpRequest(const wchar_t *verb, const char *tag, const wchar_t *ua,
+                             const wchar_t *host, int port, const wchar_t *path,
+                             const wchar_t *headers, const char *body, int bodyLen,
+                             int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
     HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!ses) { writeLogA("subs: open failed"); return NULL; }
+    if (!ses) { writeLogA("[wizbar] subs: open failed"); return NULL; }
     char *result = NULL;
     HINTERNET con = NULL, req = NULL;
     do {
@@ -222,40 +213,43 @@ static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host
         con = WinHttpConnect(ses, host, port ? (INTERNET_PORT)port
                                                     : (insecure ? INTERNET_DEFAULT_HTTP_PORT
                                                                 : INTERNET_DEFAULT_HTTPS_PORT), 0);
-        if (!con) { writeLogA("subs: connect failed"); break; }
-        req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER,
+        if (!con) { writeLogA("[wizbar] subs: connect failed"); break; }
+        req = WinHttpOpenRequest(con, verb, path, NULL, WINHTTP_NO_REFERER,
                                  WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
         if (!req) break;
         if (headers && *headers) {
             WinHttpAddRequestHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
         }
-        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            char dbg[80];
-            sprintf(dbg, "subs %s: send err %lu", tag, GetLastError());
+        DWORD total = body && bodyLen > 0 ? (DWORD)bodyLen : 0;
+        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                (LPVOID)(total ? body : WINHTTP_NO_REQUEST_DATA),
+                                total, total, 0)) {
+            char dbg[96];
+            sprintf(dbg, "[wizbar] subs %s: send err %lu", tag, GetLastError());
             writeLogA(dbg);
             break;
         }
         if (!WinHttpReceiveResponse(req, NULL)) {
-            char dbg[80];
-            sprintf(dbg, "subs %s: recv err %lu", tag, GetLastError());
+            char dbg[96];
+            sprintf(dbg, "[wizbar] subs %s: recv err %lu", tag, GetLastError());
             writeLogA(dbg);
             break;
         }
         DWORD status = 0, sz = sizeof(status);
         WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
         *outStatus = (int)status;
-        int cap = 32 * 1024, len = 0;
+        int cap = 64 * 1024, len = 0;
         result = (char *)HeapAlloc(GetProcessHeap(), 0, cap);
         if (!result) break;
         for (;;) {
             DWORD rd = 0;
-            if (len + 4096 > cap) {
+            if (len + 8192 > cap) {
                 int ncap = cap * 2;
                 char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, result, ncap);
                 if (!nb) break;
                 result = nb; cap = ncap;
             }
-            if (!WinHttpReadData(req, result + len, 4096, &rd)) break;
+            if (!WinHttpReadData(req, result + len, 8192, &rd)) break;
             if (!rd) break;
             len += (int)rd;
         }
@@ -266,6 +260,20 @@ static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host
     if (con) WinHttpCloseHandle(con);
     if (ses) WinHttpCloseHandle(ses);
     return result;
+}
+
+static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, int port,
+                         const wchar_t *path, const wchar_t *headers,
+                         int insecure, int timeoutMs, int *outStatus, int *outLen) {
+    return subsHttpRequest(L"GET", tag, ua, host, port, path, headers, NULL, 0,
+                           insecure, timeoutMs, outStatus, outLen);
+}
+
+static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *host, int port, const wchar_t *path,
+                          const wchar_t *headers, const char *body, int bodyLen,
+                          int insecure, int timeoutMs, int *outStatus, int *outLen) {
+    return subsHttpRequest(L"POST", tag, ua, host, port, path, headers, body, bodyLen,
+                           insecure, timeoutMs, outStatus, outLen);
 }
 
 static double subsJdouble(const char *js, jsmntok_t *t, int obj, const char *key, double dflt) {
@@ -319,7 +327,7 @@ static void subsSetPlan(int idx, const wchar_t *plan) {
 
 static int subsFetchChatgpt(const Config *cfg, int idx) {
     wchar_t *tok = subsChatgptToken(cfg, idx);
-    if (!tok) { writeLogA("subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(idx, 0, 0); return 0; }
+    if (!tok) { writeLogA("[wizbar] subs chatgpt: no auth token (open Codex once to refresh login)"); subsSetState(idx, 0, 0); return 0; }
     // access_token is a multi-KB JWT: build the header block at its full size
     int need = 32 + lstrlenW(tok) + 64;
     wchar_t *hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, need * sizeof(wchar_t));
@@ -357,7 +365,6 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
                 double used = subsJdouble(body, t, w, "used_percent", -1);
                 if (used < 0) continue;
                 if (used > 100) used = 100;
-                if (used < 0) used = 0;
                 lo = found ? (100 - used < lo ? 100 - used : lo) : (100 - used);
                 found = 1;
                 memset(&wins[nwin], 0, sizeof(SubsWin));
@@ -418,7 +425,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
                   subsJint(body, t, 0, "success", 1) != 0;
     if (status != 200 || !okShape) {
         char dbg[64];
-        sprintf(dbg, "subs zai: reject code=%d", code);
+        sprintf(dbg, "[wizbar] subs zai: reject code=%d", code);
         writeLogA(dbg);
         HeapFree(GetProcessHeap(), 0, body);
         subsSetState(idx, 0, 0);
@@ -493,14 +500,11 @@ static int subsFetchZai(const Config *cfg, int idx) {
 #define AGY_UA            L"antigravity/1.15.8 windows/amd64"
 #define AGY_REFRESH_MARGIN_MS (5 * 60 * 1000)
 
-// current wall clock in epoch ms (FILETIME = 100ns ticks since 1601-01-01)
+// current wall clock in epoch ms
 static long long subsNowMs(void) {
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
-    ULARGE_INTEGER u;
-    u.LowPart = ft.dwLowDateTime;
-    u.HighPart = ft.dwHighDateTime;
-    return (long long)(u.QuadPart / 10000ull) - 11644473600000ll;
+    return fileTimeToUnixMs(&ft);
 }
 
 // ISO-8601 "YYYY-MM-DDTHH:MM:SSZ" -> epoch ms (0 when unparseable).
@@ -525,71 +529,6 @@ static long long subsIsoToMs(const char *s, int len) {
     long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     long long days = era * 146097 + doe - 719468;
     return ((days * 86400 + h * 3600 + mi * 60 + se) * 1000ll);
-}
-
-// POST via WinHTTP (the GET helper above is GET-only); returns the body.
-static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *host, int port, const wchar_t *path,
-                          const wchar_t *headers, const char *body, int bodyLen,
-                          int insecure, int timeoutMs, int *outStatus, int *outLen) {
-    *outStatus = 0; *outLen = 0;
-    HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
-    if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!ses) { writeLogA("subs agy: open failed"); return NULL; }
-    char *result = NULL;
-    HINTERNET con = NULL, req = NULL;
-    do {
-        WinHttpSetTimeouts(ses, 5000, timeoutMs, 5000, timeoutMs);
-        con = WinHttpConnect(ses, host, port ? (INTERNET_PORT)port
-                                                    : (insecure ? INTERNET_DEFAULT_HTTP_PORT
-                                                                : INTERNET_DEFAULT_HTTPS_PORT), 0);
-        if (!con) { writeLogA("subs agy: connect failed"); break; }
-        req = WinHttpOpenRequest(con, L"POST", path, NULL, WINHTTP_NO_REFERER,
-                                 WINHTTP_DEFAULT_ACCEPT_TYPES, insecure ? 0 : WINHTTP_FLAG_SECURE);
-        if (!req) break;
-        if (headers && *headers) {
-            WinHttpAddRequestHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
-        }
-        DWORD total = body && bodyLen > 0 ? (DWORD)bodyLen : 0;
-        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                (LPVOID)(body && bodyLen > 0 ? body : WINHTTP_NO_REQUEST_DATA),
-                                total, total, 0)) {
-            char dbg[80];
-            sprintf(dbg, "subs agy %s: send err %lu", tag, GetLastError());
-            writeLogA(dbg);
-            break;
-        }
-        if (!WinHttpReceiveResponse(req, NULL)) {
-            char dbg[80];
-            sprintf(dbg, "subs agy %s: recv err %lu", tag, GetLastError());
-            writeLogA(dbg);
-            break;
-        }
-        DWORD status = 0, sz = sizeof(status);
-        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
-        *outStatus = (int)status;
-        int cap = 64 * 1024, len = 0;
-        result = (char *)HeapAlloc(GetProcessHeap(), 0, cap);
-        if (!result) break;
-        for (;;) {
-            DWORD rd = 0;
-            if (len + 8192 > cap) {
-                int ncap = cap * 2;
-                char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, result, ncap);
-                if (!nb) break;
-                result = nb; cap = ncap;
-            }
-            if (!WinHttpReadData(req, result + len, 8192, &rd)) break;
-            if (!rd) break;
-            len += (int)rd;
-        }
-        result[len] = 0;
-        *outLen = len;
-    } while (0);
-    if (req) WinHttpCloseHandle(req);
-    if (con) WinHttpCloseHandle(con);
-    if (ses) WinHttpCloseHandle(ses);
-    return result;
 }
 
 // Parse a possibly large JSON body (the models response is ~150KB): grow the
@@ -626,7 +565,7 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
     if (!raw) raw = L"~/.pi/agent/auth.json";
     subsPathExpand(raw, authPathOut, cch);
     int len = 0;
-    char *buf = subsReadFileUtf8(authPathOut, &len);
+    char *buf = readFileUtf8(authPathOut, &len);
     if (buf) {
         jsmntok_t t[512];
         jsmn_parser p;
@@ -656,7 +595,7 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
         wchar_t vpath[MAX_PATH];
         subsPathExpand(vraw, vpath, MAX_PATH);
         int vl = 0;
-        char *vb = subsReadFileUtf8(vpath, &vl);
+        char *vb = readFileUtf8(vpath, &vl);
         if (vb) {
             const char *needle = "\"apiKey\":\"";
             int nl = 10;
@@ -688,7 +627,7 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
                             long long expiresMs) {
     if (!path || !*path) return;
     int len = 0;
-    char *buf = subsReadFileUtf8(path, &len);
+    char *buf = readFileUtf8(path, &len);
     if (!buf) return;
     // locate the top-level "antigravity" key, then its object span
     const char *key = "\"antigravity\"";
@@ -795,15 +734,15 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
         // with a truncated file.
         if (wrote && wr == (DWORD)o) {
             if (!MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
-                writeLogA("subs agy: auth token write-back failed (store locked or read-only)");
+                writeLogA("[wizbar] subs agy: auth token write-back failed (store locked or read-only)");
                 DeleteFileW(tmp);
             }
         } else {
-            writeLogA("subs agy: auth temp file write incomplete");
+            writeLogA("[wizbar] subs agy: auth temp file write incomplete");
             DeleteFileW(tmp);
         }
     } else {
-        writeLogA("subs agy: auth temp file could not be created");
+        writeLogA("[wizbar] subs agy: auth temp file could not be created");
         DeleteFileW(tmp);
     }
     HeapFree(GetProcessHeap(), 0, out);
@@ -813,7 +752,7 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
 // Refresh the access token; 1 = ok (token + refresh + expiry in out)
 static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *clientSecret) {
     if (!clientId || !*clientId || !clientSecret || !*clientSecret) {
-        writeLogA("subs agy: no OAuth pair in config (cannot refresh the access token)");
+        writeLogA("[wizbar] subs agy: no OAuth pair in config (cannot refresh the access token)");
         return 0;
     }
     char cid[256], cs[256];
@@ -829,7 +768,7 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
                               L"Content-Type: application/json", body, bl, 0, 20000, &status, &len);
     if (!resp || (status != 200 && status != 207)) {
         char dbg[64];
-        sprintf(dbg, "subs agy: token refresh HTTP %d", status);
+        sprintf(dbg, "[wizbar] subs agy: token refresh HTTP %d", status);
         writeLogA(dbg);
         HeapFree(GetProcessHeap(), 0, resp ? (void *)resp : 0);
         return 0;
@@ -1026,7 +965,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(cfg, idx, &auth, authPath, MAX_PATH)) {
-        writeLogA("subs agy: no login (open Antigravity once)");
+        writeLogA("[wizbar] subs agy: no login (open Antigravity once)");
         subsSetState(idx, 0, 0);
         return 0;
     }
@@ -1035,7 +974,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         const wchar_t *cid = idx >= 0 && idx < cfg->subsProviderCount ? cfg->subsProviders[idx].clientId : NULL;
         const wchar_t *cs  = idx >= 0 && idx < cfg->subsProviderCount ? cfg->subsProviders[idx].clientSecret : NULL;
         if (!subsAgyRefresh(&auth, cid, cs)) {
-            writeLogA("subs agy: token refresh failed (re-login)");
+            writeLogA("[wizbar] subs agy: token refresh failed (re-login)");
             subsSetState(idx, 0, 0);
             return 0;
         }
@@ -1046,7 +985,8 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     wchar_t hdrs[4600];
     subsAgyHeaders(hdrs, 4600, auth.access);
     const wchar_t *hosts[2] = { L"cloudcode-pa.googleapis.com", L"daily-cloudcode-pa.sandbox.googleapis.com" };
-    wchar_t plan[24] = L"Antigravity";
+    wchar_t plan[24] = L"";   // paidTier.name, else currentTier.name, else "Antigravity"
+    int planSet = 0;           // set once a name actually landed in plan[]
     // The models calls are the expensive half of the cycle (~1 s of pure server
     // latency each) and they need only a project id, which the auth file already
     // carries. Fire them NOW, with the id we have, so the loadCodeAssist round
@@ -1089,14 +1029,14 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
                     writeLogA("[wizbar] subs agy loadCodeAssist: 200 but no paidTier (plan stays generic)");
                 if (paid >= 0 && t[paid].type == JSMN_OBJECT) {
                     wchar_t *nm = subsJstr(resp, t, paid, "name");
-                    if (nm && *nm) lstrcpynW(plan, nm, 24);
+                    if (nm && *nm) { lstrcpynW(plan, nm, 24); planSet = 1; }
                     wideFree(&nm);
                 }
-                if (!*plan) {
+                if (!planSet) {
                     int cur = jobjGet(resp, t, 0, "currentTier");
                     if (cur >= 0 && t[cur].type == JSMN_OBJECT) {
                         wchar_t *nm = subsJstr(resp, t, cur, "name");
-                        if (nm && *nm) lstrcpynW(plan, nm, 24);
+                        if (nm && *nm) { lstrcpynW(plan, nm, 24); planSet = 1; }
                         wideFree(&nm);
                     }
                 }
@@ -1124,7 +1064,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         WaitForSingleObject(qth, INFINITE);
         CloseHandle(qth);
         if (qj.result < 0) { // 401: the token is no good
-            writeLogA("subs agy: models 401 (re-login)");
+            writeLogA("[wizbar] subs agy: models 401 (re-login)");
             subsSetState(idx, 0, 0);
             return 0;
         }
@@ -1138,7 +1078,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         }
     }
     if (!*auth.projectId) {
-        writeLogA("subs agy: no project id");
+        writeLogA("[wizbar] subs agy: no project id");
         subsSetState(idx, 0, 0);
         return 0;
     }
@@ -1158,7 +1098,7 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         int r = agyFetchModels(hosts, hdrs, auth.projectId, cfg->subsTimeoutMs, cfg->debug,
                                famRf, famReset, famHave, famSrc);
         if (r < 0) {
-            writeLogA("subs agy: models 401 (re-login)");
+            writeLogA("[wizbar] subs agy: models 401 (re-login)");
             subsSetState(idx, 0, 0);
             return 0;
         }
@@ -1191,6 +1131,10 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     }
     if (nw > 0) {
         subsSetWins(idx, wins, nw);
+        // neither paidTier nor currentTier named a plan this cycle: keep the
+        // generic label (subsSetPlan ignores an empty name, so a failed cycle
+        // never clears a good one)
+        if (!planSet) lstrcpynW(plan, L"Antigravity", 24);
         subsSetPlan(idx, plan);
         if (cfg->debug) {
             char lb[128];
@@ -1285,7 +1229,7 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t **buf, int *cap, int *used
         wchar_t path[MAX_PATH];
         subsPathExpand(ga->path, path, MAX_PATH); // "~/..." like every other read
         int txtLen = 0;
-        char *txt = subsReadFileUtf8(path, &txtLen);
+        char *txt = readFileUtf8(path, &txtLen);
         if (txt) {
             // the file is small (an auth.json); parse it in place
             jsmntok_t *tk = NULL;
@@ -1383,12 +1327,12 @@ static int subsCrackUrl(const wchar_t *url, wchar_t *host, int cchHost, int *por
     const wchar_t *rest;
     if (subsPreI(url, L"http://")) { *tls = 0; rest = url + 7; }
     else if (subsPreI(url, L"https://")) { *tls = 1; rest = url + 8; }
-    else { writeLogA("subs gen: unsupported url scheme"); return 0; }
+    else { writeLogA("[wizbar] subs gen: unsupported url scheme"); return 0; }
     // the host runs to the first '/', ':' (an explicit port) or end of string
     const wchar_t *p = rest;
     while (*p && *p != L'/' && *p != L':') p++;
     int hl = (int)(p - rest);
-    if (hl <= 0 || hl >= cchHost) { writeLogA("subs gen: url host is empty or too long"); return 0; }
+    if (hl <= 0 || hl >= cchHost) { writeLogA("[wizbar] subs gen: url host is empty or too long"); return 0; }
     memcpy(host, rest, (size_t)hl * sizeof(wchar_t));
     host[hl] = 0;
     // an explicit :port (a bare colon with no digits is a config typo)
@@ -1399,9 +1343,9 @@ static int subsCrackUrl(const wchar_t *url, wchar_t *host, int cchHost, int *por
             n = n * 10 + (*p - L'0');
             p++;
             digits++;
-            if (n > 65535) { writeLogA("subs gen: url port out of range"); return 0; }
+            if (n > 65535) { writeLogA("[wizbar] subs gen: url port out of range"); return 0; }
         }
-        if (!digits || n <= 0) { writeLogA("subs gen: url port is not a number"); return 0; }
+        if (!digits || n <= 0) { writeLogA("[wizbar] subs gen: url port is not a number"); return 0; }
         *port = n;
     }
     // the path keeps its query string; "http://host" on its own means "/"
@@ -1428,7 +1372,7 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
     // refused rather than sent with the token in the clear
     int insecure = !tls;
     if (!tls && !sp->insecure) {
-        writeLogA("subs gen: http url needs insecure: true");
+        writeLogA("[wizbar] subs gen: http url needs insecure: true");
         subsSetState(idx, 0, 0);
         return 0;
     }
@@ -1485,7 +1429,7 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
     }
     if (!resp) { subsSetState(idx, 0, 0); return 0; }
     if (st == 401 || st == 403) {
-        writeLogA("subs gen: 401/403 (auth rejected)");
+        writeLogA("[wizbar] subs gen: 401/403 (auth rejected)");
         HeapFree(GetProcessHeap(), 0, resp);
         subsSetState(idx, 0, 0);
         return 0;
@@ -1507,7 +1451,7 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
     // a 200 can still be an error envelope (the zai gateway does exactly that):
     // "require" names a path that must be present for the body to count
     if (sp->requirePath[0] && subsJsonPath(resp, tk, 0, sp->requirePath) < 0) {
-        writeLogA("subs gen: response missing the required path");
+        writeLogA("[wizbar] subs gen: response missing the required path");
         HeapFree(GetProcessHeap(), 0, tk);
         HeapFree(GetProcessHeap(), 0, resp);
         subsSetState(idx, 0, 0);
@@ -1565,7 +1509,6 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
 }
 
 static LONG g_subsKick = 0; // board refresh button wakes the cycle early
-static volatile unsigned long long g_subsFetchedTick = 0; // cycle end (GetTickCount64)
 // wall clock of the cycle end. The board footer renders THIS directly: mixing a
 // truncated GetTickCount64 age with the wall clock made the footer's seconds
 // field oscillate (41 -> 42 -> 41) on every repaint.
@@ -1582,11 +1525,6 @@ static long long subsLocalStampMs(void) {
 }
 void subsRefetchNow(void) { InterlockedExchange(&g_subsKick, 1); }
 // seconds since the last completed fetch cycle (kept for callers that want an age)
-unsigned subsFetchedAgoSec(void) {
-    unsigned long long t = g_subsFetchedTick;
-    if (!t) return 0xFFFFFFFFu;
-    return (unsigned)((GetTickCount64() - t) / 1000ull);
-}
 // wall-clock epoch ms of the last completed cycle, 0 = never fetched
 long long subsFetchedEpochMs(void) { return g_subsFetchedEpoch; }
 
@@ -1657,7 +1595,6 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
             if (!anyEnabled) {
                 for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
             }
-            g_subsFetchedTick = GetTickCount64();
             if (view->debug) {
                 char lb[64];
                 sprintf(lb, "[wizbar] subs cycle: total %llu ms", GetTickCount64() - tCycle);

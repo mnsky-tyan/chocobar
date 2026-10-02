@@ -30,12 +30,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
-#include <d2d1.h>
-#include <d2d1_1.h>
-#include <d3d11.h>
-#include <dxgi.h>
-#include <dxgi1_2.h>
-#include <dwrite.h>
 #include <pdh.h>
 #include <shellapi.h>
 #include <mmdeviceapi.h>
@@ -54,8 +48,6 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -122,10 +114,6 @@ typedef struct {
 } UserIcon;
 
 // ---------------------------------------------------------------- util ----
-static void dbg(const char *fmt, ...) {
-    (void)fmt;
-}
-
 // jsmn helpers live with the config parser below; declared here so the source
 // and provider parsers above can use them
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key);

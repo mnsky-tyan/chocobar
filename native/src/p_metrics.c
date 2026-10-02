@@ -199,8 +199,9 @@ static void pollHwinfoSm(void) {
                 n++;
             }
         }
-        HeapFree(GetProcessHeap(), 0, recs);
+        // pick BEFORE the free: pickCpuTemp reads label/sensor/value out of recs
         pickCpuTemp(recs, n, &g_m.tempOk, &g_m.tempC, &g_m.tempHot, g_cfg.tempWarnAt);
+        HeapFree(GetProcessHeap(), 0, recs);
     } while (0);
     UnmapViewOfFile(p);
     CloseHandle(h);

@@ -42,66 +42,8 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS *e) {
 }
 
 static void freeConfig(Config *c);
-void ui_log(const char *s);
 static void writeTemplate(void);
 static void loadConfig(void);
-
-// ---- DirectComposition, declared by hand (mingw's dcomp.h is C++-only) ----
-typedef struct IDCompositionTarget IDCompositionTarget;
-typedef struct IDCompositionSurface IDCompositionSurface;
-typedef struct IDCompositionVisual IDCompositionVisual;
-typedef struct IDCompositionDevice IDCompositionDevice;
-
-static const GUID my_IID_IDCompositionDevice = {0xc37ea93a,0xe7aa,0x450d,{0xb1,0x6f,0x97,0x46,0xcb,0x04,0x07,0xf3}}; // dcomp.h DECLARE_INTERFACE_IID_ value
-static const GUID my_IID_IDXGISurface        = {0xcafcb56c,0x6ac3,0x4889,{0xbf,0x47,0x9e,0x23,0xbb,0xd2,0x60,0xec}};
-static const GUID my_IID_IDXGIDevice         = {0x54ec77fa,0x1377,0x44e6,{0x8c,0x32,0x88,0xfd,0x5f,0x44,0xc8,0x4c}};
-
-// DirectComposition COM interfaces (mingw's dcomp.h is broken in C mode - duplicate
-// overload members), slots verified against the dcomp.h interface declarations:
-typedef struct IDCompositionDeviceVtbl {
-    HRESULT (__stdcall *QueryInterface)(IDCompositionDevice *, const GUID *, void **);
-    ULONG (__stdcall *AddRef)(IDCompositionDevice *);
-    ULONG (__stdcall *Release)(IDCompositionDevice *);
-    HRESULT (__stdcall *Commit)(IDCompositionDevice *);                                  // 3
-    void *WaitForCommitCompletion, *GetFrameStatistics;                                  // 4-5
-    HRESULT (__stdcall *CreateTargetForHwnd)(IDCompositionDevice *, HWND, BOOL, IDCompositionTarget **); // 6
-    HRESULT (__stdcall *CreateVisual)(IDCompositionDevice *, IDCompositionVisual **);    // 7
-    HRESULT (__stdcall *CreateSurface)(IDCompositionDevice *, UINT, UINT, int, int, IDCompositionSurface **); // 8 (w, h, format, alphaMode)
-    void *pad9_26; // CreateVirtualSurface..CheckDeviceState (not used)
-} IDCompositionDeviceVtbl;
-typedef struct IDCompositionDevice { const IDCompositionDeviceVtbl *lpVtbl; } IDCompositionDevice;
-
-typedef struct IDCompositionTargetVtbl {
-    HRESULT (__stdcall *QueryInterface)(IDCompositionTarget *, const GUID *, void **);
-    ULONG (__stdcall *AddRef)(IDCompositionTarget *);
-    ULONG (__stdcall *Release)(IDCompositionTarget *);
-    HRESULT (__stdcall *SetRoot)(IDCompositionTarget *, IDCompositionVisual *);          // 3
-} IDCompositionTargetVtbl;
-struct IDCompositionTarget { const IDCompositionTargetVtbl *lpVtbl; };
-
-typedef struct IDCompositionVisualVtbl {
-    HRESULT (__stdcall *QueryInterface)(IDCompositionVisual *, const GUID *, void **);
-    ULONG (__stdcall *AddRef)(IDCompositionVisual *);
-    ULONG (__stdcall *Release)(IDCompositionVisual *);
-    void *pad3_14[12]; // SetOffsetX/Y x2, SetTransform x2, SetTransformParent, SetEffect, SetBitmapInterpolationMode, SetBorderMode, SetClip x2 (slots 3-14)
-    HRESULT (__stdcall *SetContent)(IDCompositionVisual *, IUnknown *);                  // 15
-} IDCompositionVisualVtbl;
-struct IDCompositionVisual { const IDCompositionVisualVtbl *lpVtbl; };
-
-typedef struct IDCompositionSurfaceVtbl { // slots per the dcomp.h interface block
-    HRESULT (__stdcall *QueryInterface)(IDCompositionSurface *, const GUID *, void **);
-    ULONG (__stdcall *AddRef)(IDCompositionSurface *);
-    ULONG (__stdcall *Release)(IDCompositionSurface *);
-    HRESULT (__stdcall *BeginDraw)(IDCompositionSurface *, const RECT *, const GUID *, void **, POINT *); // 3
-    HRESULT (__stdcall *EndDraw)(IDCompositionSurface *);                                                 // 4
-    void *pad5_7;                              // SuspendDraw, ResumeDraw, Scroll
-    HRESULT (__stdcall *Resize)(IDCompositionSurface *, UINT, UINT, int);                                 // 8
-} IDCompositionSurfaceVtbl;
-struct IDCompositionSurface { const IDCompositionSurfaceVtbl *lpVtbl; };
-
-HRESULT __stdcall DCompositionCreateDevice(IDXGIDevice *, const GUID *, void **);
-
-static const GUID my_IID_IDXGIFactory2       = {0x50c83a1c,0xe072,0x4c48,{0x87,0xb0,0x36,0x30,0xfa,0x36,0xa6,0xd0}};
 
 // shared state (declared here so every section below sees it)
 static wchar_t g_cfgPath[MAX_PATH];
@@ -172,7 +114,7 @@ static int chipClickable(const Chip *c) {
     return g_cfg.custom[c->customIdx].intervalMs <= 0;
 }
 
-// --------------------------------------------------------- d2d plumbing ----
+// ------------------------------------------------------ render init ----
 static int initRender(HWND hwnd) {
     (void)hwnd;
     g_memDc = CreateCompatibleDC(NULL);
@@ -476,6 +418,10 @@ static int g_tokensTick = 0;
 // token-cache record fields kept separately: the Electron dash shows the
 // input/output/cache R/cache W/calls table columns, not one lumped sum
 typedef struct { long long in, out, cr, cw, req; } TokAgg;
+// the total a row shows and ranks by: raw input+output plus the cache columns
+// (the token convention the README's "Token accounting" section states). One
+// home, so a fifth field cannot be added in eight places and missed in two.
+static long long tokAggSum(const TokAgg *a) { return a->in + a->out + a->cr + a->cw; }
 static TokAgg g_appAgg[DASH_MAX_APPS];
 static char g_appName[DASH_MAX_APPS][20];
 // tokens.labels maps a raw source key to its dashboard display name (e.g.
@@ -639,7 +585,7 @@ static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack) {
     FILETIME sub; sub.dwHighDateTime = (DWORD)(v >> 32); sub.dwLowDateTime = (DWORD)v;
     FILETIME ft;
     LocalFileTimeToFileTime(&sub, &ft);
-    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
+    return fileTimeToUnixMs(&ft);
 }
 
 // local midnight the day-indexed arrays are currently framed at
@@ -732,7 +678,7 @@ static void scanTokenCacheInner(const Config *cfg) {
     if (h == INVALID_HANDLE_VALUE) { tokTodaySet(-1); return; }
     BY_HANDLE_FILE_INFORMATION fi;
     if (GetFileInformationByHandle(h, &fi)) {
-        g_cacheMtimeScan = (((long long)fi.ftLastWriteTime.dwHighDateTime) << 32 | fi.ftLastWriteTime.dwLowDateTime) / 10000 - 11644473600000LL;
+        g_cacheMtimeScan = fileTimeToUnixMs(&fi.ftLastWriteTime);
         if (g_cacheReadDone && fi.ftLastWriteTime.dwLowDateTime == g_cacheStamp[0]
             && fi.ftLastWriteTime.dwHighDateTime == g_cacheStamp[1]
             && fi.nFileSizeLow == g_cacheStamp[2] && fi.nFileSizeHigh == g_cacheStamp[3]) {
@@ -937,12 +883,12 @@ static void scanTokenCache(void) {
 }
 
 // token counts (renderer/dash.js fmt): B / M / k tiers
-static void fmtTokens(long long n2, wchar_t *out, int cb) {
-    if (n2 < 0) { lstrcpynW(out, L"\u2014", cb); return; }
-    if (n2 >= 1000000000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
-    else if (n2 >= 1000000) swprintf(out, cb, L"%.1fM", n2 / 1e6);
-    else if (n2 >= 1000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
-    else swprintf(out, cb, L"%lld", n2);
+static void fmtTokens(long long n, wchar_t *out, int cb) {
+    if (n < 0) { lstrcpynW(out, L"\u2014", cb); return; }
+    if (n >= 1000000000LL) swprintf(out, cb, L"%.2fB", n / 1e9);
+    else if (n >= 1000000) swprintf(out, cb, L"%.1fM", n / 1e6);
+    else if (n >= 1000) swprintf(out, cb, L"%.1fk", n / 1e3);
+    else swprintf(out, cb, L"%lld", n);
 }
 
 // call counts: plain digits up to 5 figures so today's layout keeps its
@@ -951,19 +897,19 @@ static void fmtTokens(long long n2, wchar_t *out, int cb) {
 // most 6 chars wide and a big count can never squeeze the name column out of
 // the row. The B tier is the unbounded catch-all - two decimals run it to
 // "999.95B" (7) and past a trillion to "1000.00B" (8)
-static void fmtCalls(long long n2, wchar_t *out, int cb) {
-    if (n2 >= 999950000LL) swprintf(out, cb, L"%.2fB", n2 / 1e9);
-    else if (n2 >= 999950) swprintf(out, cb, L"%.1fM", n2 / 1e6);
-    else if (n2 >= 100000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
-    else swprintf(out, cb, L"%lld", n2);
+static void fmtCalls(long long n, wchar_t *out, int cb) {
+    if (n >= 999950000LL) swprintf(out, cb, L"%.2fB", n / 1e9);
+    else if (n >= 999950) swprintf(out, cb, L"%.1fM", n / 1e6);
+    else if (n >= 100000) swprintf(out, cb, L"%.1fk", n / 1e3);
+    else swprintf(out, cb, L"%lld", n);
 }
 
 // renderer/subs.js fmtNum: M and k tiers only (no B), values rounded
-static void fmtNum(long long n2, wchar_t *out, int cb) {
-    if (n2 < 0) { lstrcpynW(out, L"\u2014", cb); return; }
-    if (n2 >= 1000000LL) swprintf(out, cb, L"%.1fM", n2 / 1e6);
-    else if (n2 >= 1000) swprintf(out, cb, L"%.1fk", n2 / 1e3);
-    else swprintf(out, cb, L"%lld", n2);
+static void fmtNum(long long n, wchar_t *out, int cb) {
+    if (n < 0) { lstrcpynW(out, L"\u2014", cb); return; }
+    if (n >= 1000000LL) swprintf(out, cb, L"%.1fM", n / 1e6);
+    else if (n >= 1000) swprintf(out, cb, L"%.1fk", n / 1e3);
+    else swprintf(out, cb, L"%lld", n);
 }
 
 // uppercased window label, as the panel head shows it (subs.css text-transform)
@@ -981,7 +927,7 @@ static void subsWinUpper(const SubsWin *w, wchar_t *up, int cb) {
 static void fmtReset(long long ms, wchar_t *out, int cb) {
     if (ms <= 0) { lstrcpynW(out, L"reset \u2014", cb); return; }
     FILETIME ft; GetSystemTimeAsFileTime(&ft);
-    long long now = ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000 - 11644473600000LL;
+    long long now = fileTimeToUnixMs(&ft);
     long long delta = ms - now;
     if (delta <= 0) { lstrcpynW(out, L"reset now", cb); return; }
     long long h = delta / 3600000LL, m = (delta % 3600000LL) / 60000LL, d = h / 24;
@@ -1443,10 +1389,6 @@ static void repaintBar(HWND hwnd) {
         writeLogA(_b);
     }
 }
-
-static int g_paintHooked = 0;
-static void paint(HWND hwnd) { repaintBar(hwnd); (void)g_paintHooked; }
-
 
 static int wikilessContains(const wchar_t *hay, const wchar_t *needle) {
     if (!hay || !needle || !*needle) return 1;
@@ -2084,7 +2026,7 @@ static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
 static void dashTableHead(HDC dc, int x0, int y,
                           const int *xs, DashTheme *t, HFONT f9, const wchar_t *firstCol) {
     dashStr(dc, x0 + 2, y, firstCol, t->dim, f9);
-    wchar_t *in = L"INPUT", *out = L"OUTPUT", *cr = L"CACHE R", *cw = L"CACHE W", *ca = L"CALLS";
+    const wchar_t *in = L"INPUT", *out = L"OUTPUT", *cr = L"CACHE R", *cw = L"CACHE W", *ca = L"CALLS";
     dashStrR(dc, xs[4], y, in, t->dim, f9);
     dashStrR(dc, xs[3], y, out, t->dim, f9);
     if (xs[2]) dashStrR(dc, xs[2], y, cr, t->dim, f9);
@@ -2468,10 +2410,10 @@ static void paintDash(HWND hwnd) {
             for (int i = 0; i < appN; i++) appOrder[i] = i;
             for (int i = 1; i < appN; i++) {
                 int v = appOrder[i], j = i - 1;
-                long long vt = g_appAgg[v].in + g_appAgg[v].out + g_appAgg[v].cr + g_appAgg[v].cw;
+                long long vt = tokAggSum(&g_appAgg[v]);
                 while (j >= 0) {
                     int u = appOrder[j];
-                    long long ut = g_appAgg[u].in + g_appAgg[u].out + g_appAgg[u].cr + g_appAgg[u].cw;
+                    long long ut = tokAggSum(&g_appAgg[u]);
                     if (ut >= vt) break;
                     appOrder[j + 1] = appOrder[j];
                     j--;
@@ -2485,10 +2427,10 @@ static void paintDash(HWND hwnd) {
             for (int i = 0; i < g_modelCount; i++) mdlOrder[i] = i;
             for (int i = 1; i < g_modelCount; i++) {
                 int v = i, j = i - 1;
-                long long vt = g_modelAgg[v].in + g_modelAgg[v].out + g_modelAgg[v].cr + g_modelAgg[v].cw;
+                long long vt = tokAggSum(&g_modelAgg[v]);
                 while (j >= 0) {
                     int u = mdlOrder[j];
-                    long long ut = g_modelAgg[u].in + g_modelAgg[u].out + g_modelAgg[u].cr + g_modelAgg[u].cw;
+                    long long ut = tokAggSum(&g_modelAgg[u]);
                     if (ut >= vt) break;
                     mdlOrder[j + 1] = mdlOrder[j];
                     j--;
@@ -2547,7 +2489,7 @@ static void paintDash(HWND hwnd) {
                     if (side == 0) {
                         long long maxAll = 1;
                         for (int i = 0; i < g_appCount; i++) {
-                            long long s = g_appAgg[i].in + g_appAgg[i].out + g_appAgg[i].cr + g_appAgg[i].cw;
+                            long long s = tokAggSum(&g_appAgg[i]);
                             if (s > maxAll) maxAll = s;
                         }
                         int appRows = appN < rows ? appN : rows;
@@ -2555,7 +2497,7 @@ static void paintDash(HWND hwnd) {
                             int ai = appOrder[i];
                             wchar_t an[24];
                             appLabelW(ai, an, 24);
-                            long long s = g_appAgg[ai].in + g_appAgg[ai].out + g_appAgg[ai].cr + g_appAgg[ai].cw;
+                            long long s = tokAggSum(&g_appAgg[ai]);
                             TokAgg a2 = g_appAgg[ai];
                             // even rows get the zebra wash (dash.css nth-child(even))
                             if (i & 1) {
@@ -2574,7 +2516,7 @@ static void paintDash(HWND hwnd) {
                     } else {
                         long long maxAll = 1;
                         for (int i = 0; i < g_modelCount; i++) {
-                            long long s = g_modelAgg[i].in + g_modelAgg[i].out + g_modelAgg[i].cr + g_modelAgg[i].cw;
+                            long long s = tokAggSum(&g_modelAgg[i]);
                             if (s > maxAll) maxAll = s;
                         }
                         int mdlRows = mdlN < rows ? mdlN : rows;
@@ -2588,7 +2530,7 @@ static void paintDash(HWND hwnd) {
                             wchar_t mn[48];
                             int mnw = MultiByteToWideChar(CP_UTF8, 0, mp2, -1, mn, 47);
                             mn[mnw > 0 ? mnw - 1 : 0] = 0; // force NUL even on truncation
-                            long long s = g_modelAgg[mi].in + g_modelAgg[mi].out + g_modelAgg[mi].cr + g_modelAgg[mi].cw;
+                            long long s = tokAggSum(&g_modelAgg[mi]);
                             TokAgg a2 = g_modelAgg[mi];
                             if (i & 1) {
                                 HBRUSH b = CreateSolidBrush(t.zebra);
@@ -2917,7 +2859,7 @@ static void dashTipCell(HWND hwnd, POINT p) {
                     wchar_t an[24], line[56];
                     appLabelW(i, an, 24);
                     wchar_t tn2[24];
-                    fmtTokens(a->in + a->out + a->cr + a->cw, tn2, 24);
+                    fmtTokens(tokAggSum(a), tn2, 24);
                     swprintf(line, 55, L"\n%ls: %ls (%lld)", an, tn2, a->req);
                     if (lstrlenW(body) + lstrlenW(line) >= cap) { skipped++; continue; }
                     lstrcatW(body, line);
@@ -3391,8 +3333,7 @@ static void chipClick(int idx) {
             break;
         }
         CustomChip *cc = &g_cfg.custom[c->customIdx];
-        if (cc->intervalMs > 0) break;
-        if (!cc->command) break;
+        if (!cc->command) break;   // display-only chips never reach here (chipClickable)
         if (cc->toggle) {
             g_customState[c->customIdx] = !g_customState[c->customIdx];
             wchar_t full[1100];
@@ -3556,9 +3497,19 @@ static void showTrayMenu(HWND hwnd) {
     DashTheme dt; dashResolveTheme(&dt);
     MENUINFO mi; memset(&mi, 0, sizeof(mi)); mi.cbSize = sizeof(mi);
     mi.fMask = MIM_BACKGROUND;
-    mi.hbrBack = CreateSolidBrush(dt.bg); // leaks the brush by design: the
-    // menu must keep a valid brush until dismissal (deleting it earlier paints
-    // with a garbage handle). One 4-byte GDI object per opened menu.
+    // One long-lived brush per themed background. The menu must keep a valid
+    // brush until dismissal, and allocating a fresh one per open grew the
+    // process's GDI handle count for its whole lifetime. No menu is open at
+    // this point, so replacing the cached brush is safe.
+    static HBRUSH s_menuBrush = NULL;
+    static COLORREF s_menuBrushBg = 0xFFFFFFFF;
+    if (!s_menuBrush || s_menuBrushBg != dt.bg) {
+        HBRUSH old = s_menuBrush;
+        s_menuBrush = CreateSolidBrush(dt.bg);
+        s_menuBrushBg = dt.bg;
+        if (old && s_menuBrush) DeleteObject(old);
+    }
+    mi.hbrBack = s_menuBrush;
     SetMenuInfo(m, &mi);
     POINT p; GetCursorPos(&p);
     SetForegroundWindow(hwnd); // required for correct menu dismissal
@@ -3713,7 +3664,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
-        paint(hwnd);
+        repaintBar(hwnd);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -3848,7 +3799,10 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int h = chipAt(p);
-        if (h >= 0) chipClick(h);
+        // chipClickable is the single predicate for "this click does something":
+        // a hit on a display-only chip stays a no-op (it must not fall through
+        // to raising the terminal, which is what clicking the bare strip does)
+        if (h >= 0) { if (chipClickable(&g_chips[h])) chipClick(h); }
         else if (g_term) {
             // the bar is the terminal's title-strip substitute: clicking the
             // strip (not a chip) raises the followed terminal
@@ -3972,7 +3926,7 @@ void writeTemplate(void) {
 
 void loadConfig(void) {
     int freshInstall = 0;
-    DWORD len = 0;
+    int len = 0;
     char *raw = readFileUtf8(g_cfgPath, &len);
     if (!raw) {
         writeTemplate();
@@ -4096,7 +4050,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
         NULL, NULL, hInst, NULL);
     if (!g_bar) return 1;
 
-    if (!initRender(g_bar)) dbg("render init failed");
+    if (!initRender(g_bar)) writeLogA("[wizbar] render init failed");
 
     SetTimer(g_bar, TIMER_METRICS, 1000, NULL);
     SetTimer(g_bar, TIMER_FOLLOW, 100, NULL);
@@ -4111,7 +4065,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
     svgInitAll();
     SendMessageW(g_bar, WM_TIMER, TIMER_METRICS, 0); // prime metrics + first paint
     // layered windows never receive WM_PAINT: draw + UpdateLayeredWindow explicitly
-    paint(g_bar);
+    repaintBar(g_bar);
     {
         char dbg[160];
         sprintf(dbg, "[wizbar] start %s %s: subs en=%d n=%d", __DATE__, __TIME__, g_cfg.subsEnabled, g_cfg.subsProviderCount);
