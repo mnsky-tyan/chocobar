@@ -3114,7 +3114,7 @@ static void dashToggle(int type) {
         // HWND_TOP raises the board above the terminal and every other normal
         // window; SWP_NOACTIVATE keeps the keyboard with the terminal. Both are
         // needed - SetForegroundWindow alone stole the user's keystrokes,
-        // and SW_SHOWNA alone left the board sunk behind his windows.
+        // and SW_SHOWNA alone left the board sunk behind other windows.
         SetWindowPos(g_dash, HWND_TOP, (tsw - tw) / 2, (dashMaxH() + 40 - th2) / 2, tw, th2, SWP_NOACTIVATE);
         InvalidateRect(g_dash, NULL, FALSE);
         UpdateWindow(g_dash); // repaint + content-fit at the new size, once
