@@ -373,5 +373,5 @@ native/src/p_tokens.c   live session-log scan and byte cursors
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-scripts/                icon tooling and the regression suite
+scripts/                the portable regression suite
 ```

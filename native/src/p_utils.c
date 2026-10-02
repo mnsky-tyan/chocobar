@@ -1,21 +1,36 @@
 // ---------------------------------------------------------------- util ----
-static char *readFileUtf8(const wchar_t *path, DWORD *outLen) {
+// FILETIME (100ns ticks since 1601-01-01) -> Unix epoch milliseconds. The
+// conversion was pasted at five call sites across three parts; one home means
+// a change here cannot miss four of them.
+static long long fileTimeToUnixMs(const FILETIME *ft) {
+    ULARGE_INTEGER u;
+    u.LowPart = ft->dwLowDateTime;
+    u.HighPart = ft->dwHighDateTime;
+    return (long long)(u.QuadPart / 10000ull) - 11644473600000LL;
+}
+
+// Slurp a UTF-8 file into a NUL-terminated heap buffer (caller frees). Strips a
+// UTF-8 BOM and refuses anything past 32 MB, so a JSON the bar reads parses the
+// same way wherever it is read from.
+static char *readFileUtf8(const wchar_t *path, int *outLen) {
+    if (outLen) *outLen = 0;
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     DWORD size = GetFileSize(h, NULL);
-    if (size == INVALID_FILE_SIZE || size == 0) { CloseHandle(h); return NULL; }
+    if (size == INVALID_FILE_SIZE || size == 0 || size > 32 * 1024 * 1024) { CloseHandle(h); return NULL; }
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size + 1);
     if (!buf) { CloseHandle(h); return NULL; }
     DWORD got = 0;
-    ReadFile(h, buf, size, &got, NULL);
+    BOOL ok = ReadFile(h, buf, size, &got, NULL) && got == size;
     CloseHandle(h);
+    if (!ok) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
     buf[got] = 0;
     if (got >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB) {
         memmove(buf, buf + 3, got - 2);
         got -= 3;
     }
-    *outLen = got;
+    if (outLen) *outLen = (int)got;
     return buf;
 }
 

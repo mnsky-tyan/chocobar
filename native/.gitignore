@@ -1,4 +1,3 @@
 chocobar.exe
-tiny.exe
 *.o
 src/chocobar_full.c

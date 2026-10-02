@@ -306,7 +306,7 @@ static int g_flatN[SVG_COUNT];
 // config (the buttons a user can add by name). A user icon keeps the same
 // flattened-path representation, so it renders through the identical GDI+ AA
 // path and the same per-icon DIB cache - only the id is shifted past SVG_COUNT.
-#define SVG_USER_MAX 16
+#define SVG_USER_MAX MAX_USER_ICONS   // one capacity for config parse and renderer
 #define SVG_USER_BASE 1000
 #define SVG_ID_MAX (SVG_COUNT + SVG_USER_MAX)
 static SvgFlat g_user[SVG_USER_MAX][SVG_MAXPARTS];
@@ -432,7 +432,7 @@ static void gdipInit(void) {
         (void *)t_GdipFillEllipse, (void *)t_GdipFillRectangleI, (void *)t_GdipFillPath, (void *)t_GdipAddPathArc,
         (void *)t_GdipCloseFigure, (void *)t_GdipCreateSolidFill, (void *)t_GdipDeleteBrush };
     for (int i = 0; i < (int)(sizeof(tabs) / sizeof(tabs[0])); i++) {
-        if (!tabs[i]) { writeLogA("gdiplus bind missing, falling back to GDI"); return; }
+        if (!tabs[i]) { writeLogA("[wizbar] gdiplus bind missing, falling back to GDI"); return; }
     }
     GdiplusStartupInput in;
     in.GdiplusVersion = 1;
