@@ -9,11 +9,14 @@ base = open('src/chocobar.c').read()      # entry, config parser, wWinMain
 utils = open('src/p_utils.c').read()      # logging, string/config helpers
 metrics = open('src/p_metrics.c').read()  # cpu/ram/temp/volume/battery/gpu/pet polls
 subs = open('src/p_subs.c').read()        # subscription quota fetchers (WinHTTP thread)
-icons = open('src/p_icons.c').read()        # chip icons: flattened renderer SVG paths
-tokens = open('src/p_tokens.c').read()      # live JSONL session scan (every declared source) + cursors
+icons = open('src/p_icons.c').read()      # chip icons: flattened renderer SVG paths
+tokens = open('src/p_tokens.c').read()    # live JSONL session scan (every declared source) + cursors
 ui = open('src/p_ui.c').read()            # GDI render, window, follow, tray
 marker = '// --------------------------------------------------------------- config ----'
 full = base.replace(marker, utils + '\n' + marker, 1)
+# fail loudly: a marker typo would silently drop p_utils.c from the build
+if full == base:
+    raise SystemExit('config marker not found in src/chocobar.c: the amalgamation would omit p_utils.c')
 full += '\n' + metrics + '\n' + subs + '\n' + icons + '\n' + tokens + '\n' + ui
 open('src/chocobar_full.c', 'w').write(full)
 PY
@@ -24,5 +27,5 @@ nix shell \
   nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
   nixpkgs#pkgsCross.mingwW64.buildPackages.binutils \
   nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads \
-  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -ld2d1 -ldwrite -lpdh -lcomctl32 -lole32 -luuid -lgdi32 -ld3d11 -ldxgi -ldcomp -lwinhttp -lmsimg32 -liphlpapi -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
+  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -lpdh -lcomctl32 -lole32 -luuid -lgdi32 -lwinhttp -lmsimg32 -liphlpapi -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
 echo "built: $(ls -la chocobar.exe | awk '{print $5}') bytes"
