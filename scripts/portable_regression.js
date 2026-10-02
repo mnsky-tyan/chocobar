@@ -70,7 +70,7 @@ function check(name, ok, detail) {
     check('template: pet chip and subs board ship off',
       !!(mod.pet && mod.pet.enabled === false) && !!(tpl.subs && tpl.subs.enabled === false));
     check('template: no personal identifiers in the template',
-      !/tyanw|mnsky|firstmate/i.test(decode(m[1])));
+      !/tyanw|mnsky|firstmate|captain|crewmate|remielle/i.test(decode(m[1])));
   }
 }
 
