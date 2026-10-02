@@ -186,7 +186,7 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
         }
     }
     // usage numbers: cacheRead/cacheWrite are breakdown columns, input/output
-    // are raw (the TOKEN CONVENTION in AGENTS.md)
+    // are raw (the TOKEN CONVENTION in the README's "Token accounting")
     long long *dst[4] = { &out->in, &out->out, &out->cr, &out->cw };
     for (int k = 0; k < 4; k++) {
         for (int i = 0; i + tk->len[k] <= len; i++) {
