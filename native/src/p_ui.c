@@ -1674,10 +1674,10 @@ static void followTick(void) {
     // stuck-topmost race (microsoft/terminal#16476 - it acquires and RETAINS
     // HWND_TOPMOST around login, new-window churn and the Win+D repro; any
     // permanently-always-on-top window on the desktop arms it continuously)
-    // drops the terminal into the TOPMOST band, whereupon every Win+N activation lands
-    // beneath it ("opens behind the terminal"), and this bar - pinned right
-    // after the terminal in z - is dragged up with it, burying unrelated
-    // foreground apps (the zorder-watch.log Z-ANOMALY lines caught exactly
+    // drops the terminal into the TOPMOST band, whereupon every Win+N
+    // activation lands beneath it ("opens behind the terminal"), and this bar -
+    // pinned right after the terminal in z - is dragged up with it, burying
+    // unrelated foreground apps (the zorder-watch.log Z-ANOMALY lines caught exactly
     // that: fg=WhatsApp / explorer / HWiNFO blocked-by [Chocobar]). Probe at
     // tick rate and demote on the first observation (a GetWindowLong is
     // nanoseconds): the state heals faster than the external PowerShell guard
