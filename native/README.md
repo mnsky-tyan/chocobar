@@ -32,9 +32,8 @@ native/build.sh        # -> native/chocobar.exe
 
 Requires Nix (`pkgsCross.mingwW64` gcc/binutils + mcfgthreads). `build.sh`
 assembles `src/chocobar_full.c` from the seven source parts, then compiles.
-Edit the PARTS (`src/chocobar.c`, `src/p_utils.c`, `src/p_metrics.c`,
-`src/p_subs.c`, `src/p_icons.c`, `src/p_tokens.c`, `src/p_ui.c`), never the
-assembled file.
+Edit the PARTS listed in the `PARTS` array at the top of `build.sh` (the
+authoritative list), never the assembled file.
 
 ## Run
 

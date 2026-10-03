@@ -50,6 +50,18 @@ static wchar_t g_cfgPath[MAX_PATH];
 extern double g_scale; // display scale (dpi/96): defined in chocobar.c (shared with p_icons)
 static int g_customState[MAX_CUSTOM];
 
+// cross-part declarations - all parts build as one translation unit
+// (chocobar_full.c), so these only make later sections visible early
+extern long long g_tokAllLive; // p_tokens
+void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs); // p_tokens
+long tokLiveScan(const Config *cfg); // p_tokens
+void tokLiveReset(void); // p_tokens: tokens.enabled off - forget cursors + live counters
+void tokLiveInit(void); // p_tokens
+long long subsFetchedEpochMs(void); // p_subs
+static void updCheckStart(void); // p_subs
+static int updNote(wchar_t *out, int cb); // p_subs
+extern double g_iconOpacity; // theme.iconOpacity/100 (defined in chocobar.c)
+
 // ------------------------------------------------------------- globals ----
 // scan worker -> UI: the token scan finished, apply the staged records
 // (WM_APP + 1 is already WM_TRAY, chocobar.c)
@@ -391,14 +403,6 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
 // how many tokens the live scan folded in (the "+N" log line). Every
 // displayed total is derived from the per-day buckets below, so the live scan
 // keeps no totals of its own.
-extern long long g_tokAllLive;
-void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs);
-long tokLiveScan(const Config *cfg);
-void tokLiveReset(void); // tokens.enabled off: forget cursors + live counters
-long long subsFetchedEpochMs(void);
-static void updCheckStart(void);
-static int updNote(wchar_t *out, int cb);
-void tokLiveInit(void);
 
 // newest ts + mtime seen in the cache file, for the live scan's seed boundary
 static long long g_cacheMaxTsScan = 0;
@@ -1154,7 +1158,6 @@ static void chipIconText(const Chip *c, wchar_t *out) {
 }
 
 // draw the bar into the premultiplied DIB and hand it to DWM (ULW)
-extern double g_iconOpacity; // theme.iconOpacity/100 (definition in chocobar.c)
 
 // premultiplied-DIB source-over blend with coverage (0..255): used for the
 // rounded bar corners, the hover pill, and any other alpha-shaped paint
@@ -2235,12 +2238,24 @@ static void paintDash(HWND hwnd) {
             int pitch = cell + cgap;
             SYSTEMTIME nowSt; GetLocalTime(&nowSt);
             int endDow = nowSt.wDayOfWeek; // 0 = Sun
-            // quantile thresholds over nonzero days (dash.js renderHeatmap)
-            long long nz[200]; int nnz = 0;
-            for (int i = 0; i < DASH_MAX_DAYS && nnz < 200; i++) if (g_dayTot[i] > 0) nz[nnz++] = g_dayTot[i];
-            for (int i = 1; i < nnz; i++) { long long v = nz[i]; int j = i - 1; while (j >= 0 && nz[j] > v) { nz[j + 1] = nz[j]; j--; } nz[j + 1] = v; }
-            long long th[3] = { 1, 1, 1 };
-            if (nnz) { th[0] = nz[nnz / 4]; th[1] = nz[nnz / 2]; th[2] = nz[nnz * 3 / 4]; }
+            // quantile thresholds over nonzero days (dash.js renderHeatmap).
+            // g_dayTot only moves on this thread - tokDrainPending bumps
+            // g_tokDataVersion after applying a scan, dashDayRollover shifts
+            // the buckets at the scan trigger - so (version, day-of-month) is
+            // an exact cache key: same values, sort runs once per scan.
+            static unsigned long long heatVer = 0;
+            static int heatDay = -1;
+            static long long heatTh[3] = { 1, 1, 1 };
+            if (heatVer != g_tokDataVersion || heatDay != nowSt.wDay) {
+                long long nz[200]; int nnz = 0;
+                for (int i = 0; i < DASH_MAX_DAYS && nnz < 200; i++) if (g_dayTot[i] > 0) nz[nnz++] = g_dayTot[i];
+                for (int i = 1; i < nnz; i++) { long long v = nz[i]; int j = i - 1; while (j >= 0 && nz[j] > v) { nz[j + 1] = nz[j]; j--; } nz[j + 1] = v; }
+                if (nnz) { heatTh[0] = nz[nnz / 4]; heatTh[1] = nz[nnz / 2]; heatTh[2] = nz[nnz * 3 / 4]; }
+                else { heatTh[0] = heatTh[1] = heatTh[2] = 1; }
+                heatVer = g_tokDataVersion;
+                heatDay = nowSt.wDay;
+            }
+            long long *th = heatTh;
             int hmH = 7 * pitch - cgap;
             int hasSel = g_daySel >= 0 && g_daySel < DASH_MAX_DAYS;
             int ddRows = 0, ddAll = 0;
@@ -3357,9 +3372,11 @@ typedef struct { const wchar_t *label; int cmd; } MenuItem;
 // provider's WEEKLY window when it reports one (the vendor's own headline
 // quota), else its lowest window. Advances one entry per subs.rotateSec.
 // Returns the entry's remaining % and writes "<plan> <window> N% left".
-static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
+// The selection half: fill pick[] with (provider << 8) | window entries, one
+// per enabled provider that currently has a window (its best window).
+// Returns the count; 0 means no provider has data right now.
+static int subsChipPick(int *pick, int maxPick) {
     int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
-    int pick[MAX_SUBS]; // (provider << 8) | window
     int n = 0;
     for (int i = 0; i < pn; i++) {
         if (!subsProvEnabled(i)) continue;
@@ -3373,19 +3390,14 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
             // prefer a row with a real fraction; rem -1 rows are reset-only
             if (best < 0 || (w[k].rem >= 0 && w[k].rem < w[best].rem)) best = k;
         }
-        if (best >= 0 && n < MAX_SUBS) pick[n++] = (i << 8) | best;
+        if (best >= 0 && n < maxPick) pick[n++] = (i << 8) | best;
     }
-    if (!n) { if (tip) lstrcpynW(tip, L"No subscription windows", tipCb); if (txt) lstrcpynW(txt, L"\u2014", cb); return -1; }
-    if (g_subsRotSec < 5) g_subsRotSec = 5;
-    // the set of providers with data shrinks between paints (one drops to no
-    // data), so the persistent index is clamped to what this call filled
-    if (g_subsRotIdx >= n) g_subsRotIdx %= n;
-    DWORD now = GetTickCount();
-    if (now - g_subsRotTick >= (DWORD)g_subsRotSec * 1000u) {
-        g_subsRotTick = now;
-        g_subsRotIdx = (g_subsRotIdx + 1) % n;
-    }
-    int pi2 = pick[g_subsRotIdx] >> 8, k = pick[g_subsRotIdx] & 0xFF;
+    return n;
+}
+
+// The formatting half: render one (provider, window) pair as the rotating
+// chip's text and tooltip.
+static int subsChipFormat(int pi2, int k, wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
     SubsWin w[MAX_GEN_WIN];
     int wn = subsProvWins(pi2, w, MAX_GEN_WIN);
     if (wn < 0) wn = -wn;
@@ -3414,6 +3426,22 @@ static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
         else swprintf(txt, cb, L"%d%%", rem);
     }
     return rem;
+}
+
+static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
+    int pick[MAX_SUBS]; // (provider << 8) | window
+    int n = subsChipPick(pick, MAX_SUBS);
+    if (!n) { if (tip) lstrcpynW(tip, L"No subscription windows", tipCb); if (txt) lstrcpynW(txt, L"\u2014", cb); return -1; }
+    if (g_subsRotSec < 5) g_subsRotSec = 5;
+    // the set of providers with data shrinks between paints (one drops to no
+    // data), so the persistent index is clamped to what this call filled
+    if (g_subsRotIdx >= n) g_subsRotIdx %= n;
+    DWORD now = GetTickCount();
+    if (now - g_subsRotTick >= (DWORD)g_subsRotSec * 1000u) {
+        g_subsRotTick = now;
+        g_subsRotIdx = (g_subsRotIdx + 1) % n;
+    }
+    return subsChipFormat(pick[g_subsRotIdx] >> 8, pick[g_subsRotIdx] & 0xFF, txt, cb, tip, tipCb);
 }
 
 static const MenuItem kMenuItems[] = {
