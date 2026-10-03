@@ -361,7 +361,7 @@ The suite decodes the first-run config template the bar writes (`g_template` in 
 
 ## Layout
 
-The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents.
+The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents. The authoritative list of source parts is the `PARTS` array at the top of `native/build.sh` - the table below is descriptive prose.
 
 ```text
 native/src/chocobar.c   entry, config parser, wWinMain
