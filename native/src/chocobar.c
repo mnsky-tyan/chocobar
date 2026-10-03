@@ -238,7 +238,7 @@ typedef struct {
 } SubsProvider;
 
 typedef struct {
-    int height, gap, fontSize, backgroundAlpha, align;
+    int height, gap, fontSize, backgroundAlpha;
     wchar_t *tint, *backdrop, *fontFamily;
 
     wchar_t *fg, *fgDim, *pink, *pinkDeep, *divider, *warn, *pinkBg, *yellow, *good;
@@ -700,7 +700,6 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->backdrop = jstrTok(js, t, jobjGet(js, t, bar, "backdrop"), c->backdrop);
         wideFree(&c->fontFamily);
         c->fontFamily = jstrTok(js, t, jobjGet(js, t, bar, "fontFamily"), c->fontFamily);
-        c->align      = jintTok(js, t, jobjGet(js, t, bar, "align"), 0) == 2 ? 2 : 1; // 1=right 2=left
         c->barRadius  = jintTok(js, t, jobjGet(js, t, bar, "radius"), c->barRadius);
         if (c->barRadius < 0) c->barRadius = 0;
         if (c->barRadius > 26) c->barRadius = 26;
