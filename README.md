@@ -1,8 +1,12 @@
 # Chocobar
 
-Chocobar is a small bar that sticks to the top of your terminal window. It shows your computer's CPU, memory, temperature, battery etc ,with tokens and coding subscriptio tracked. Its a lightweight bar about **30 MB of memory** and **4-5% of one CPU core** . for customiztion of the bar there is config.json. all data from the bar is local. Once you switch a subscription plan on, it asks that plan's own website how much quota you have left, using the login that plan already saved here.
+Chocobar is a small bar that sticks to the top of your terminal window. It shows your computer's CPU, memory, temperature, battery and more, plus your token usage and coding subscriptions at a glance. It is lightweight - about **30 MB of memory** and **under 1% of your total CPU** (about 3% of a single core) - so it can sit on your screen all day. Customization lives in one plain text file, `config.json`. All data stays local: the bar reads the logs your tools already write on your disk and never uploads anything. Once you switch a subscription plan on, it asks that plan's own website how much quota you have left, using the login that plan already saved here.
 
 ## What it looks like
+
+The bar, doing its job on top of a working terminal:
+
+![The chocobar bar on top of a terminal](docs/img/bar-terminal.png)
 
 The token dashboard - how many tokens you used today, this week, and over time, with a heatmap and a per-app breakdown:
 
