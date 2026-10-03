@@ -76,7 +76,6 @@ Every `Default` in the tables below is that built-in fallback, and so is the com
 | `backgroundAlpha` | `110` | How solid the tint is (0-255). |
 | `backdrop` | `"acrylic"` | `"acrylic"` for the blurred DWM backdrop, `"solid"` for a flat opaque bar. |
 | `radius` | `8` | Corner radius, 0-26. |
-| `align` | `1` | `1` = chips packed right (default), `2` = packed left. |
 
 ### `theme` - colors and icons
 
@@ -251,7 +250,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
 {
   "bar": { "height": 24, "gap": 8, "fontSize": 12, "fontFamily": "Cascadia Mono",
            "backgroundTint": "#FBF2E2", "backgroundAlpha": 110,
-           "backdrop": "acrylic", "radius": 8, "align": 1 },
+           "backdrop": "acrylic", "radius": 8 },
   "theme": { "fg": "#080808", "fgDim": "#5a5245", "pink": "#E8C7D0",
              "pinkDeep": "#D493AA", "warn": "#A00000", "good": "#006400",
              "divider": "#D9CCB2", "iconColor": "", "iconOpacity": 90,
