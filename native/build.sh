@@ -3,21 +3,34 @@
 set -e
 cd "$(dirname "$0")"
 
+# Authoritative source-part list, in assembly order. The first entry is the base
+# translation unit that carries the config marker; p_utils.c is spliced in at
+# that marker and every remaining part is appended after it. Edit this list, not
+# the assembled output.
+PARTS=(
+  src/chocobar.c
+  src/p_utils.c
+  src/p_metrics.c
+  src/p_subs.c
+  src/p_icons.c
+  src/p_tokens.c
+  src/p_ui.c
+)
+
 # assemble the single translation unit from the source parts (same order every time)
-python3 - << 'PY'
-base = open('src/chocobar.c').read()      # entry, config parser, wWinMain
-utils = open('src/p_utils.c').read()      # logging, string/config helpers
-metrics = open('src/p_metrics.c').read()  # cpu/ram/temp/volume/battery/gpu/pet polls
-subs = open('src/p_subs.c').read()        # subscription quota fetchers (WinHTTP thread)
-icons = open('src/p_icons.c').read()      # chip icons: flattened renderer SVG paths
-tokens = open('src/p_tokens.c').read()    # live JSONL session scan (every declared source) + cursors
-ui = open('src/p_ui.c').read()            # GDI render, window, follow, tray
+PARTS_JOINED="$(printf '%s\n' "${PARTS[@]}")" python3 - << 'PY'
+import os
+paths = os.environ['PARTS_JOINED'].splitlines()
+base_path, rest = paths[0], paths[1:]
+sources = {p: open(p).read() for p in rest}
+base = open(base_path).read()
+utils = sources.pop('src/p_utils.c')     # logging, string/config helpers
 marker = '// --------------------------------------------------------------- config ----'
 full = base.replace(marker, utils + '\n' + marker, 1)
 # fail loudly: a marker typo would silently drop p_utils.c from the build
 if full == base:
-    raise SystemExit('config marker not found in src/chocobar.c: the amalgamation would omit p_utils.c')
-full += '\n' + metrics + '\n' + subs + '\n' + icons + '\n' + tokens + '\n' + ui
+    raise SystemExit('config marker not found in %s: the amalgamation would omit p_utils.c' % base_path)
+full += '\n' + '\n'.join(sources[p] for p in rest if p in sources)
 open('src/chocobar_full.c', 'w').write(full)
 PY
 . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
