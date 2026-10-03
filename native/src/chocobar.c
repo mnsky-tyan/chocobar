@@ -375,8 +375,20 @@ static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key)
     return -1;
 }
 
+// a PRIMITIVE token that actually carries a number: jsmn lumps null/true/false
+// into the same JSMN_PRIMITIVE type, and atoi/atof on those silently returned 0
+// where the caller's default meant "not set"
+static int jNumOk(const char *js, const jsmntok_t *t, int i) {
+    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return 0;
+    for (int k = t[i].start; k < t[i].end; k++) {
+        char c = js[k];
+        if ((c >= '0' && c <= '9') || c == '-' || c == '+') return 1;
+    }
+    return 0;
+}
+
 static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
-    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return def;
+    if (!jNumOk(js, t, i)) return def;
     char b[32]; int len = t[i].end - t[i].start;
     if (len <= 0 || len >= (int)sizeof(b)) return def;
     memcpy(b, js + t[i].start, len); b[len] = 0;
@@ -386,7 +398,7 @@ static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
 // a JSON number read as a double (theme.icons[].w); atof is locale-stable
 // enough for the plain decimals a config can carry
 static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def) {
-    if (i < 0 || t[i].type != JSMN_PRIMITIVE) return def;
+    if (!jNumOk(js, t, i)) return def;
     char b[32]; int len = t[i].end - t[i].start;
     if (len <= 0 || len >= (int)sizeof(b)) return def;
     memcpy(b, js + t[i].start, len); b[len] = 0;
