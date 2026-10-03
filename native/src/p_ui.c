@@ -3843,7 +3843,7 @@ static const char *g_template =
     "// Chocobar (native build) config. Saved on first run; hot-reloads on save.\r\n"
     "// Everything below is optional - delete a key and the built-in default applies.\r\n"
     "{\r\n"
-    "  \"bar\": { \"height\": 30, \"gap\": 12, \"fontSize\": 10, \"fontFamily\": \"Segoe Print\", \"align\": 1,\r\n"
+    "  \"bar\": { \"height\": 30, \"gap\": 12, \"fontSize\": 10, \"fontFamily\": \"Segoe Print\",\r\n"
     "            \"backgroundTint\": \"#E8D8C3\", \"backgroundAlpha\": 120, \"backdrop\": \"acrylic\", \"radius\": 8 },\r\n"
     "  \"theme\": { \"fg\": \"#080808\", \"fgDim\": \"#5a5245\", \"pink\": \"#F0DEE4\", \"pinkDeep\": \"#D493AA\", \"pinkBg\": \"#FEF7F9\",\r\n"
     "              \"yellow\": \"#D8C77A\", \"warn\": \"#A00000\", \"good\": \"#006400\", \"divider\": \"#D9CCB2\",\r\n"
