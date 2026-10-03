@@ -276,15 +276,11 @@ static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *hos
                            insecure, timeoutMs, outStatus, outLen);
 }
 
+static int jNumOk(const char *js, const jsmntok_t *t, int i); // chocobar
+
 static double subsJdouble(const char *js, jsmntok_t *t, int obj, const char *key, double dflt) {
     int k = jobjGet(js, t, obj, key);
-    if (k < 0 || t[k].type != JSMN_PRIMITIVE) return dflt;
-    int isNum = 0;
-    for (int i = t[k].start; i < t[k].end; i++) {
-        char c = js[i];
-        if ((c >= '0' && c <= '9') || c == '-' || c == '+') { isNum = 1; break; }
-    }
-    if (!isNum) return dflt; // null / true / false
+    if (!jNumOk(js, t, k)) return dflt; // null / true / false
     char tmp[32];
     int len = t[k].end - t[k].start;
     if (len >= 32) len = 31;

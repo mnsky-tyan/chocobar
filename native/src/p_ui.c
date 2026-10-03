@@ -2388,17 +2388,8 @@ static void paintDash(HWND hwnd) {
                         if (a->req == 0) continue;
                         wchar_t an[24];
                         appLabelW(i, an, 24);
-                        dashDot(dc, padL + secPadX + 2, ddy + (DX(15) - DX(8)) / 2, DX(8), appDotColor(g_appName[i], &t));
-                        SelectObject(dc, fBody);
-                        SetTextColor(dc, t.fg);
-                        RECT lr2 = { padL + secPadX + 2 + DX(14), ddy, padL + secPadX + DX(150), ddy + DX(15) + 1 };
-                        DrawTextW(dc, an, -1, &lr2, DT_SINGLELINE | DT_LEFT | DT_END_ELLIPSIS);
-                        wchar_t vs[32];
-                        fmtTokens(a->in, vs, 32); dashStrR(dc, xs[4], ddy, vs, t.fg, fBody);
-                        fmtTokens(a->out, vs, 32); dashStrR(dc, xs[3], ddy, vs, t.fg, fBody);
-                        if (xs[2]) { fmtTokens(a->cr, vs, 32); dashStrR(dc, xs[2], ddy, vs, t.fg, fBody); }
-                        if (xs[1]) { fmtTokens(a->cw, vs, 32); dashStrR(dc, xs[1], ddy, vs, t.fg, fBody); }
-                        fmtCalls(a->req, vs, 32); dashStrR(dc, xs[0], ddy, vs, t.fg, fBody);
+                        dashTableRow(dc, padL + secPadX, innerW - 2 * secPadX, ddy, DX(17),
+                                     xs, an, appDotColor(g_appName[i], &t), 0.0, a, &t, fBody, fS9);
                         ddDrawn++;
                         ddy += DX(17);
                     }
