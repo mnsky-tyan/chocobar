@@ -316,9 +316,11 @@ static void tokCursorLoad(const Config *cfg) {
 
 // JSON number token -> long long (jsmn primitives are strings in the buffer).
 // The key lookup is jobjGet's job - it already walks the same key/value pairs.
+static int jNumOk(const char *js, const jsmntok_t *t, int i); // chocobar
+
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def) {
     int k = jobjGet(js, t, parent, key);
-    if (k < 0 || t[k].type != JSMN_PRIMITIVE) return def;
+    if (!jNumOk(js, t, k)) return def;
     char b[32]; int l = t[k].end - t[k].start;
     if (l <= 0 || l >= (int)sizeof(b)) return def;
     memcpy(b, js + t[k].start, l); b[l] = 0;
