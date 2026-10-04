@@ -149,7 +149,20 @@ const DEFAULTS = {
       models: true,     // "By model" table
       plans: true       // plan-usage card (needs sources.subscription enabled)
     },
-    // Usage sources — all opt-in, all local read-only. Enable the ones you use
+    // A turn whose provider reports no usage at all - a local app or CLI
+    // reached through a bridge, which has no API to answer with a usage block -
+    // is dropped today, as if the turn never happened. With this on, such a
+    // turn's tokens are ESTIMATED from the transcript the harness already
+    // wrote (see src/usage-estimate.js). Off by default: an estimate is not a
+    // measurement, and the constants below are tuned to one machine's history,
+    // so enabling it is a deliberate choice rather than a default.
+    estimateMissingUsage: false,
+    // Tuning for that estimator. inputFactor turns transcript characters into
+    // prompt tokens; saturateTokens is where the prompt stops growing because
+    // the harness compacted the conversation; outputFactor scales the reply's
+    // own text into completion tokens.
+    estimate: { inputFactor: 0.84, saturateTokens: 185000, outputFactor: 1.019 },
+    // Usage sources - all opt-in, all local read-only. Enable the ones you use
     // and point them at your own stores; with none enabled the bar and the
     // dashboard stay empty.
     sources: {

@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js && node scripts/model_case_regression.js",
+    "test": "node scripts/portable_regression.js && node scripts/pi_source_regression.js && node scripts/model_case_regression.js && node scripts/estimate_regression.js",
     "postinstall": "electron --version || true"
   },
   "devDependencies": {

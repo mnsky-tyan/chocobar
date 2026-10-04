@@ -47,6 +47,7 @@ const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
 const { APP_DIR } = require('./config');
+const { estimateUsage } = require('./usage-estimate');
 
 const CACHE_PATH = path.join(APP_DIR, 'token-cache.json');
 const DAY_MS = 86400000;
@@ -78,6 +79,32 @@ function addAgg(a, r) {
   a.requests += 1;
 }
 
+// Characters of text a message contributes to the transcript: its content plus
+// the text of every section. Only computed when tokens.estimateMissingUsage is
+// on, because it needs every line parsed rather than just the usage ones.
+// Non-string payloads are measured by their JSON length, which is what the
+// estimator's constants were calibrated against.
+function msgTextLength(m) {
+  let n = 0;
+  if (typeof m.content === 'string') n += m.content.length;
+  else if (m.content != null) n += JSON.stringify(m.content).length;
+  const sec = m.sections;
+  if (sec && typeof sec === 'object') {
+    for (const v of Object.values(sec)) {
+      if (typeof v === 'string') n += v.length;
+      else if (v != null) n += JSON.stringify(v).length;
+    }
+  }
+  return n;
+}
+
+// Just the reply's own text, no sections - the completion the estimator scales.
+function replyTextLength(m) {
+  if (typeof m.content === 'string') return m.content.length;
+  if (m.content == null) return 0;
+  return JSON.stringify(m.content).length;
+}
+
 class TokenTracker extends require('events') {
   constructor(config) {
     super();
@@ -88,6 +115,7 @@ class TokenTracker extends require('events') {
     this.lastScan = null;
     this._timer = null;
     this._pythonCmd = 'python'; // may be re-probed to python3 on Linux
+    this._estimateOn = this.cfg.estimateMissingUsage === true;
     if (this.cfg.enabled) this._loadCache(); // master off: nothing is read at all
   }
 
@@ -142,6 +170,18 @@ class TokenTracker extends require('events') {
   }
 
   setConfig(config) {
+    const wasEstimating = this._estimateOn;
+    this._estimateOn = config.tokens.estimateMissingUsage === true;
+    // The estimator counts a file's transcript from byte zero, so cursors built
+    // without it carry no char total and would estimate every live file's tail
+    // from a size of zero. Flipping the switch therefore costs one full rescan.
+    if (this._estimateOn !== wasEstimating) {
+      this._zaiMtimeFloor = 0; this._zaiMtimeHigh = 0;
+      this._piMtimeFloor = 0; this._piMtimeHigh = 0;
+      this._ocMtimeFloor = 0; this._ocMtimeHigh = 0;
+      this._fileProgress = new Map();
+      this._pendingTails = new Map();
+    }
     this.cfg = config.tokens;
     this.start();
   }
@@ -327,34 +367,63 @@ class TokenTracker extends require('events') {
     } else if (prevTail) {
       this._pendingTails.delete(tailKey); // file ended cleanly or grew past it
     }
+    // With the estimator on, every line is parsed for its text so the
+    // transcript size at each turn is known; otherwise only usage lines are,
+    // which is what keeps a scan of a hundred-megabyte store cheap.
+    const estimating = this._estimateOn;
+    // Transcript text already counted for this file on an earlier scan, so an
+    // appended read can continue the running total instead of restarting it. A
+    // read that starts at byte zero (rewrite, rotation, or a full rescan)
+    // restarts the count with it.
+    const charsBase = (start > 0 && prog && prog.chars) ? prog.chars : 0;
+    // Which providers in this file have EVER reported a real usage number,
+    // carried across scans. A provider on this list has an API behind it, so
+    // its blank turns are aborts; a provider off it is a bridge with no API to
+    // answer, so its blank turns are real work with no reported numbers.
+    // Keying on the provider rather than the file matters: one session often
+    // mixes a reporting route with a bridged one, and a file-level rule would
+    // throw away every bridged turn in it as if it were an abort. In one real
+    // store 824 of 1,028 CodeBuddy turns sit in such files.
+    const seenReal = new Set((start > 0 && prog && Array.isArray(prog.real)) ? prog.real : []);
+    let chars = charsBase;
     let added = 0;
+    const blanks = [];
     let lineStart = 0;
     for (let i = 0; i <= usable; i++) {
       if (i !== usable && buf[i] !== 10) continue;
       if (i > lineStart) {
         const line = buf.toString('utf8', lineStart, i).trim();
-        if (line.includes('"usage"')) {
-          let d;
-          try { d = JSON.parse(line); } catch (_) {} // partial/corrupt line: skip
-          if (d && d.type === 'message' && d.message && d.message.role === 'assistant') {
-            const u = d.message.usage || {};
-            const input = u.input || 0, output = u.output || 0;
-            const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
-            if (input || output || cacheRead || cacheWrite) {
-              const key = d.message.id
-                ? `${keyPrefix}:${rel}:${d.message.id}`
+        if (line) {
+          let d = null;
+          if (estimating || line.includes('"usage"')) {
+            try { d = JSON.parse(line); } catch (_) {} // partial/corrupt line: skip
+          }
+          if (d && d.type === 'message' && d.message) {
+            const m = d.message;
+            if (estimating) chars += msgTextLength(m);
+            if (m.role === 'assistant') {
+              const u = m.usage || {};
+              const input = u.input || 0, output = u.output || 0;
+              const cacheRead = u.cacheRead || 0, cacheWrite = u.cacheWrite || 0;
+              const key = m.id
+                ? `${keyPrefix}:${rel}:${m.id}`
                 : `${keyPrefix}:${rel}:b${start + lineStart}`;
-              if (!this.records.has(key)) {
-                this.records.set(key, {
-                  app,
-                  ts: Number(d.message.timestamp) || st.mtimeMs,
-                  model: d.message.model || 'unknown',
-                  // pi's usage.totalTokens == input + output + cacheRead +
-                  // cacheWrite (verified on real transcripts), so its input is
-                  // already cache-exclusive. Cache columns stay as detail only.
-                  input, output, cacheRead, cacheWrite, reasoning: 0
-                });
-                added++;
+              if (input || output || cacheRead || cacheWrite) {
+                seenReal.add(m.provider || m.api || 'unknown');
+                if (!this.records.has(key)) {
+                  this.records.set(key, {
+                    app,
+                    ts: Number(m.timestamp) || st.mtimeMs,
+                    model: m.model || 'unknown',
+                    // pi's usage.totalTokens == input + output + cacheRead +
+                    // cacheWrite (verified on real transcripts), so its input is
+                    // already cache-exclusive. Cache columns stay as detail only.
+                    input, output, cacheRead, cacheWrite, reasoning: 0
+                  });
+                  added++;
+                }
+              } else if (estimating) {
+                blanks.push({ key, m, chars, prov: m.provider || m.api || 'unknown' });
               }
             }
           }
@@ -362,7 +431,38 @@ class TokenTracker extends require('events') {
       }
       lineStart = i + 1;
     }
-    this._fileProgress.set(keyPrefix + ':' + rel, { offset: start + usable, mtimeMs: st.mtimeMs });
+    // Decide the blanks per PROVIDER, not per turn. A provider that has never
+    // reported a real number anywhere in this file is a bridge: its turns are
+    // real work whose usage the route simply cannot report, so estimating them
+    // is the honest answer. A provider that has reported is an ordinary route
+    // whose blanks are turns aborted before anything was billed - inventing
+    // tokens for those would over-count, so they stay at zero exactly as
+    // before. In one real store that keeps 3,433 aborted turns at zero while
+    // recovering the bridged ones.
+    if (estimating && blanks.length) {
+      const est = this.cfg.estimate || {};
+      for (const b of blanks) {
+        if (this.records.has(b.key)) continue;
+        if (seenReal.has(b.prov)) continue;   // that route reports; this turn is an abort
+        const e = estimateUsage(b.chars, replyTextLength(b.m), est);
+        if (!e) continue;
+        this.records.set(b.key, {
+          app,
+          ts: Number(b.m.timestamp) || st.mtimeMs,
+          model: b.m.model || 'unknown',
+          input: e.input, output: e.output, cacheRead: 0, cacheWrite: 0,
+          reasoning: 0,
+          estimated: true
+        });
+        added++;
+      }
+    }
+    const progOut = { offset: start + usable, mtimeMs: st.mtimeMs };
+    if (estimating) {
+      progOut.chars = chars;
+      if (seenReal.size) progOut.real = [...seenReal];
+    }
+    this._fileProgress.set(keyPrefix + ':' + rel, progOut);
     return added;
   }
 
@@ -736,7 +836,15 @@ class TokenTracker extends require('events') {
         this._fileProgress = new Map();
         for (const [k, p] of Object.entries(parsed.progress)) {
           if (p && Number.isFinite(p.offset) && p.offset >= 0) {
-            this._fileProgress.set(k, { offset: p.offset, mtimeMs: p.mtimeMs || 0 });
+            this._fileProgress.set(k, {
+              offset: p.offset, mtimeMs: p.mtimeMs || 0,
+              // The estimator's running transcript-char total for the file, and
+              // which providers have reported a real number in it. Absent in
+              // cursors written before the estimator existed, which the read
+              // side treats as "unknown" and rebuilds on the next full rescan.
+              chars: Number.isFinite(p.chars) ? p.chars : 0,
+              real: Array.isArray(p.real) ? p.real : []
+            });
           }
         }
       }
@@ -814,6 +922,7 @@ class TokenTracker extends require('events') {
         week: 0, month: 0, allTime: 0,
         byDay: {}, byApp: {}, byModel: {},
         recordCount: 0, heatmapWeeks: this.cfg.heatmapWeeks, sourcesEnabled: 0, masterEnabled: false,
+        estimatedRecords: 0,
         subscription: null
       };
     }
@@ -822,8 +931,10 @@ class TokenTracker extends require('events') {
     const byModel = new Map();   // "app|lowercased model" -> agg
     const modelVariants = new Map(); // byModel key -> Map(raw model id -> record count)
     let allTime = 0;
+    let estCount = 0;
 
     for (const r of this.records.values()) {
+      if (r.estimated) estCount++;
       const dk = localDateKey(r.ts);
       if (!byDay.has(dk)) byDay.set(dk, { total: 0, apps: {} });
       const day = byDay.get(dk);
@@ -877,6 +988,12 @@ class TokenTracker extends require('events') {
       byModel: Object.fromEntries(byModel),
       recordCount: this.records.size,
       heatmapWeeks: this.cfg.heatmapWeeks,
+      // How many rows the estimator invented rather than read (zero unless
+      // tokens.estimateMissingUsage is on). Exposed so the dashboard can say
+      // "this includes an estimate" instead of presenting it as measured.
+      // Counted from the records themselves, so it stays right across a cold
+      // start that restored them from the cache.
+      estimatedRecords: estCount,
       // How many usage sources are switched on — lets the dashboard explain an
       // empty state ("no sources configured") instead of just showing zeros.
       sourcesEnabled: Object.values(this.cfg.sources || {}).filter((s) => s && s.enabled).length,

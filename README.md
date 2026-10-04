@@ -189,6 +189,18 @@ Exact read sites, for reference:
 
 `npm test` cross-checks the scanner against a raw walk of a real session store: record counts and per-column sums must match exactly, and the portable suite pins the aggregation contract (totals include cache; input/output columns stay raw).
 
+### When a route reports no usage at all
+
+An API route answers with a usage block, so its numbers above are exact. A route that is a local app or CLI driven through a bridge - CodeBuddy over `workbuddy`, the MiMo desktop, the `agy` CLI - has no API to answer, so its turns arrive with an all-zero usage object and are dropped, exactly as if the turn never happened.
+
+`tokens.estimateMissingUsage` (default **off**) fills those in from the transcript the harness already wrote, in `src/usage-estimate.js`. Two measured facts drive it: the prompt is roughly the whole transcript at about 4 characters per token, and the prompt then **saturates** - the harness compacts long conversations, so it stops growing near 185k tokens however long the transcript gets. That cap is the important part; without it the raw character count of a long session runs to tens of millions of tokens and the estimate reports single turns no model could accept. The reply side is the turn's own text, which needs no correction.
+
+The estimate is applied **per route, not per turn**. Within each session file the scanner notes which providers have ever reported a real number; a blank turn is estimated only when its own provider is not among them. A provider that reports has an API behind it, so its blank turns are aborts and stay at zero - inventing tokens for those would over-count. A provider that never reports is a bridge whose turns are real work with no numbers, so estimating them is the honest answer. Keying on the provider rather than the file matters: one session routinely mixes a reporting route with a bridged one, and in one real store 824 of 1,028 CodeBuddy turns sit in such files, where a file-level rule would discard every one of them as an abort. The split has no hardcoded list of bridges - it is read from the store each scan, so a route that starts reporting is picked up automatically. Its cost is a small tail: a route whose every turn in a file happens to be an abort gets estimated there (about 150 turns out of 2,516 in the same store).
+
+It is labelled an estimate for a reason. Summed over turns it is unbiased (median estimated/reported = 1.00 over 63,986 calibration turns), but a **single** turn is not trustworthy: compaction is a step, so an individual turn is either close or several times off, and the stored record does not say which. That makes it fit for per-model and per-app totals - which is everything the dashboard shows - and unfit for per-session or per-day figures. The constants are also tuned to one machine's history, so turning it on is a deliberate choice; `tokens.estimate` (`inputFactor`, `saturateTokens`, `outputFactor`) overrides them, and flipping the switch costs one full rescan because the running transcript size has to be rebuilt from byte zero.
+
+Estimated rows are flagged `estimated: true` on the record, and `aggregate()` reports how many there are as `estimatedRecords`, so a consumer can say "this includes an estimate" rather than present it as measured.
+
 ## Use the bar and dashboard
 
 - Click the diamond (tokens) chip or use `Ctrl+Alt+D` to open the dashboard.
