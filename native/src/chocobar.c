@@ -286,6 +286,10 @@ typedef struct {
     wchar_t tokLabelVals[16][40];
     int tokLabelCount;
     int tokensEnabled;            // master switch: off = zero scans
+    int tokEstimate;              // tokens.estimateMissingUsage: fill blind turns with an estimate
+    double tokEstIn;              // chars->prompt-token factor before saturation
+    double tokEstSat;             // the prompt stops growing here (compaction)
+    double tokEstOut;             // chars->completion-token factor
     int tokensRescanSec;          // tokens.rescanMinutes -> seconds between scans
     TokSource tokSrc[MAX_TOK_SRC];  // JSONL session stores for the live scan
     int tokSrcCount;
@@ -851,6 +855,20 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     int toks = jobjGet(js, t, root, "tokens");
     if (toks >= 0 && t[toks].type == JSMN_OBJECT) {
         c->tokensEnabled = jboolDefault(js, t, jobjGet(js, t, toks, "enabled"), 1);
+        // Estimate a turn whose provider reported no usage at all. A route that is
+        // a local app or CLI driven through a bridge (CodeBuddy over workbuddy, the
+        // MiMo desktop, the agy CLI) has no API to answer with a usage block, so
+        // those turns arrive all-zero and are dropped. See tokEstimate in
+        // p_tokens.c. OFF by default: an estimate is not a measurement, and the
+        // constants are tuned to one machine's history.
+        c->tokEstimate = jboolDefault(js, t, jobjGet(js, t, toks, "estimateMissingUsage"), 0);
+        int est = jobjGet(js, t, toks, "estimate");
+        c->tokEstIn  = jdoubleTok(js, t, jobjGet(js, t, est, "inputFactor"), 1.10);
+        c->tokEstSat = jdoubleTok(js, t, jobjGet(js, t, est, "saturateTokens"), 160000.0);
+        c->tokEstOut = jdoubleTok(js, t, jobjGet(js, t, est, "outputFactor"), 1.04);
+        if (c->tokEstIn  <= 0) c->tokEstIn  = 1.10;      // a zero or inverted
+        if (c->tokEstSat <= 0) c->tokEstSat = 160000.0;  // factor would make the
+        if (c->tokEstOut <= 0) c->tokEstOut = 1.04;      // estimate useless
         // minutes -> seconds, clamped 1..60 MINUTES: the metrics tick is 1s, so this
         // is the tick count between token scans
         int rm = jintTok(js, t, jobjGet(js, t, toks, "rescanMinutes"), 1);

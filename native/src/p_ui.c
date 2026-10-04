@@ -756,7 +756,9 @@ static void scanTokenCacheInner(const Config *cfg) {
             if (me > mv) mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
-        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen);
+        // est=0: these come from the seed cache, which holds PROVIDER-REPORTED
+        // numbers, so nothing here is ever an estimate.
+        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, 0);
         if (ts > tsScanMax) tsScanMax = ts;
         p = next ? next : end;
     }
@@ -3880,6 +3882,14 @@ static const char *g_template =
     "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": false, \"recursive\": true },\r\n"
     "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": false }\r\n"
     "    ],\r\n"
+    "    // estimateMissingUsage: a route that is a LOCAL APP or CLI driven through a bridge\r\n"
+    "    // (CodeBuddy over workbuddy, the MiMo desktop, the agy CLI) has no API to answer\r\n"
+    "    // with a usage block, so its turns arrive all-zero and are dropped. Set true to\r\n"
+    "    // estimate them from the transcript instead. OFF by default - an estimate is not\r\n"
+    "    // a measurement: use it for per-model and per-app totals, never per session.\r\n"
+    "    // The constants are tuned to one machine's history; override them under\r\n"
+    "    // \"estimate\" if your store disagrees.\r\n"
+    "    \"estimateMissingUsage\": false,\r\n"
     "    \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"

@@ -41,7 +41,18 @@ long long g_tokAllLive = 0;
 int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
 
 #define TOK_MAX_FILES 4096
-typedef struct { char path[520]; long long size; long long mtimeMs; } TokCursor;
+// Per-file cursor, persisted to ~/.wizbar/token-cursors.json. `chars` and
+// `real` exist only for tokens.estimateMissingUsage and are written as 0/""
+// when it is off, so an older cursor file (or one written with the feature off)
+// simply reads back as "nothing known yet" and is rebuilt on the next full
+// re-read.
+typedef struct {
+    char path[520];
+    long long size;
+    long long mtimeMs;
+    long long chars;   // transcript text counted so far in this file
+    char real[80];     // comma-joined providers that DID report usage here
+} TokCursor;
 static TokCursor g_tokCursor[TOK_MAX_FILES];
 static int g_tokCursorN = 0;
 static int g_tokCursorDirty = 0;
@@ -62,6 +73,7 @@ typedef struct {
     char model[41]; // ids longer than the cap keep their prefix
     short alen, mlen;
     long long ts, in, out, cr, cw;
+    short est;      // this row was estimated, not reported (see tokEstimate)
 } TokPend;
 #define TOK_PEND_MIN 4096
 static TokPend *g_tokPend = NULL;
@@ -70,7 +82,7 @@ static int g_tokPendSeedReset = 0; // seed re-read: the drain clears aggregates 
 
 static void tokPendPush(const char *app, int alen, long long ts,
                         long long in, long long out, long long cr, long long cw,
-                        const char *model, int mlen) {
+                        const char *model, int mlen, int est) {
     if (alen < 0) alen = 0;
     if (alen > 19) alen = 19;
     if (mlen < 0) mlen = 0;
@@ -96,6 +108,7 @@ static void tokPendPush(const char *app, int alen, long long ts,
     r->out = out;
     r->cr = cr;
     r->cw = cw;
+    r->est = (short)(est ? 1 : 0);
 }
 
 static void tokPendClear(void) { g_tokPendN = 0; }
@@ -123,8 +136,200 @@ static int tokWideToUtf8(const wchar_t *w, char *out, int cb) {
     return 0;
 }
 
+// ------------------------------------------------------- usage estimator --
+// WHY: a route that is a real API answers with a usage block, so the numbers
+// tokParseLine reads are exact. A route that is a local app or CLI driven
+// through a bridge - CodeBuddy over workbuddy, the MiMo desktop, the agy CLI -
+// has no API to answer, so its turns arrive with an all-zero usage object and
+// tokScanFile would drop them, exactly as if the turn never happened.
+//
+// THE MODEL, both facts measured against 20,777 turns from a real pi store
+// that DID report usage, counted the way tokTextLen counts them:
+//   1. the prompt is roughly the whole transcript, at about 4 chars per token,
+//      scaled by inFactor;
+//   2. the prompt then SATURATES at saturateTokens and stops growing however
+//      long the transcript gets, because the harness compacts a long
+//      conversation before sending it. That cap is the important part: the raw
+//      character count of a long session runs to tens of millions of tokens, so
+//      without it a single turn estimates at millions - more than any model
+//      accepts.
+// Packed into one formula: prompt = min(transcriptChars / 4 * inFactor,
+// saturateTokens). The completion side needs only outFactor: it is the turn's
+// own reply text.
+//
+// ACCURACY, measured over the same 20,777 turns:
+//   transcript size   median estimated / reported
+//     under 200k        1.02
+//     200k-400k         0.96
+//     400k-1M           0.91
+//     over 1M           1.00
+//   overall aggregate 1.004
+// A SINGLE turn is not trustworthy - compaction is a step, so a turn is either
+// close or several times off and the stored record does not say which. Fit for
+// per-model and per-app totals, which is everything the dashboard shows, and
+// unfit for a per-session or per-day figure.
+//
+// Returns 0 when there is nothing to go on, so the caller can skip the turn
+// instead of recording a fabricated zero.
+static long long tokEstimate(long long transcriptChars, long long replyChars,
+                             double inFactor, double saturate, double outFactor,
+                             long long *outTokens) {
+    if (transcriptChars <= 0 && replyChars <= 0) return 0;
+    double prompt = ((double)transcriptChars / 4.0) * inFactor;
+    if (prompt > saturate) prompt = saturate;
+    long long pins = (long long)(prompt + 0.5);
+    long long oins = (long long)(((double)replyChars / 4.0) * outFactor + 0.5);
+    if (outTokens) *outTokens = oins;
+    return pins;
+}
+
+// Step over one JSON string. Returns the position after the closing quote and
+// reports the string's length in CHARACTERS, so an escaped quote or a \uXXXX
+// escape counts once rather than as its bytes.
+static const char *tokJsonStr(const char *p, const char *e, int *chars) {
+    *chars = 0;
+    if (p >= e || *p != '"') return p;
+    p++;
+    while (p < e && *p != '"') {
+        if (*p == '\\' && p + 1 < e) {
+            if (p[1] == 'u' && p + 5 < e) { p += 6; (*chars)++; continue; }  // \uXXXX = 1 char
+            p += 2; (*chars)++; continue;                                  // so is any escape
+        }
+        p++;
+        (*chars)++;
+    }
+    return (p < e) ? p + 1 : e;
+}
+
+// Step over one JSON value of any kind (object, array, string, or primitive),
+// so a caller can walk a structure without parsing all of it.
+static const char *tokJsonSkip(const char *p, const char *e) {
+    while (p < e && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',')) p++;
+    if (p >= e) return e;
+    if (*p == '"') { int n; return tokJsonStr(p, e, &n); }
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        while (p < e) {
+            if (*p == '"') { int n; p = tokJsonStr(p, e, &n); continue; }
+            if (*p == '{' || *p == '[') depth++;
+            else if (*p == '}' || *p == ']') { p++; depth--; if (depth <= 0) break; continue; }
+            p++;
+        }
+        return p;
+    }
+    while (p < e && *p != ',' && *p != '}' && *p != ']' && *p != '\n') p++;
+    return p;
+}
+
+// The first non-blank position at or after p, so a value's start can be
+// captured before tokJsonSkip walks over it.
+static const char *tokJsonValStart(const char *p, const char *e) {
+    while (p < e && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    return p;
+}
+
+// Characters of text one JSON value contributes. The reference this mirrors
+// takes the RAW BYTE SPAN of a value rather than its decoded JSON:
+//   * a string is its characters, counting each escape once;
+//   * an array is its members' raw JSON joined by spaces, which is the span
+//     without the two brackets ('[a,b]' and 'a b' have the same inner length);
+//   * anything else keeps its raw JSON.
+// This stays byte-level on purpose: the estimator's constants are fitted to
+// THESE counts, so the bar needs neither a JSON parser nor a character-set
+// decode, and a turn is estimated the same way on every machine.
+static int tokValChars(const char *vs, const char *ve) {
+    if (!vs || !ve || ve <= vs) return 0;
+    if (*vs == '"') { int n = 0; tokJsonStr(vs, ve, &n); return n; }
+    if (*vs == '[') return (int)(ve - vs) - 2;   // drop the brackets
+    return (int)(ve - vs);
+}
+
+// Characters of transcript text a JSONL line's message carries: its "content"
+// plus the text of every "sections" entry. Returns the total and reports the
+// content-only length separately, because the completion half of an estimate
+// is just the turn's own reply.
+//
+// WHY ANCHORED ON "message": a compaction record embeds a whole systemMessage
+// with its own content and sections, and the first "content": in such a line is
+// inside a tool schema. Taking the message object's span keeps that out - 284
+// real compaction lines each carrying ~150k characters would otherwise be
+// counted twice. Anchoring is also what makes it cheap: content is the first
+// key of every message, so the first "content": inside the span is the right
+// one and the search stops there.
+static int tokTextLen(const char *ln, int len, int *replyChars) {
+    const char *e = ln + len;
+    if (replyChars) *replyChars = 0;
+    const char *mo = NULL;      // the message object's opening brace
+    for (const char *p = ln; p + 11 <= e; p++) {
+        if (memcmp(p, "\"message\":{", 11) == 0) { mo = p + 10; break; }
+    }
+    if (!mo) return 0;
+    // the message object's full span. mo points AT the brace, so tokJsonSkip
+    // walks the whole object and stops after it; ms is its contents.
+    const char *me = tokJsonSkip(mo, e);
+    const char *ms = mo + 1;
+
+    // "content":<value> -> the value's characters. content is the FIRST key of
+    // every pi message, so the first match inside the span is the right one; the
+    // search for sections resumes from AFTER it, so a "content" nested inside a
+    // tool input can never be picked up by mistake.
+    int total = 0;
+    const char *afterContent = ms;
+    for (const char *p = ms; p + 10 <= me; p++) {
+        if (memcmp(p, "\"content\":", 10) == 0) {
+            const char *vs = tokJsonValStart(p + 10, me);
+            const char *ve = tokJsonSkip(vs, me);
+            int v = tokValChars(vs, ve);
+            total += v;
+            if (replyChars) *replyChars += v;
+            afterContent = ve;
+            break;
+        }
+    }
+
+    // "sections":{...} -> sum the string VALUES; the keys ("preamble",
+    // "tools", "rules") are structure, not transcript text, and counting them
+    // on every line of a long session would skew a whole archive.
+    const char *s = NULL;
+    for (const char *p = afterContent; p + 11 <= me; p++) {
+        if (memcmp(p, "\"sections\":", 11) == 0) { s = p + 11; break; }
+    }
+    if (s) {
+        while (s < e && (*s == ' ' || *s == '\t')) s++;
+        if (s < e && *s == '{') {
+            s++;
+            while (s < e && *s != '}') {
+                while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == ',')) s++;
+                if (s >= e || *s != '"') break;
+                int kn;
+                s = tokJsonStr(s, e, &kn);          // the key: not text
+                while (s < e && (*s == ' ' || *s == '\t')) s++;
+                if (s >= e || *s != ':') break;
+                s++;
+                while (s < e && (*s == ' ' || *s == '\t')) s++;
+                if (s < e && *s == '"') {
+                    int vn;
+                    s = tokJsonStr(s, e, &vn);
+                    total += vn;
+                } else {
+                    s = tokJsonSkip(s, e);
+                }
+            }
+        }
+    }
+    return total;
+}
+
+
+
 // one record's fields, parsed out of a JSONL line
-typedef struct { long long ts; const char *app; int appLen; long long in, out, cr, cw; const char *model; int modelLen; } TokRec;
+typedef struct {
+    long long ts;
+    const char *app; int appLen;
+    long long in, out, cr, cw;
+    const char *model; int modelLen;
+    const char *prov; int provLen; // "provider" (pi) - the route the turn travelled
+} TokRec;
 
 // the six field names a source uses, pre-quoted for the substring search. Built
 // once per scan (not per line) so the hot path stays a memcmp.
@@ -148,6 +353,7 @@ static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
 static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out) {
     out->ts = 0; out->app = NULL; out->appLen = 0;
     out->in = out->out = out->cr = out->cw = 0; out->model = NULL; out->modelLen = 0;
+    out->prov = NULL; out->provLen = 0;
     // cheap pre-filter: no input field = nothing to count
     const char *u = NULL;
     for (int i = 0; i + tk->len[0] <= len; i++) {
@@ -185,6 +391,22 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
             if (me > mp) { out->model = mp; out->modelLen = (int)(me - mp); }
         }
     }
+    // provider: which route carried the turn. pi spells it "provider" and keeps
+    // "api" as the sub-protocol; the estimator keys on this to tell a bridged
+    // route (workbuddy, mimo-desktop, antigravity-cli) from an API one.
+    for (int i = 0; i + 12 <= len; i++) {
+        if (memcmp(ln + i, "\"provider\":", 11) == 0) {
+            const char *v = ln + i + 11;
+            while (v < ln + len && (*v == ' ' || *v == '\t')) v++;
+            if (v < ln + len && *v == '"') {
+                v++;
+                const char *e = v;
+                while (e < ln + len && *e != '"' && e - v < 32) e++;
+                if (e > v) { out->prov = v; out->provLen = (int)(e - v); }
+            }
+            break;
+        }
+    }
     // usage numbers: cacheRead/cacheWrite are breakdown columns, input/output
     // are raw (the TOKEN CONVENTION in the README's "Token accounting")
     long long *dst[4] = { &out->in, &out->out, &out->cr, &out->cw };
@@ -198,14 +420,29 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
 
 // read [from, EOF) of a session file and hand every complete line's record to
 // aggRecord. Returns the new cursor (EOF) or -1 on a read error.
+//
+// With cfg->tokEstimate on, a turn whose provider reported nothing at all is
+// filled in from the transcript instead of dropped - see tokEstimate. The
+// decision is per ROUTE, not per turn: within this file the providers that did
+// report are collected, and a blank turn is estimated only when its own
+// provider is not among them. That matters because one session routinely mixes
+// a reporting route with a bridged one - 824 of 1,028 real CodeBuddy turns sit
+// in such files, where a per-file rule would discard every one as an abort.
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
-                             const TokKeys *tk) {
+                             const TokKeys *tk, const Config *cfg, TokCursor *cur) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
     LARGE_INTEGER sz; if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); return -1; }
     long long size = (long long)sz.QuadPart;
-    if (from > size) from = size; // truncated: restart from scratch
+    if (from > size) {
+        // truncated: the file SHRANK, so the running transcript count no longer
+        // describes it. Drop the estimator state instead of carrying a length the
+        // file no longer has - a later append then re-accumulates from here, and
+        // nothing is counted twice.
+        from = size;
+        if (cur) cur->chars = 0;
+    }
     if (from < 0) from = 0;
     long long toRead = size - from;
     if (toRead <= 0) { CloseHandle(h); return size; }
@@ -248,25 +485,84 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
     // (its bytes stay uncounted because the cursor is not advanced past it)
     char *p = buf, *e = buf + got;
     long long consumed = 0;
+    const int estimating = cfg->tokEstimate ? 1 : 0;
+    // transcript text counted so far in this file: an appended read continues
+    // the running total from the cursor, a re-read from byte zero restarts it.
+    long long chars = (from > 0 && cur && cur->chars > 0) ? cur->chars : 0;
+    char real[80] = "";                  // providers here that DID report
+    if (from > 0 && cur && cur->real[0]) lstrcpynA(real, cur->real, 80);
+    int realSeen = (int)strlen(real);
     while (p < e) {
         char *nl = (char *)memchr(p, '\n', (size_t)(e - p));
         if (!nl) break; // partial tail: do not advance the cursor past it
         int len = (int)(nl - p);
         if (len > 0) {
+            // The transcript size is the text of EVERY line so far, not only the
+            // ones carrying usage - a user turn and a tool result both go into
+            // the prompt. One scan per line, which is why it sits behind the
+            // config flag; the file is already being read end to end.
+            int replyChars = 0;
+            int lineChars = estimating ? tokTextLen(p, len, &replyChars) : 0;
             TokRec r;
             if (tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs) {
                 long long fld[4] = { r.in, r.out, r.cr, r.cw };
                 long long sum = fld[0] + fld[1] + fld[2] + fld[3];
-                // staged, not aggregated: the aggregates are UI-thread-affine
-                // and this runs on the scan worker (the drain applies them)
-                tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
-                            r.model, r.modelLen);
-                g_tokAllLive += sum;
+                if (sum > 0) {
+                    // a real number: this route reports, so it has an API behind it.
+                    // Remember it, so a later blank turn from the SAME route is read
+                    // as an abort rather than as a bridged one.
+                    if (estimating && r.provLen > 0) {
+                        char pv[40]; int pl = r.provLen < 39 ? r.provLen : 39;
+                        memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
+                        // already listed? a substring test is enough at <10 entries
+                        if (!strstr(real, pv)) {
+                            int need = (realSeen ? 1 : 0) + pl;
+                            if (realSeen + need < (int)sizeof(real) - 1) {
+                                if (realSeen) real[realSeen++] = ',';
+                                memcpy(real + realSeen, pv, (size_t)pl);
+                                realSeen += pl; real[realSeen] = 0;
+                            }
+                        }
+                    }
+                    // staged, not aggregated: the aggregates are UI-thread-affine
+                    // and this runs on the scan worker (the drain applies them)
+                    tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
+                                r.model, r.modelLen, 0);
+                    g_tokAllLive += sum;
+                } else if (estimating) {
+                    // No usage at all. Estimate it unless this route reports
+                    // elsewhere in the file, in which case the turn was aborted
+                    // before anything was billed and inventing tokens for it
+                    // would over-count.
+                    char pv[40] = "";
+                    int blind = 1;
+                    if (r.provLen > 0) {
+                        int pl = r.provLen < 39 ? r.provLen : 39;
+                        memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
+                        if (realSeen && strstr(real, pv)) blind = 0;
+                    }
+                    if (blind) {
+                        long long oout = 0;
+                        long long pin = tokEstimate(chars + lineChars, replyChars,
+                                                    cfg->tokEstIn, cfg->tokEstSat,
+                                                    cfg->tokEstOut, &oout);
+                        if (pin > 0) {
+                            tokPendPush(appName, (int)strlen(appName), r.ts,
+                                        pin, oout, 0, 0, r.model, r.modelLen, 1);
+                            g_tokAllLive += pin + oout;
+                        }
+                    }
+                }
             }
+            // this line's text is now part of the transcript the NEXT turn sends
+            if (estimating) chars += lineChars;
         }
         consumed += len + 1;
         p = nl + 1;
     }
+    // persist what the estimator learned about this file, so an appended read
+    // next rescan continues the count and keeps the same answer
+    if (estimating && cur) { cur->chars = chars; lstrcpynA(cur->real, real, 80); }
     HeapFree(GetProcessHeap(), 0, buf);
     return start + consumed;
 }
@@ -305,6 +601,12 @@ static void tokCursorLoad(const Config *cfg) {
                     lstrcpynA(c->path, pathA, 520);
                     c->size = tokJll(raw, t, k + 1, "size", 0);
                     c->mtimeMs = tokJll(raw, t, k + 1, "mtime", 0);
+                    // estimator state, absent in a cursor written before the
+                    // feature existed (or with it off): 0/"" means "nothing
+                    // known yet" and the next full re-read rebuilds them
+                    c->chars = tokJll(raw, t, k + 1, "chars", 0);
+                    jstrCopyA(c->real, (int)sizeof(c->real), raw, t,
+                              jobjGet(raw, t, k + 1, "real"), "");
                 }
             }
             k += 1 + jtokSpan(t, k + 1);
@@ -336,8 +638,10 @@ static void tokCursorSave(void) {
     DWORD wrote = 0;
     WriteFile(h, "{\n", 2, &wrote, NULL);
     for (int i = 0; i < g_tokCursorN; i++) {
-        int n = snprintf(line, sizeof(line), "  \"%s\": {\"size\": %lld, \"mtime\": %lld}%s\n",
+        int n = snprintf(line, sizeof(line),
+                         "  \"%s\": {\"size\": %lld, \"mtime\": %lld, \"chars\": %lld, \"real\": \"%s\"}%s\n",
                          g_tokCursor[i].path, g_tokCursor[i].size, g_tokCursor[i].mtimeMs,
+                         g_tokCursor[i].chars, g_tokCursor[i].real,
                          i + 1 < g_tokCursorN ? "," : "");
         if (n > 0) WriteFile(h, line, (DWORD)n, &wrote, NULL);
     }
@@ -365,7 +669,7 @@ static void tokCursorSet(const char *path, long long size, long long mtimeMs) {
 
 // ------------------------------------------------------------- directory ----
 static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
-                       const TokKeys *tk) {
+                       const TokKeys *tk, const Config *cfg) {
     wchar_t pat[MAX_PATH];
     swprintf(pat, MAX_PATH, L"%ls\\*", dir);
     WIN32_FIND_DATAW fd;
@@ -377,7 +681,7 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
             if (lstrcmpW(fd.cFileName, L".") == 0 || lstrcmpW(fd.cFileName, L"..") == 0) continue;
             wchar_t sub[MAX_PATH];
             swprintf(sub, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
-            tokScanDir(sub, 1, appName, tk);
+            tokScanDir(sub, 1, appName, tk, cfg);
             continue;
         }
         int nl = lstrlenW(fd.cFileName);
@@ -397,9 +701,14 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         // rescan is what blocked the bar for ~600ms and made refresh lag.
         if (c && c->size == fsz && c->mtimeMs == mt) { g_tokDbgFiles++; g_tokDbgHits++; continue; }
         long long from = c ? c->size : 0;
+        // The estimator counts a file's transcript from byte zero and carries the
+        // running total in the cursor. A cursor written before the feature was
+        // on has no total, so resuming from it would estimate everything in the
+        // appended tail as if the transcript were tiny: re-read the file once.
+        if (cfg->tokEstimate && c && c->size > 0 && c->chars <= 0) from = 0;
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
-        long long neu = tokScanFile(full, from, appName, tk);
+        long long neu = tokScanFile(full, from, appName, tk, cfg, c);
         if (neu >= 0) { g_tokDbgRead += (int)(neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -450,7 +759,7 @@ long tokLiveScan(const Config *cfg) {
         int recursive = s->recursive;
         TokKeys tk;
         tokKeysBuild(s, &tk);
-        tokScanDir(dir, recursive, s->app, &tk);
+        tokScanDir(dir, recursive, s->app, &tk, cfg);
     }
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
     if (cfg->debug) {

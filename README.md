@@ -162,6 +162,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 | `appFilter` | `[]` | Harness allowlist: only these app ids are counted (empty = all). |
 | `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
 | `sources` | `[]` | Every session store the live scan reads - a user-declared array, see below. |
+| `estimateMissingUsage` | `false` | Estimate turns whose route reports no usage at all. Off by default - see "When a route reports no usage at all" below. |
 
 **`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else. Up to 8 sources; extras are ignored with no error, so keep the list short enough to count.
 
@@ -179,6 +180,8 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 - `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
 
 Usage semantics per store are in the Token accounting section below.
+
+**`tokens.estimateMissingUsage`** and its `tokens.estimate` overrides are described in their own section further down.
 
 A config from before the array form (`"sources": { "pi": { "sessionsDir": ... } }`) is still read: each key becomes the app and its `sessionsDir` the store, and one log line says the legacy form was converted. Migrate to the array form at your convenience - entries without a `sessionsDir` (the old sqlite-backed stores) are skipped, as they always were.
 
@@ -274,6 +277,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                   "command": "C:\tools\focus.bat", "toggle": true } ]
   },
   "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
+              "estimateMissingUsage": false,
               "labels": { "pi": "pi-wsl" },
               "sources": [ { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
                            { "app": "pi",  "path": "~/.pi/agent/sessions", "enabled": true,
@@ -338,6 +342,43 @@ Every row is a per-store semantics note, not something you declare: the shipped 
 
 Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
 
+### When a route reports no usage at all
+
+A route that is a real API answers with a usage block, so the numbers above are exact. A route that is a **local app or CLI driven through a bridge** - CodeBuddy reached through the workbuddy daemon, the MiMo desktop, the `agy` CLI - has no API to answer, so its turns arrive with an all-zero usage object and are dropped, exactly as if the turn never happened. That is the honest default, and it is why a bridged route otherwise shows nothing.
+
+`tokens.estimateMissingUsage: true` estimates those turns instead, from the transcript they were sent in. It is **off by default** because an estimate is not a measurement, and because the constants below were fitted to one machine's history.
+
+```json
+"tokens": {
+  "estimateMissingUsage": true,
+  "estimate": { "inputFactor": 1.10, "saturateTokens": 160000, "outputFactor": 1.04 }
+}
+```
+
+**How a turn is chosen.** Per session file, per route: a turn is estimated only when its own route has never reported a real number anywhere in that file. One session routinely mixes a reporting route with a bridged one - on the store this was measured against, 824 of 1,028 CodeBuddy turns sit in such files, where a whole-file rule would discard every one of them as an abort. No route name is compiled in; the decision comes from what reported in that file, so a new harness needs no code change and a route that starts reporting is picked up the same day.
+
+**How the numbers are derived.**
+
+- The prompt is the whole transcript so far - every message, not only the usage-bearing ones - at about four characters per token, scaled by `inputFactor`.
+- It then **saturates** at `saturateTokens` and stops growing, however long the transcript gets. This is the important part: a long session's raw character count runs to tens of millions of tokens, so without the cap a single turn estimates at more than any model accepts.
+- The completion side is just the turn's own reply text, scaled by `outputFactor`.
+- The estimated prompt is stored as `input` with both cache columns zero, so `rowTotal` still equals the tokens that turn really cost.
+
+**Accuracy** - measured on 20,777 turns that did report usage, over their own transcripts:
+
+| transcript size | median estimated / reported |
+|---|---|
+| under 200k | 1.02 |
+| 200k-400k | 0.96 |
+| 400k-1M | 0.91 |
+| over 1M | 1.00 |
+
+The aggregate error is under half a percent. A **single** turn is not trustworthy: compaction is a step, so a turn is either close or several times off and nothing in the record says which. Use the result for per-model and per-app totals - which is everything the dashboard shows - and not for a per-session or per-day figure.
+
+The constants are machine-specific, because they absorb how one harness's transcripts grow and compact. If your store disagrees, override them under `tokens.estimate`; the built-ins are 1.10, 160000 and 1.04.
+
+**What it cannot reach.** opencode, the mimo history cache and the subscription board keep no recoverable transcript text, so no pi-side estimator can fill those in; they stay at zero and their totals stay whatever the store reported. pi and zcode self-correct from their own reported turns, so they do not need this at all.
+
 ## Use the bar and dashboard
 
 - Click the diamond (tokens) chip for the dashboard, the gauge (subscription) chip for the plan board.
@@ -361,7 +402,9 @@ Tests are headless and require no GUI:
 npm test
 ```
 
-The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator off with no override block.
+
+It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
 ## Layout
 
