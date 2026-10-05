@@ -756,7 +756,9 @@ static void scanTokenCacheInner(const Config *cfg) {
             if (me > mv) mlen = (int)(me - mv);
         }
         if (ts >= midnight) total += sum;
-        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen);
+        // est=0: these come from the seed cache, which holds PROVIDER-REPORTED
+        // numbers, so nothing here is ever an estimate.
+        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, 0);
         if (ts > tsScanMax) tsScanMax = ts;
         p = next ? next : end;
     }
@@ -3880,6 +3882,15 @@ static const char *g_template =
     "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": false, \"recursive\": true },\r\n"
     "      { \"app\": \"zai\",  \"path\": \"~/.zai/agent/sessions\", \"enabled\": false }\r\n"
     "    ],\r\n"
+    "    // estimateMissingUsage: a route that is a LOCAL APP or CLI driven through a bridge\r\n"
+    "    // (CodeBuddy over workbuddy, the MiMo desktop, the agy CLI) has no API to answer\r\n"
+    "    // with a usage block, so its turns arrive all-zero and are dropped. Set this to\r\n"
+    "    // false to leave them at zero instead. ON by default, because the alternative is\r\n"
+    "    // to under-count what those routes actually did - and the constants below were\r\n"
+    "    // fitted, and can be re-fitted under \"estimate\", for that.\r\n"
+    "    // An estimate is a COUNT, not a price: per-model and per-app totals carry it.\r\n"
+    "    // It is not a basis for what any provider billed.\r\n"
+    "    \"estimateMissingUsage\": true,\r\n"
     "    \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"
