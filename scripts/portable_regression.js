@@ -78,8 +78,8 @@ function check(name, ok, detail) {
     // the estimator of blind turns: an estimate is not a measurement, so it ships
     // OFF and says so, and its constants stay overridable in the config file
     // rather than being baked into the source
-    check('template: estimateMissingUsage on by default',
-      tok.estimateMissingUsage === true);
+    check('template: estimateMissingUsage off by default',
+      tok.estimateMissingUsage === false);
     check('template: estimate block absent by default (built-ins apply)',
       !('estimate' in tok));
     check('template: no personal identifiers in the template',
@@ -124,8 +124,8 @@ function check(name, ok, detail) {
     'a real row is never flagged, an estimated row always is');
 
   // off by default, with the constants in config and a sane floor
-  check('config: estimateMissingUsage defaults to on',
-    /tokensEnabled = jboolDefault\(js, t, jobjGet\(js, t, toks, "enabled"\), 1\);[\s\S]{0,700}tokEstimate = jboolDefault\(js, t, jobjGet\(js, t, toks, "estimateMissingUsage"\), 1\);/.test(cb));
+  check('config: estimateMissingUsage defaults to off',
+    /tokensEnabled = jboolDefault\(js, t, jobjGet\(js, t, toks, "enabled"\), 1\);[\s\S]{0,700}tokEstimate = jboolDefault\(js, t, jobjGet\(js, t, toks, "estimateMissingUsage"\), 0\);/.test(cb));
   check('config: the three constants are configurable',
     /"inputFactor"/.test(cb) && /"saturateTokens"/.test(cb) && /"outputFactor"/.test(cb));
   check('config: constants fall back on a zero/negative value',
