@@ -859,11 +859,11 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         // a local app or CLI driven through a bridge (CodeBuddy over workbuddy, the
         // MiMo desktop, the agy CLI) has no API to answer with a usage block, so
         // those turns arrive all-zero and are dropped. See tokEstimate in
-        // p_tokens.c. ON by default: the alternative is to quietly under-count
-        // what those bridged routes did, and the constants absorb one machine's
-        // history. An estimate is a COUNT, not a price; per-model and per-app
-        // totals carry it.
-        c->tokEstimate = jboolDefault(js, t, jobjGet(js, t, toks, "estimateMissingUsage"), 1);
+        // p_tokens.c. OFF by default: the cap is a chosen constant, not a
+        // read-out of a real turn, so the number the bar publishes for
+        // a bridged route is cap-driven rather than measured. Leave it off
+        // unless a coarse total is better than a hole for you.
+        c->tokEstimate = jboolDefault(js, t, jobjGet(js, t, toks, "estimateMissingUsage"), 0);
         int est = jobjGet(js, t, toks, "estimate");
         c->tokEstIn  = jdoubleTok(js, t, jobjGet(js, t, est, "inputFactor"), 1.10);
         c->tokEstSat = jdoubleTok(js, t, jobjGet(js, t, est, "saturateTokens"), 160000.0);
