@@ -162,7 +162,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 | `appFilter` | `[]` | Harness allowlist: only these app ids are counted (empty = all). |
 | `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
 | `sources` | `[]` | Every session store the live scan reads - a user-declared array, see below. |
-| `estimateMissingUsage` | `false` | Estimate turns whose route reports no usage at all. Off by default - see "When a route reports no usage at all" below. |
+| `estimateMissingUsage` | `true` | Estimate turns whose route reports no usage at all. On by default - see "When a route reports no usage at all" below. |
 
 **`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else. Up to 8 sources; extras are ignored with no error, so keep the list short enough to count.
 
@@ -277,7 +277,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                   "command": "C:\tools\focus.bat", "toggle": true } ]
   },
   "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
-              "estimateMissingUsage": false,
+              "estimateMissingUsage": true,
               "labels": { "pi": "pi-wsl" },
               "sources": [ { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
                            { "app": "pi",  "path": "~/.pi/agent/sessions", "enabled": true,
@@ -346,7 +346,7 @@ Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[
 
 A route that is a real API answers with a usage block, so the numbers above are exact. A route that is a **local app or CLI driven through a bridge** - CodeBuddy reached through the workbuddy daemon, the MiMo desktop, the `agy` CLI - has no API to answer, so its turns arrive with an all-zero usage object and are dropped, exactly as if the turn never happened. That is the honest default, and it is why a bridged route otherwise shows nothing.
 
-`tokens.estimateMissingUsage: true` estimates those turns instead, from the transcript they were sent in. It is **off by default** because an estimate is not a measurement, and because the constants below were fitted to one machine's history.
+`tokens.estimateMissingUsage: false` leaves them at zero instead. It is **on by default**, because the alternative is to quietly under-count what those bridged routes actually did - which on the store this was measured on was a substantial share of total usage. An estimate is a count, not a measurement, and not a basis for what any provider billed.
 
 ```json
 "tokens": {
