@@ -863,7 +863,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         // read-out of a real turn, so the number the bar publishes for
         // a bridged route is cap-driven rather than measured. Leave it off
         // unless a coarse total is better than a hole for you.
-        c->tokEstimate = jboolDefault(js, t, jobjGet(js, t, toks, "estimateMissingUsage"), 0);
+        c->tokEstimate = jboolDefault(js, t, jobjGet(js, t, toks, "estimateMissingUsage"), 1);
         int est = jobjGet(js, t, toks, "estimate");
         c->tokEstIn  = jdoubleTok(js, t, jobjGet(js, t, est, "inputFactor"), 1.10);
         c->tokEstSat = jdoubleTok(js, t, jobjGet(js, t, est, "saturateTokens"), 160000.0);

@@ -3891,7 +3891,7 @@ static const char *g_template =
     "    // totals still cannot say what the wire never reported.\r\n"
     "    // The constants below are the fit the estimate uses; tweak them under\r\n"
     "    // \"estimate\" only if a coarse total is better than a hole.\r\n"
-    "    \"estimateMissingUsage\": false,\r\n"
+    "    \"estimateMissingUsage\": true,\r\n"
     "    \"labels\": { \"pi\": \"pi-wsl\" } },\r\n"
     "  \"modules\": {\r\n"
     "    \"gpu\": { \"enabled\": true },\r\n"

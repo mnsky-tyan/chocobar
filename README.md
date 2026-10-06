@@ -162,7 +162,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 | `appFilter` | `[]` | Harness allowlist: only these app ids are counted (empty = all). |
 | `labels` | `{}` | Display names, e.g. `{ "pi": "pi-wsl" }`; aggregation keys stay raw. |
 | `sources` | `[]` | Every session store the live scan reads - a user-declared array, see below. |
-| `estimateMissingUsage` | `false` | Estimate turns whose route reports no usage at all. Off by default - see "When a route reports no usage at all" below. |
+| `estimateMissingUsage` | `true` | Estimate turns whose route reports no usage at all. On by default - see "When a route reports no usage at all" below. |
 
 **`tokens.sources[]`** - the list of session stores, so tracking a new harness is a config line and nothing else. Up to 8 sources; extras are ignored with no error, so keep the list short enough to count.
 
@@ -277,7 +277,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                   "command": "C:\tools\focus.bat", "toggle": true } ]
   },
   "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
-              "estimateMissingUsage": false,
+              "estimateMissingUsage": true,
               "labels": { "pi": "pi-wsl" },
               "sources": [ { "app": "zai", "path": "~/.zai/agent/sessions", "enabled": true },
                            { "app": "pi",  "path": "~/.pi/agent/sessions", "enabled": true,
@@ -344,13 +344,13 @@ Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[
 
 ### When a route reports no usage at all
 
-A route that is a real API answers with a usage block, so the numbers above are exact. A route that is a **local app or CLI driven through a bridge** - CodeBuddy reached through the workbuddy daemon, the MiMo desktop, the `agy` CLI - has no API to answer, so its turns arrive with an all-zero usage object. With `estimateMissingUsage: false` (the default), those turns are dropped, exactly as if they never happened. That is the honest number, and it is why a bridged route otherwise shows nothing.
+A route that is a real API answers with a usage block, so the numbers above are exact. A route that is a **local app or CLI driven through a bridge** - CodeBuddy reached through the workbuddy daemon, the MiMo desktop, the `agy` CLI - has no API to answer, so its turns arrive with an all-zero usage object. With `estimateMissingUsage: false`, those turns are dropped, exactly as if they never happened. That is the honest number, and it is why a bridged route otherwise shows nothing. With `true` (the default), the bar estimates those turns from the prompt and output text instead.
 
-`tokens.estimateMissingUsage: true` estimates those turns from the transcript they were sent in. It is **off by default**, because the estimate is cap-driven rather than measured: the cap is a chosen constant, not a read-out of a real turn, so the number the bar publishes for that route reflects the cap on the live transcript, not a measured token count. You can still turn it on and override the constants under `tokens.estimate`, and the table below is what the estimate tracks. The flag remains for cases where a coarse total is better than a hole, but it is not the default because it cannot be made to say "this many tokens really happened" - only the wire knows that, and for these routes the wire is silent.
+`tokens.estimateMissingUsage: true` estimates those turns from the transcript they were sent in. It is **on by default**, and you can override the constants under `tokens.estimate`. The table below is what the estimate tracks. It cannot say "this many tokens really happened" - only the wire knows that, and for these routes the wire is silent - so turn it off with `estimateMissingUsage: false` if you prefer a hole you know about to a guess you do not.
 
 ```json
 "tokens": {
-  "estimateMissingUsage": false,
+  "estimateMissingUsage": true,
   "estimate": { "inputFactor": 1.10, "saturateTokens": 160000, "outputFactor": 1.04 }
 }
 ```
