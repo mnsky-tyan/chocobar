@@ -83,8 +83,10 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 - All wide strings go through `wideDup`/HeapFree; mixing `_wcsdup` with
   HeapFree caused a 0xC0000374 heap corruption once.
 - A crash handler (`SetUnhandledExceptionFilter` -> `writeLogA`) appends
-  the exception code to `native.log` next to the config; paint failures
-  log there too. No other logging in steady state.
+  the exception code to `%USERPROFILE%\.wizbar\native.log` - always that
+  path, even when `--config` points elsewhere (TEMP\chocobar-native.log
+  when the profile is unset); paint failures log there too. No other
+  logging in steady state.
 - `CreateWindowExW` starts the bar at (-2000,-2000); the follow tick moves
   it. Never paint assumptions before `followTick` has run.
 

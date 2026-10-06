@@ -139,7 +139,13 @@ static int svgNum(const wchar_t *d, int *pi, float *out) {
         double f = 0.1;
         while (d[i] >= L'0' && d[i] <= L'9') { v += (d[i] - L'0') * f; f *= 0.1; i++; }
     }
-    if (!any) return 0;
+    if (!any) {
+        // svgWalk treats 0 as "break the switch, keep walking", so a failed
+        // read must still land the cursor past the junk byte or the walk spins
+        if (i == *pi && d[i]) i++;
+        *pi = i;
+        return 0;
+    }
     *pi = i;
     *out = neg ? (float)-v : (float)v;
     return 1;
@@ -385,7 +391,6 @@ static GpStatus (WINAPI *t_GdipDrawPath)(GpGraphics *, GpPen *, GpPath *);
 static GpStatus (WINAPI *t_GdipDrawArc)(GpGraphics *, GpPen *, float, float, float, float, float, float);
 static GpStatus (WINAPI *t_GdipDrawEllipse)(GpGraphics *, GpPen *, float, float, float, float);
 static GpStatus (WINAPI *t_GdipFillEllipse)(GpGraphics *, GpBrush *, float, float, float, float);
-static GpStatus (WINAPI *t_GdipFillRectangleI)(GpGraphics *, GpBrush *, int, int, int, int);
 static GpStatus (WINAPI *t_GdipFillPath)(GpGraphics *, GpBrush *, GpPath *);
 static GpStatus (WINAPI *t_GdipAddPathArc)(GpPath *, float, float, float, float, float, float);
 static GpStatus (WINAPI *t_GdipCloseFigure)(GpPath *);
@@ -415,7 +420,6 @@ static void gdipInit(void) {
     GBIND(GdipDrawArc, "GdipDrawArc");
     GBIND(GdipDrawEllipse, "GdipDrawEllipse");
     GBIND(GdipFillEllipse, "GdipFillEllipse");
-    GBIND(GdipFillRectangleI, "GdipFillRectangleI");
     GBIND(GdipFillPath, "GdipFillPath");
     GBIND(GdipAddPathArc, "GdipAddPathArc");
     GBIND(GdipCloseFigure, "GdipClosePathFigure"); // flat API has no GdipCloseFigure
@@ -429,7 +433,7 @@ static void gdipInit(void) {
         (void *)t_GdipClosePathFigure, (void *)t_GdipCreatePen1, (void *)t_GdipDeletePen,
         (void *)t_GdipSetPenStartCap, (void *)t_GdipSetPenEndCap, (void *)t_GdipSetPenLineJoin,
         (void *)t_GdipDrawPath, (void *)t_GdipDrawArc, (void *)t_GdipDrawEllipse,
-        (void *)t_GdipFillEllipse, (void *)t_GdipFillRectangleI, (void *)t_GdipFillPath, (void *)t_GdipAddPathArc,
+        (void *)t_GdipFillEllipse, (void *)t_GdipFillPath, (void *)t_GdipAddPathArc,
         (void *)t_GdipCloseFigure, (void *)t_GdipCreateSolidFill, (void *)t_GdipDeleteBrush };
     for (int i = 0; i < (int)(sizeof(tabs) / sizeof(tabs[0])); i++) {
         if (!tabs[i]) { writeLogA("[wizbar] gdiplus bind missing, falling back to GDI"); return; }

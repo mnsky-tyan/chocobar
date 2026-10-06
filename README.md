@@ -340,7 +340,7 @@ Per source, the raw numbers come from the provider's own usage records:
 
 Every row is a per-store semantics note, not something you declare: the shipped bar scans only the JSONL session stores in `tokens.sources[]`, and `zcode` / `opencode` / `mimo` / `subscription` have no native reader.
 
-Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
+Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan and the per-file byte cursor; the `aggRecord` aggregation itself is `native/src/p_ui.c`'s), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
 
 ### When a route reports no usage at all
 
@@ -411,12 +411,12 @@ It then guards the estimator itself in `native/src/p_tokens.c` and its parser in
 The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents. The authoritative list of source parts is the `PARTS` array at the top of `native/build.sh` - the table below is descriptive prose.
 
 ```text
-native/src/chocobar.c   entry, config parser, wWinMain
+native/src/chocobar.c   config parser
 native/src/p_metrics.c  cpu / ram / temp / volume / battery / gpu / pet polls
 native/src/p_subs.c     subscription quota fetchers (WinHTTP)
 native/src/p_icons.c    chip icons (flattened SVG paths)
 native/src/p_tokens.c   live session-log scan and byte cursors
-native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
+native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
 scripts/                the portable regression suite
