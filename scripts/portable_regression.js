@@ -133,5 +133,25 @@ function check(name, ok, detail) {
     && /if \(c->tokEstOut\s+<= 0\)/.test(cb));
 }
 
+// --- version sync -------------------------------------------------------------
+// version.h calls itself the single source of truth for the shipped version,
+// but package.json and package-lock.json repeat the number by hand, and git
+// history shows the copies drifting apart on hand bumps. The binary only ever
+// reads version.h, so pin the three-way agreement here: a bump that misses a
+// copy fails the suite instead of shipping disagreeing metadata.
+{
+  const vh = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'version.h'), 'utf8');
+  const m = vh.match(/#define CB_VER_STR\s+"([^"]+)"/);
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package-lock.json'), 'utf8'));
+  const lockRoot = lock.packages && lock.packages[''] ? lock.packages[''].version : undefined;
+  check('version: version.h declares CB_VER_STR', !!m);
+  if (m) {
+    check('version: package.json, package-lock.json, and version.h agree',
+      pkg.version === m[1] && lock.version === m[1] && lockRoot === m[1],
+      `version.h=${m[1]} package.json=${pkg.version} lock=${lock.version}/${lockRoot}`);
+  }
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);

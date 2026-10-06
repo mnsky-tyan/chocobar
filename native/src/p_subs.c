@@ -276,17 +276,11 @@ static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *hos
                            insecure, timeoutMs, outStatus, outLen);
 }
 
-static int jNumOk(const char *js, const jsmntok_t *t, int i); // chocobar
+static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def); // chocobar
 
 static double subsJdouble(const char *js, jsmntok_t *t, int obj, const char *key, double dflt) {
-    int k = jobjGet(js, t, obj, key);
-    if (!jNumOk(js, t, k)) return dflt; // null / true / false
-    char tmp[32];
-    int len = t[k].end - t[k].start;
-    if (len >= 32) len = 31;
-    memcpy(tmp, js + t[k].start, len);
-    tmp[len] = 0;
-    return atof(tmp);
+    // jdoubleTok: null/true/false and an oversized token return the default
+    return jdoubleTok(js, t, jobjGet(js, t, obj, key), dflt);
 }
 
 static int subsJint(const char *js, jsmntok_t *t, int obj, const char *key, int dflt) {
@@ -1510,15 +1504,6 @@ static LONG g_subsKick = 0; // board refresh button wakes the cycle early
 // field oscillate (41 -> 42 -> 41) on every repaint.
 static volatile long long g_subsFetchedEpoch = 0;
 
-// Local wall clock in the frame dashFmtTime renders (it reinterprets its input
-// as UTC), so the board footer shows the user's local time. subsNowMs() is a
-// TRUE UTC epoch and would print UTC - hours off in a UTC+8 timezone.
-static long long subsLocalStampMs(void) {
-    SYSTEMTIME now; GetLocalTime(&now);
-    FILETIME ft;
-    SystemTimeToFileTime(&now, &ft);
-    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
-}
 void subsRefetchNow(void) { InterlockedExchange(&g_subsKick, 1); }
 // seconds since the last completed fetch cycle (kept for callers that want an age)
 // wall-clock epoch ms of the last completed cycle, 0 = never fetched
@@ -1596,7 +1581,7 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                 sprintf(lb, "[wizbar] subs cycle: total %llu ms", GetTickCount64() - tCycle);
                 writeLogA(lb);
             }
-            g_subsFetchedEpoch = subsLocalStampMs();
+            g_subsFetchedEpoch = wallNowLocalMs();
             if (view->debug) { // one line per provider: what the board will show
                 for (int i = 0; i < n; i++) {
                     if (!view->subsProviders[i].enabled) continue;
