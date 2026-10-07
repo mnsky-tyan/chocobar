@@ -1744,7 +1744,6 @@ static void configCheckTick(void) {
                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
         if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
-        clockFmtReload();
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
     }
@@ -3585,7 +3584,6 @@ static void showTrayMenu(HWND hwnd) {
         ShellExecuteExW(&sei);
     } else if (id == 3) {
         loadConfig();
-        clockFmtReload();
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
     } else if (id == 4) {
@@ -4002,6 +4000,7 @@ void loadConfig(void) {
     // the provider fetch threads and the command poll both walk the live one.
     cfgInstall(next);
     g_cfgLoaded = 1;
+    clockFmtReload();
     // A first run (template just written) registers the Run value per
     // general.autoStart; every later run leaves the registry to the menu,
     // except that a value pointing at a different exe path is repaired - the
