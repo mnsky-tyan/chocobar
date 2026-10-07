@@ -153,5 +153,26 @@ function check(name, ok, detail) {
   }
 }
 
+// --- autostart follows the exe when it moves ----------------------------------
+// The Run value is written first-run-only from whatever path the exe was
+// launched out of. The shipped app is a single portable exe a user may move
+// after running it once, so a stored path that no longer matches the running
+// one must be repaired - otherwise every boot starts a stale copy, or nothing
+// at all when that copy is gone. The heal must (a) rewrite on a mismatch, and
+// (b) leave an absent value alone, because absence is the user's "off".
+{
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_ui.c'), 'utf8');
+  const heal = ui.match(/static void autoStartHeal\(void\) \{([\s\S]*?)\n\}/);
+  check('autostart: a moved exe is rewritten on mismatch',
+    !!heal && /lstrcmpiW\(cur, want\)/.test(heal[1]) && !/lstrcmpW\(cur, want\)/.test(heal[1]),
+    'case-insensitive compare: Windows paths differ in case');
+  check('autostart: an absent Run value is left alone',
+    !!heal && /RegGetValueW\([^]*?!= ERROR_SUCCESS\) return;/.test(heal[1]),
+    'no value = the user turned it off; healing it back on would be wrong');
+  check('autostart: the heal runs on every load after the first-run write',
+    /if \(freshInstall && g_cfg\.autoStart\) autoStartSet\(1\);\s*\n\s*else autoStartHeal\(\);/.test(ui),
+    'first run writes, every later run repairs');
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);
