@@ -8,6 +8,10 @@ commands:
   # pops no window.
   test: "node scripts/portable_regression.js"
 
+  # Compile-only C gate: syntax + -Wall -Wextra over the amalgamated source,
+  # no link, no exe written.
+  lint: "bash native/build.sh --check"
+
 # The Test step is an agent, so it also reads AGENTS.md. The live bar at
 # C:\Users\tyanw\review\chocobar\native\chocobar.exe is the user's running
 # status bar, NOT a test fixture. It must never be stopped to free the

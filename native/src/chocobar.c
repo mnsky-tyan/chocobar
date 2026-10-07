@@ -363,7 +363,7 @@ static int jtokSpan(const jsmntok_t *t, int i) {
 }
 
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key) {
-    if (t[obj].type != JSMN_OBJECT) return -1;
+    if (obj < 0 || t[obj].type != JSMN_OBJECT) return -1;
     int kids = t[obj].size;
     int kl = (int)strlen(key);
     int k = obj + 1;
@@ -985,44 +985,44 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         if (c->dashW < 360) c->dashW = 360;
         if (c->dashH < 240) c->dashH = 240;
     }
-        int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
-        if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
-            int n2 = t[arr].size;
-            if (n2 > MAX_SUBS) n2 = MAX_SUBS;
-            int k = arr + 1;
-            for (int j = 0; j < n2; j++) {
-                jsmntok_t *e = &t[k];
-                if (e->type == JSMN_OBJECT && c->subsProviderCount < MAX_SUBS) {
-                    SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
-                    memset(sp, 0, sizeof(*sp));
-                    int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
-                    wchar_t *ty = jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
-                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
-                             : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
-                             : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
-                    // an absent type falls back to chatgpt by design, but a
-                    // MISSPELLED one must say so: otherwise a typo silently
-                    // reads another provider's quota (the chatgpt fetch)
-                    if (ty && *ty && sp->type == 0 && lstrcmpiW(ty, L"chatgpt") != 0) {
-                        char tw[160];
-                        snprintf(tw, sizeof(tw), "[wizbar] subs: unknown provider type \"%ls\" - using chatgpt", ty);
-                        writeLogA(tw);
-                    }
-                    wideFree(&ty);
-                    sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
-                    sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
-                    sp->clientId     = jstrTok(js, t, jobjGet(js, t, k, "clientId"), L"");
-                    sp->clientSecret = jstrTok(js, t, jobjGet(js, t, k, "clientSecret"), L"");
-                    sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
-                    sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
-                    sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
-                    if (sp->type == 3) genParse(sp, js, t, k);
-                    c->subsProviderCount++;
+    int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
+    if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
+        int n2 = t[arr].size;
+        if (n2 > MAX_SUBS) n2 = MAX_SUBS;
+        int k = arr + 1;
+        for (int j = 0; j < n2; j++) {
+            jsmntok_t *e = &t[k];
+            if (e->type == JSMN_OBJECT && c->subsProviderCount < MAX_SUBS) {
+                SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
+                memset(sp, 0, sizeof(*sp));
+                int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
+                wchar_t *ty = jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
+                sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
+                         : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
+                         : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
+                // an absent type falls back to chatgpt by design, but a
+                // MISSPELLED one must say so: otherwise a typo silently
+                // reads another provider's quota (the chatgpt fetch)
+                if (ty && *ty && sp->type == 0 && lstrcmpiW(ty, L"chatgpt") != 0) {
+                    char tw[160];
+                    snprintf(tw, sizeof(tw), "[wizbar] subs: unknown provider type \"%ls\" - using chatgpt", ty);
+                    writeLogA(tw);
                 }
-                // advance k past this element
-                k += jtokSpan(t, k);
+                wideFree(&ty);
+                sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
+                sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
+                sp->clientId     = jstrTok(js, t, jobjGet(js, t, k, "clientId"), L"");
+                sp->clientSecret = jstrTok(js, t, jobjGet(js, t, k, "clientSecret"), L"");
+                sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
+                sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
+                sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
+                if (sp->type == 3) genParse(sp, js, t, k);
+                c->subsProviderCount++;
             }
+            // advance k past this element
+            k += jtokSpan(t, k);
         }
+    }
     int term = jobjGet(js, t, root, "terminal");
     if (term >= 0) {
         c->terminalClassName = jstrTok(js, t, jobjGet(js, t, term, "className"), L"");

@@ -38,7 +38,7 @@ static void writeLogA(const char *s);
 // scan keeps no totals of its own to drift out of step with them.
 long long g_tokAllLive = 0;
 // scan diagnostics (one log line per rescan while general.debug is on)
-int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
+int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0;
 
 #define TOK_MAX_FILES 4096
 // Per-file cursor, persisted to ~/.wizbar/token-cursors.json. `chars` and

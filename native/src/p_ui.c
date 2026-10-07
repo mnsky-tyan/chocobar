@@ -123,7 +123,8 @@ static int chipClickable(const Chip *c) {
     if (c->type == CT_SHORTCUT || c->type == CT_PET) return 1;
     if (c->type != CT_CUSTOM) return 0;
     if (c->customIdx < 0 || c->customIdx >= MAX_CUSTOM) return 1; // the dashboard openers
-    return g_cfg.custom[c->customIdx].intervalMs <= 0;
+    const CustomChip *cc = &g_cfg.custom[c->customIdx];
+    return cc->intervalMs <= 0 && cc->command && *cc->command;
 }
 
 // ------------------------------------------------------ render init ----

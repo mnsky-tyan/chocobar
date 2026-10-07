@@ -329,16 +329,13 @@ int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
     for (int i = 0; i < g_userCount; i++)
         if (lstrcmpiW(g_userName[i], name) == 0) { slot = i; break; } // redefine = replace
     if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, 24); }
-    int n = 0;
     for (int j = 0; j < SVG_MAXPARTS; j++) {
         memset(&g_user[slot][j], 0, sizeof(SvgFlat));
     }
     // one part: the whole d string (svgWalk splits on M into subpaths)
-    memset(&g_user[slot][0].path, 0, sizeof(SvgPath));
     svgWalk(&g_user[slot][0].path, d);
     g_user[slot][0].w = w > 0 ? w : 2.2f;
-    n = 1;
-    g_userN[slot] = n;
+    g_userN[slot] = 1;
     return SVG_USER_BASE + slot;
 }
 

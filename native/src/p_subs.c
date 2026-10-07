@@ -198,6 +198,10 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
 // near-identical copies (proxy fallback, timeouts, TLS flag, status read,
 // grow-on-demand body loop), so anything fixed in one had to be remembered in
 // the other. The verb and the request body are the only real differences.
+// upper bound for one response body: every consumer parses it with a bounded
+// jsmn token array, so a body that outgrows this can never be useful
+#define SUBS_BODY_MAX (4 * 1024 * 1024)
+
 static char *subsHttpRequest(const wchar_t *verb, const char *tag, const wchar_t *ua,
                              const wchar_t *host, int port, const wchar_t *path,
                              const wchar_t *headers, const char *body, int bodyLen,
@@ -244,7 +248,14 @@ static char *subsHttpRequest(const wchar_t *verb, const char *tag, const wchar_t
         for (;;) {
             DWORD rd = 0;
             if (len + 8192 > cap) {
+                if (cap >= SUBS_BODY_MAX) {
+                    char dbg[96];
+                    sprintf(dbg, "[wizbar] subs %s: body over %d MB, truncated", tag, SUBS_BODY_MAX >> 20);
+                    writeLogA(dbg);
+                    break;
+                }
                 int ncap = cap * 2;
+                if (ncap > SUBS_BODY_MAX) ncap = SUBS_BODY_MAX;
                 char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, result, ncap);
                 if (!nb) break;
                 result = nb; cap = ncap;
@@ -253,6 +264,7 @@ static char *subsHttpRequest(const wchar_t *verb, const char *tag, const wchar_t
             if (!rd) break;
             len += (int)rd;
         }
+        if (len >= cap) len = cap - 1;
         result[len] = 0;
         *outLen = len;
     } while (0);
@@ -383,8 +395,10 @@ static int subsFetchZai(const Config *cfg, int idx) {
     wchar_t *mid = NULL;
     wchar_t *key = subsZaiKey(cfg, idx, &mid);
     if (!key) { subsSetState(idx, 0, 0); return 0; }
-    wchar_t hdrs[1600];
-    swprintf(hdrs, 1600,
+    int need = 384 + 2 * lstrlenW(key) + (mid ? lstrlenW(mid) : 0);
+    wchar_t *hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)need * sizeof(wchar_t));
+    if (!hdrs) { wideFree(&key); wideFree(&mid); subsSetState(idx, 0, 0); return 0; }
+    swprintf(hdrs, need,
         L"authorization: %ls\r\n"
         L"Accept: application/json\r\n"
         L"x-api-key: %ls\r\n"
@@ -404,6 +418,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
     wideFree(&mid);
     int status = 0, len = 0;
     char *body = subsHttpGet("zai", L"ZCode/3.11.2", L"api.z.ai", 0, L"/api/monitor/usage/quota/limit", hdrs, 0, cfg->subsTimeoutMs, &status, &len);
+    HeapFree(GetProcessHeap(), 0, hdrs);
 
     if (!body) { subsSetState(idx, 0, 0); return 0; }
     jsmntok_t t[1024];
@@ -785,8 +800,8 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
     return ok;
 }
 
-static void subsAgyHeaders(wchar_t *hdrs, int cch, const wchar_t *token) {
-    swprintf(hdrs, cch,
+static int subsAgyHeaders(wchar_t *hdrs, int cch, const wchar_t *token) {
+    int n = swprintf(hdrs, cch,
         L"Authorization: Bearer %ls\r\n"
         L"Content-Type: application/json\r\n"
         L"Accept: text/event-stream\r\n"
@@ -794,6 +809,7 @@ static void subsAgyHeaders(wchar_t *hdrs, int cch, const wchar_t *token) {
         L"X-Goog-Api-Client: google-cloud-sdk vscode_cloudshelleditor/0.1\r\n"
         L"Client-Metadata: {\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}",
         token);
+    return n > 0 && n < cch;
 }
 
 
@@ -973,7 +989,11 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     unsigned long long tAgy = GetTickCount64();
     if (!*auth.access) { subsSetState(idx, 0, 0); return 0; }
     wchar_t hdrs[4600];
-    subsAgyHeaders(hdrs, 4600, auth.access);
+    if (!subsAgyHeaders(hdrs, 4600, auth.access)) {
+        writeLogA("[wizbar] subs agy: auth token too long for the header block");
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
     const wchar_t *hosts[2] = { L"cloudcode-pa.googleapis.com", L"daily-cloudcode-pa.sandbox.googleapis.com" };
     wchar_t plan[24] = L"";   // paidTier.name, else currentTier.name, else "Antigravity"
     int planSet = 0;           // set once a name actually landed in plan[]
