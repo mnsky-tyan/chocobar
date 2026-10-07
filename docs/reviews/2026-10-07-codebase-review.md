@@ -1,6 +1,6 @@
 # Codebase Review - 2026-10-07
 Scope: /home/tyan/mnsky/chocobar | Review units: native/src (C sources), non-C files, cross-scope
-Summary: 26 findings (0 Critical, 0 High, 5 Medium, 21 Low). The Critical/High tier is empty: the 2026-10-06 fixes landed, and this pass found no new crash-class defects in the audited areas - but cross-scope Finding 1 is a real out-of-bounds read the repo's gates cannot see.
+Summary: 26 findings (0 Critical, 0 High, 8 Medium, 18 Low). The Critical/High tier is empty: the 2026-10-06 fixes landed, and this pass found no new crash-class defects in the audited areas - but cross-scope Finding 1 is a real out-of-bounds read the repo's gates cannot see.
 
 ## Findings by Severity
 | # | Category | Severity | File(s) | Description | Fix Complexity |
