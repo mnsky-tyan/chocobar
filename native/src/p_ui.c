@@ -3453,16 +3453,24 @@ static int autoStartEnabled(void) {
     return *val ? 1 : 0;
 }
 
+// The module path quoted the way the Run value stores it. Returns 0 when the
+// path does not fit MAX_PATH or the buffer is too small for the quotes.
+static int moduleQuoted(wchar_t *out, int cch) {
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return 0;
+    if ((int)wcslen(exe) + 3 > cch) return 0;
+    swprintf(out, cch, L"\"%ls\"", exe);
+    return 1;
+}
+
 static void autoStartSet(int on) {
     HKEY k;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                       0, KEY_WRITE, &k) != ERROR_SUCCESS) return;
     if (on) {
-        wchar_t exe[MAX_PATH];
-        DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-        if (n && n < MAX_PATH) {
-            wchar_t quoted[MAX_PATH + 3];
-            swprintf(quoted, MAX_PATH + 3, L"\"%ls\"", exe);
+        wchar_t quoted[MAX_PATH + 3];
+        if (moduleQuoted(quoted, MAX_PATH + 3)) {
             RegSetValueExW(k, AUTOSTART_NAME, 0, REG_SZ, (const BYTE *)quoted,
                            (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
         }
@@ -3470,6 +3478,26 @@ static void autoStartSet(int on) {
         RegDeleteValueW(k, AUTOSTART_NAME);
     }
     RegCloseKey(k);
+}
+
+// Self-heal the Run value when the stored path no longer matches this exe.
+// The value is written once, on first run, from whatever path the exe was
+// launched out of; a user who later MOVES the exe (portable single-file app)
+// would otherwise keep booting the old copy - or, if that copy is gone, boot
+// nothing at all with no error. Rewriting on a mismatch costs one registry
+// read and makes "start with Windows" follow the file the user actually runs.
+// A disabled setting (no value) is left alone: absence is the user's choice.
+static void autoStartHeal(void) {
+    wchar_t cur[MAX_PATH + 2];
+    DWORD n = (DWORD)sizeof(cur);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                     AUTOSTART_NAME, RRF_RT_REG_SZ, NULL, cur, &n) != ERROR_SUCCESS) return;
+    if (!*cur) return;
+    wchar_t want[MAX_PATH + 3];
+    if (!moduleQuoted(want, MAX_PATH + 3)) return;
+    if (!lstrcmpiW(cur, want)) return;
+    autoStartSet(1);
+    writeLogA("autostart: repointed Run value to the running exe (it had moved)");
 }
 
 // Menu width: the widest row label + padding + room for the autostart check
@@ -3975,8 +4003,11 @@ void loadConfig(void) {
     cfgInstall(next);
     g_cfgLoaded = 1;
     // A first run (template just written) registers the Run value per
-    // general.autoStart; every later run leaves the registry to the menu
+    // general.autoStart; every later run leaves the registry to the menu,
+    // except that a value pointing at a different exe path is repaired - the
+    // move case the first-run-only write cannot cover (see autoStartHeal)
     if (freshInstall && g_cfg.autoStart) autoStartSet(1);
+    else autoStartHeal();
     g_iconOpacity = g_cfg.iconOpacity / 100.0; // p_icons AlphaBlend constant
     g_subsRotSec = g_cfg.subsRotateSec;
     // theme.icons[] -> the icon engine (a name defined again replaces its slot,
