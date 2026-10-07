@@ -22,9 +22,21 @@ probe, a smoke run) must launch its own copy in isolation:
 - Point it at an **isolated config and scratch dir** (`--config <scratch>`,
   a throwaway `USERPROFILE`-shaped dir), never the live `~/.wizbar/config.json`,
   so it cannot touch the real cursor file or log.
-- A copy started from a different path in an isolated profile does not fight the
-  live mutex in any way that matters, but if a test *must* have the mutex,
-  test the component or a scratch build - do not evict the user's bar.
+- **Pin the scratch copy's terminal.** `evictRivalBars()` (p_ui.c) enforces
+  one bar per terminal by ordered eviction: the **lowest pid on a terminal keeps
+  it and every higher-pid rival is closed with WM_CLOSE**. A scratch bar with no
+  `terminal.className`/`terminal.title` will attach to the same terminal as the
+  live bar and, if its pid happens to be lower, will close the live bar. Give
+  the scratch config its own `terminal.className` **plus a unique
+  `terminal.title`** so it can never attach to the user's terminal, or ensure
+  the scratch pid is higher than the live bar's so it yields instead of evicting.
+  Measured 2026-10-07: a scratch run evicted the live bar this way once.
+- Also rename the single-instance mutex and the `HKCU` Run value in a scratch
+  build if the copy must coexist with the live one.
+
+After any test round on this repo, **confirm the live bar is still running**
+(`Get-CimInstance Win32_Process -Filter "Name='chocobar.exe'"`); relaunch from
+`C:\Users\tyanw\review\chocobar\native\chocobar.exe` if it is not.
 
 If a test cannot run in isolation, do not run it against the live bar. Report
 that instead of taking the user's screen.
