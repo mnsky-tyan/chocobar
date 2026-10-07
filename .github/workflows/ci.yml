@@ -18,6 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: C compile check
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          bash native/build.sh --check
+
       - name: Test
         run: |
           node scripts/portable_regression.js

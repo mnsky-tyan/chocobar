@@ -75,9 +75,9 @@ function check(name, ok, detail) {
       srcs.every((s) => !/\.(sqlite|sqlite3|db)$/i.test(String(s.path || ''))));
     check('template: pet chip and subs board ship off',
       !!(mod.pet && mod.pet.enabled === false) && !!(tpl.subs && tpl.subs.enabled === false));
-    // the estimator of blind turns: an estimate is not a measurement, so it ships
-    // OFF and says so, and its constants stay overridable in the config file
-    // rather than being baked into the source
+    // the estimator of blind turns: an estimate is not a measurement, so the
+    // template ships it ON and says so, and its constants stay overridable in
+    // the config file rather than being baked into the source
     check('template: estimateMissingUsage on by default',
       tok.estimateMissingUsage === true);
     check('template: estimate block absent by default (built-ins apply)',

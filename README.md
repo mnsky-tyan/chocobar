@@ -402,7 +402,7 @@ Tests are headless and require no GUI:
 npm test
 ```
 
-The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator off with no override block.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator on by default with no override block.
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 

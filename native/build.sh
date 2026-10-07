@@ -33,6 +33,15 @@ if full == base:
 full += '\n' + '\n'.join(sources[p] for p in rest if p in sources)
 open('src/chocobar_full.c', 'w').write(full)
 PY
+if [ "${1:-}" = "--check" ]; then
+  if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    exec x86_64-w64-mingw32-gcc -fsyntax-only -Wall -Wextra -Ivendor -I src src/chocobar_full.c
+  fi
+  . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
+  export NIX_CONFIG="extra-experimental-features = nix-command flakes"
+  exec nix shell nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
+    -c sh -c "x86_64-w64-mingw32-gcc -fsyntax-only -Wall -Wextra -Ivendor -I src src/chocobar_full.c"
+fi
 . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
 export NIX_CONFIG="extra-experimental-features = nix-command flakes"
 MCFGTHREAD_LIB=$(nix eval nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads --raw)/lib
