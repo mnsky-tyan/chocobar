@@ -55,8 +55,30 @@ Only when the user asks for a deploy:
    during which the dashboard shows "No token data" - that is expected, not a
    failure.
 
-## Build
+## Build and the compile gate
 
 ```sh
-bash native/build.sh   # -> native/chocobar.exe (needs nix pkgsCross.mingwW64)
+bash native/build.sh            # -> native/chocobar.exe (needs nix pkgsCross.mingwW64)
+bash native/build.sh --check    # compile-only: -fsyntax-only -Wall -Wextra, no link
 ```
+
+`--check` is the C compiler gate pinned in `.no-mistakes.yaml` (`commands.lint`)
+and in `.github/workflows/ci.yml`. It runs the same amalgamation step as a full
+build, so it rewrites `native/src/chocobar_full.c`; that file is gitignored in
+`native/.gitignore`, so the gate leaves no git-status noise. Keep it that way -
+if a new generated artifact appears in the source tree, add it to that
+`.gitignore` in the same change.
+
+**Nothing else in this repo compiles the C.** The portable suite is pure
+source/config text inspection and cannot see an out-of-bounds read, a type
+error, or a missing declaration. Do not weaken or drop `--check`: it is the only
+gate that would have caught the `jobjGet` OOB read fixed on 2026-10-07.
+
+## Assembling a run to review
+
+The pipeline owns the branch and commits in its own worktree, so the checkout
+here lags. Before reviewing "what shipped", fetch and read the pipeline head
+(`git log FETCH_HEAD`) instead of local `git log` - the two can differ by
+several commits until the run finishes. If local review-report edits land after
+the pipeline already based a fix commit on the branch, push them as a
+fast-forward on top of the pipeline head so no pipeline fix commit is dropped.
