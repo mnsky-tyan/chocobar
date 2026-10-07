@@ -123,7 +123,7 @@ function check(name, ok, detail) {
     && /r\.model, r\.modelLen, 0\);/.test(pt) && /r\.model, r\.modelLen, 1\);/.test(pt),
     'a real row is never flagged, an estimated row always is');
 
-  // off by default, with the constants in config and a sane floor
+  // on by default, with the constants in config and a sane floor
   check('config: estimateMissingUsage defaults to on',
     /tokensEnabled = jboolDefault\(js, t, jobjGet\(js, t, toks, "enabled"\), 1\);[\s\S]{0,700}tokEstimate = jboolDefault\(js, t, jobjGet\(js, t, toks, "estimateMissingUsage"\), 1\);/.test(cb));
   check('config: the three constants are configurable',
