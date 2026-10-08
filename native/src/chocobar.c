@@ -45,11 +45,13 @@
 // the mingw cross toolchain, which links the same libs explicitly (build.sh
 // passes -l flags) and warns on an unknown pragma, so keep them MSVC-only.
 #ifdef _MSC_VER
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "msimg32.lib")
+#pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #endif
@@ -118,6 +120,8 @@ typedef struct {
 // and provider parsers above can use them
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key);
 static int jtokSpan(const jsmntok_t *t, int i);
+static void jstrCopyA(char *dst, int cch, const char *js, const jsmntok_t *t, int i,
+                      const char *dflt);
 static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_subs
 
 // one bounded, NUL-terminated UTF-8 copy of a config string. Every reader of
@@ -192,13 +196,7 @@ static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
 // copy one usage-field name out of the config, falling back to the default
 static void tokFieldCopy(char *dst, int cch, const char *js, jsmntok_t *t, int obj,
                          const char *key, const char *dflt) {
-    lstrcpynA(dst, dflt, cch);
-    int k = jobjGet(js, t, obj, key);
-    if (k < 0 || t[k].type != JSMN_STRING) return;
-    int n = t[k].end - t[k].start;
-    if (n <= 0 || n >= cch) return;
-    memcpy(dst, js + t[k].start, (size_t)n);
-    dst[n] = 0;
+    jstrCopyA(dst, cch, js, t, jobjGet(js, t, obj, key), dflt);
 }
 
 // --------------------------------------------------------------- config ----
@@ -365,7 +363,7 @@ static int jtokSpan(const jsmntok_t *t, int i) {
 }
 
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key) {
-    if (t[obj].type != JSMN_OBJECT) return -1;
+    if (obj < 0 || t[obj].type != JSMN_OBJECT) return -1;
     int kids = t[obj].size;
     int kl = (int)strlen(key);
     int k = obj + 1;
@@ -407,6 +405,15 @@ static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def) 
     if (len <= 0 || len >= (int)sizeof(b)) return def;
     memcpy(b, js + t[i].start, len); b[len] = 0;
     return atof(b);
+}
+
+// a JSON number read as a long long (cursor sizes/mtimes are beyond int range)
+static long long jllTok(const char *js, const jsmntok_t *t, int i, long long def) {
+    if (!jNumOk(js, t, i)) return def;
+    char b[32]; int len = t[i].end - t[i].start;
+    if (len <= 0 || len >= (int)sizeof(b)) return def;
+    memcpy(b, js + t[i].start, len); b[len] = 0;
+    return _atoi64(b);
 }
 
 static wchar_t *jstrTok(const char *js, const jsmntok_t *t, int i, const wchar_t *def) {
@@ -859,10 +866,10 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         // a local app or CLI driven through a bridge (CodeBuddy over workbuddy, the
         // MiMo desktop, the agy CLI) has no API to answer with a usage block, so
         // those turns arrive all-zero and are dropped. See tokEstimate in
-        // p_tokens.c. OFF by default: the cap is a chosen constant, not a
+        // p_tokens.c. ON by default: the cap is a chosen constant, not a
         // read-out of a real turn, so the number the bar publishes for
-        // a bridged route is cap-driven rather than measured. Leave it off
-        // unless a coarse total is better than a hole for you.
+        // a bridged route is cap-driven rather than measured. Set it to
+        // false if a hole you know about beats a coarse total.
         c->tokEstimate = jboolDefault(js, t, jobjGet(js, t, toks, "estimateMissingUsage"), 1);
         int est = jobjGet(js, t, toks, "estimate");
         c->tokEstIn  = jdoubleTok(js, t, jobjGet(js, t, est, "inputFactor"), 1.10);
@@ -978,44 +985,44 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         if (c->dashW < 360) c->dashW = 360;
         if (c->dashH < 240) c->dashH = 240;
     }
-        int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
-        if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
-            int n2 = t[arr].size;
-            if (n2 > MAX_SUBS) n2 = MAX_SUBS;
-            int k = arr + 1;
-            for (int j = 0; j < n2; j++) {
-                jsmntok_t *e = &t[k];
-                if (e->type == JSMN_OBJECT && c->subsProviderCount < MAX_SUBS) {
-                    SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
-                    memset(sp, 0, sizeof(*sp));
-                    int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
-                    wchar_t *ty = jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
-                    sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
-                             : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
-                             : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
-                    // an absent type falls back to chatgpt by design, but a
-                    // MISSPELLED one must say so: otherwise a typo silently
-                    // reads another provider's quota (the chatgpt fetch)
-                    if (ty && *ty && sp->type == 0 && lstrcmpiW(ty, L"chatgpt") != 0) {
-                        char tw[160];
-                        snprintf(tw, sizeof(tw), "[wizbar] subs: unknown provider type \"%ls\" - using chatgpt", ty);
-                        writeLogA(tw);
-                    }
-                    wideFree(&ty);
-                    sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
-                    sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
-                    sp->clientId     = jstrTok(js, t, jobjGet(js, t, k, "clientId"), L"");
-                    sp->clientSecret = jstrTok(js, t, jobjGet(js, t, k, "clientSecret"), L"");
-                    sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
-                    sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
-                    sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
-                    if (sp->type == 3) genParse(sp, js, t, k);
-                    c->subsProviderCount++;
+    int arr = subs >= 0 ? jobjGet(js, t, subs, "providers") : -1;
+    if (arr >= 0 && t[arr].type == JSMN_ARRAY) {
+        int n2 = t[arr].size;
+        if (n2 > MAX_SUBS) n2 = MAX_SUBS;
+        int k = arr + 1;
+        for (int j = 0; j < n2; j++) {
+            jsmntok_t *e = &t[k];
+            if (e->type == JSMN_OBJECT && c->subsProviderCount < MAX_SUBS) {
+                SubsProvider *sp = &c->subsProviders[c->subsProviderCount];
+                memset(sp, 0, sizeof(*sp));
+                int en = jobjGet(js, t, k, "enabled"); sp->enabled = jboolDefault(js, t, en, 1);
+                wchar_t *ty = jstrTok(js, t, jobjGet(js, t, k, "type"), L"chatgpt");
+                sp->type = (ty && lstrcmpiW(ty, L"zai") == 0) ? 1
+                         : (ty && lstrcmpiW(ty, L"antigravity") == 0) ? 2
+                         : (ty && lstrcmpiW(ty, L"generic") == 0) ? 3 : 0;
+                // an absent type falls back to chatgpt by design, but a
+                // MISSPELLED one must say so: otherwise a typo silently
+                // reads another provider's quota (the chatgpt fetch)
+                if (ty && *ty && sp->type == 0 && lstrcmpiW(ty, L"chatgpt") != 0) {
+                    char tw[160];
+                    snprintf(tw, sizeof(tw), "[wizbar] subs: unknown provider type \"%ls\" - using chatgpt", ty);
+                    writeLogA(tw);
                 }
-                // advance k past this element
-                k += jtokSpan(t, k);
+                wideFree(&ty);
+                sp->label        = jstrTok(js, t, jobjGet(js, t, k, "label"), L"");
+                sp->authPath     = jstrTok(js, t, jobjGet(js, t, k, "authPath"), L"");
+                sp->clientId     = jstrTok(js, t, jobjGet(js, t, k, "clientId"), L"");
+                sp->clientSecret = jstrTok(js, t, jobjGet(js, t, k, "clientSecret"), L"");
+                sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
+                sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
+                sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
+                if (sp->type == 3) genParse(sp, js, t, k);
+                c->subsProviderCount++;
             }
+            // advance k past this element
+            k += jtokSpan(t, k);
         }
+    }
     int term = jobjGet(js, t, root, "terminal");
     if (term >= 0) {
         c->terminalClassName = jstrTok(js, t, jobjGet(js, t, term, "className"), L"");

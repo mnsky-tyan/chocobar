@@ -75,9 +75,9 @@ function check(name, ok, detail) {
       srcs.every((s) => !/\.(sqlite|sqlite3|db)$/i.test(String(s.path || ''))));
     check('template: pet chip and subs board ship off',
       !!(mod.pet && mod.pet.enabled === false) && !!(tpl.subs && tpl.subs.enabled === false));
-    // the estimator of blind turns: an estimate is not a measurement, so it ships
-    // OFF and says so, and its constants stay overridable in the config file
-    // rather than being baked into the source
+    // the estimator of blind turns: an estimate is not a measurement, so the
+    // template ships it ON and says so, and its constants stay overridable in
+    // the config file rather than being baked into the source
     check('template: estimateMissingUsage on by default',
       tok.estimateMissingUsage === true);
     check('template: estimate block absent by default (built-ins apply)',
@@ -123,7 +123,7 @@ function check(name, ok, detail) {
     && /r\.model, r\.modelLen, 0\);/.test(pt) && /r\.model, r\.modelLen, 1\);/.test(pt),
     'a real row is never flagged, an estimated row always is');
 
-  // off by default, with the constants in config and a sane floor
+  // on by default, with the constants in config and a sane floor
   check('config: estimateMissingUsage defaults to on',
     /tokensEnabled = jboolDefault\(js, t, jobjGet\(js, t, toks, "enabled"\), 1\);[\s\S]{0,700}tokEstimate = jboolDefault\(js, t, jobjGet\(js, t, toks, "estimateMissingUsage"\), 1\);/.test(cb));
   check('config: the three constants are configurable',
@@ -131,6 +131,47 @@ function check(name, ok, detail) {
   check('config: constants fall back on a zero/negative value',
     /if \(c->tokEstIn\s+<= 0\)/.test(cb) && /if \(c->tokEstSat\s+<= 0\)/.test(cb)
     && /if \(c->tokEstOut\s+<= 0\)/.test(cb));
+}
+
+// --- version sync -------------------------------------------------------------
+// version.h calls itself the single source of truth for the shipped version,
+// but package.json and package-lock.json repeat the number by hand, and git
+// history shows the copies drifting apart on hand bumps. The binary only ever
+// reads version.h, so pin the three-way agreement here: a bump that misses a
+// copy fails the suite instead of shipping disagreeing metadata.
+{
+  const vh = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'version.h'), 'utf8');
+  const m = vh.match(/#define CB_VER_STR\s+"([^"]+)"/);
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package-lock.json'), 'utf8'));
+  const lockRoot = lock.packages && lock.packages[''] ? lock.packages[''].version : undefined;
+  check('version: version.h declares CB_VER_STR', !!m);
+  if (m) {
+    check('version: package.json, package-lock.json, and version.h agree',
+      pkg.version === m[1] && lock.version === m[1] && lockRoot === m[1],
+      `version.h=${m[1]} package.json=${pkg.version} lock=${lock.version}/${lockRoot}`);
+  }
+}
+
+// --- autostart follows the exe when it moves ----------------------------------
+// The Run value is written first-run-only from whatever path the exe was
+// launched out of. The shipped app is a single portable exe a user may move
+// after running it once, so a stored path that no longer matches the running
+// one must be repaired - otherwise every boot starts a stale copy, or nothing
+// at all when that copy is gone. The heal must (a) rewrite on a mismatch, and
+// (b) leave an absent value alone, because absence is the user's "off".
+{
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_ui.c'), 'utf8');
+  const heal = ui.match(/static void autoStartHeal\(void\) \{([\s\S]*?)\n\}/);
+  check('autostart: a moved exe is rewritten on mismatch',
+    !!heal && /lstrcmpiW\(cur, want\)/.test(heal[1]) && !/lstrcmpW\(cur, want\)/.test(heal[1]),
+    'case-insensitive compare: Windows paths differ in case');
+  check('autostart: an absent Run value is left alone',
+    !!heal && /RegGetValueW\([^]*?!= ERROR_SUCCESS\) return;/.test(heal[1]),
+    'no value = the user turned it off; healing it back on would be wrong');
+  check('autostart: the heal runs on every load after the first-run write',
+    /if \(freshInstall && g_cfg\.autoStart\) autoStartSet\(1\);\s*\n\s*else autoStartHeal\(\);/.test(ui),
+    'first run writes, every later run repairs');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);

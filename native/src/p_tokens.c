@@ -38,7 +38,7 @@ static void writeLogA(const char *s);
 // scan keeps no totals of its own to drift out of step with them.
 long long g_tokAllLive = 0;
 // scan diagnostics (one log line per rescan while general.debug is on)
-int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0, g_tokDbgStart = 0;
+int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0;
 
 #define TOK_MAX_FILES 4096
 // Per-file cursor, persisted to ~/.wizbar/token-cursors.json. `chars` and
@@ -618,15 +618,10 @@ static void tokCursorLoad(const Config *cfg) {
 
 // JSON number token -> long long (jsmn primitives are strings in the buffer).
 // The key lookup is jobjGet's job - it already walks the same key/value pairs.
-static int jNumOk(const char *js, const jsmntok_t *t, int i); // chocobar
+static long long jllTok(const char *js, const jsmntok_t *t, int i, long long def); // chocobar
 
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def) {
-    int k = jobjGet(js, t, parent, key);
-    if (!jNumOk(js, t, k)) return def;
-    char b[32]; int l = t[k].end - t[k].start;
-    if (l <= 0 || l >= (int)sizeof(b)) return def;
-    memcpy(b, js + t[k].start, l); b[l] = 0;
-    return _atoi64(b);
+    return jllTok(js, t, jobjGet(js, t, parent, key), def);
 }
 
 static void tokCursorSave(void) {
