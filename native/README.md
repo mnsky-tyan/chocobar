@@ -20,7 +20,8 @@ Phase 2 progress: the token analytics chips + dashboards and the
 subscription board are DONE (`paintDash` / `dashToggle`, a 1:1 port of the
 retired Electron renderer's `dash.css` + `subs.css`). Autostart writing is done as well
 (`general.autoStart` writes the HKCU Run value on a first run; afterwards the
-tray menu's item is the control). Bluetooth stays unimplemented on purpose -
+tray menu's item is the control, and a stored value that points at a different
+exe path is repointed on load so a moved exe still starts). Bluetooth stays unimplemented on purpose -
 `modules.bluetooth` is an ignored Electron-era key (README "Keys the native
 build ignores").
 
@@ -83,8 +84,10 @@ off-screen at (-2000,-2000) and follows the foreground terminal once found.
 - All wide strings go through `wideDup`/HeapFree; mixing `_wcsdup` with
   HeapFree caused a 0xC0000374 heap corruption once.
 - A crash handler (`SetUnhandledExceptionFilter` -> `writeLogA`) appends
-  the exception code to `native.log` next to the config; paint failures
-  log there too. No other logging in steady state.
+  the exception code to `%USERPROFILE%\.wizbar\native.log` - always that
+  path, even when `--config` points elsewhere (TEMP\chocobar-native.log
+  when the profile is unset); paint failures log there too. No other
+  logging in steady state.
 - `CreateWindowExW` starts the bar at (-2000,-2000); the follow tick moves
   it. Never paint assumptions before `followTick` has run.
 

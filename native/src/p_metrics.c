@@ -143,17 +143,24 @@ static void pickCpuTemp(TempRec *list, int n, int *ok, double *outC, int *hot, i
     *hot = warnAt > 0 && *outC >= warnAt;
 }
 
+// committed bytes of the mapping behind p: both HWiNFO readers bound every
+// later offset with this walk (the block grows one region at a time)
+static DWORD mapCommitBytes(BYTE *p) {
+    MEMORY_BASIC_INFORMATION mbi;
+    DWORD total = 0;
+    while (VirtualQuery(p + total, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+           (BYTE *)mbi.BaseAddress == p + total && total < 64 * 1024 * 1024)
+        total += (DWORD)mbi.RegionSize;
+    return total;
+}
+
 // SM1: 40-byte header, NUL-terminated sensor array, reading elements
 static void pollHwinfoSm(void) {
     HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\HWiNFO_SENS_SM");
     if (!h) return;
     BYTE *p = (BYTE *)MapViewOfFile(h, FILE_MAP_READ, 0, 0, 0);
     if (!p) { CloseHandle(h); return; }
-    MEMORY_BASIC_INFORMATION mbi;
-    DWORD total = 0;
-    while (VirtualQuery(p + total, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
-           (BYTE *)mbi.BaseAddress == p + total && total < 64 * 1024 * 1024)
-        total += (DWORD)mbi.RegionSize;
+    DWORD total = mapCommitBytes(p);
     do {
         if (total < 40 || *(uint32_t *)p != 0x10) break;
         DWORD sensorSize = *(DWORD *)(p + 32), readingSize = *(DWORD *)(p + 36);
@@ -162,7 +169,6 @@ static void pollHwinfoSm(void) {
         int wide = suffix == 32;
         // sensor names
         wchar_t sensors[256][64];
-        int sensorCount = 0;
         DWORD off = 40;
         for (int i = 0; i < 256; i++) {
             wchar_t name[64]; name[0] = 0;
@@ -170,10 +176,8 @@ static void pollHwinfoSm(void) {
             else { int n = 0; while (n < 63 && off + n < total && p[off + n]) { name[n] = (wchar_t)p[off + n]; n++; } name[n] = 0; }
             if (!name[0]) break;
             lstrcpynW(sensors[i], name, 64);
-            sensorCount = i + 1;
             off += sensorSize;
         }
-        (void)sensorCount;
         DWORD labelBytes = suffix * 8;
         TempRec *recs = (TempRec *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TempRec) * 1024);
         if (!recs) break;
@@ -213,11 +217,7 @@ static void pollHwinfoSm2(void) {
     if (!h) return;
     BYTE *p = (BYTE *)MapViewOfFile(h, FILE_MAP_READ, 0, 0, 0);
     if (!p) { CloseHandle(h); return; }
-    MEMORY_BASIC_INFORMATION mbi;
-    DWORD total = 0;
-    while (VirtualQuery(p + total, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
-           (BYTE *)mbi.BaseAddress == p + total && total < 64 * 1024 * 1024)
-        total += (DWORD)mbi.RegionSize;
+    DWORD total = mapCommitBytes(p);
     do {
         if (total < 48 || *(uint32_t *)p != 0x53695748) break; // 'HWiS'
         DWORD sensorSize = *(DWORD *)(p + 24), sensorCount = *(DWORD *)(p + 28);

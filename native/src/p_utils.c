@@ -9,6 +9,17 @@ static long long fileTimeToUnixMs(const FILETIME *ft) {
     return (long long)(u.QuadPart / 10000ull) - 11644473600000LL;
 }
 
+// Local wall clock in epoch ms, in the frame the boards render: dashFmtTime
+// reinterprets its input as UTC, so a true UTC epoch would print hours off in
+// a UTC+8 timezone. Both the token dash's scan stamp and the subs footer
+// stamp need exactly that frame.
+static long long wallNowLocalMs(void) {
+    SYSTEMTIME now; GetLocalTime(&now);
+    FILETIME ft;
+    SystemTimeToFileTime(&now, &ft);
+    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
+}
+
 // Slurp a UTF-8 file into a NUL-terminated heap buffer (caller frees). Strips a
 // UTF-8 BOM and refuses anything past 32 MB, so a JSON the bar reads parses the
 // same way wherever it is read from.

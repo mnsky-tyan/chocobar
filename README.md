@@ -243,7 +243,7 @@ Each provider entry:
 | `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, and mintty by class, in that order. |
 | `terminal.title` | `""` | Optional title substring a followed window must contain (case-insensitive). Empty = any window of a probed class qualifies. |
 | `general.showTray` | `true` | Show the tray icon. |
-| `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. |
+| `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. If you later move the exe, the bar repoints the Run value to the path you are actually running - so "start with Windows" follows the file. |
 | `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`. |
 | `general.checkUpdates` | `false` | **Reports only** (never downloads or installs). On startup, one request to the GitHub releases API compares the running version with the latest release; when you are behind, one `[wizbar]` log line and the tray tooltip say so. Leave it off and the bar makes no network request of its own. |
 
@@ -340,7 +340,7 @@ Per source, the raw numbers come from the provider's own usage records:
 
 Every row is a per-store semantics note, not something you declare: the shipped bar scans only the JSONL session stores in `tokens.sources[]`, and `zcode` / `opencode` / `mimo` / `subscription` have no native reader.
 
-Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan, the per-file byte cursor, and `aggRecord`), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
+Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan and the per-file byte cursor; the `aggRecord` aggregation itself is `native/src/p_ui.c`'s), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
 
 ### When a route reports no usage at all
 
@@ -402,7 +402,7 @@ Tests are headless and require no GUI:
 npm test
 ```
 
-The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator off with no override block.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator on by default with no override block.
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
@@ -411,12 +411,12 @@ It then guards the estimator itself in `native/src/p_tokens.c` and its parser in
 The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents. The authoritative list of source parts is the `PARTS` array at the top of `native/build.sh` - the table below is descriptive prose.
 
 ```text
-native/src/chocobar.c   entry, config parser, wWinMain
+native/src/chocobar.c   config parser
 native/src/p_metrics.c  cpu / ram / temp / volume / battery / gpu / pet polls
 native/src/p_subs.c     subscription quota fetchers (WinHTTP)
 native/src/p_icons.c    chip icons (flattened SVG paths)
 native/src/p_tokens.c   live session-log scan and byte cursors
-native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards
+native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
 scripts/                the portable regression suite

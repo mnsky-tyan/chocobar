@@ -33,6 +33,15 @@ if full == base:
 full += '\n' + '\n'.join(sources[p] for p in rest if p in sources)
 open('src/chocobar_full.c', 'w').write(full)
 PY
+if [ "${1:-}" = "--check" ]; then
+  if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    exec x86_64-w64-mingw32-gcc -fsyntax-only -Wall -Wextra -Ivendor -I src src/chocobar_full.c
+  fi
+  . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
+  export NIX_CONFIG="extra-experimental-features = nix-command flakes"
+  exec nix shell nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
+    -c sh -c "x86_64-w64-mingw32-gcc -fsyntax-only -Wall -Wextra -Ivendor -I src src/chocobar_full.c"
+fi
 . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
 export NIX_CONFIG="extra-experimental-features = nix-command flakes"
 MCFGTHREAD_LIB=$(nix eval nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads --raw)/lib
@@ -40,5 +49,5 @@ nix shell \
   nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
   nixpkgs#pkgsCross.mingwW64.buildPackages.binutils \
   nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads \
-  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -lpdh -lcomctl32 -lole32 -luuid -lgdi32 -lwinhttp -lmsimg32 -liphlpapi -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
+  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32 -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
 echo "built: $(ls -la chocobar.exe | awk '{print $5}') bytes"

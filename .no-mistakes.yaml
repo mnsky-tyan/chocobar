@@ -1,0 +1,29 @@
+# no-mistakes repo config - chocobar
+#
+# Deterministic checks, and the rule that protects the user's live bar.
+
+commands:
+  # The portable regression suite is the whole deterministic test surface.
+  # It is pure source/config inspection + assertions; it launches nothing and
+  # pops no window.
+  test: "node scripts/portable_regression.js"
+
+  # Compile-only C gate: syntax + -Wall -Wextra over the amalgamated source,
+  # no link, no exe written.
+  lint: "bash native/build.sh --check"
+
+# The Test step is an agent, so it also reads AGENTS.md. The live bar at
+# C:\Users\tyanw\review\chocobar\native\chocobar.exe is the user's running
+# status bar, NOT a test fixture. It must never be stopped to free the
+# single-instance mutex.
+#
+# If a validation genuinely needs to RUN the bar, launch a scratch copy in
+# isolation on the `second` Windows virtual desktop via `win-hidden-launch`
+# (~/.local/bin), pointed at a throwaway --config and scratch profile. If it
+# cannot be isolated, do not run it - report the gap instead.
+test:
+  notes: >-
+    NEVER kill the user's live chocobar.exe (C:\Users\tyanw\review\chocobar\native\chocobar.exe,
+    HKCU Run value "Chocobar"). A bar process must be launched on the Windows
+    'second' desktop via win-hidden-launch with an isolated --config, never by
+    evicting the live instance. See AGENTS.md.

@@ -123,7 +123,8 @@ static int chipClickable(const Chip *c) {
     if (c->type == CT_SHORTCUT || c->type == CT_PET) return 1;
     if (c->type != CT_CUSTOM) return 0;
     if (c->customIdx < 0 || c->customIdx >= MAX_CUSTOM) return 1; // the dashboard openers
-    return g_cfg.custom[c->customIdx].intervalMs <= 0;
+    const CustomChip *cc = &g_cfg.custom[c->customIdx];
+    return cc->intervalMs <= 0 && cc->command && *cc->command;
 }
 
 // ------------------------------------------------------ render init ----
@@ -451,16 +452,8 @@ static int g_modelCount = 0;
 static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day detail)
 static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
 static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
-// wall clock as the epoch ms dashFmtTime renders back as local time
-static long long dashWallNowMs(void) {
-    SYSTEMTIME now; GetLocalTime(&now);
-    FILETIME ft;
-    SystemTimeToFileTime(&now, &ft); // treats fields as UTC: matches dashFmtTime
-    return ((((long long)ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
-}
-
 static long long g_lastScanMs = 0;      // GetTickCount64 of the last scan
-static long long g_lastScanEpoch = 0;   // wall clock of the last scan (dashWallNowMs)
+static long long g_lastScanEpoch = 0;   // wall clock of the last scan (wallNowLocalMs, p_utils)
 static unsigned long long g_tokDataVersion = 0;   // moves on every completed scan
 static unsigned long long g_dashTokVersion = 0;   // version the open board shows
 static int g_daySel = -1; // selected heatmap cell (daysBack), -1 = none
@@ -765,7 +758,7 @@ static void scanTokenCacheInner(const Config *cfg) {
     HeapFree(GetProcessHeap(), 0, buf);
     tokTodaySet(total);
     g_lastScanMs = (long long)GetTickCount64();
-    g_lastScanEpoch = dashWallNowMs();
+    g_lastScanEpoch = wallNowLocalMs();
     // remember the seed boundary so the live session scan only counts records
     // NEWER than anything the cache already holds (no double counting)
     g_cacheMaxTsScan = tsScanMax;
@@ -1752,7 +1745,6 @@ static void configCheckTick(void) {
                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
         if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
-        clockFmtReload();
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
     }
@@ -3461,16 +3453,24 @@ static int autoStartEnabled(void) {
     return *val ? 1 : 0;
 }
 
+// The module path quoted the way the Run value stores it. Returns 0 when the
+// path does not fit MAX_PATH or the buffer is too small for the quotes.
+static int moduleQuoted(wchar_t *out, int cch) {
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return 0;
+    if ((int)wcslen(exe) + 3 > cch) return 0;
+    swprintf(out, cch, L"\"%ls\"", exe);
+    return 1;
+}
+
 static void autoStartSet(int on) {
     HKEY k;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                       0, KEY_WRITE, &k) != ERROR_SUCCESS) return;
     if (on) {
-        wchar_t exe[MAX_PATH];
-        DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-        if (n && n < MAX_PATH) {
-            wchar_t quoted[MAX_PATH + 3];
-            swprintf(quoted, MAX_PATH + 3, L"\"%ls\"", exe);
+        wchar_t quoted[MAX_PATH + 3];
+        if (moduleQuoted(quoted, MAX_PATH + 3)) {
             RegSetValueExW(k, AUTOSTART_NAME, 0, REG_SZ, (const BYTE *)quoted,
                            (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
         }
@@ -3478,6 +3478,26 @@ static void autoStartSet(int on) {
         RegDeleteValueW(k, AUTOSTART_NAME);
     }
     RegCloseKey(k);
+}
+
+// Self-heal the Run value when the stored path no longer matches this exe.
+// The value is written once, on first run, from whatever path the exe was
+// launched out of; a user who later MOVES the exe (portable single-file app)
+// would otherwise keep booting the old copy - or, if that copy is gone, boot
+// nothing at all with no error. Rewriting on a mismatch costs one registry
+// read and makes "start with Windows" follow the file the user actually runs.
+// A disabled setting (no value) is left alone: absence is the user's choice.
+static void autoStartHeal(void) {
+    wchar_t cur[MAX_PATH + 2];
+    DWORD n = (DWORD)sizeof(cur);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                     AUTOSTART_NAME, RRF_RT_REG_SZ, NULL, cur, &n) != ERROR_SUCCESS) return;
+    if (!*cur) return;
+    wchar_t want[MAX_PATH + 3];
+    if (!moduleQuoted(want, MAX_PATH + 3)) return;
+    if (!lstrcmpiW(cur, want)) return;
+    autoStartSet(1);
+    writeLogA("autostart: repointed Run value to the running exe (it had moved)");
 }
 
 // Menu width: the widest row label + padding + room for the autostart check
@@ -3565,7 +3585,6 @@ static void showTrayMenu(HWND hwnd) {
         ShellExecuteExW(&sei);
     } else if (id == 3) {
         loadConfig();
-        clockFmtReload();
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
     } else if (id == 4) {
@@ -3698,7 +3717,6 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             pollHwinfoSm2(); pollHwinfoSm();
             if (!g_m.tempOk) { g_m.tempOk = 0; }
             g_m.petRunning = g_cfg.petEnabled && g_cfg.petExePath && *g_cfg.petExePath ? petRunning(g_cfg.petExePath) : 0;
-            clockFmtReload();
             formatClock(clockFmt(), g_m.clockText, 80);
             buildChips();
             repaintBar(hwnd);
@@ -3884,11 +3902,11 @@ static const char *g_template =
     "    ],\r\n"
     "    // estimateMissingUsage: a route that is a LOCAL APP or CLI driven through a bridge\r\n"
     "    // (CodeBuddy over workbuddy, the MiMo desktop, the agy CLI) has no API to answer\r\n"
-    "    // with a usage block, so its turns arrive all-zero and are dropped. Set this to\r\n"
-    "    // true to estimate them from the transcript instead. OFF by default, because\r\n"
-    "    // the cap is a chosen constant, not a read-out of a real turn - the bar\r\n"
-    "    // publishes a cap-driven number, not a measured one. Per-model and per-app\r\n"
-    "    // totals still cannot say what the wire never reported.\r\n"
+    "    // with a usage block, so its turns arrive all-zero and are dropped. It is ON\r\n"
+    "    // by default so those routes still show a total - the cap is a chosen\r\n"
+    "    // constant, not a read-out of a real turn, so the bar publishes a\r\n"
+    "    // cap-driven number, not a measured one. Per-model and per-app totals\r\n"
+    "    // still cannot say what the wire never reported.\r\n"
     "    // The constants below are the fit the estimate uses; tweak them under\r\n"
     "    // \"estimate\" only if a coarse total is better than a hole.\r\n"
     "    \"estimateMissingUsage\": true,\r\n"
@@ -3983,9 +4001,13 @@ void loadConfig(void) {
     // the provider fetch threads and the command poll both walk the live one.
     cfgInstall(next);
     g_cfgLoaded = 1;
+    clockFmtReload();
     // A first run (template just written) registers the Run value per
-    // general.autoStart; every later run leaves the registry to the menu
+    // general.autoStart; every later run leaves the registry to the menu,
+    // except that a value pointing at a different exe path is repaired - the
+    // move case the first-run-only write cannot cover (see autoStartHeal)
     if (freshInstall && g_cfg.autoStart) autoStartSet(1);
+    else autoStartHeal();
     g_iconOpacity = g_cfg.iconOpacity / 100.0; // p_icons AlphaBlend constant
     g_subsRotSec = g_cfg.subsRotateSec;
     // theme.icons[] -> the icon engine (a name defined again replaces its slot,
