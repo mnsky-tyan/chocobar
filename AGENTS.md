@@ -55,6 +55,35 @@ Only when the user asks for a deploy:
    during which the dashboard shows "No token data" - that is expected, not a
    failure.
 
+## Subscription credentials must never point at Pi's auth store
+
+The `pi-agy` extension (`~/.pi/agent/npm/node_modules/pi-agy`) registers Google
+Antigravity models into pi's `/model` list and stores its OAuth credential under
+the `antigravity` key of `~/.pi/agent/auth.json`. **Do not point
+`subs.providers[].authPath` at that file.** Logging out of Antigravity in pi
+(which the user does deliberately, to keep Google models out of `/model`)
+deletes that key, and the bar's chip immediately goes stale with
+`subs agy: no login (open Antigravity once)` in `native.log`.
+
+Measured 2026-10-08: that is exactly what happened. The bar's `authPath` was
+`\\wsl.localhost\Ubuntu\home\tyan\.pi\agent\auth.json`.
+
+**The bar keeps its own credential copy** at
+`C:\Users\tyanw\.wizbar\antigravity.json`, in the shape the reader expects:
+`{"antigravity": {access, refresh, expires, projectId, email, type}}`, with
+`expires` in **epoch milliseconds** (the pi-agy store uses the same field; the
+Antigravity *CLI* file `~/.gemini/antigravity-cli/antigravity-oauth-token` uses
+an ISO string under `token.expiry`, which this reader does NOT accept).
+`subsAgyReadAuth` reads it, `subsAgyRefresh` refreshes near-expiry tokens with
+the provider's `clientId`/`clientSecret`, and `subsAgySaveAuth` writes the
+rotated token back - so the copy self-maintains and never needs pi to log in.
+
+To restore it after a pi logout, take the last good credential from a pi backup
+(`~/.pi/agent/auth.json.bak-before-antigravity-logout-*`) and rewrite the bar's
+file. Note the WSL path `~/.wizbar` is a **stale Sep-2026 leftover**, NOT the
+live config directory; the live one is `C:\Users\tyanw\.wizbar`
+(`/mnt/c/Users/tyanw/.wizbar`).
+
 ## Build and the compile gate
 
 ```sh
