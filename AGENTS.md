@@ -118,6 +118,20 @@ desktop) and thereby put an unreviewed build in front of the user and on their
 screen mid-session. The user caught it by seeing the bar change in real time.
 That script is for installing a RELEASE, only on the user's explicit request.
 
+**The single-instance mutex is a fixed name** (`APP_MUTEX` =
+`ChocobarSingleInstanceMutex`, `chocobar.c`), so a test copy CANNOT run at the
+same time as the user's bar: it exits immediately with `ERROR_ALREADY_EXISTS`.
+That exit is **not** a failure of the build, and stopping the user's bar to
+"make room" is forbidden. A scratch run also has to neuter two more real
+effects or it will damage user state from a throwaway build:
+- `autoStartHeal()` rewrites the user's real `HKCU\...\Run\Chocobar` value on
+  every non-fresh load when it points at a different exe, so a scratch exe path
+  would repoint the user's autostart at the scratch build.
+- the bar writes to `%USERPROFILE%\.wizbar` (log, cursors), so a scratch run
+  needs a redirected `USERPROFILE` or it mixes with the real files.
+
+The `second`-desktop scratch recipe that does all three is `~/.local/bin/cbdev`.
+
 ### Installing a release for the user
 
 1. Get the newest release asset (do not build it): `gh release download <tag>`.
