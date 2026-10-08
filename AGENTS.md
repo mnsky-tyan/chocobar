@@ -43,15 +43,27 @@ that instead of taking the user's screen.
 
 ## Deploy / restart, if the live bar genuinely must be restarted
 
+**A deploy installs a RELEASE asset - never a local build.** The user's bar must
+be the newest published release (see "The development split" below). Local
+builds go to the second desktop.
+
 Only when the user asks for a deploy:
 
-1. `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\tyanw\.wizbar\deploy_bar.ps1`
-   (stops the old copy, copies the fresh build, clears the cursor file, relaunches).
-2. **Relaunch immediately and verify** - the script stops the bar, and the user
-   is left with nothing until a process is running again. Confirm with
-   `Get-CimInstance Win32_Process -Filter "Name='chocobar.exe'"` and tell the
-   user it is back.
-3. Clearing `token-cursors.json` forces a full cold re-scan (~45 s over ~990 MB),
+1. Download the release asset, do not build it:
+   `gh release download <tag> --pattern chocobar.exe --dir /tmp/reldl`
+   (the tag must be the newest release; check with `gh release list`), then copy
+   it over the Run path and relaunch. `/mnt/c/Users/tyanw/.wizbar/install_release.ps1`
+   does exactly this (it copies a downloaded asset; it does NOT build).
+2. **Relaunch immediately and verify** - the bar is stopped during the copy, and
+   the user is left with nothing until a process is running again. Confirm with
+   `Get-CimInstance Win32_Process -Filter "Name='chocobar.exe'"`, confirm the
+   installed hash equals the release asset's hash, and tell the user it is back.
+3. `C:\Users\tyanw\.wizbar\deploy_bar.ps1` is the OLD script: it copies
+   `\\wsl.localhost\...\native\chocobar.exe` (a local build) over the Run path.
+   Do not use it to ship a build. It may only be used if the user explicitly
+   asks to run that exact local build, and the version should then be verified
+   in `native.log` afterwards.
+4. Clearing `token-cursors.json` forces a full cold re-scan (~45 s over ~990 MB),
    during which the dashboard shows "No token data" - that is expected, not a
    failure.
 
@@ -124,8 +136,9 @@ The asset is then the single source of truth for what users install.
 ## Build and the compile gate
 
 ```sh
-bash native/build.sh            # -> native/chocobar.exe (needs nix pkgsCross.mingwW64)
+bash native/build.sh            # -> native/chocobar.exe (system mingw if present, else nix pkgsCross.mingwW64)
 bash native/build.sh --check    # compile-only: -fsyntax-only -Wall -Wextra, no link
+bash native/build.sh --no-nix   # force the system mingw recipe (what CI/release.yml use)
 ```
 
 `--check` is the C compiler gate pinned in `.no-mistakes.yaml` (`commands.lint`)
