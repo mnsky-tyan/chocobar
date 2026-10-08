@@ -29,12 +29,20 @@ build ignores").
 
 ```sh
 native/build.sh        # -> native/chocobar.exe
+native/build.sh --check  # compile-only gate (-fsyntax-only -Wall -Wextra), no exe
 ```
 
-Requires Nix (`pkgsCross.mingwW64` gcc/binutils + mcfgthreads). `build.sh`
-assembles `src/chocobar_full.c` from the seven source parts, then compiles.
-Edit the PARTS listed in the `PARTS` array at the top of `build.sh` (the
-authoritative list), never the assembled file.
+Toolchain: `build.sh` uses a **system** `x86_64-w64-mingw32-gcc` when one is on
+`PATH` (that is what CI and the release workflow use, via `--no-nix`), and
+otherwise falls back to Nix (`pkgsCross.mingwW64` gcc/binutils + mcfgthreads).
+The two differ only in the default thread library the wrapper links: Nix forces
+`-lmcfgthread`, Debian/CI uses winpthreads. The code uses only Win32 threading,
+so both produce the same binary behaviour. `--no-nix` forces the system recipe
+and fails if no system toolchain is present.
+
+`build.sh` assembles `src/chocobar_full.c` from the seven source parts, then
+compiles. Edit the PARTS listed in the `PARTS` array at the top of `build.sh`
+(the authoritative list), never the assembled file.
 
 ## Run
 
