@@ -1,7 +1,7 @@
 # Codebase Review - 2026-10-08
 Scope: /home/tyan/mnsky/chocobar | Review units: native/src (C sources), non-C files, cross-scope
 Base: 1bf3ae0 (PR #72 merged) + the release-workflow work (3d98ec6, f9941b1)
-Summary: 11 findings (0 Critical, 0 High, 4 Medium, 7 Low).
+Summary: 11 findings (0 Critical, 0 High, 5 Medium, 6 Low).
 
 ## Findings by Severity
 | # | Category | Severity | File(s) | Description | Fix Complexity |
