@@ -84,6 +84,43 @@ file. Note the WSL path `~/.wizbar` is a **stale Sep-2026 leftover**, NOT the
 live config directory; the live one is `C:\Users\tyanw\.wizbar`
 (`/mnt/c/Users/tyanw/.wizbar`).
 
+## The development split: the user runs releases, agents run second-desktop builds
+
+This is the standard workflow for this repo and it is not optional.
+
+**The user's bar is a published RELEASE.** It is installed at
+`C:\Users\tyanw\review\chocobar\native\chocobar.exe` (the `HKCU` Run value
+`Chocobar`) and it must be the newest **published release** version. It is not a
+build directory and not a place for a work-in-progress binary.
+
+**Agents develop on the `second` desktop, never on the user's bar.** Every build
+the agent makes is run from an isolated copy: `win-hidden-launch --desktop second`
+with its own `--config` and scratch profile, and a pinned `terminal.className` +
+unique `terminal.title` so it can never attach to the user's terminal (see the
+`evictRivalBars()` note below). Never build into, copy over, or relaunch the
+exe path behind the user's Run value to test something.
+
+Measured failure, 2026-10-08: an agent ran `deploy_bar.ps1` (which does
+`Stop-Process` + `Copy-Item` over the Run path + `Start-Process` onto the ACTIVE
+desktop) and thereby put an unreviewed build in front of the user and on their
+screen mid-session. The user caught it by seeing the bar change in real time.
+That script is for installing a RELEASE, only on the user's explicit request.
+
+### Installing a release for the user
+
+1. Get the newest release asset (do not build it): `gh release download <tag>`.
+2. Stop the bar, copy the asset to the Run path, relaunch, and verify the
+   process is up and reports the expected version in `native.log`.
+3. The release must have been produced by `.github/workflows/release.yml` from
+   the tag, so the exe the user runs is reproducible from the tag tree.
+
+### Releasing
+
+Tag `v<major>.<minor>.<patch>` must equal `CB_VER_STR` in `native/src/version.h`
+(the workflow fails the build otherwise). Pushing such a tag makes
+`release.yml` build the exe on the runner and attach it to the GitHub release.
+The asset is then the single source of truth for what users install.
+
 ## Build and the compile gate
 
 ```sh

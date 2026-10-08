@@ -1,0 +1,62 @@
+name: Release
+
+# Builds the Windows exe from the tagged commit and attaches it to the release.
+#
+# Why this exists: releases used to be built by hand on one machine, so the
+# published exe could not be reproduced from its tag by anyone. From now on the
+# asset on a release is produced here, from the tag, by the same compile gate
+# that `pull_request` CI runs.
+#
+# Only fires on a plain version tag (v1.2.3). Pre-release tags (v1.2.3-rc1)
+# deliberately do NOT match, so a test tag cannot publish an asset.
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Verify the tag matches version.h
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          hdr=$(sed -n 's/^#define CB_VER_STR *"\(.*\)"/\1/p' native/src/version.h)
+          echo "tag=$tag version.h=$hdr"
+          if [ "$tag" != "$hdr" ]; then
+            echo "::error::tag $tag does not match CB_VER_STR $hdr in native/src/version.h"
+            exit 1
+          fi
+
+      - name: Compile gate
+        run: bash native/build.sh --check
+
+      - name: Build
+        run: |
+          bash native/build.sh --no-nix
+          ls -la native/chocobar.exe
+
+      - name: Verify the built exe reports the tagged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # The version lives in the PE version resource, which is UTF-16, so read
+          # it with strings -el (plain strings would miss it).
+          strings -el native/chocobar.exe | grep -qx "$tag" \
+            || { echo "::error::built exe does not contain version string $tag"; exit 1; }
+
+      - name: Attach the exe to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" native/chocobar.exe --clobber
