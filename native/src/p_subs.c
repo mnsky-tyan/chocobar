@@ -1404,7 +1404,8 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
             if (!nb) { HeapFree(GetProcessHeap(), 0, hdrs); subsSetState(idx, 0, 0); return 0; }
             hdrs = nb;
         }
-        used += swprintf(hdrs + used, hlen - used, L"%ls", sp->headerBlob);
+        int n = swprintf(hdrs + used, hlen - used, L"%ls", sp->headerBlob);
+        if (n > 0) used += n; // never let a negative return poison the length
     }
 
     unsigned long long t0 = GetTickCount64();
@@ -1640,7 +1641,7 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
 // in the README stays true). The answer only ever produces a log line + a tray
 // tooltip note: it never downloads, installs, or swaps anything. The tray
 // "Check for updates" entry remains the manual route to the releases page.
-typedef struct { char msg[192]; int newer; } UpdateVerdict;
+typedef struct { char msg[192]; } UpdateVerdict;
 static UpdateVerdict g_upd;
 
 // "1.10.2" -> 1010002-ish, so 1.10 > 1.9 (a string compare would say otherwise)
@@ -1680,7 +1681,6 @@ static DWORD WINAPI updThread(LPVOID unused) {
         HeapFree(GetProcessHeap(), 0, raw);
         const char *v = (tag[0] == 'v' || tag[0] == 'V') ? tag + 1 : tag;
         if (verParse(v) > verParse(CB_VER_STR)) {
-            g_upd.newer = 1;
             sprintf(g_upd.msg, "Chocobar %s is available (running %s)", v, CB_VER_STR);
             char lb[224];
             sprintf(lb, "[wizbar] update check: %s", g_upd.msg);

@@ -169,6 +169,7 @@ static void pollHwinfoSm(void) {
         int wide = suffix == 32;
         // sensor names
         wchar_t sensors[256][64];
+        DWORD sensorCount = 0;
         DWORD off = 40;
         for (int i = 0; i < 256; i++) {
             wchar_t name[64]; name[0] = 0;
@@ -176,6 +177,7 @@ static void pollHwinfoSm(void) {
             else { int n = 0; while (n < 63 && off + n < total && p[off + n]) { name[n] = (wchar_t)p[off + n]; n++; } name[n] = 0; }
             if (!name[0]) break;
             lstrcpynW(sensors[i], name, 64);
+            sensorCount = i + 1;
             off += sensorSize;
         }
         DWORD labelBytes = suffix * 8;
@@ -199,7 +201,7 @@ static void pollHwinfoSm(void) {
                 DWORD id = *(DWORD *)(p + ro + 48 + labelBytes + suffix);
                 recs[n].c = (double)(int)(v * 10) / 10;
                 lstrcpynW(recs[n].label, label, 64);
-                if (id < 256) lstrcpynW(recs[n].sensor, sensors[id], 64);
+                if (id < sensorCount) lstrcpynW(recs[n].sensor, sensors[id], 64);
                 n++;
             }
         }
@@ -223,7 +225,9 @@ static void pollHwinfoSm2(void) {
         DWORD sensorSize = *(DWORD *)(p + 24), sensorCount = *(DWORD *)(p + 28);
         DWORD readingsOff = *(DWORD *)(p + 32), readingSize = *(DWORD *)(p + 36), readingCount = *(DWORD *)(p + 40);
         if (sensorSize < 136 || readingSize < 320 || !sensorCount || !readingCount) break;
-        if (readingsOff + readingCount * readingSize > total) break;
+        if ((unsigned long long)readingsOff + (unsigned long long)readingCount * readingSize > total) break;
+        if (48ULL + (unsigned long long)sensorCount * sensorSize > total)
+            sensorCount = (DWORD)((total - 48u) / sensorSize);
         TempRec *recs = (TempRec *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TempRec) * (readingCount ? readingCount : 1));
         if (!recs) break;
         int n = 0;
