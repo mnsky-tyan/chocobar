@@ -127,32 +127,40 @@ static int chipClickable(const Chip *c) {
     return cc->intervalMs <= 0 && cc->command && *cc->command;
 }
 
+static void uiFontFamily(wchar_t *fam, int cb) {
+    const wchar_t *src = g_cfg.fontFamily;
+    int n = 0;
+    while (src && *src && *src != L'\'' && *src != L'-' && !iswalpha(*src)) src++;
+    if (src && *src == L'\'') {
+        src++;
+        while (src[n] && src[n] != L'\'' && n < cb - 1) { fam[n] = src[n]; n++; }
+    } else {
+        while (src && src[n] && src[n] != L',' && n < cb - 1) { fam[n] = src[n]; n++; }
+    }
+    fam[n] = 0;
+    if (!fam[0]) lstrcpynW(fam, L"Segoe UI", cb);
+}
+
+// The bar chip font. Electron bar.css: font-weight 600, font-size 11px CSS
+// -> em px at DPI. The Meslo Nerd Font family ships only Regular + Bold:
+// Chromium maps the 600 to Regular (no synthetic bolding below the 700
+// threshold), while GDI rounds FW_SEMIBOLD up to Bold - which read too heavy.
+// FW_NORMAL is the Chromium-identical face.
+static HFONT barFont(void) {
+    wchar_t fam[64];
+    uiFontFamily(fam, 64);
+    int px = (int)(g_cfg.fontSize * g_scale + 0.5);
+    return CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                       OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, fam);
+}
+
 // ------------------------------------------------------ render init ----
 static int initRender(HWND hwnd) {
     (void)hwnd;
     g_memDc = CreateCompatibleDC(NULL);
     if (!g_memDc) return 0;
-    // first quoted family from the config, else let GDI map a default
-    wchar_t fam[64];
-    const wchar_t *src = g_cfg.fontFamily;
-    while (src && *src && *src != L'\'' && *src != L'-' && !iswalpha(*src)) src++;
-    int n = 0;
-    if (src && *src == L'\'') {
-        src++;
-        while (src[n] && src[n] != L'\'' && n < 63) { fam[n] = src[n]; n++; }
-    } else {
-        while (src && src[n] && src[n] != L',' && n < 63) { fam[n] = src[n]; n++; }
-    }
-    fam[n] = 0;
-    // Electron bar.css: font-weight 600, font-size 11px CSS -> em px at DPI.
-    // The Meslo Nerd Font family ships only Regular + Bold: Chromium maps the
-    // 600 to Regular (no synthetic bolding below the 700 threshold), while GDI
-    // rounds FW_SEMIBOLD up to Bold - which read too heavy. FW_NORMAL is the
-    // Chromium-identical face.
-    int px = (int)(g_cfg.fontSize * g_scale + 0.5);
-    g_font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                         OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                         DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
+    g_font = barFont();
     if (!g_font) return 0;
     g_fontOld = (HFONT)SelectObject(g_memDc, g_font);
     return 1;
@@ -674,7 +682,8 @@ static void scanTokenCacheInner(const Config *cfg) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) { tokTodaySet(-1); return; }
     BY_HANDLE_FILE_INFORMATION fi;
-    if (GetFileInformationByHandle(h, &fi)) {
+    BOOL statOk = GetFileInformationByHandle(h, &fi);
+    if (statOk) {
         g_cacheMtimeScan = fileTimeToUnixMs(&fi.ftLastWriteTime);
         if (g_cacheReadDone && fi.ftLastWriteTime.dwLowDateTime == g_cacheStamp[0]
             && fi.ftLastWriteTime.dwHighDateTime == g_cacheStamp[1]
@@ -762,11 +771,13 @@ static void scanTokenCacheInner(const Config *cfg) {
     // remember the seed boundary so the live session scan only counts records
     // NEWER than anything the cache already holds (no double counting)
     g_cacheMaxTsScan = tsScanMax;
-    g_cacheStamp[0] = fi.ftLastWriteTime.dwLowDateTime;
-    g_cacheStamp[1] = fi.ftLastWriteTime.dwHighDateTime;
-    g_cacheStamp[2] = fi.nFileSizeLow;
-    g_cacheStamp[3] = fi.nFileSizeHigh;
-    g_cacheReadDone = 1;
+    if (statOk) {
+        g_cacheStamp[0] = fi.ftLastWriteTime.dwLowDateTime;
+        g_cacheStamp[1] = fi.ftLastWriteTime.dwHighDateTime;
+        g_cacheStamp[2] = fi.nFileSizeLow;
+        g_cacheStamp[3] = fi.nFileSizeHigh;
+        g_cacheReadDone = 1;
+    }
 }
 
 
@@ -1728,8 +1739,6 @@ static void followTick(void) {
     }
 }
 
-static void uiFontFamily(wchar_t *fam, int cb); // defined with the dashboard fonts
-
 static void configCheckTick(void) {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!GetFileAttributesExW(g_cfgPath, GetFileExInfoStandard, &fa)) return;
@@ -1738,12 +1747,7 @@ static void configCheckTick(void) {
         loadConfig();
         // font may change with the config: rebuild it
         if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); g_font = NULL; }
-        wchar_t fam[64];
-        uiFontFamily(fam, 64);
-        HFONT nf = CreateFontW(-(int)(g_cfg.fontSize * g_scale + 0.5), 0, 0, 0, FW_NORMAL,
-                               FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, fam[0] ? fam : L"Segoe UI");
+        HFONT nf = barFont();
         if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
@@ -1776,20 +1780,6 @@ static void dashRoundCorners(HWND h) {
     if (!m) return;
     PFN f = (PFN)(void *)GetProcAddress(m, "DwmSetWindowAttribute");
     if (f) { DWORD pref = DWMWCP_ROUND_NATIVE; f(h, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref)); }
-}
-
-static void uiFontFamily(wchar_t *fam, int cb) {
-    const wchar_t *src = g_cfg.fontFamily;
-    int n = 0;
-    while (src && *src && *src != L'\'' && *src != L'-' && !iswalpha(*src)) src++;
-    if (src && *src == L'\'') {
-        src++;
-        while (src[n] && src[n] != L'\'' && n < cb - 1) { fam[n] = src[n]; n++; }
-    } else {
-        while (src && src[n] && src[n] != L',' && n < cb - 1) { fam[n] = src[n]; n++; }
-    }
-    fam[n] = 0;
-    if (!fam[0]) lstrcpynW(fam, L"Segoe UI", cb);
 }
 
 static HFONT dashFont(int cssPx, int weight) {
@@ -3386,6 +3376,11 @@ static int subsChipFormat(int pi2, int k, wchar_t *txt, int cb, wchar_t *tip, in
     SubsWin w[MAX_GEN_WIN];
     int wn = subsProvWins(pi2, w, MAX_GEN_WIN);
     if (wn < 0) wn = -wn;
+    if (wn <= 0) {
+        if (tip) lstrcpynW(tip, L"\u2014", tipCb);
+        if (txt) lstrcpynW(txt, L"\u2014", cb);
+        return -1;
+    }
     if (k >= wn) k = 0;
     int rem = w[k].rem;
     // The chip stays a percentage (it is a meter); the absolute credit
