@@ -23,7 +23,15 @@ commands:
 # cannot be isolated, do not run it - report the gap instead.
 test:
   notes: >-
-    NEVER kill the user's live chocobar.exe (C:\Users\tyanw\review\chocobar\native\chocobar.exe,
-    HKCU Run value "Chocobar"). A bar process must be launched on the Windows
-    'second' desktop via win-hidden-launch with an isolated --config, never by
-    evicting the live instance. See AGENTS.md.
+    NEVER kill, stop, or restart the user's bar. It is a PUBLISHED RELEASE at
+    C:\Users\tyanw\review\chocobar\native\chocobar.exe (HKCU Run value
+    "Chocobar") and it is the thing the user looks at all day; it does not come
+    back on its own. The single-instance mutex is a fixed name
+    (APP_MUTEX="ChocobarSingleInstanceMutex"), so a test copy CANNOT run
+    alongside it - it exits immediately with ERROR_ALREADY_EXISTS. That is NOT a
+    failure of your build; do not stop the user's bar to "make room".
+    A dev bar belongs on the Windows 'second' desktop via win-hidden-launch with
+    its own --config (see ~/.local/bin/cbdev and AGENTS.md, "The development
+    split"). Prefer validating the bar's DATA PATH from the log and the source
+    over running a second instance. If a validation needs the bar running and
+    cannot be isolated, report the gap instead of taking the user's screen.

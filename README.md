@@ -48,7 +48,8 @@ it lives in `%USERPROFILE%\.wizbar\`, never next to the executable.
 ### Build from source
 
 `native/build.sh` assembles the parts in `native/src/` and cross-compiles with
-the Nix mingw toolchain:
+a mingw toolchain (system `x86_64-w64-mingw32-gcc` when one is on `PATH`,
+otherwise Nix - `native/README.md` owns the toolchain details):
 
 ```bash
 bash native/build.sh   # produces native/chocobar.exe
