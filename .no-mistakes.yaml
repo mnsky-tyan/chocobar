@@ -9,7 +9,9 @@ commands:
   test: "node scripts/portable_regression.js"
 
   # Compile-only C gate: syntax + -Wall -Wextra over the amalgamated source,
-  # no link, no exe written.
+  # no link, no exe written. Self-contained: build.sh installs the distro
+  # mingw when neither a system mingw nor nix is present, so this pin does
+  # not depend on any ci.yml-provided setup step.
   lint: "bash native/build.sh --check"
 
 # The Test step is an agent, so it also reads AGENTS.md. The live bar at

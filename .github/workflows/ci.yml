@@ -1,3 +1,8 @@
+# HAND-MAINTAINED - do not regenerate with `no-mistakes ci-workflow`.
+# Regeneration emits an unconditional actions/setup-go step (this repo has no
+# Go) and drops the mingw install; edit this file by hand instead. The pinned
+# lint command needs no separate setup: `bash native/build.sh --check`
+# installs the distro mingw itself when no local toolchain exists.
 name: CI
 
 on:

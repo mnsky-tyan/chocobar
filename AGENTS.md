@@ -116,7 +116,9 @@ Measured failure, 2026-10-08: an agent ran `deploy_bar.ps1` (which does
 `Stop-Process` + `Copy-Item` over the Run path + `Start-Process` onto the ACTIVE
 desktop) and thereby put an unreviewed build in front of the user and on their
 screen mid-session. The user caught it by seeing the bar change in real time.
-That script is for installing a RELEASE, only on the user's explicit request.
+That script installs a LOCAL BUILD, not a release - never use it to ship
+anything; installs for the user come only from a downloaded release asset, on
+the user's explicit request.
 
 **The single-instance mutex is a fixed name** (`APP_MUTEX` =
 `ChocobarSingleInstanceMutex`, `chocobar.c`), so a test copy CANNOT run at the
@@ -164,8 +166,12 @@ if a new generated artifact appears in the source tree, add it to that
 
 **Nothing else in this repo compiles the C.** The portable suite is pure
 source/config text inspection and cannot see an out-of-bounds read, a type
-error, or a missing declaration. Do not weaken or drop `--check`: it is the only
-gate that would have caught the `jobjGet` OOB read fixed on 2026-10-07.
+error, or a missing declaration. Do not weaken or drop `--check`: it is the
+only gate that catches compile-time C errors (types, declarations, signatures)
+before anything runs. It cannot see runtime bugs - the `jobjGet` OOB read
+fixed on 2026-10-07 was a runtime negative index that a `-fsyntax-only`
+compile accepts cleanly; that bug class needs runtime validation, not this
+gate.
 
 ## Assembling a run to review
 

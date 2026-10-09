@@ -1,7 +1,7 @@
 # Codebase Review - 2026-10-09
 Scope: /home/tyan/mnsky/chocobar | Review units: native/src (C sources), non-C files
 Base: 8200859 (PR #73 merged)
-Summary: 5 findings (0 Critical, 1 High, 2 Medium, 2 Low). Third pass; the previous
+Summary: 5 findings (0 Critical, 2 High, 2 Medium, 1 Low). Third pass; the previous
 two rounds' fixes are all verified present.
 
 ## Findings by Severity
