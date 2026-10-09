@@ -1,3 +1,8 @@
+# HAND-MAINTAINED - do not regenerate with `no-mistakes ci-workflow`.
+# Regeneration emits an unconditional actions/setup-go step (this repo has no
+# Go) and drops the mingw install below; edit this file by hand instead. The
+# toolchain install stays HERE, not in build.sh: `--check` is a pure compile
+# check with no side effects and must never apt-get install on its own.
 name: CI
 
 on:

@@ -553,9 +553,12 @@ static int subsParseBig(const char *js, int len, jsmntok_t **outTok) {
     return 0;
 }
 
+#define AGY_ACCESS_CCH 4096
+#define AGY_REFRESH_CCH 512
+
 typedef struct {
-    wchar_t access[4096];
-    wchar_t refresh[512];
+    wchar_t access[AGY_ACCESS_CCH];
+    wchar_t refresh[AGY_REFRESH_CCH];
     long long expires;   // epoch ms
     wchar_t projectId[128];
     int hasRefresh;
@@ -582,8 +585,8 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
                 wchar_t *ref = subsJstr(buf, t, a, "refresh");
                 wchar_t *pid = subsJstr(buf, t, a, "projectId");
                 long long exp = (long long)subsJdouble(buf, t, a, "expires", 0);
-                if (acc && *acc) lstrcpynW(out->access, acc, 4096);
-                if (ref && *ref) { lstrcpynW(out->refresh, ref, 512); out->hasRefresh = 1; }
+                if (acc && *acc) lstrcpynW(out->access, acc, AGY_ACCESS_CCH);
+                if (ref && *ref) { lstrcpynW(out->refresh, ref, AGY_REFRESH_CCH); out->hasRefresh = 1; }
                 if (pid && *pid) lstrcpynW(out->projectId, pid, 128);
                 out->expires = exp;
                 wideFree(&acc);
@@ -612,7 +615,7 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
                     while (e < vl && vb[e] != '"' && vb[e] != '\\' && (e - j) < 4000) e++;
                     int tl = e - j;
                     if (tl > 5 && tl < 4000) {
-                        MultiByteToWideChar(CP_UTF8, 0, vb + j, tl, out->access, 4096);
+                        MultiByteToWideChar(CP_UTF8, 0, vb + j, tl, out->access, AGY_ACCESS_CCH);
                         out->fromVscdb = 1;
                         HeapFree(GetProcessHeap(), 0, vb);
                         return 1;
@@ -655,13 +658,21 @@ static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wc
         else if (c == '}') { depth--; if (!depth) { oe++; break; } }
     }
     if (depth) { HeapFree(GetProcessHeap(), 0, buf); return; }
-    char accN[4200], refN[600], expN[32];
-    int al = WideCharToMultiByte(CP_UTF8, 0, access, -1, accN, 4200, NULL, NULL);
-    int rl = WideCharToMultiByte(CP_UTF8, 0, refresh, -1, refN, 600, NULL, NULL);
+    // conversion buffers sized from the AgyAuth field caps (worst-case UTF-8
+    // is 3 bytes per UTF-16 code unit), so a full-cap source cannot truncate;
+    // the length assert turns any residual doubt into the documented abort
+    char accN[3 * AGY_ACCESS_CCH + 1], refN[3 * AGY_REFRESH_CCH + 1], expN[32];
+    int al = WideCharToMultiByte(CP_UTF8, 0, access, -1, accN, (int)sizeof(accN), NULL, NULL);
+    int rl = WideCharToMultiByte(CP_UTF8, 0, refresh, -1, refN, (int)sizeof(refN), NULL, NULL);
     sprintf(expN, "%lld", expiresMs);
-    if (al <= 0 || rl <= 0) { HeapFree(GetProcessHeap(), 0, buf); return; }
+    if (al <= 0 || al > (int)sizeof(accN) || rl <= 0 || rl > (int)sizeof(refN)) {
+        HeapFree(GetProcessHeap(), 0, buf); return;
+    }
     // replace the three values inside the object span
-    char *out = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 8192);
+    // slack covers the largest possible splice growth: the three new values
+    // (old values can be empty) plus their surrounding quotes
+    char *out = (char *)HeapAlloc(GetProcessHeap(), 0,
+                                  (size_t)len + sizeof(accN) + sizeof(refN) + sizeof(expN) + 16);
     if (!out) { HeapFree(GetProcessHeap(), 0, buf); return; }
     int o = 0;
     // Copy the prefix before the antigravity object verbatim, then start the
@@ -787,9 +798,9 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
         wchar_t *ref = subsJstr(resp, t, 0, "refresh_token");
         double ein = subsJdouble(resp, t, 0, "expires_in", 3600);
         if (acc && *acc) {
-            lstrcpynW(a->access, acc, 4096);
+            lstrcpynW(a->access, acc, AGY_ACCESS_CCH);
             a->expires = subsNowMs() + (long long)(ein * 1000.0);
-            if (ref && *ref) lstrcpynW(a->refresh, ref, 512);
+            if (ref && *ref) lstrcpynW(a->refresh, ref, AGY_REFRESH_CCH);
             a->hasRefresh = 1;
             ok = 1;
         }
