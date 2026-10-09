@@ -320,25 +320,6 @@ static int g_userN[SVG_USER_MAX];
 static wchar_t g_userName[SVG_USER_MAX][24];
 static int g_userCount = 0;
 
-// flatten one config icon (name | SVG path data | stroke width). The path data
-// may hold several subpaths in one "d" string - svgWalk starts a new subpath
-// on every M. Returns the icon id, or -1 when the table is full.
-int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
-    if (g_userCount >= SVG_USER_MAX || !name || !*name || !d || !*d) return -1;
-    int slot = -1;
-    for (int i = 0; i < g_userCount; i++)
-        if (lstrcmpiW(g_userName[i], name) == 0) { slot = i; break; } // redefine = replace
-    if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, 24); }
-    for (int j = 0; j < SVG_MAXPARTS; j++) {
-        memset(&g_user[slot][j], 0, sizeof(SvgFlat));
-    }
-    // one part: the whole d string (svgWalk splits on M into subpaths)
-    svgWalk(&g_user[slot][0].path, d);
-    g_user[slot][0].w = w > 0 ? w : 2.2f;
-    g_userN[slot] = 1;
-    return SVG_USER_BASE + slot;
-}
-
 // name -> id among the config icons, -1 when not defined
 int iconUserFind(const wchar_t *name) {
     if (!name || !*name) return -1;
@@ -697,6 +678,28 @@ static IconDib *dibSlot(int id) {
         return &g_iconDib[SVG_COUNT + (id - SVG_USER_BASE)];
     return NULL;
 }
+
+// flatten one config icon (name | SVG path data | stroke width). The path data
+// may hold several subpaths in one "d" string - svgWalk starts a new subpath
+// on every M. Returns the icon id, or -1 when the table is full.
+int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
+    if (g_userCount >= SVG_USER_MAX || !name || !*name || !d || !*d) return -1;
+    int slot = -1;
+    for (int i = 0; i < g_userCount; i++)
+        if (lstrcmpiW(g_userName[i], name) == 0) { slot = i; break; } // redefine = replace
+    if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, 24); }
+    for (int j = 0; j < SVG_MAXPARTS; j++) {
+        memset(&g_user[slot][j], 0, sizeof(SvgFlat));
+    }
+    // one part: the whole d string (svgWalk splits on M into subpaths)
+    svgWalk(&g_user[slot][0].path, d);
+    g_user[slot][0].w = w > 0 ? w : 2.2f;
+    g_userN[slot] = 1;
+    IconDib *dib = dibSlot(SVG_USER_BASE + slot); // the old glyph's cache died with the old path data
+    if (dib) iconDrop(dib);
+    return SVG_USER_BASE + slot;
+}
+
 static void svgDraw(HDC hdc, int id, COLORREF color, int x, int y) {
     int nparts = 0;
     IconDib *d = dibSlot(id);

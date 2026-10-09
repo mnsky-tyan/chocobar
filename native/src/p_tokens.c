@@ -41,16 +41,19 @@ long long g_tokAllLive = 0;
 int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0;
 
 #define TOK_MAX_FILES 4096
+#define TOK_CHARS_NONE (-1LL) // chars: the estimator has never counted this file
 // Per-file cursor, persisted to ~/.wizbar/token-cursors.json. `chars` and
-// `real` exist only for tokens.estimateMissingUsage and are written as 0/""
-// when it is off, so an older cursor file (or one written with the feature off)
-// simply reads back as "nothing known yet" and is rebuilt on the next full
-// re-read.
+// `real` exist only for tokens.estimateMissingUsage: chars stays
+// TOK_CHARS_NONE until the estimator's first count of the file (an older
+// cursor file's absent or 0 chars reads back as NONE too), so a genuine total
+// of 0 - a store whose lines carry no transcript text at all - stays distinct
+// from "never counted" and resumes from its byte cursor instead of re-reading
+// from byte zero on every append.
 typedef struct {
     char path[520];
     long long size;
     long long mtimeMs;
-    long long chars;   // transcript text counted so far in this file
+    long long chars;   // transcript text counted so far; TOK_CHARS_NONE = never
     char real[80];     // comma-joined providers that DID report usage here
 } TokCursor;
 static TokCursor g_tokCursor[TOK_MAX_FILES];
@@ -568,6 +571,31 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
 }
 
 // ---------------------------------------------------------- cursor file ----
+// The cursor file is machine-written JSON, and the only characters a stored
+// path or provider list can carry that JSON forbids raw are backslash (every
+// Windows path separator) and quote: escape on write, decode on read.
+static int tokJsonEsc(char *out, int cap, const char *s) {
+    int n = 0;
+    for (; *s; s++) {
+        int need = (*s == '\\' || *s == '"') ? 2 : 1;
+        if (n + need > cap - 1) return -1;
+        if (need == 2) out[n++] = '\\';
+        out[n++] = *s;
+    }
+    out[n] = 0;
+    return n;
+}
+
+// decode tokJsonEsc's two escapes in place; returns the decoded length
+static int tokJsonUnesc(char *s, int n) {
+    int r = 0, w = 0;
+    while (r < n) {
+        if (s[r] == '\\' && r + 1 < n && (s[r + 1] == '"' || s[r + 1] == '\\')) r++;
+        s[w++] = s[r++];
+    }
+    return w;
+}
+
 // cfg is the caller's pinned generation: this also runs on the scan worker.
 static void tokCursorLoad(const Config *cfg) {
     g_tokCursorN = 0;
@@ -582,7 +610,15 @@ static void tokCursorLoad(const Config *cfg) {
     stripLineComments(raw);
     jsmn_parser p; jsmn_init(&p);
     int nt = jsmn_parse(&p, raw, (size_t)len, NULL, 0);
-    if (nt <= 0) { HeapFree(GetProcessHeap(), 0, raw); return; }
+    if (nt <= 0) {
+        if (cfg->debug) {
+            char lb[200];
+            sprintf(lb, "[wizbar] tokCursorLoad: parse FAILED len=%d", len);
+            writeLogA(lb);
+        }
+        HeapFree(GetProcessHeap(), 0, raw);
+        return;
+    }
     jsmntok_t *t = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (nt + 1));
     if (!t) { HeapFree(GetProcessHeap(), 0, raw); return; }
     jsmn_init(&p);
@@ -596,17 +632,21 @@ static void tokCursorLoad(const Config *cfg) {
                 int pl = t[k].end - t[k].start;
                 if (pl > 0 && pl < 519) {
                     memcpy(pathA, raw + t[k].start, pl); pathA[pl] = 0;
+                    pl = tokJsonUnesc(pathA, pl); pathA[pl] = 0;
                     TokCursor *c = &g_tokCursor[g_tokCursorN++];
                     memset(c, 0, sizeof(*c));
                     lstrcpynA(c->path, pathA, 520);
                     c->size = tokJll(raw, t, k + 1, "size", 0);
                     c->mtimeMs = tokJll(raw, t, k + 1, "mtime", 0);
                     // estimator state, absent in a cursor written before the
-                    // feature existed (or with it off): 0/"" means "nothing
-                    // known yet" and the next full re-read rebuilds them
-                    c->chars = tokJll(raw, t, k + 1, "chars", 0);
+                    // feature existed (or with it off): an absent or 0 chars
+                    // reads back as TOK_CHARS_NONE ("nothing known yet") and
+                    // the next full re-read rebuilds them
+                    c->chars = tokJll(raw, t, k + 1, "chars", TOK_CHARS_NONE);
+                    if (c->chars == 0) c->chars = TOK_CHARS_NONE; // pre-sentinel writer
                     jstrCopyA(c->real, (int)sizeof(c->real), raw, t,
                               jobjGet(raw, t, k + 1, "real"), "");
+                    c->real[tokJsonUnesc(c->real, (int)strlen(c->real))] = 0;
                 }
             }
             k += 1 + jtokSpan(t, k + 1);
@@ -629,14 +669,17 @@ static void tokCursorSave(void) {
     HANDLE h = CreateFileW(g_tokCursorPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
-    char line[768]; // path[519] + real[79] + three %lld + format overhead
+    char line[1344]; // escaped path + escaped real + three %lld + format overhead
     DWORD wrote = 0;
     WriteFile(h, "{\n", 2, &wrote, NULL);
     for (int i = 0; i < g_tokCursorN; i++) {
+        char escP[1040], escR[160]; // 2x a full path / real list, plus NUL
+        if (tokJsonEsc(escP, (int)sizeof(escP), g_tokCursor[i].path) < 0) continue;
+        if (tokJsonEsc(escR, (int)sizeof(escR), g_tokCursor[i].real) < 0) continue;
         int n = snprintf(line, sizeof(line),
                          "  \"%s\": {\"size\": %lld, \"mtime\": %lld, \"chars\": %lld, \"real\": \"%s\"}%s\n",
-                         g_tokCursor[i].path, g_tokCursor[i].size, g_tokCursor[i].mtimeMs,
-                         g_tokCursor[i].chars, g_tokCursor[i].real,
+                         escP, g_tokCursor[i].size, g_tokCursor[i].mtimeMs,
+                         g_tokCursor[i].chars, escR,
                          i + 1 < g_tokCursorN ? "," : "");
         // snprintf returns the length the output WOULD have had: positive and
         // larger than the buffer exactly on truncation, so clamp to what was
@@ -654,14 +697,22 @@ static TokCursor *tokCursorFind(const char *path) {
     return NULL;
 }
 
-static void tokCursorSet(const char *path, long long size, long long mtimeMs) {
+// find a cursor or create it; a fresh entry has never been counted
+static TokCursor *tokCursorGet(const char *path) {
     TokCursor *c = tokCursorFind(path);
     if (!c) {
-        if (g_tokCursorN >= TOK_MAX_FILES) return;
+        if (g_tokCursorN >= TOK_MAX_FILES) return NULL;
         c = &g_tokCursor[g_tokCursorN++];
         memset(c, 0, sizeof(*c));
         lstrcpynA(c->path, path, 520);
+        c->chars = TOK_CHARS_NONE;
     }
+    return c;
+}
+
+static void tokCursorSet(const char *path, long long size, long long mtimeMs) {
+    TokCursor *c = tokCursorGet(path);
+    if (!c) return;
     c->size = size; c->mtimeMs = mtimeMs;
     g_tokCursorDirty = 1;
 }
@@ -701,13 +752,15 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         if (c && c->size == fsz && c->mtimeMs == mt) { g_tokDbgFiles++; g_tokDbgHits++; continue; }
         long long from = c ? c->size : 0;
         // The estimator counts a file's transcript from byte zero and carries the
-        // running total in the cursor. A cursor written before the feature was
-        // on has no total, so resuming from it would estimate everything in the
-        // appended tail as if the transcript were tiny: re-read the file once.
-        if (cfg->tokEstimate && c && c->size > 0 && c->chars <= 0) from = 0;
+        // running total in the cursor. A cursor with no total yet (TOK_CHARS_NONE;
+        // a real total of 0 is a store whose lines carry no transcript text) would
+        // otherwise resume as if the transcript were tiny: re-read the file once.
+        if (cfg->tokEstimate && c && c->size > 0 && c->chars < 0) from = 0;
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
-        long long neu = tokScanFile(full, from, appName, tk, cfg, c);
+        // the cursor must exist BEFORE the read so the count this scan just made
+        // (chars, real) lands in it instead of being lost to a fresh memset
+        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA));
         if (neu >= 0) { g_tokDbgRead += (int)(neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
