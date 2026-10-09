@@ -44,6 +44,18 @@ if [ "${1:-}" = "--check" ]; then
 fi
 . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
 export NIX_CONFIG="extra-experimental-features = nix-command flakes"
+
+# Two link recipes, chosen by which toolchain is present:
+#  - a plain mingw gcc on PATH (CI: Debian gcc-mingw-w64, winpthreads thread model)
+#  - otherwise nix's pkgsCross.mingwW64, whose wrapper forces -lmcfgthread, so the
+#    static lib must be on the link line (the built exe imports no thread DLL).
+if [ "${1:-}" = "--no-nix" ] || command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+  x86_64-w64-mingw32-windres src/version.rc -o version.o
+  x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe \
+    -Ivendor -I src -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32
+  echo "built: $(ls -la chocobar.exe | awk '{print $5}') bytes (system mingw)"
+  exit 0
+fi
 MCFGTHREAD_LIB=$(nix eval nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads --raw)/lib
 nix shell \
   nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
