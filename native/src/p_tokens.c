@@ -44,11 +44,11 @@ int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0;
 #define TOK_CHARS_NONE (-1LL) // chars: the estimator has never counted this file
 // Per-file cursor, persisted to ~/.wizbar/token-cursors.json. `chars` and
 // `real` exist only for tokens.estimateMissingUsage: chars stays
-// TOK_CHARS_NONE until the estimator's first count of the file (an older
-// cursor file's absent or 0 chars reads back as NONE too), so a genuine total
-// of 0 - a store whose lines carry no transcript text at all - stays distinct
-// from "never counted" and resumes from its byte cursor instead of re-reading
-// from byte zero on every append.
+// TOK_CHARS_NONE until the estimator's first count of the file (the key is
+// absent only in a cursor written before the feature existed, which reads
+// back as NONE), so a genuine total of 0 - a store whose lines carry no
+// transcript text at all - stays distinct from "never counted" and resumes
+// from its byte cursor instead of re-reading from byte zero on every append.
 typedef struct {
     char path[520];
     long long size;
@@ -639,11 +639,10 @@ static void tokCursorLoad(const Config *cfg) {
                     c->size = tokJll(raw, t, k + 1, "size", 0);
                     c->mtimeMs = tokJll(raw, t, k + 1, "mtime", 0);
                     // estimator state, absent in a cursor written before the
-                    // feature existed (or with it off): an absent or 0 chars
-                    // reads back as TOK_CHARS_NONE ("nothing known yet") and
-                    // the next full re-read rebuilds them
+                    // feature existed: an absent chars reads back as
+                    // TOK_CHARS_NONE ("nothing known yet") and the next full
+                    // re-read rebuilds them
                     c->chars = tokJll(raw, t, k + 1, "chars", TOK_CHARS_NONE);
-                    if (c->chars == 0) c->chars = TOK_CHARS_NONE; // pre-sentinel writer
                     jstrCopyA(c->real, (int)sizeof(c->real), raw, t,
                               jobjGet(raw, t, k + 1, "real"), "");
                     c->real[tokJsonUnesc(c->real, (int)strlen(c->real))] = 0;
