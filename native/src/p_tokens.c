@@ -444,7 +444,7 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
         // file no longer has - a later append then re-accumulates from here, and
         // nothing is counted twice.
         from = size;
-        if (cur) cur->chars = 0;
+        if (cur) cur->chars = TOK_CHARS_NONE;
     }
     if (from < 0) from = 0;
     long long toRead = size - from;
