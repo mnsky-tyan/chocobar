@@ -36,12 +36,9 @@ PY
 if [ "${1:-}" = "--check" ]; then
   . ~/.nix-profile/etc/profile.d/nix.sh 2>/dev/null || true
   export NIX_CONFIG="extra-experimental-features = nix-command flakes"
-  # self-contained: with neither a system mingw nor nix on PATH (a fresh CI
-  # runner), pull the distro mingw package instead of failing
-  if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 && ! command -v nix >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq gcc-mingw-w64-x86-64
-  fi
+  # A system mingw wins (CI installs it in the workflow); otherwise fall back to
+  # nix. No toolchain at all is a hard, visible failure - this gate must stay a
+  # pure compile check with no side effects, so it never installs packages.
   if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     exec x86_64-w64-mingw32-gcc -fsyntax-only -Wall -Wextra -Ivendor -I src src/chocobar_full.c
   fi

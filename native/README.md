@@ -35,10 +35,10 @@ native/build.sh --check  # compile-only gate (-fsyntax-only -Wall -Wextra), no e
 Toolchain: `build.sh` uses a **system** `x86_64-w64-mingw32-gcc` when one is on
 `PATH` (that is what CI and the release workflow use, via `--no-nix`), and
 otherwise falls back to Nix (`pkgsCross.mingwW64` gcc/binutils + mcfgthreads).
-The compile-only `--check` gate is self-contained: when neither a system mingw
-nor nix is on `PATH` (a fresh CI runner), it installs the distro mingw
-(`gcc-mingw-w64-x86-64`) itself before compiling - so the lint command pinned
-in `.no-mistakes.yaml` needs no separate setup step.
+The compile-only `--check` gate is deliberately a pure compile check with no
+side effects: it uses the system mingw when present and falls back to nix, and
+fails loudly when neither exists - it never installs packages. CI therefore
+installs `gcc-mingw-w64-x86-64` in its own workflow step.
 The two differ only in the default thread library the wrapper links: Nix forces
 `-lmcfgthread`, Debian/CI uses winpthreads. The code uses only Win32 threading,
 so both produce the same binary behaviour. `--no-nix` forces the system recipe
