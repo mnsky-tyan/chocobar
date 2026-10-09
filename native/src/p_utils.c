@@ -49,6 +49,7 @@ static char *readFileUtf8(const wchar_t *path, int *outLen) {
 static void stripLineComments(char *s) {
     int inStr = 0;
     for (char *p = s; *p; p++) {
+        if (inStr && *p == '\\') { if (p[1]) p++; continue; }
         if (*p == '"') inStr = !inStr;
         else if (!inStr && p[0] == '/' && p[1] == '/') {
             while (*p && *p != '\n') *p++ = ' ';
