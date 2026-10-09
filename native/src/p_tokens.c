@@ -629,7 +629,7 @@ static void tokCursorSave(void) {
     HANDLE h = CreateFileW(g_tokCursorPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
-    char line[700];
+    char line[768]; // path[519] + real[79] + three %lld + format overhead
     DWORD wrote = 0;
     WriteFile(h, "{\n", 2, &wrote, NULL);
     for (int i = 0; i < g_tokCursorN; i++) {
@@ -638,6 +638,10 @@ static void tokCursorSave(void) {
                          g_tokCursor[i].path, g_tokCursor[i].size, g_tokCursor[i].mtimeMs,
                          g_tokCursor[i].chars, g_tokCursor[i].real,
                          i + 1 < g_tokCursorN ? "," : "");
+        // snprintf returns the length the output WOULD have had: positive and
+        // larger than the buffer exactly on truncation, so clamp to what was
+        // actually written before it can become a WriteFile byte count
+        if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
         if (n > 0) WriteFile(h, line, (DWORD)n, &wrote, NULL);
     }
     WriteFile(h, "}\n", 2, &wrote, NULL);
