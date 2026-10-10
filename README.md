@@ -430,5 +430,5 @@ native/src/p_tokens.c   live session-log scan and byte cursors
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-scripts/                the portable regression suite
+scripts/                the portable regression suite and the Windows token regression runner
 ```
