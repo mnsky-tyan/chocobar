@@ -1,3 +1,4 @@
 chocobar.exe
+token-regression.exe
 *.o
 src/chocobar_full.c
