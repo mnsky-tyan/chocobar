@@ -6,3 +6,9 @@ out/
 .env.*
 Thumbs.db
 __pycache__/
+
+# Agent harness & internal workspace files
+AGENTS.md
+.no-mistakes.yaml
+docs/agent/
+docs/reviews/
