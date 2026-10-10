@@ -8,7 +8,7 @@
 
 #define CB_VER_MAJOR 1
 #define CB_VER_MINOR 3
-#define CB_VER_PATCH 2
-#define CB_VER_STR   "1.3.2"
+#define CB_VER_PATCH 3
+#define CB_VER_STR   "1.3.3"
 
 #endif

@@ -183,15 +183,17 @@ function check(name, ok, detail) {
 // boundary that sit earlier in each file, and the history would vanish from the
 // board. Measured 2026-10-10: without this, a restart collapsed ~9.0B to 3.5M.
 // The inverse matters too: forcing it on EVERY scan re-adds the whole history
-// each pass (measured 9.0B -> 36.0B -> 45.0B), so the flag must be raised only
-// when the boundary actually changes.
+// each pass (measured 9.0B -> 36.0B -> 45.0B). Replay is required at startup,
+// when the boundary moves, or when a seed reread actually resets aggregates.
+// Unchanged warm scans must stay incremental. Executable restart/reset
+// coverage lives in token_regression.py; these older text guards are retained.
 {
   const tk = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8');
   const seed = tk.match(/void tokLiveSeed\(long long cacheMaxTs[\s\S]*?\n\}/);
   check('tokens: a moved seed boundary forces a full re-read',
     !!seed && /if \(g_cacheMaxTs != cacheMaxTs\) g_tokForceFullRead = 1;/.test(seed[0]),
     'a seed re-read rebuilds the live half from scratch, so cursors must be bypassed');
-  check('tokens: an unchanged seed boundary does NOT force a full re-read',
+  check('tokens: seed handling does NOT force an unconditional full re-read',
     !!seed && !/^\s*g_tokForceFullRead = 1;\s*$/m.test(seed[0]),
     'unconditional would re-add all history every 60s and inflate the totals');
   check('tokens: the scan honours the forced full read',
