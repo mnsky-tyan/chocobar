@@ -55,11 +55,13 @@ production source, then runs it on Windows. It is a console-only test entry:
 no bar window, registry changes, subscriptions or real-profile access. The
 Python runner owns temporary profiles and checks actual parsed/aggregated data
 across separate processes, including failures, sources enabled through config
-reload after a disabled startup, and unchanged warm scans. One case is not
-about tokens at all: it plants a plausible third-party credential store in the
-scratch profile and asserts the `antigravity` provider never resolves to it when
-the config names no `authPath`, because that reader both reads and (after a
-token refresh) rewrites whichever path it is given.
+reload after a disabled startup, and unchanged warm scans. Two cases are not
+about tokens: one plants a plausible third-party credential store in the scratch
+profile and asserts the `antigravity` provider never resolves to it when the
+config names no `authPath` (that reader both reads and, after a token refresh,
+rewrites whichever path it is given); the other omits config keys and asserts the
+built-in defaults survive, which the shipped template promises with "delete a key
+and the built-in default applies".
 
 With a system MinGW toolchain, from the repository root:
 

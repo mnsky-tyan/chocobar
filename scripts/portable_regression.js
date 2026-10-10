@@ -156,6 +156,20 @@ function check(name, ok, detail) {
   const lock = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package-lock.json'), 'utf8'));
   const lockRoot = lock.packages && lock.packages[''] ? lock.packages[''].version : undefined;
   check('version: version.h declares CB_VER_STR', !!m);
+  // The numeric triple feeds version.rc's FILEVERSION/PRODUCTVERSION, which no
+  // other check reads: a bump that edits only CB_VER_STR would ship an exe whose
+  // string resource says one version and whose numeric file version says another.
+  // Match an anchored, ACTIVE define and require exactly one: the preprocessor
+  // uses the last effective definition and ignores commented-out text, so a
+  // first-textual-match regex would accept a stray duplicate or a commented one.
+  const nums = ['MAJOR', 'MINOR', 'PATCH'].map((k) => {
+    const active = vh.split('\n').filter((line) => new RegExp(`^#define CB_VER_${k}\\s+\\d+`).test(line));
+    const n = active.length === 1 ? active[0].match(new RegExp(`^#define CB_VER_${k}\\s+(\\d+)`)) : null;
+    return n ? n[1] : null;
+  });
+  check('version: the numeric triple matches CB_VER_STR',
+    !!m && nums.every((n) => n !== null) && nums.join('.') === m[1],
+    `numeric=${nums.join('.')} str=${m ? m[1] : '?'}`);
   if (m) {
     check('version: package.json, package-lock.json, and version.h agree',
       pkg.version === m[1] && lock.version === m[1] && lockRoot === m[1],

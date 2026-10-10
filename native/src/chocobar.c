@@ -215,7 +215,6 @@ typedef struct {
 // subscription provider (chip fetcher; mirrors config.subs.providers)
 typedef struct {
     int type;            // 0 = chatgpt, 1 = zai, 2 = antigravity, 3 = generic
-    int family;          // antigravity only: 0 = Gemini, 1 = GPT/Claude
     int enabled;
     wchar_t *label;
     wchar_t *authPath;     // chatgpt auth.json; antigravity: only a user-set path, no default
@@ -422,6 +421,20 @@ static wchar_t *jstrTok(const char *js, const jsmntok_t *t, int i, const wchar_t
         if (w) return w;
     }
     return def ? wideDup(def) : NULL;
+}
+
+// Replace *slot from obj[key], keeping the field's CURRENT value as the default
+// for an absent key. The old value is freed only once the replacement is in
+// hand: wideFree zeroes the slot, so the older `wideFree(&c->x); c->x =
+// jstrTok(..., c->x);` idiom handed jstrTok a NULL default and silently erased
+// every built-in default when the user deleted that key (the shipped promise is
+// "delete a key and the built-in default applies").
+static void jstrReplace(const char *js, const jsmntok_t *t, int i, wchar_t **slot) {
+    if (i < 0 || t[i].type != JSMN_STRING) return;
+    wchar_t *w = jdup(js, &t[i]);
+    if (!w) return;
+    wideFree(slot);
+    *slot = w;
 }
 
 static int jboolDefault(const char *js, const jsmntok_t *t, int i, int def) {
@@ -717,22 +730,19 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->gap        = jintTok(js, t, jobjGet(js, t, bar, "gap"), c->gap);
         c->fontSize   = jintTok(js, t, jobjGet(js, t, bar, "fontSize"), c->fontSize);
         c->backgroundAlpha = jintTok(js, t, jobjGet(js, t, bar, "backgroundAlpha"), c->backgroundAlpha);
-        wideFree(&c->tint);
-        c->tint  = jstrTok(js, t, jobjGet(js, t, bar, "backgroundTint"), c->tint);
-        wideFree(&c->backdrop);
-        c->backdrop = jstrTok(js, t, jobjGet(js, t, bar, "backdrop"), c->backdrop);
-        wideFree(&c->fontFamily);
-        c->fontFamily = jstrTok(js, t, jobjGet(js, t, bar, "fontFamily"), c->fontFamily);
+        jstrReplace(js, t, jobjGet(js, t, bar, "backgroundTint"), &c->tint);
+        jstrReplace(js, t, jobjGet(js, t, bar, "backdrop"), &c->backdrop);
+        jstrReplace(js, t, jobjGet(js, t, bar, "fontFamily"), &c->fontFamily);
         c->barRadius  = jintTok(js, t, jobjGet(js, t, bar, "radius"), c->barRadius);
         if (c->barRadius < 0) c->barRadius = 0;
         if (c->barRadius > 26) c->barRadius = 26;
     }
     int theme = jobjGet(js, t, root, "theme");
     if (theme >= 0) {
-        wideFree(&c->fg);       c->fg       = jstrTok(js, t, jobjGet(js, t, theme, "fg"), c->fg);
-        wideFree(&c->fgDim);    c->fgDim    = jstrTok(js, t, jobjGet(js, t, theme, "fgDim"), c->fgDim);
-        wideFree(&c->pink); c->pink = jstrTok(js, t, jobjGet(js, t, theme, "pink"), c->pink);
-        wideFree(&c->iconColor); c->iconColor = jstrTok(js, t, jobjGet(js, t, theme, "iconColor"), c->iconColor);
+        jstrReplace(js, t, jobjGet(js, t, theme, "fg"), &c->fg);
+        jstrReplace(js, t, jobjGet(js, t, theme, "fgDim"), &c->fgDim);
+        jstrReplace(js, t, jobjGet(js, t, theme, "pink"), &c->pink);
+        jstrReplace(js, t, jobjGet(js, t, theme, "iconColor"), &c->iconColor);
         c->iconOpacity = jintTok(js, t, jobjGet(js, t, theme, "iconOpacity"), c->iconOpacity);
         if (c->iconOpacity < 0) c->iconOpacity = 0;
         if (c->iconOpacity > 100) c->iconOpacity = 100;
@@ -772,12 +782,12 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 k += jtokSpan(t, k);
             }
         }
-        wideFree(&c->pinkDeep); c->pinkDeep = jstrTok(js, t, jobjGet(js, t, theme, "pinkDeep"), c->pinkDeep);
-        wideFree(&c->divider);  c->divider  = jstrTok(js, t, jobjGet(js, t, theme, "divider"), c->divider);
-        wideFree(&c->warn);     c->warn     = jstrTok(js, t, jobjGet(js, t, theme, "warn"), c->warn);
-        wideFree(&c->pinkBg);   c->pinkBg   = jstrTok(js, t, jobjGet(js, t, theme, "pinkBg"), c->pinkBg);
-        wideFree(&c->yellow);   c->yellow   = jstrTok(js, t, jobjGet(js, t, theme, "yellow"), c->yellow);
-        wideFree(&c->good);     c->good     = jstrTok(js, t, jobjGet(js, t, theme, "good"), c->good);
+        jstrReplace(js, t, jobjGet(js, t, theme, "pinkDeep"), &c->pinkDeep);
+        jstrReplace(js, t, jobjGet(js, t, theme, "divider"), &c->divider);
+        jstrReplace(js, t, jobjGet(js, t, theme, "warn"), &c->warn);
+        jstrReplace(js, t, jobjGet(js, t, theme, "pinkBg"), &c->pinkBg);
+        jstrReplace(js, t, jobjGet(js, t, theme, "yellow"), &c->yellow);
+        jstrReplace(js, t, jobjGet(js, t, theme, "good"), &c->good);
     }
     int modules = jobjGet(js, t, root, "modules");
     if (modules >= 0) {
@@ -795,7 +805,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         if (m >= 0) {
             c->mClock = jboolDefault(js, t, jobjGet(js, t, m, "enabled"), 1);
             int f = jobjGet(js, t, m, "format");
-            if (f >= 0) { wideFree(&c->clockFormat); c->clockFormat = jstrTok(js, t, f, c->clockFormat); }
+            if (f >= 0) jstrReplace(js, t, f, &c->clockFormat);
         }
         m = jobjGet(js, t, modules, "shortcut");
         if (m >= 0) {
@@ -820,7 +830,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 if (e->type == JSMN_OBJECT) {
                     CustomChip *cc = &c->custom[c->customCount];
                     memset(cc, 0, sizeof(*cc));
-                    cc->enabled = 1; cc->toggle = 0;
+                    cc->toggle = 0;
                     en = jobjGet(js, t, k, "enabled");   cc->enabled = jboolDefault(js, t, en, 1);
                     en = jobjGet(js, t, k, "toggle");    cc->toggle  = jboolDefault(js, t, en, 0);
                     cc->icon    = jstrTok(js, t, jobjGet(js, t, k, "icon"), L"");
@@ -848,7 +858,11 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     if (subs >= 0 && t[subs].type == JSMN_OBJECT) {
         c->subsEnabled = jboolDefault(js, t, jobjGet(js, t, subs, "enabled"), 0);
         c->subsIntervalMin = jintTok(js, t, jobjGet(js, t, subs, "intervalMinutes"), c->subsIntervalMin);
+        if (c->subsIntervalMin < 1) c->subsIntervalMin = 1;
+        if (c->subsIntervalMin > 1440) c->subsIntervalMin = 1440;
         c->subsTimeoutMs = jintTok(js, t, jobjGet(js, t, subs, "fetchTimeoutMs"), c->subsTimeoutMs);
+        if (c->subsTimeoutMs < 1000) c->subsTimeoutMs = 1000;
+        if (c->subsTimeoutMs > 120000) c->subsTimeoutMs = 120000;
         // how long each plan stays on the gauge chip before rotating
         c->subsRotateSec = jintTok(js, t, jobjGet(js, t, subs, "rotateSec"), c->subsRotateSec);
         if (c->subsRotateSec < 5) c->subsRotateSec = 5;
@@ -884,8 +898,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         if (rm < 1) rm = 1;
         if (rm > 60) rm = 60;
         c->tokensRescanSec = rm * 60;
-        wideFree(&c->tokenCachePath);
-        c->tokenCachePath = jstrTok(js, t, jobjGet(js, t, toks, "cachePath"), c->tokenCachePath);
+        jstrReplace(js, t, jobjGet(js, t, toks, "cachePath"), &c->tokenCachePath);
         int af = jobjGet(js, t, toks, "appFilter");
         if (af >= 0 && t[af].type == JSMN_ARRAY) {
             int cnt = t[af].size; if (cnt > 16) cnt = 16;

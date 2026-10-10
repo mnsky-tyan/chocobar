@@ -38,7 +38,8 @@ static void writeLogA(const char *s);
 // scan keeps no totals of its own to drift out of step with them.
 long long g_tokAllLive = 0;
 // scan diagnostics (one log line per rescan while general.debug is on)
-int g_tokDbgFiles = 0, g_tokDbgHits = 0, g_tokDbgRead = 0;
+int g_tokDbgFiles = 0, g_tokDbgHits = 0;
+long long g_tokDbgRead = 0;
 
 #define TOK_MAX_FILES 4096
 #define TOK_CHARS_NONE (-1LL) // chars: the estimator has never counted this file
@@ -137,8 +138,11 @@ static int tokWideToUtf8(const wchar_t *w, char *out, int cb) {
     if (!w || !*w) { if (cb > 0) out[0] = 0; return 0; }
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, cb, NULL, NULL);
     if (n > 0) return n - 1;
+    // Return -1, not 0: a 0 lets the caller keep the empty string as a cursor
+    // KEY, and every path too long to convert then shares one cursor row, so
+    // the second file resumes from the first file's offset.
     if (cb > 0) out[0] = 0;
-    return 0;
+    return -1;
 }
 
 // ------------------------------------------------------- usage estimator --
@@ -399,7 +403,7 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     // provider: which route carried the turn. pi spells it "provider" and keeps
     // "api" as the sub-protocol; the estimator keys on this to tell a bridged
     // route (workbuddy, mimo-desktop, antigravity-cli) from an API one.
-    for (int i = 0; i + 12 <= len; i++) {
+    for (int i = 0; i + 11 <= len; i++) {
         if (memcmp(ln + i, "\"provider\":", 11) == 0) {
             const char *v = ln + i + 11;
             while (v < ln + len && (*v == ' ' || *v == '\t')) v++;
@@ -632,7 +636,7 @@ static void tokCursorLoad(const Config *cfg) {
             if (t[k].type == JSMN_STRING && t[k + 1].type == JSMN_OBJECT) {
                 char pathA[520];
                 int pl = t[k].end - t[k].start;
-                if (pl > 0 && pl < 519) {
+                if (pl > 0 && pl <= 519) {
                     memcpy(pathA, raw + t[k].start, pl); pathA[pl] = 0;
                     pl = tokJsonUnesc(pathA, pl); pathA[pl] = 0;
                     TokCursor *c = &g_tokCursor[g_tokCursorN++];
@@ -745,8 +749,11 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         long long fsz = (long long)fd.nFileSizeLow + ((long long)fd.nFileSizeHigh << 32);
         if (mt && g_cacheMtimeMs && mt <= g_cacheMtimeMs) continue; // the Electron cache already covers it
         char pathA[520];
-        tokWideToUtf8(full, pathA, 520);
-        TokCursor *c = tokCursorFind(pathA);
+        // A path we cannot name must not borrow the empty-key cursor: read it
+        // uncursored (from 0, no persistence) instead of resuming from another
+        // file's offset.
+        int pathOk = tokWideToUtf8(full, pathA, 520) >= 0;
+        TokCursor *c = pathOk ? tokCursorFind(pathA) : NULL;
         // Unchanged since the last scan: skip it. Opening one file over the WSL
         // redirector costs ~25ms, and re-opening all 21 active files every
         // rescan is what blocked the bar for ~600ms and made refresh lag.
@@ -761,8 +768,8 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         g_tokDbgFiles++;
         // the cursor must exist BEFORE the read so the count this scan just made
         // (chars, real) lands in it instead of being lost to a fresh memset
-        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA));
-        if (neu >= 0) { g_tokDbgRead += (int)(neu - from); tokCursorSet(pathA, neu, mt); }
+        long long neu = tokScanFile(full, from, appName, tk, cfg, pathOk ? tokCursorGet(pathA) : NULL);
+        if (neu >= 0) { g_tokDbgRead += (neu - from); if (pathOk) tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
@@ -797,7 +804,7 @@ void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs) {
 // Scan every enabled JSONL session store. Records are STAGED (tokPendPush)
 // for the UI thread's drain; the return is the token sum they carried.
 // cfg is the pinned config generation: this runs on a worker thread.
-long tokLiveScan(const Config *cfg) {
+long long tokLiveScan(const Config *cfg) {
     if (!g_cfgLoaded) return 0;
     if (!cfg->tokensEnabled) return 0;
     long long before = g_tokAllLive;
@@ -843,12 +850,12 @@ long tokLiveScan(const Config *cfg) {
     if (cfg->debug) {
         if (fullRead) writeLogA("[wizbar] token live scan: FORCED full re-read (history rebuild)");
         char lb[160];
-        sprintf(lb, "[wizbar] token live scan: files=%d cursorHits=%d bytesRead=%d cursors=%d",
+        sprintf(lb, "[wizbar] token live scan: files=%d cursorHits=%d bytesRead=%lld cursors=%d",
                 g_tokDbgFiles, g_tokDbgHits, g_tokDbgRead, g_tokCursorN);
         writeLogA(lb);
         g_tokDbgFiles = g_tokDbgHits = g_tokDbgRead = 0;
     }
-    return (long)(g_tokAllLive - before);
+    return g_tokAllLive - before;
 }
 
 void tokLiveInit(void) {

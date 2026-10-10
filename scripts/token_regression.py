@@ -108,11 +108,18 @@ def main():
     # WSL executions keep fixtures with the local Windows-drive executable.
     parent = exe.parent if os.name != "nt" else None
     failures = []
+    total = 0
     def check(name, action):
+        nonlocal total
+        total += 1
         try:
             scans = action()
             print("PASS: " + name + " " + json.dumps(scans), flush=True)
-        except (AssertionError, OSError, ValueError, subprocess.SubprocessError, RuntimeError) as error:
+        # KeyError/TypeError included: a child JSON or cursor file missing an
+        # expected key used to escape check() and abort the whole run with a
+        # traceback instead of one counted FAIL line.
+        except (AssertionError, OSError, ValueError, TypeError, KeyError,
+                subprocess.SubprocessError, RuntimeError) as error:
             failures.append(name)
             print(f"FAIL: {name}: {error}", flush=True)
 
@@ -218,7 +225,37 @@ def main():
                     raise AssertionError(f"{label}: {resolved} is not the explicit user path")
             return [line for line in text.splitlines() if line.strip()]
         check("antigravity never invents a credential path", agy_no_default_path)
-    print(f"{14 - len(failures)}/14 executable token cases passed")
+
+        # Omitting a key must keep its built-in default (the template promises
+        # "delete a key and the built-in default applies").
+        def omitted_keys_keep_defaults():
+            command = [windows_path(exe), "--defaults-probe"]
+            kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                      "stdin": subprocess.DEVNULL, "timeout": 45}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                if not shutil.which("win-run-hidden"):
+                    raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
+                command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
+            child = subprocess.run(command, **kwargs)
+            text = child.stdout or ""
+            if os.name == "nt" and child.returncode != 0:
+                raise AssertionError(f"defaults probe exited {child.returncode}: {text}")
+            seen = {}
+            for line in text.splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key in ("backgroundTint", "backdrop", "fontFamily", "verdict"):
+                    seen[key] = value.strip()
+            wanted = {"backgroundTint": "#FBF2E2", "backdrop": "acrylic", "fontFamily": "Cascadia Mono"}
+            for key, want in wanted.items():
+                if seen.get(key) != want:
+                    raise AssertionError(f"{key}: expected {want}, got {seen.get(key)!r}: {text}")
+            if seen.get("verdict") != "DEFAULTS_KEPT":
+                raise AssertionError(f"defaults were lost when keys were omitted: {text}")
+            return [line for line in text.splitlines() if line.strip()]
+        check("omitted config keys keep their built-in defaults", omitted_keys_keep_defaults)
+    print(f"{total - len(failures)}/{total} executable token cases passed")
     return 1 if failures else 0
 
 
