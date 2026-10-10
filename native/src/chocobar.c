@@ -218,7 +218,7 @@ typedef struct {
     int family;          // antigravity only: 0 = Gemini, 1 = GPT/Claude
     int enabled;
     wchar_t *label;
-    wchar_t *authPath;     // chatgpt auth.json, antigravity pi auth.json
+    wchar_t *authPath;     // chatgpt auth.json; antigravity: only a user-set path, no default
     wchar_t *clientId;     // google desktop oauth pair for the cloud fallback:
     wchar_t *clientSecret; // user config only, never compiled in or committed
     wchar_t *configPath;   // zai config.json
