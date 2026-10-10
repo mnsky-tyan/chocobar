@@ -132,7 +132,7 @@ Every module takes `enabled` (default `true` unless noted). The three leftmost t
 ```json
 { "enabled": true, "icon": "moon", "label": "Focus", "color": "",
   "title": "Toggle the focus script", "toggle": true,
-  "command": "C:\tools\focus.bat" }
+  "command": "C:\\tools\\focus.bat" }
 ```
 
 - `icon`: a built-in name, a `theme.icons` name, a nerd-font glyph, or an emoji.
@@ -179,6 +179,10 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 - `enabled`: per-source switch, honoured only when `tokens.enabled` is on. Defaults to **on** - adding an entry is the act of turning it on; the shipped template leaves its two examples off.
 - `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
 - `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
+
+Stores must contain newline-terminated `.jsonl` records with usage numbers and a **numeric Unix timestamp in milliseconds**. `fields` maps key names, not JSON paths; ISO-only timestamps and SQLite stores are not live readers. Set `tokens.enabled: true` as well as enabling your source. The declared `app` appears in the dashboard automatically; `tokens.labels` can rename its display row.
+
+The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later recover the eligible live history too. With a legacy seed, only files newer than the seed file and records beyond its latest timestamp contribute to that live half. A legacy seed file is optional; a fresh install reconstructs its totals without one.
 
 Usage semantics per store are in the Token accounting section below.
 
@@ -275,7 +279,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
     "shortcut": { "enabled": false, "label": "", "command": "" },
     "pet": { "enabled": false, "label": "", "exePath": "" },
     "custom": [ { "enabled": true, "icon": "moon", "label": "Focus",
-                  "command": "C:\tools\focus.bat", "toggle": true } ]
+                  "command": "C:\\tools\\focus.bat", "toggle": true } ]
   },
   "tokens": { "enabled": true, "appFilter": [], "cachePath": "",
               "estimateMissingUsage": true,
@@ -407,6 +411,12 @@ The suite decodes the first-run config template the bar writes (`g_template` in 
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
+CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals and cursor serialization. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
+
+## License
+
+[MIT](LICENSE). The bundled `jsmn` parser retains its own license notice in `native/vendor/jsmn.h`.
+
 ## Layout
 
 The shipped bar is the native Win32 build in `native/`. The Electron app it replaced has been removed from the repository; its old config surface is what "Keys the native build ignores" documents. The authoritative list of source parts is the `PARTS` array at the top of `native/build.sh` - the table below is descriptive prose.
@@ -420,5 +430,5 @@ native/src/p_tokens.c   live session-log scan and byte cursors
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-scripts/                the portable regression suite
+scripts/                the portable regression suite and the Windows token regression runner
 ```

@@ -63,7 +63,7 @@ static long long tokJll(const char *js, const jsmntok_t *t, int parent, const ch
 
 static wchar_t g_tokCursorPath[MAX_PATH]; // ~/.wizbar/token-cursors.json
 static long long g_cacheMaxTs = 0;     // newest ts the Electron cache holds
-static int g_tokForceFullRead = 0;     // seed was (re)read: re-stage from byte 0
+static int g_tokForceFullRead = 1;     // startup must rebuild memory-only aggregates
 static int g_tokFullReadNow = 0;       // this walk is the forced full re-read
 static long long g_cacheMtimeMs = 0;   // when that cache was last written
 
@@ -783,13 +783,13 @@ void tokLiveReset(void) {
 // Record the seed (the Electron cache) so the live scan only counts what is
 // newer, and nothing already in the cache is counted twice.
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs) {
-    // Only a boundary that actually MOVED invalidates the live half. This runs
-    // on every scan, so setting the flag unconditionally would force a full
-    // re-read every 60s - and, because a full re-read re-stages every record
-    // above the boundary while the drain rebuilds from scratch, that is not
-    // merely slow: it re-adds the whole history on each pass and the totals
-    // climb without bound (observed 9.0B -> 36.0B -> 45.0B).
+    // A boundary change invalidates the live half. An actual seed re-read
+    // does too, even if its maximum timestamp stayed the same: the UI drain
+    // will clear the aggregates before applying this scan. Warm scans that
+    // keep both the boundary and aggregates must stay incremental, or replay
+    // would add the whole history again on every timer tick.
     if (g_cacheMaxTs != cacheMaxTs) g_tokForceFullRead = 1;
+    if (g_tokPendSeedReset) g_tokForceFullRead = 1;
     g_cacheMaxTs = cacheMaxTs;
     g_cacheMtimeMs = cacheMtimeMs;
 }
@@ -811,6 +811,16 @@ long tokLiveScan(const Config *cfg) {
     int fullRead = g_tokForceFullRead;
     g_tokForceFullRead = 0;
     g_tokFullReadNow = fullRead; // tokScanDir reads this for the walk below
+    if (fullRead) {
+        // Inactive files have no rebuilt live contribution either. Forget their
+        // old EOF positions too, so enabling a source later reads its history.
+        for (int i = 0; i < g_tokCursorN; i++) {
+            g_tokCursor[i].size = g_tokCursor[i].mtimeMs = 0;
+            g_tokCursor[i].chars = TOK_CHARS_NONE;
+            g_tokCursor[i].real[0] = 0;
+        }
+        if (g_tokCursorN) g_tokCursorDirty = 1;
+    }
     for (int i = 0; i < cfg->tokSrcCount; i++) {
         const TokSource *s = &cfg->tokSrc[i];
         if (!s->enabled || !s->sessionsDir || !*s->sessionsDir) continue;
@@ -831,7 +841,7 @@ long tokLiveScan(const Config *cfg) {
     g_tokFullReadNow = 0; // the walk is done; later rescans resume from cursors
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
     if (cfg->debug) {
-        if (fullRead) writeLogA("[wizbar] token live scan: FORCED full re-read (seed changed)");
+        if (fullRead) writeLogA("[wizbar] token live scan: FORCED full re-read (history rebuild)");
         char lb[160];
         sprintf(lb, "[wizbar] token live scan: files=%d cursorHits=%d bytesRead=%d cursors=%d",
                 g_tokDbgFiles, g_tokDbgHits, g_tokDbgRead, g_tokCursorN);
