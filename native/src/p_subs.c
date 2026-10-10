@@ -492,7 +492,8 @@ static int subsFetchZai(const Config *cfg, int idx) {
 }
 
 // ---- Antigravity (Google Cloud Code) ----------------------------------------
-// The pi auth.json OAuth entry refreshed with Google's public desktop-client
+// The auth.json OAuth entry (whichever file the user's authPath names; there
+// is no built-in default) refreshed with Google's public desktop-client
 // creds, then /v1internal:fetchAvailableModels on BOTH Google endpoints
 // (production authoritative per family) as the quota source. Sharp edges:
 //  - auth.json "expires" is epoch MILLISECONDS (not seconds).
@@ -637,8 +638,9 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
     return (*out->access || out->hasRefresh) ? 1 : 0;
 }
 
-// Best-effort persist of a rotated token into the pi auth store. Targeted
-// text surgery inside the "antigravity" object only - any doubt aborts the
+// Best-effort persist of a rotated token into whichever auth store the
+// user's authPath names (no built-in default). Targeted text surgery inside
+// the "antigravity" object only - any doubt aborts the
 // write (a corrupted auth.json would break the user's tooling).
 static void subsAgySaveAuth(const wchar_t *path, const wchar_t *access, const wchar_t *refresh,
                             long long expiresMs) {
