@@ -63,6 +63,8 @@ static long long tokJll(const char *js, const jsmntok_t *t, int parent, const ch
 
 static wchar_t g_tokCursorPath[MAX_PATH]; // ~/.wizbar/token-cursors.json
 static long long g_cacheMaxTs = 0;     // newest ts the Electron cache holds
+static int g_tokForceFullRead = 0;     // seed was (re)read: re-stage from byte 0
+static int g_tokFullReadNow = 0;       // this walk is the forced full re-read
 static long long g_cacheMtimeMs = 0;   // when that cache was last written
 
 // ---------------------------------------------------------- pending records --
@@ -748,8 +750,8 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         // Unchanged since the last scan: skip it. Opening one file over the WSL
         // redirector costs ~25ms, and re-opening all 21 active files every
         // rescan is what blocked the bar for ~600ms and made refresh lag.
-        if (c && c->size == fsz && c->mtimeMs == mt) { g_tokDbgFiles++; g_tokDbgHits++; continue; }
-        long long from = c ? c->size : 0;
+        if (c && !g_tokFullReadNow && c->size == fsz && c->mtimeMs == mt) { g_tokDbgFiles++; g_tokDbgHits++; continue; }
+        long long from = (c && !g_tokFullReadNow) ? c->size : 0;
         // The estimator counts a file's transcript from byte zero and carries the
         // running total in the cursor. A cursor with no total yet (TOK_CHARS_NONE;
         // a real total of 0 is a store whose lines carry no transcript text) would
@@ -773,6 +775,7 @@ void tokLiveReset(void) {
     memset(g_tokCursor, 0, sizeof(g_tokCursor));
     g_tokCursorN = 0;
     g_tokCursorDirty = 0;
+    g_tokForceFullRead = 1; // no cursors left: the next scan re-reads from byte 0
     g_tokAllLive = 0;
     if (g_tokCursorPath[0]) DeleteFileW(g_tokCursorPath);
 }
@@ -780,6 +783,13 @@ void tokLiveReset(void) {
 // Record the seed (the Electron cache) so the live scan only counts what is
 // newer, and nothing already in the cache is counted twice.
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs) {
+    // Only a boundary that actually MOVED invalidates the live half. This runs
+    // on every scan, so setting the flag unconditionally would force a full
+    // re-read every 60s - and, because a full re-read re-stages every record
+    // above the boundary while the drain rebuilds from scratch, that is not
+    // merely slow: it re-adds the whole history on each pass and the totals
+    // climb without bound (observed 9.0B -> 36.0B -> 45.0B).
+    if (g_cacheMaxTs != cacheMaxTs) g_tokForceFullRead = 1;
     g_cacheMaxTs = cacheMaxTs;
     g_cacheMtimeMs = cacheMtimeMs;
 }
@@ -795,6 +805,12 @@ long tokLiveScan(const Config *cfg) {
     // reset it) but the file still holds entries, reload it. Without this the
     // scan re-reads every active file from byte 0 and DOUBLE COUNTS them.
     if (!g_tokCursorN) tokCursorLoad(cfg);
+    // A seed (re)read means the live half is rebuilt from scratch, so this scan
+    // has to re-stage every record above the boundary - not just the appended
+    // tail. One full read; the cursors then resume normally on later scans.
+    int fullRead = g_tokForceFullRead;
+    g_tokForceFullRead = 0;
+    g_tokFullReadNow = fullRead; // tokScanDir reads this for the walk below
     for (int i = 0; i < cfg->tokSrcCount; i++) {
         const TokSource *s = &cfg->tokSrc[i];
         if (!s->enabled || !s->sessionsDir || !*s->sessionsDir) continue;
@@ -812,8 +828,10 @@ long tokLiveScan(const Config *cfg) {
         tokKeysBuild(s, &tk);
         tokScanDir(dir, recursive, s->app, &tk, cfg);
     }
+    g_tokFullReadNow = 0; // the walk is done; later rescans resume from cursors
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }
     if (cfg->debug) {
+        if (fullRead) writeLogA("[wizbar] token live scan: FORCED full re-read (seed changed)");
         char lb[160];
         sprintf(lb, "[wizbar] token live scan: files=%d cursorHits=%d bytesRead=%d cursors=%d",
                 g_tokDbgFiles, g_tokDbgHits, g_tokDbgRead, g_tokCursorN);
