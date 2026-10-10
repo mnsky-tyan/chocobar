@@ -182,7 +182,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 
 Stores must contain newline-terminated `.jsonl` records with usage numbers and a **numeric Unix timestamp in milliseconds**. `fields` maps key names, not JSON paths; ISO-only timestamps and SQLite stores are not live readers. Set `tokens.enabled: true` as well as enabling your source. The declared `app` appears in the dashboard automatically; `tokens.labels` can rename its display row.
 
-The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later also recover their retained history. A legacy seed file is optional; a fresh install reconstructs its totals without one.
+The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later recover the eligible live history too. With a legacy seed, only files newer than the seed file and records beyond its latest timestamp contribute to that live half. A legacy seed file is optional; a fresh install reconstructs its totals without one.
 
 Usage semantics per store are in the Token accounting section below.
 

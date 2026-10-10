@@ -1,3 +1,5 @@
+# Hand-maintained native CI: keep MinGW installation in this workflow.
+# The compile-only build check must stay side-effect free.
 name: CI
 
 on:
