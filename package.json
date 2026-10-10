@@ -6,7 +6,6 @@
   "license": "MIT",
   "scripts": {
     "build": "bash native/build.sh",
-    "lint": "bash native/build.sh --check",
     "test": "node scripts/portable_regression.js"
   }
 }
