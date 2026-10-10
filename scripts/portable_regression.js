@@ -174,5 +174,34 @@ function check(name, ok, detail) {
     'first run writes, every later run repairs');
 }
 
+// --- the live token scan re-stages history whenever the seed moves -------------
+// The dashboard's totals are two halves: the Electron cache (the seed, holding
+// history) and the live JSONL scan, which stages only records NEWER than the
+// seed's boundary. On a seed re-read the drain wipes the aggregates and rebuilds
+// them from the staged records alone, so that scan MUST read every file from
+// byte 0 - resuming from a per-file cursor would omit the records above the
+// boundary that sit earlier in each file, and the history would vanish from the
+// board. Measured 2026-10-10: without this, a restart collapsed ~9.0B to 3.5M.
+// The inverse matters too: forcing it on EVERY scan re-adds the whole history
+// each pass (measured 9.0B -> 36.0B -> 45.0B), so the flag must be raised only
+// when the boundary actually changes.
+{
+  const tk = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8');
+  const seed = tk.match(/void tokLiveSeed\(long long cacheMaxTs[\s\S]*?\n\}/);
+  check('tokens: a moved seed boundary forces a full re-read',
+    !!seed && /if \(g_cacheMaxTs != cacheMaxTs\) g_tokForceFullRead = 1;/.test(seed[0]),
+    'a seed re-read rebuilds the live half from scratch, so cursors must be bypassed');
+  check('tokens: an unchanged seed boundary does NOT force a full re-read',
+    !!seed && !/^\s*g_tokForceFullRead = 1;\s*$/m.test(seed[0]),
+    'unconditional would re-add all history every 60s and inflate the totals');
+  check('tokens: the scan honours the forced full read',
+    /if \(c && !g_tokFullReadNow && c->size == fsz/.test(tk)
+      && /long long from = \(c && !g_tokFullReadNow\) \? c->size : 0;/.test(tk),
+    'both the unchanged-file skip and the resume offset must bypass the cursor');
+  check('tokens: the forced flag is consumed by the scan, not left set',
+    /int fullRead = g_tokForceFullRead;\s*\n\s*g_tokForceFullRead = 0;/.test(tk),
+    'left set, every later rescan would re-read from byte 0');
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);
