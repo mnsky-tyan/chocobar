@@ -4023,7 +4023,19 @@ void writeTemplate(void) {
     wcsncpy_s(dir, MAX_PATH, g_cfgPath, _TRUNCATE);
     wchar_t *slash = wcsrchr(dir, L'\\');
     if (!slash) slash = wcsrchr(dir, L'/');
-    if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
+    if (slash) {
+        // a --config path may sit several new directories deep: create every
+        // missing prefix, not only the last component. Calls on levels that
+        // already exist (or are a drive/share root) just fail, harmlessly.
+        *slash = 0;
+        for (wchar_t *p = dir + 1; *p; p++) {
+            if (*p != L'\\' && *p != L'/') continue;
+            wchar_t keep = *p; *p = 0;
+            CreateDirectoryW(dir, NULL);
+            *p = keep;
+        }
+        CreateDirectoryW(dir, NULL);
+    }
     HANDLE h = CreateFileW(g_cfgPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) { writeLogA("[wizbar] config: cannot create the template"); return; }
     DWORD wrote;
