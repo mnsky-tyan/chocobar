@@ -205,15 +205,36 @@ Each provider entry:
 
 ```json
 { "type": "antigravity", "enabled": true, "label": "Antigravity",
-  "authPath": "~/.pi/agent/auth.json",
-  "clientId": "", "clientSecret": "" }
+  "authPath": "", "clientId": "", "clientSecret": "" }
 ```
 
+**Where each provider looks for a login.** Chocobar never asks you to log in itself.
+It reads the login file that another tool already saved, so you point each entry at
+that tool's file. The path is yours to choose; the file's **shape** is not - each
+reader expects a specific layout, listed below.
+
+| `type` | Config keys | The file it reads | What that file must contain |
+|---|---|---|---|
+| `chatgpt` | `authPath` | a Codex CLI login, by default `~/.codex/auth.json` | `{ "auth_mode": "chatgpt", "tokens": { "access_token": "..." } }` |
+| `zai` | `configPath`, `provider` | a Z.ai CLI config, by default `~/.zcode/v2/config.json` | `{ "provider": { "<provider>": { "enabled": true, "options": { "apiKey": "..." } } } }`; `provider` selects the key (default `builtin:zai-coding-plan`) |
+| `antigravity` | `authPath`, or `vscdbPath` | **no default** - whichever file your tool writes it to | `{ "antigravity": { "access": "...", "refresh": "...", "expires": <epoch ms>, "projectId": "..." } }` |
+| `generic` | `url`, `auth`, `windows` | any REST endpoint, declared here | see below |
+
+- `authPath` / `configPath`: `~` expands to `%USERPROFILE%`, and an absolute or UNC
+  path works too. `antigravity` has **no built-in default** on purpose: which file
+  holds an Antigravity login depends on the tool you signed in with, and a wrong
+  guess would not just read a stranger's file - a refreshed token is written back to
+  it. Point it at your own file, or leave it empty and use `vscdbPath`.
 - `enabled`: per-provider switch, honoured only when the `subs` master above is on. Defaults to **on** - declaring a provider is the act of turning it on; the first-run template ships its four examples off.
 - `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
-- `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
+- `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none. This one needs no login file from a CLI, so it is the simplest option if you sign in through the Antigravity IDE.
 - `clientId` / `clientSecret`: the Antigravity token refresh needs them (the Google desktop-client pair); there is no other quota source to fall back to, so a token that needs refreshing without them leaves the panel with no data. They are personal - keep them in your own config file, never in the repo.
-- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints: production is authoritative per family, so the daily endpoint only fills a family production does not report and the 5h pool survives. Each row is labeled with the pool it holds (`5h` or `day`). Same source as the harness's `/quota`; no IDE or language server required.
+- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints: production is authoritative per family, so the daily endpoint only fills a family production does not report and the 5h pool survives. Each row is labeled with the pool it holds (`5h` or `day`); no IDE or language server is required.
+
+**If your tool is not one of these**, you do not need a new Chocobar feature: the
+`generic` type below can describe any JSON quota endpoint in config. And if your
+tool stores a plain token you would rather not keep on disk at all, `auth` accepts
+`env` (an environment variable) or `literal` (the value inline in `config.json`).
 
 **`type: "generic"`** - any REST quota endpoint, declared entirely in config. This is what makes a new subscription plan a config edit rather than a code change:
 
@@ -296,7 +317,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                 "configPath": "~/.zcode/v2/config.json",
                 "provider": "builtin:zai-coding-plan" },
               { "type": "antigravity", "enabled": false, "label": "Antigravity",
-                "authPath": "~/.pi/agent/auth.json",
+                "authPath": "",
                 "clientId": "", "clientSecret": "" },
               { "type": "generic", "enabled": false, "label": "MyPlan",
                 "url": "https://api.example.com/v1/quota", "method": "GET",
@@ -407,11 +428,11 @@ Tests are headless and require no GUI:
 npm test
 ```
 
-The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator on by default with no override block.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, no provider credential path naming a specific third-party tool, and the blind-turn estimator on by default with no override block.
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
-CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals and cursor serialization. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
+CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals, cursor serialization, and that the `antigravity` provider never invents a credential path when the config names none. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
 
 ## License
 

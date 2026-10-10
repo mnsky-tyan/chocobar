@@ -172,7 +172,34 @@ def main():
                 raise AssertionError("cursor did not round-trip the file position and zero transcript length")
             return []
         check("cursor serialization round-trips escaped paths", cursor_contract)
-    print(f"{13 - len(failures)}/13 executable token cases passed")
+        # The antigravity provider must not invent a credential path. The child
+        # plants a plausible vendor store in its own scratch profile and asserts
+        # the reader never resolves to it when the config names no path.
+        def agy_no_default_path():
+            profile = fixture(root, "agy-path")
+            command = [windows_path(exe), "--agy-probe", windows_path(profile)]
+            kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                      "stdin": subprocess.DEVNULL, "timeout": 45}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                # WSL cannot exec a Windows binary directly, and the launcher's
+                # own exit status does not carry the child's - the child prints
+                # its own verdict and a non-zero exit is reported in that text.
+                if not shutil.which("win-run-hidden"):
+                    raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
+                command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
+            child = subprocess.run(command, **kwargs)
+            text = child.stdout or ""
+            if "found=1" in text and "empty_authPath" in text:
+                raise AssertionError(f"a config with an empty authPath still resolved a credential: {text}")
+            if "found=1" in text and "absent_authPath" in text:
+                raise AssertionError(f"a config with no authPath still resolved a credential: {text}")
+            if "empty_authPath" not in text or "absent_authPath" not in text:
+                raise AssertionError(f"agy probe did not report its cases (exit {child.returncode}): {text}")
+            return [line for line in text.splitlines() if line.strip()]
+        check("antigravity never invents a credential path", agy_no_default_path)
+    print(f"{15 - len(failures)}/15 executable token cases passed")
     return 1 if failures else 0
 
 
