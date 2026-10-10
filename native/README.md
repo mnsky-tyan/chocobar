@@ -48,6 +48,34 @@ and fails if no system toolchain is present.
 compiles. Edit the PARTS listed in the `PARTS` array at the top of `build.sh`
 (the authoritative list), never the assembled file.
 
+## Executable token regressions
+
+The CI workflow builds `native/tests/token_regression.c` after assembling the
+production source, then runs it on Windows. It is a console-only test entry:
+no bar window, registry changes, subscriptions or real-profile access. The
+Python runner owns temporary profiles and checks actual parsed/aggregated data
+across separate processes, including failures, sources enabled through config
+reload after a disabled startup, and unchanged warm scans.
+
+With a system MinGW toolchain, from the repository root:
+
+```sh
+bash native/build.sh --check
+x86_64-w64-mingw32-gcc -O2 -municode -mconsole native/tests/token_regression.c \
+  -Inative/vendor -Inative/src -o native/token-regression.exe \
+  -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32
+```
+
+Run on Windows with Python 3:
+
+```sh
+python scripts/token_regression.py --exe native/token-regression.exe
+```
+
+WSL execution requires the `win-run-hidden` windowless launcher and a harness
+on a local Windows drive. Nix builds need the same static mcfgthreads link
+flags as `build.sh`. Release publishing waits for these CI tests to pass.
+
 ## Run
 
 ```
@@ -110,5 +138,6 @@ captures show the lock screen for every window, which once sent a debugging
 session chasing phantom "invisible window" bugs. `PrintWindow` on the
 `ChocobarDash` popups verifies the dashboards; the bar itself is layered, so
 verify it by geometry (`GetWindowRect`, and `WindowFromPoint` for hit areas)
-or a `general.debug` log line, not by pixels. Kill the bar only via
-`taskkill /IM chocobar.exe /F` (targeted; never blanket taskkill powershell).
+or a `general.debug` log line, not by pixels. Use isolated profiles for tests
+and never stop a user's running bar to make room for a test. Clean up only the
+exact PID/path of an instance you started; do not use name-wide process kills.

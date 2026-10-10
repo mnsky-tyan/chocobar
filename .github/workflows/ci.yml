@@ -1,14 +1,12 @@
-# HAND-MAINTAINED - do not regenerate with `no-mistakes ci-workflow`.
-# Regeneration emits an unconditional actions/setup-go step (this repo has no
-# Go) and drops the mingw install below; edit this file by hand instead. The
-# toolchain install stays HERE, not in build.sh: `--check` is a pure compile
-# check with no side effects and must never apt-get install on its own.
+# Hand-maintained native CI: keep MinGW installation in this workflow.
+# The compile-only build check must stay side-effect free.
 name: CI
 
 on:
   push:
     branches: ['main']
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -20,6 +18,7 @@ concurrency:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -32,3 +31,32 @@ jobs:
       - name: Test
         run: |
           node scripts/portable_regression.js
+
+      - name: Build console token harness
+        run: |
+          x86_64-w64-mingw32-gcc -O2 -municode -mconsole native/tests/token_regression.c \
+            -Inative/vendor -Inative/src -o native/token-regression.exe \
+            -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-regression-harness
+          path: native/token-regression.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  token-runtime:
+    needs: build-test
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: token-regression-harness
+          path: native
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Executable token regressions
+        run: python scripts/token_regression.py --exe native/token-regression.exe
