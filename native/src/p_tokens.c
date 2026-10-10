@@ -138,9 +138,9 @@ static int tokWideToUtf8(const wchar_t *w, char *out, int cb) {
     if (!w || !*w) { if (cb > 0) out[0] = 0; return 0; }
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, cb, NULL, NULL);
     if (n > 0) return n - 1;
-    // Return -1, not 0: a 0 lets the caller keep the empty string as a cursor
-    // KEY, and every path too long to convert then shares one cursor row, so
-    // the second file resumes from the first file's offset.
+    // -1, not 0: "could not convert" must be distinguishable from "converted
+    // to nothing", so the caller keys the cursor another way instead of
+    // letting every failed path share the empty-key row.
     if (cb > 0) out[0] = 0;
     return -1;
 }
@@ -696,6 +696,19 @@ static void tokCursorSave(void) {
     CloseHandle(h);
 }
 
+// Cursor key for a path UTF-8 cannot name (too long for the buffer, or an
+// unpaired surrogate WideCharToMultiByte rejects): FNV-1a over the wide path.
+// A real key is always a full path and so always carries a backslash, so no
+// live name can collide with the "#hex" form.
+static void tokCursorKeyWide(const wchar_t *w, char *out, int cb) {
+    unsigned long long h = 1469598103934665603ull;
+    for (; *w; w++) {
+        h ^= (unsigned short)*w;
+        h *= 1099511628211ull;
+    }
+    snprintf(out, cb, "#%016llx", h);
+}
+
 static TokCursor *tokCursorFind(const char *path) {
     for (int i = 0; i < g_tokCursorN; i++)
         if (lstrcmpA(g_tokCursor[i].path, path) == 0) return &g_tokCursor[i];
@@ -749,11 +762,11 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         long long fsz = (long long)fd.nFileSizeLow + ((long long)fd.nFileSizeHigh << 32);
         if (mt && g_cacheMtimeMs && mt <= g_cacheMtimeMs) continue; // the Electron cache already covers it
         char pathA[520];
-        // A path we cannot name must not borrow the empty-key cursor: read it
-        // uncursored (from 0, no persistence) instead of resuming from another
-        // file's offset.
-        int pathOk = tokWideToUtf8(full, pathA, 520) >= 0;
-        TokCursor *c = pathOk ? tokCursorFind(pathA) : NULL;
+        // every enumerable file gets a stable cursor key: the UTF-8 name when
+        // it fits, else a hash of the wide path, so it warm-skips, resumes and
+        // persists like any other file instead of being re-read from 0 forever
+        if (tokWideToUtf8(full, pathA, 520) < 0) tokCursorKeyWide(full, pathA, 520);
+        TokCursor *c = tokCursorFind(pathA);
         // Unchanged since the last scan: skip it. Opening one file over the WSL
         // redirector costs ~25ms, and re-opening all 21 active files every
         // rescan is what blocked the bar for ~600ms and made refresh lag.
@@ -768,8 +781,8 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         g_tokDbgFiles++;
         // the cursor must exist BEFORE the read so the count this scan just made
         // (chars, real) lands in it instead of being lost to a fresh memset
-        long long neu = tokScanFile(full, from, appName, tk, cfg, pathOk ? tokCursorGet(pathA) : NULL);
-        if (neu >= 0) { g_tokDbgRead += (neu - from); if (pathOk) tokCursorSet(pathA, neu, mt); }
+        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA));
+        if (neu >= 0) { g_tokDbgRead += (neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
