@@ -811,6 +811,16 @@ long tokLiveScan(const Config *cfg) {
     int fullRead = g_tokForceFullRead;
     g_tokForceFullRead = 0;
     g_tokFullReadNow = fullRead; // tokScanDir reads this for the walk below
+    if (fullRead) {
+        // Inactive files have no rebuilt live contribution either. Forget their
+        // old EOF positions too, so enabling a source later reads its history.
+        for (int i = 0; i < g_tokCursorN; i++) {
+            g_tokCursor[i].size = g_tokCursor[i].mtimeMs = 0;
+            g_tokCursor[i].chars = TOK_CHARS_NONE;
+            g_tokCursor[i].real[0] = 0;
+        }
+        if (g_tokCursorN) g_tokCursorDirty = 1;
+    }
     for (int i = 0; i < cfg->tokSrcCount; i++) {
         const TokSource *s = &cfg->tokSrc[i];
         if (!s->enabled || !s->sessionsDir || !*s->sessionsDir) continue;

@@ -78,6 +78,14 @@ static int testAppend(const wchar_t *profile) {
     return ok ? 0 : 6;
 }
 
+static int testEnableSource(const wchar_t *profile) {
+    wchar_t path[MAX_PATH], src[MAX_PATH];
+    if (swprintf(path, MAX_PATH, L"%ls\\.wizbar\\config.json", profile) <= 0 ||
+        swprintf(src, MAX_PATH, L"%ls\\config-on.json", profile) <= 0 || !CopyFileW(src, path, FALSE)) return 9;
+    freeConfig(&g_cfg);
+    return testConfig(profile);
+}
+
 static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans, int *count) {
     if (lstrlenW(profile) >= MAX_PATH - 50 || !SetEnvironmentVariableW(L"USERPROFILE", profile)) return 1;
     InitializeCriticalSection(&g_cfgCustomLock);
@@ -89,8 +97,9 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
     int boundary = wcscmp(mode, L"boundary") == 0;
     int append = wcscmp(mode, L"append") == 0;
     int toggle = wcscmp(mode, L"toggle") == 0;
-    if (!refresh && !boundary && !append && !toggle && wcscmp(mode, L"normal") != 0) return 7;
-    int n = toggle ? 4 : (refresh || boundary || append) ? 3 : 2;
+    int sourceToggle = wcscmp(mode, L"source-toggle") == 0;
+    if (!refresh && !boundary && !append && !toggle && !sourceToggle && wcscmp(mode, L"normal") != 0) return 7;
+    int n = toggle ? 4 : (refresh || boundary || append || sourceToggle) ? 3 : 2;
     for (int pass = 0; pass < n; pass++) {
         if (toggle) g_cfg.tokensEnabled = pass == 1 ? 0 : 1;
         int before = g_tokDbgRead;
@@ -112,6 +121,7 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
         *count = pass + 1;
         if (pass == 0 && (refresh || boundary)) rc = testSeedChange(profile, boundary);
         if (pass == 0 && append) rc = testAppend(profile);
+        if (pass == 0 && sourceToggle) rc = testEnableSource(profile);
         if (rc) return rc;
     }
     return 0;

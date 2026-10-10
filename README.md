@@ -182,7 +182,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 
 Stores must contain newline-terminated `.jsonl` records with usage numbers and a **numeric Unix timestamp in milliseconds**. `fields` maps key names, not JSON paths; ISO-only timestamps and SQLite stores are not live readers. Set `tokens.enabled: true` as well as enabling your source. The declared `app` appears in the dashboard automatically; `tokens.labels` can rename its display row.
 
-The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. A legacy seed file is optional; a fresh install reconstructs its totals without one.
+The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later also recover their retained history. A legacy seed file is optional; a fresh install reconstructs its totals without one.
 
 Usage semantics per store are in the Token accounting section below.
 
@@ -411,7 +411,7 @@ The suite decodes the first-run config template the bar writes (`g_template` in 
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
-CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, app/model/request totals and cursor serialization. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
+CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals and cursor serialization. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
 
 ## License
 

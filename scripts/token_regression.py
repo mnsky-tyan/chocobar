@@ -141,6 +141,28 @@ def main():
         toggled = fixture(root, "toggle")
         check("master off/on clears then rebuilds without doubling", lambda: verify(run_child(exe, toggled, "toggle"),
               [(265, 2, 2, False), (0, 0, 0, True), (265, 2, 2, False), (265, 2, 2, True)]))
+        def source_toggle(name, partial=False):
+            profile = fixture(root, name)
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if partial:
+                other = profile / "other-sessions"
+                other.mkdir()
+                shutil.copyfile(profile / "append-record.json", other / "usage.jsonl")
+                config["tokens"]["sources"].append({
+                    **config["tokens"]["sources"][0],
+                    "app": "secondary-cli", "path": windows_path(other)})
+                path.write_text(json.dumps(config), encoding="utf-8")
+            baseline = warm320 if partial else warm265
+            verify(run_child(exe, profile), baseline)  # A prior process persists EOF cursors.
+            (profile / "config-on.json").write_text(json.dumps(config), encoding="utf-8")
+            config["tokens"]["sources"][-1]["enabled"] = False
+            path.write_text(json.dumps(config), encoding="utf-8")
+            expected = ([(265, 2, 2, False), (320, 3, 3, False), (320, 3, 3, True)]
+                        if partial else [(0, 0, 0, True), (265, 2, 2, False), (265, 2, 2, True)])
+            return verify(run_child(exe, profile, "source-toggle"), expected)
+        check("disabled source enabled after restart recovers history", lambda: source_toggle("source-off"))
+        check("disabled source enabled alongside active source", lambda: source_toggle("source-partial", True))
         # Verify the cursor serialization as persisted output, not source text.
         def cursor_contract():
             data = json.loads((fresh / ".wizbar" / "token-cursors.json").read_text(encoding="utf-8"))
@@ -150,7 +172,7 @@ def main():
                 raise AssertionError("cursor did not round-trip the file position and zero transcript length")
             return []
         check("cursor serialization round-trips escaped paths", cursor_contract)
-    print(f"{11 - len(failures)}/11 executable token cases passed")
+    print(f"{13 - len(failures)}/13 executable token cases passed")
     return 1 if failures else 0
 
 

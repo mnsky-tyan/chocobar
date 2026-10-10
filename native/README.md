@@ -54,7 +54,8 @@ The CI workflow builds `native/tests/token_regression.c` after assembling the
 production source, then runs it on Windows. It is a console-only test entry:
 no bar window, registry changes, subscriptions or real-profile access. The
 Python runner owns temporary profiles and checks actual parsed/aggregated data
-across separate processes, including failures and unchanged warm scans.
+across separate processes, including failures, sources enabled through config
+reload after a disabled startup, and unchanged warm scans.
 
 With a system MinGW toolchain, from the repository root:
 
