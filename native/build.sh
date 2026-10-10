@@ -56,6 +56,11 @@ if [ "${1:-}" = "--no-nix" ] || command -v x86_64-w64-mingw32-gcc >/dev/null 2>&
   x86_64-w64-mingw32-windres src/version.rc -o version.o
   x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe \
     -Ivendor -I src -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32
+  # Debian's gcc-mingw-w64 emits DWARF by default while nix's does not, so the
+  # CI-built asset used to ship ~280 KB of debug sections (source paths and
+  # symbols) that the nix-built one did not. Strip explicitly in BOTH recipes so
+  # the released artifact does not depend on which toolchain built it.
+  x86_64-w64-mingw32-strip --strip-debug chocobar.exe
   echo "built: $(ls -la chocobar.exe | awk '{print $5}') bytes (system mingw)"
   exit 0
 fi
@@ -64,5 +69,5 @@ nix shell \
   nixpkgs#pkgsCross.mingwW64.buildPackages.gcc \
   nixpkgs#pkgsCross.mingwW64.buildPackages.binutils \
   nixpkgs#pkgsCross.mingwW64.windows.mcfgthreads \
-  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32 -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic"
+  -c sh -c "x86_64-w64-mingw32-windres src/version.rc -o version.o && x86_64-w64-mingw32-gcc -O2 -municode -mwindows src/chocobar_full.c version.o -o chocobar.exe -Ivendor -I src -L$MCFGTHREAD_LIB -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32 -Wl,-Bstatic -lmcfgthread -Wl,-Bdynamic && x86_64-w64-mingw32-strip --strip-debug chocobar.exe"
 echo "built: $(ls -la chocobar.exe | awk '{print $5}') bytes"
