@@ -1,5 +1,4 @@
 // ------------------------------------------------------------- metrics ----
-static int striContains(const wchar_t *hay, const wchar_t *needle);
 typedef struct {
     double cpu, gpu, ram;
     double tempC;
@@ -83,7 +82,7 @@ static int g_gpuFirst = 1;
 static void gpuInit(void) {
     if (PdhOpenQueryW(NULL, 0, &g_gpuQuery) != ERROR_SUCCESS) return;
     PDH_STATUS st = PdhAddEnglishCounterW(g_gpuQuery, L"\\GPU Engine(*)\\Utilization Percentage", 0, &g_gpuCounter);
-    if (st != ERROR_SUCCESS) { g_gpuQuery = NULL; return; }
+    if (st != ERROR_SUCCESS) { PdhCloseQuery(g_gpuQuery); g_gpuQuery = NULL; return; }
     PdhCollectQueryData(g_gpuQuery); // baseline sample
 }
 
@@ -95,7 +94,9 @@ static void pollGpu(void) {
     PdhGetFormattedCounterArrayW(g_gpuCounter, PDH_FMT_DOUBLE, &size, &count, NULL);
     if (!size) { g_m.gpu = 0; return; }
     PDH_FMT_COUNTERVALUE_ITEM_W *items = (PDH_FMT_COUNTERVALUE_ITEM_W *)HeapAlloc(GetProcessHeap(), 0, size);
-    if (!items) return;
+    // Match every other early return here: without this the last painted GPU
+    // percentage stays on screen instead of falling back to a dash.
+    if (!items) { g_m.gpu = 0; return; }
     double sum = 0;
     if (PdhGetFormattedCounterArrayW(g_gpuCounter, PDH_FMT_DOUBLE, &size, &count, items) == ERROR_SUCCESS) {
         for (DWORD i = 0; i < count; i++)
@@ -108,7 +109,8 @@ static void pollGpu(void) {
 }
 
 // --- CPU temperature via HWiNFO shared memory (SM then SM2) -------------------
-// Mirrors the Electron reader's parsers exactly (layouts per HWiNFO's SDK).
+// Mirrors the HWiNFO shared-memory layouts (SM then SM2) as documented by the
+// HWiNFO SDK. Reads Global\\HWiNFO_SENS_SM2 first, falling back to the older SM..
 static int striContains(const wchar_t *hay, const wchar_t *needle) {
     if (!hay || !needle || !*needle) return 0;
     wchar_t h[256], n[64];

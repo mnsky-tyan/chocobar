@@ -8,7 +8,8 @@
 
 typedef struct {
     long long total, appTotal, modelTotal, calls;
-    int models, bytes;
+    int models;
+    long long bytes;
 } TestScan;
 
 static int testConfig(const wchar_t *profile) {
@@ -136,7 +137,11 @@ static int agyProbeMain(const wchar_t *profile) {
         g_cfgLoaded = 1;
         AgyAuth auth; wchar_t resolved[MAX_PATH];
         int found = subsAgyReadAuth(&g_cfg, 0, &auth, resolved, MAX_PATH);
-        int usedOther = wcsstr(resolved, L"\\.pi\\") != NULL;
+        /* The reader keeps the separator the config used, so the vendor store it
+           must never reach is spelled with EITHER separator: a backslash-only
+           needle never matched the forward-slash form and left this leg
+           asserting nothing. */
+        int usedOther = wcsstr(resolved, L"\\.pi\\") != NULL || wcsstr(resolved, L".pi/") != NULL;
         /* the two no-path cases must resolve nothing; the explicit case must
            read exactly the user-named planted store, never the vendor one */
         if (i < 2 && (found || usedOther)) rc = 4;
@@ -149,6 +154,47 @@ static int agyProbeMain(const wchar_t *profile) {
     }
     DeleteFileW(file); RemoveDirectoryW(sub); RemoveDirectoryW(dir);
     DeleteFileW(own);
+    return rc;
+}
+
+/* Omitting a key must keep its built-in default. parseConfigInto installs every
+   default, then the per-section loop used to wideFree the field and pass it back
+   as jstrTok's own default - so wideFree zeroed it and an absent key erased the
+   default (the bar painted black, the font fell back, backdrop=solid stopped
+   working). The shipped template promises "delete a key and the built-in default
+   applies", so this is the executable form of that promise. */
+static int defaultsProbeMain(void) {
+    static const char *js = "{\"bar\":{\"height\":30},\"theme\":{},\"modules\":{},\"tokens\":{\"enabled\":false}}";
+    int len = (int)strlen(js);
+    char *raw = HeapAlloc(GetProcessHeap(), 0, len + 1);
+    if (!raw) return 1;
+    memcpy(raw, js, len + 1);
+    jsmn_parser p; jsmn_init(&p);
+    int nt = jsmn_parse(&p, raw, (size_t)len, NULL, 0);
+    if (nt <= 0) { HeapFree(GetProcessHeap(), 0, raw); return 2; }
+    jsmntok_t *t = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*t) * (nt + 1));
+    if (!t) { HeapFree(GetProcessHeap(), 0, raw); return 3; }
+    jsmn_init(&p);
+    if (jsmn_parse(&p, raw, (size_t)len, t, (unsigned)nt) != nt) {
+        HeapFree(GetProcessHeap(), 0, t); HeapFree(GetProcessHeap(), 0, raw); return 3;
+    }
+    Config c; memset(&c, 0, sizeof(c));
+    parseConfigInto(&c, raw, t, 0);
+    struct { const wchar_t *label; const wchar_t *got; const wchar_t *want; } cases[] = {
+        { L"backgroundTint", c.tint,       L"#FBF2E2" },
+        { L"backdrop",       c.backdrop,   L"acrylic" },
+        { L"fontFamily",     c.fontFamily, L"Cascadia Mono" },
+    };
+    int rc = 0;
+    for (int i = 0; i < 3; i++) {
+        int ok = cases[i].got && wcscmp(cases[i].got, cases[i].want) == 0;
+        printf("%ls=%ls\n", cases[i].label, cases[i].got ? cases[i].got : L"(NULL)");
+        if (!ok) rc = 4;
+    }
+    printf("verdict=%s\n", rc ? "DEFAULTS_LOST" : "DEFAULTS_KEPT");
+    freeConfig(&c);
+    HeapFree(GetProcessHeap(), 0, t);
+    HeapFree(GetProcessHeap(), 0, raw);
     return rc;
 }
 
@@ -166,9 +212,10 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
     int sourceToggle = wcscmp(mode, L"source-toggle") == 0;
     if (!refresh && !boundary && !append && !toggle && !sourceToggle && wcscmp(mode, L"normal") != 0) return 7;
     int n = toggle ? 4 : (refresh || boundary || append || sourceToggle) ? 3 : 2;
+    if (n > TEST_SCANS) return 2; // scans[pass] is written unguarded below
     for (int pass = 0; pass < n; pass++) {
         if (toggle) g_cfg.tokensEnabled = pass == 1 ? 0 : 1;
-        int before = g_tokDbgRead;
+        long long before = g_tokDbgRead;
         scanTokenCache();
         DWORD start = GetTickCount();
         while (g_cfg.tokensEnabled && InterlockedCompareExchange(&g_tokScanDone, 0, 0) != 1) {
@@ -195,6 +242,7 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
 
 int wmain(int argc, wchar_t **argv) {
     if (argc == 3 && wcscmp(argv[1], L"--agy-probe") == 0) return agyProbeMain(argv[2]);
+    if (argc == 2 && wcscmp(argv[1], L"--defaults-probe") == 0) return defaultsProbeMain();
     if (argc != 4) return 64;
     FILE *out = _wfopen(argv[2], L"wb");
     if (!out) return 65;
@@ -204,7 +252,7 @@ int wmain(int argc, wchar_t **argv) {
     fprintf(out, "{\"exit\":%d,\"scans\":[", rc);
     for (int i = 0; i < count; i++) {
         TestScan *s = &scans[i];
-        fprintf(out, "%s{\"total\":%lld,\"app_total\":%lld,\"model_total\":%lld,\"calls\":%lld,\"models\":%d,\"bytes\":%d}",
+        fprintf(out, "%s{\"total\":%lld,\"app_total\":%lld,\"model_total\":%lld,\"calls\":%lld,\"models\":%d,\"bytes\":%lld}",
                 i ? "," : "", s->total, s->appTotal, s->modelTotal, s->calls, s->models, s->bytes);
     }
     fprintf(out, "]}\n");

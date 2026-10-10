@@ -43,6 +43,7 @@ static int g_subsThreadStarted = 0;
 static const wchar_t *subsNz(const wchar_t *s) { return (s && *s) ? s : NULL; }
 // readers defined further down (the fetch thread logs what it stored)
 static void subsProvLabel(int i, wchar_t *out, int cb);
+static int subsParseBig(const char *js, int len, jsmntok_t **outTok);
 static void subsViewLabel(const Config *v, int i, wchar_t *out, int cb);
 static void subsProvPlan(int i, wchar_t *out, int cb);
 static int subsProvWins(int i, SubsWin *out, int max);
@@ -133,10 +134,10 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
     char *buf = readFileUtf8(path, &len);
 
     wchar_t *key = NULL;
-    jsmntok_t t[512];
-    jsmn_parser p;
-    jsmn_init(&p);
-    int n = jsmn_parse(&p, buf, len, t, 512);
+    // Growable parse: the ZCode config is a user file that accumulates provider
+    // entries, and a fixed cap silently returned no key once it filled up.
+    jsmntok_t *t = NULL;
+    int n = subsParseBig(buf, len, &t);
     if (n > 0 && t[0].type == JSMN_OBJECT) {
         int prov = jobjGet(buf, t, 0, "provider");
         if (prov >= 0 && t[prov].type == JSMN_OBJECT) {
@@ -167,6 +168,7 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
         }
     }
     HeapFree(GetProcessHeap(), 0, buf);
+    if (t) HeapFree(GetProcessHeap(), 0, t);
     // deviceMid sits next to the config: telemetry-state.json
     if (deviceMid) {
         *deviceMid = NULL;
@@ -180,12 +182,12 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
             int tl = 0;
             char *tb = readFileUtf8(tpath, &tl);
             if (tb) {
-                jsmntok_t tt[128];
-                jsmn_parser tp2;
-                jsmn_init(&tp2);
-                if (jsmn_parse(&tp2, tb, tl, tt, 128) > 0 && tt[0].type == JSMN_OBJECT) {
+                jsmntok_t *tt = NULL;
+                int tn = subsParseBig(tb, tl, &tt);
+                if (tn > 0 && tt[0].type == JSMN_OBJECT) {
                     *deviceMid = subsJstr(tb, tt, 0, "deviceMid");
                 }
+                if (tt) HeapFree(GetProcessHeap(), 0, tt);
                 HeapFree(GetProcessHeap(), 0, tb);
             }
         }
@@ -348,6 +350,7 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
     }
     double rem = 100;
     wchar_t *pt = NULL;
+    int reached = 0;
     jsmntok_t t[512];
     jsmn_parser p;
     jsmn_init(&p);
@@ -356,7 +359,7 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
         int rl = jobjGet(body, t, 0, "rate_limit");
         rem = 100;
         if (rl >= 0 && t[rl].type == JSMN_OBJECT) {
-            int reached = subsJint(body, t, rl, "limit_reached", 0);
+            reached = subsJint(body, t, rl, "limit_reached", 0);
             double lo = 100;
             int found = 0;
             const char *wnames[2] = { "primary_window", "secondary_window" };
@@ -384,7 +387,22 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
         }
     }
     HeapFree(GetProcessHeap(), 0, body);
-    subsSetWins(idx, wins, nwin);
+    // A 200 that yielded no window is NOT "100% remaining": it is a body we
+    // could not read (error envelope, HTML, changed schema, a missing
+    // rate_limit object). Reporting a green 100% masks a real outage, and the
+    // check has to sit OUTSIDE the container branch or the missing-container
+    // case slips through. Match generic/antigravity: no-data state, and keep
+    // the last good windows (subsSetState marks them stale) rather than wiping
+    // them, which is what the README promises.
+    if (nwin == 0 && !reached) {
+        subsSetState(idx, 0, 0);
+        wideFree(&pt);
+        return 0;
+    }
+    // limit_reached with no window labels: report CAPPED (0 remaining) but keep
+    // whatever rows were last known, like every other provider - wiping them
+    // would leave a CAPPED pill above an empty panel.
+    if (nwin > 0) subsSetWins(idx, wins, nwin);
     subsSetState(idx, (int)(rem + 0.5), 1);
     subsSetPlan(idx, pt && *pt ? pt : L"chatgpt");
     wideFree(&pt);
@@ -394,7 +412,16 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
 static int subsFetchZai(const Config *cfg, int idx) {
     wchar_t *mid = NULL;
     wchar_t *key = subsZaiKey(cfg, idx, &mid);
-    if (!key) { subsSetState(idx, 0, 0); return 0; }
+    if (!key) {
+        // Name the real cause: this is the one provider failure with no
+        // diagnostic, so a stale Z.ai panel used to be undebuggable.
+        char lb[160];
+        snprintf(lb, sizeof(lb), "[wizbar] subs zai: no apiKey (check configPath/provider) - %s",
+                 cfg->subsProviders[idx].configPath && *cfg->subsProviders[idx].configPath ? "path set" : "(default)");
+        writeLogA(lb);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
     int need = 384 + 2 * lstrlenW(key) + (mid ? lstrlenW(mid) : 0);
     wchar_t *hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)need * sizeof(wchar_t));
     if (!hdrs) { wideFree(&key); wideFree(&mid); subsSetState(idx, 0, 0); return 0; }
@@ -439,6 +466,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
     SubsWin wins[MAX_GEN_WIN];
     int nwin = 0;
     double lo = 100;
+    int found = 0;
     int limits = jobjGet(body, t, 0, "data");
     int dataObj = limits;
     if (limits >= 0 && t[limits].type == JSMN_OBJECT) {
@@ -446,7 +474,6 @@ static int subsFetchZai(const Config *cfg, int idx) {
         if (limits >= 0 && t[limits].type == JSMN_ARRAY) {
             int cnt = t[limits].size;
             int k = limits + 1;
-            int found = 0;
             for (int i = 0; i < cnt; i++) {
                 jsmntok_t *e = &t[k];
                 if (e->type == JSMN_OBJECT) {
@@ -484,6 +511,15 @@ static int subsFetchZai(const Config *cfg, int idx) {
     }
     wchar_t *pt = dataObj >= 0 ? subsJstr(body, t, dataObj, "level") : NULL;
     HeapFree(GetProcessHeap(), 0, body);
+    // Same rule as chatgpt/antigravity/generic: no window at all - an empty or
+    // missing limits array, or a data object that never appeared - is an
+    // unreadable response, not a full tank. Checked OUTSIDE the container
+    // branch, and the last good windows are kept (marked stale) not wiped.
+    if (nwin == 0) {
+        wideFree(&pt);
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
     subsSetWins(idx, wins, nwin);
     subsSetState(idx, (int)(lo + 0.5), 1);
     subsSetPlan(idx, pt && *pt ? pt : L"coding");
@@ -563,7 +599,6 @@ typedef struct {
     long long expires;   // epoch ms
     wchar_t projectId[128];
     int hasRefresh;
-    int fromVscdb;
 } AgyAuth;
 
 // auth.json: { "antigravity": { access, refresh, expires, projectId } }
@@ -626,7 +661,6 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
                     int tl = e - j;
                     if (tl > 5 && tl < 4000) {
                         MultiByteToWideChar(CP_UTF8, 0, vb + j, tl, out->access, AGY_ACCESS_CCH);
-                        out->fromVscdb = 1;
                         HeapFree(GetProcessHeap(), 0, vb);
                         return 1;
                     }
@@ -783,8 +817,16 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
         return 0;
     }
     char cid[256], cs[256];
-    WideCharToMultiByte(CP_UTF8, 0, clientId, -1, cid, sizeof(cid), NULL, NULL);
-    WideCharToMultiByte(CP_UTF8, 0, clientSecret, -1, cs, sizeof(cs), NULL, NULL);
+    int cidl = WideCharToMultiByte(CP_UTF8, 0, clientId, -1, cid, sizeof(cid), NULL, NULL);
+    int csl = WideCharToMultiByte(CP_UTF8, 0, clientSecret, -1, cs, sizeof(cs), NULL, NULL);
+    // Both calls leave the destination UNTOUCHED and return 0 when the buffer
+    // is too small; ignoring that fed uninitialized stack bytes to snprintf and
+    // shipped them to Google. The sibling splice below aborts on the same
+    // condition - this path must too.
+    if (cidl <= 0 || csl <= 0) {
+        writeLogA("[wizbar] subs agy refresh: clientId/clientSecret too long");
+        return 0;
+    }
     char body[2048];
     int bl = snprintf(body, sizeof(body),
         "{\"client_id\":\"%s\",\"client_secret\":\"%s\",\"refresh_token\":\"%ls\",\"grant_type\":\"refresh_token\"}",
@@ -1651,10 +1693,12 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                 }
             }
         }
-        // sleep the interval, but a kick (refresh button) breaks out early
-        int ivl = view->subsIntervalMin > 0 ? view->subsIntervalMin * 60000 : 120000;
+        // sleep the interval, but a kick (refresh button) breaks out early.
+        // long long: an unclamped int * 60000 overflows into a negative value,
+        // which makes the wait loop exit at once and hammers every endpoint.
+        long long ivl = view->subsIntervalMin > 0 ? (long long)view->subsIntervalMin * 60000LL : 120000LL;
         cfgUnpin(); // the sleeps below read no config: let a retired generation go
-        for (int waited = 0; waited < ivl; waited += 250) {
+        for (long long waited = 0; waited < ivl; waited += 250) {
             if (InterlockedCompareExchange(&g_subsKick, 0, 0)) break;
             Sleep(250);
         }
@@ -1807,8 +1851,9 @@ static void subsViewLabel(const Config *v, int i, wchar_t *out, int cb) {
     const wchar_t *l = i >= 0 && i < v->subsProviderCount && v->subsProviders[i].label
                            ? v->subsProviders[i].label : NULL;
     int it = i >= 0 && i < v->subsProviderCount ? v->subsProviders[i].type : 0;
-    if (it == 2) l = L"Antigravity";
-    else if (!l || !*l) l = it == 1 ? L"Z.ai" : (it == 3 ? L"generic" : L"ChatGPT");
+    // The configured label wins for EVERY type; the type default only fills an
+    // empty one. Antigravity used to overwrite a user-set label unconditionally.
+    if (!l || !*l) l = it == 2 ? L"Antigravity" : (it == 1 ? L"Z.ai" : (it == 3 ? L"generic" : L"ChatGPT"));
     lstrcpynW(out, l, cb);
 }
 static void subsProvLabel(int i, wchar_t *out, int cb) { subsViewLabel(&g_cfg, i, out, cb); }

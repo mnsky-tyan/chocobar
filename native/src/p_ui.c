@@ -54,7 +54,7 @@ static int g_customState[MAX_CUSTOM];
 // (chocobar_full.c), so these only make later sections visible early
 extern long long g_tokAllLive; // p_tokens
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs); // p_tokens
-long tokLiveScan(const Config *cfg); // p_tokens
+long long tokLiveScan(const Config *cfg); // p_tokens
 void tokLiveReset(void); // p_tokens: tokens.enabled off - forget cursors + live counters
 void tokLiveInit(void); // p_tokens
 long long subsFetchedEpochMs(void); // p_subs
@@ -156,8 +156,7 @@ static HFONT barFont(void) {
 }
 
 // ------------------------------------------------------ render init ----
-static int initRender(HWND hwnd) {
-    (void)hwnd;
+static int initRender(void) {
     g_memDc = CreateCompatibleDC(NULL);
     if (!g_memDc) return 0;
     g_font = barFont();
@@ -464,6 +463,12 @@ static long long g_lastScanMs = 0;      // GetTickCount64 of the last scan
 static long long g_lastScanEpoch = 0;   // wall clock of the last scan (wallNowLocalMs, p_utils)
 static unsigned long long g_tokDataVersion = 0;   // moves on every completed scan
 static unsigned long long g_dashTokVersion = 0;   // version the open board shows
+static long long g_dashSubsEpoch = 0;             // fetch epoch the subs board shows
+static long long g_dashSubsEpochPending = 0;     // epoch sampled at the start of a paint
+// The dashboard window/type are declared here (before configCheckTick, which
+// needs to invalidate the open board after a config reload).
+static HWND g_dash = NULL;
+static int g_dashType = 0;          // 0 = token usage, 1 = subs board
 static int g_daySel = -1; // selected heatmap cell (daysBack), -1 = none
 
 // blend two opaque colors, num/256 of the foreground
@@ -662,8 +667,12 @@ static void scanTokenCacheInner(const Config *cfg) {
         // ~ prefix = relative to the profile dir; else absolute
         if (cfg->tokenCachePath[0] == L'~' && lstrlenW(cfg->tokenCachePath) < MAX_PATH - 2) {
             DWORD n = GetEnvironmentVariableW(L"USERPROFILE", path, MAX_PATH);
-            if (!n) { tokTodaySet(-1); return; }
-            lstrcatW(path, cfg->tokenCachePath + 1);
+            // n is the required size: at or over the buffer means the result was
+            // truncated and path is NOT terminated. The default branch below
+            // already rejects this; mirror it and bound the append with
+            // lstrcpynW so the concat cannot overrun either.
+            if (!n || n >= MAX_PATH - 40) { tokTodaySet(-1); return; }
+            lstrcpynW(path + lstrlenW(path), cfg->tokenCachePath + 1, MAX_PATH - lstrlenW(path));
         } else if (lstrlenW(cfg->tokenCachePath) < MAX_PATH) {
             lstrcpynW(path, cfg->tokenCachePath, MAX_PATH);
         }
@@ -985,9 +994,12 @@ static void buildChips(void) {
         g_chips[g_chipCount - 1].iconSvg = SVG_BOLT;
     }
     if (g_cfg.petEnabled) {
-        wchar_t txt[16];
+        // modules.pet.label is documented as an optional prefix; it used to be
+        // parsed and then ignored, so the chip always read plain on/off.
+        wchar_t txt[80];
         int running = g_m.petRunning;
-        lstrcpynW(txt, running ? L"on" : L"off", 16);
+        if (g_cfg.petLabel && *g_cfg.petLabel) swprintf(txt, 80, L"%ls %ls", g_cfg.petLabel, running ? L"on" : L"off");
+        else lstrcpynW(txt, running ? L"on" : L"off", 80);
         addChipI(CT_PET, 0, txt, 0, running ? g_cfg.good : g_cfg.fgDim, 0);
         g_chips[g_chipCount - 1].align = 2;
         g_chips[g_chipCount - 1].iconSvg = SVG_BOW;
@@ -1360,7 +1372,7 @@ static void repaintBar(HWND hwnd) {
             int iy = (g_dibH - svgBox) / 2;
             if (c->iconSvg == SVG_BAT)
                 svgDrawBatt(g_memDc, g_m.battPct, g_m.battAc, acc, colorrefFromHex(g_cfg.warn, 255),
-                            colorrefFromHex(g_cfg.tint, 255), tx, iy);
+                            tx, iy);
             else
                 svgDraw(g_memDc, c->iconSvg, acc, tx, iy);
             tx += iconW[i] + (int)icoGap;
@@ -1409,16 +1421,25 @@ static int wikilessContains(const wchar_t *hay, const wchar_t *needle) {
     return 0;
 }
 
+// The terminal classes the bar follows when terminal.className is empty. ONE
+// list: isTerminalHwnd (foreground test) and findTerminalByProbe (fallback
+// search) must agree, and a fifth terminal would otherwise have to be added in
+// two places that could silently diverge.
+static const wchar_t *const g_termClasses[] = {
+    L"CASCADIA_HOSTING_WINDOW_CLASS", L"ConsoleWindowClass",
+    L"VirtualConsoleClass", L"mintty"
+};
+#define TERM_CLASS_COUNT ((int)(sizeof(g_termClasses) / sizeof(g_termClasses[0])))
+
 static int isTerminalHwnd(HWND h) {
     if (!h || h == g_bar) return 0;
     wchar_t cls[64];
     if (!GetClassNameW(h, cls, 64)) return 0;
-    int classOk;
+    int classOk = 0;
     if (g_cfg.terminalClassName && *g_cfg.terminalClassName) classOk = !lstrcmpiW(cls, g_cfg.terminalClassName);
-    else classOk = !lstrcmpiW(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") ||
-                   !lstrcmpiW(cls, L"ConsoleWindowClass") ||
-                   !lstrcmpiW(cls, L"VirtualConsoleClass") ||
-                   !lstrcmpiW(cls, L"mintty");
+    else for (int i = 0; i < TERM_CLASS_COUNT; i++) {
+        if (!lstrcmpiW(cls, g_termClasses[i])) { classOk = 1; break; }
+    }
     if (!classOk) return 0;
     // configured title substring must match too (else any same-class window wins)
     if (g_cfg.terminalTitle && *g_cfg.terminalTitle) {
@@ -1447,14 +1468,10 @@ static HWND findTerminalByProbe(void) {
         }
         return NULL;
     }
-    static const wchar_t *const classes[] = {
-        L"CASCADIA_HOSTING_WINDOW_CLASS", L"ConsoleWindowClass",
-        L"VirtualConsoleClass", L"mintty"
-    };
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < TERM_CLASS_COUNT; i++) {
         HWND h = NULL;
         for (;;) {
-            h = FindWindowExW(NULL, h, classes[i], NULL);
+            h = FindWindowExW(NULL, h, g_termClasses[i], NULL);
             if (!h) break;
             // isTerminalHwnd applies the configured title substring too - the
             // generic path used to return the FIRST window of each class, so a
@@ -1685,6 +1702,11 @@ static void followTick(void) {
     // cross-process operation that also repositions in z.
     if (g_owner != g_term) {
         g_nonrudeSet = 0; // the owner changed: re-arm the latch for the new terminal
+        // SetLastError(0) first: SetWindowLongPtr returns 0 both on failure and
+        // on a successful first assignment, so without clearing it a stale error
+        // from any earlier call leaves g_owner NULL and this reparent re-runs on
+        // every follow tick.
+        SetLastError(0);
         LONG_PTR prev = SetWindowLongPtrW(g_bar, GWLP_HWNDPARENT, (LONG_PTR)g_term);
         if (prev || GetLastError() == 0) g_owner = g_term; // a failed set leaves the old owner
     }
@@ -1751,6 +1773,12 @@ static void configCheckTick(void) {
         if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
+        // The subs board renders from the live config at paint time, but its
+        // WM_TIMER repaint is now keyed to the fetch epoch. A reload can rename,
+        // disable or add a provider without any fetch landing, so force the
+        // board to repaint too - otherwise the edit is invisible until the next
+        // cycle (up to intervalMinutes).
+        if (g_dash && g_dashType == 1) { g_dashSubsEpoch = -1; InvalidateRect(g_dash, NULL, FALSE); }
     }
 }
 
@@ -1758,8 +1786,7 @@ static void configCheckTick(void) {
 // Electron opens frameless BrowserWindows (840x580 / 820x480 CSS, opaque
 // pinkBg, Win11-rounded by DWM). The native panels mirror that: WS_POPUP,
 // DWM-rounded corners, one panel at a time, chip click toggles.
-static HWND g_dash = NULL;
-static int g_dashType = 0;          // 0 = token usage, 1 = subs board
+// (g_dash and g_dashType are declared near the top, above configCheckTick.)
 static void *g_dashBits = NULL;
 static HBITMAP g_dashDib = NULL;
 static HDC g_dashDc = NULL;
@@ -1923,8 +1950,9 @@ static void dashDot(HDC dc, int cx, int cy, int d, COLORREF cr) {
 }
 
 // heatmap hit rects (physical px) + the days-back each holds
-static RECT g_hmRect[26][7];
-static int g_hmBack[26][7];
+#define HM_WEEKS 26   // fixed heatmap width (weeks); the arrays and loops must agree
+static RECT g_hmRect[HM_WEEKS][7];
+static int g_hmBack[HM_WEEKS][7];
 static RECT g_btnRefresh, g_btnClose; // physical px
 // refresh-button debounce: while set the button reads "..." and ignores
 // clicks, so a restless double-click cannot fire two scans in a row
@@ -1968,8 +1996,7 @@ static void dashTableHeadNeeds(HDC dc, HFONT f, int *need) {
 // one table row: share bar behind the first cell, dot, numbers right-aligned
 static void dashTableRow(HDC dc, int x0, int innerW, int y, int rowH,
                          const int *xs, const wchar_t *label, COLORREF dot,
-                         double share, TokAgg *a, DashTheme *t, HFONT f11, HFONT f9) {
-    (void)f9;
+                         double share, TokAgg *a, DashTheme *t, HFONT f11) {
     // zebra-less; share bar behind the label (dash.css .share i)
     if (share > 0.003) {
         int bw = (int)(share * innerW);
@@ -2059,6 +2086,11 @@ static void paintDash(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
     LONG w = rc.right, h = rc.bottom;
     if (w < 1 || h < 1) return;
+    // Sample the data versions BEFORE drawing (recorded after, see the end): a
+    // fetch landing mid-paint must still differ from what we record, or its
+    // data waits for the next cycle.
+    unsigned long long seenTokVersion = g_tokDataVersion;
+    g_dashSubsEpochPending = subsFetchedEpochMs();
     if (w != g_dashW || h != g_dashH || !g_dashDib || g_dashPainted != g_dashType) {
         if (g_dashDib) { SelectObject(g_dashDc, g_dashOldBmp); DeleteObject(g_dashDib); g_dashDib = NULL; g_dashBits = NULL; }
         BITMAPINFO bi; memset(&bi, 0, sizeof(bi));
@@ -2209,7 +2241,7 @@ static void paintDash(HWND hwnd) {
 
             // daily usage section: heatmap + legend (+ optional day detail)
             int rowLabW = DX(16) + DX(5);
-            int weeks = 26; // heatmapWeeks is Electron-only; the native board is fixed at 26
+            int weeks = HM_WEEKS; // heatmapWeeks is Electron-only; the native board is fixed
             int secPadX = DX(12);
             // Fill the card: 26 cells at a fixed DX(11) left the right half of
             // the card blank, which is most of why the board read as cramped.
@@ -2373,7 +2405,7 @@ static void paintDash(HWND hwnd) {
                         wchar_t an[24];
                         appLabelW(i, an, 24);
                         dashTableRow(dc, padL + secPadX, innerW - 2 * secPadX, ddy, DX(17),
-                                     xs, an, appDotColor(g_appName[i], &t), 0.0, a, &t, fBody, fS9);
+                                     xs, an, appDotColor(g_appName[i], &t), 0.0, a, &t, fBody);
                         ddDrawn++;
                         ddy += DX(17);
                     }
@@ -2497,7 +2529,7 @@ static void paintDash(HWND hwnd) {
                                 DeleteObject(b);
                             }
                             dashTableRow(dc, sx + DX(12), inner, ry, rowH, xs, an,
-                                         appDotColor(g_appName[ai], &t), (double)s / maxAll, &a2, &t, fBody, fS9);
+                                         appDotColor(g_appName[ai], &t), (double)s / maxAll, &a2, &t, fBody);
                             ry += rowH;
                         }
                         if (appN == 0 && rows > 0) {
@@ -2531,7 +2563,7 @@ static void paintDash(HWND hwnd) {
                             if (bar) *bar = 0;
                             COLORREF dc2 = appDotColor(mk, &t);
                             dashTableRow(dc, sx + DX(12), inner, ry, rowH, xs, mn,
-                                         dc2, (double)s / maxAll, &a2, &t, fBody, fS9);
+                                         dc2, (double)s / maxAll, &a2, &t, fBody);
                             ry += rowH;
                         }
                         if (mdlN == 0 && rows > 0) {
@@ -2653,7 +2685,11 @@ static void paintDash(HWND hwnd) {
                 // rem -1 = the backend reports no fraction for this pool right
                 // now (Claude/GPT between resets): the row exists but must not
                 // drag the pill to CAPPED
-                for (int k = 0; k < wn; k++) { if (wins[k].rem >= 0 && wins[k].rem < lowest) lowest = wins[k].rem; anyw = 1; }
+                for (int k = 0; k < wn; k++) {
+                    if (wins[k].rem < 0) continue;   // no fraction reported: not a cap
+                    anyw = 1;
+                    if (wins[k].rem < lowest) lowest = wins[k].rem;
+                }
                 const wchar_t *ps2 = NULL; COLORREF pc = t.dim, pbg = blendCr(t.head, t.dim, 31);
                 if (stale) { ps2 = L"STALE"; pc = t.yellow; pbg = blendCr(t.head, t.yellow, 31); }
                 else if (!anyw) ps2 = NULL;
@@ -2812,7 +2848,11 @@ static void paintDash(HWND hwnd) {
     HDC wdc = GetDC(hwnd);
     BitBlt(wdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     ReleaseDC(hwnd, wdc);
-    if (g_dashType == 0) g_dashTokVersion = g_tokDataVersion;
+    // Record the observed versions AFTER the pixels are drawn, but sample them
+    // BEFORE: a fetch landing mid-paint would otherwise be recorded as already
+    // shown and its data would not be painted until the next cycle.
+    if (g_dashType == 0) g_dashTokVersion = seenTokVersion;
+    else g_dashSubsEpoch = g_dashSubsEpochPending;
 }
 
 static int dashPtInBtn(POINT p, int *which) {
@@ -2823,7 +2863,7 @@ static int dashPtInBtn(POINT p, int *which) {
 }
 
 static void dashTipCell(HWND hwnd, POINT p) {
-    for (int wk = 0; wk < 26; wk++)
+    for (int wk = 0; wk < HM_WEEKS; wk++)
         for (int dow = 0; dow < 7; dow++) {
             if (!PtInRect(&g_hmRect[wk][dow], p)) continue;
             int daysBack = g_hmBack[wk][dow];
@@ -2924,7 +2964,17 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_btnBusyUntil = 0;
             InvalidateRect(hwnd, NULL, FALSE);
         }
-        if (g_dashType == 1 || g_tokDataVersion != g_dashTokVersion) InvalidateRect(hwnd, NULL, FALSE);
+        if (g_dashType == 1) {
+            // Only on new data: the epoch moves when a fetch (including the
+            // background cycle) lands. Repainting unconditionally twice a second
+            // re-ran the whole layout, the GDI+ donuts and a SetWindowPos.
+            if (subsFetchedEpochMs() != g_dashSubsEpoch) {
+                g_dashSubsEpoch = subsFetchedEpochMs();
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        } else if (g_tokDataVersion != g_dashTokVersion) {
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -2997,7 +3047,7 @@ static LRESULT CALLBACK dashProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (g_dashType == 0) {
-            for (int wk = 0; wk < 26; wk++)
+            for (int wk = 0; wk < HM_WEEKS; wk++)
                 for (int dow = 0; dow < 7; dow++) {
                     if (!PtInRect(&g_hmRect[wk][dow], p)) continue;
                     int daysBack = g_hmBack[wk][dow];
@@ -3582,6 +3632,7 @@ static void showTrayMenu(HWND hwnd) {
         loadConfig();
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
+        if (g_dash && g_dashType == 1) { g_dashSubsEpoch = -1; InvalidateRect(g_dash, NULL, FALSE); }
     } else if (id == 4) {
         PostQuitMessage(0);
     }
@@ -3710,7 +3761,6 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TIMER_METRICS) {
             pollCpu(); pollRam(); pollBattery(); pollVolume(); pollGpu();
             pollHwinfoSm2(); pollHwinfoSm();
-            if (!g_m.tempOk) { g_m.tempOk = 0; }
             g_m.petRunning = g_cfg.petEnabled && g_cfg.petExePath && *g_cfg.petExePath ? petRunning(g_cfg.petExePath) : 0;
             formatClock(clockFmt(), g_m.clockText, 80);
             buildChips();
@@ -3964,8 +4014,18 @@ static const char *g_template =
     "}\r\n";
 
 void writeTemplate(void) {
+    // Never clobber an existing file: loadConfig calls this when readFileUtf8
+    // fails, which also covers a transient read error or an oversized file. Only
+    // a genuinely absent path may be created, and the parent directory is made
+    // first so --config <newdir>/config.json works as the README promises.
+    if (GetFileAttributesW(g_cfgPath) != INVALID_FILE_ATTRIBUTES) return;
+    wchar_t dir[MAX_PATH];
+    wcsncpy_s(dir, MAX_PATH, g_cfgPath, _TRUNCATE);
+    wchar_t *slash = wcsrchr(dir, L'\\');
+    if (!slash) slash = wcsrchr(dir, L'/');
+    if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
     HANDLE h = CreateFileW(g_cfgPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) { writeLogA("[wizbar] config: cannot create the template"); return; }
     DWORD wrote;
     WriteFile(h, g_template, (DWORD)strlen(g_template), &wrote, NULL);
     CloseHandle(h);
@@ -3976,18 +4036,42 @@ void loadConfig(void) {
     int len = 0;
     char *raw = readFileUtf8(g_cfgPath, &len);
     if (!raw) {
+        // Only a genuinely absent path is a fresh install. writeTemplate now
+        // refuses to touch an existing file, so an unreadable one (zero length,
+        // over 32 MiB, a transient read error) must not be reported as created
+        // - and must not be silent either, which is the same failure class this
+        // function already logs for parse and allocation errors.
+        DWORD attrs = GetFileAttributesW(g_cfgPath);
+        int missing = (attrs == INVALID_FILE_ATTRIBUTES);
         writeTemplate();
-        freshInstall = 1;
         raw = readFileUtf8(g_cfgPath, &len);
-        if (!raw) return;
+        if (!raw) {
+            writeLogA(missing ? "[wizbar] config: template write failed - running on defaults"
+                              : "[wizbar] config: unreadable and not replaced - keeping previous");
+            return;
+        }
+        if (missing) freshInstall = 1;
     }
     stripLineComments(raw);
     jsmn_parser parser;
     jsmn_init(&parser);
     int ntok = jsmn_parse(&parser, raw, (size_t)len, NULL, 0);
-    if (ntok < 0) { HeapFree(GetProcessHeap(), 0, raw); return; }
+    if (ntok < 0) {
+        // Silent before: a malformed hand-edit left the bar on defaults with no
+        // explanation and no log line, and g_cfgLoaded stayed 0 so every token
+        // scan became a no-op. Say what happened instead.
+        char lb[96];
+        sprintf(lb, "[wizbar] config: parse failed (jsmn %d) - keeping previous", ntok);
+        writeLogA(lb);
+        HeapFree(GetProcessHeap(), 0, raw);
+        return;
+    }
     jsmntok_t *toks = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (ntok + 1));
-    if (!toks) { HeapFree(GetProcessHeap(), 0, raw); return; }
+    if (!toks) {
+        writeLogA("[wizbar] config: token allocation failed - keeping previous");
+        HeapFree(GetProcessHeap(), 0, raw);
+        return;
+    }
     jsmn_init(&parser);
     jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
     Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
@@ -4101,7 +4185,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show) {
         NULL, NULL, hInst, NULL);
     if (!g_bar) return 1;
 
-    if (!initRender(g_bar)) writeLogA("[wizbar] render init failed");
+    if (!initRender()) writeLogA("[wizbar] render init failed");
 
     SetTimer(g_bar, TIMER_METRICS, 1000, NULL);
     SetTimer(g_bar, TIMER_FOLLOW, 100, NULL);
