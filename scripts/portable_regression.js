@@ -84,6 +84,16 @@ function check(name, ok, detail) {
       !('estimate' in tok));
     check('template: no personal identifiers in the template',
       !/tyanw|mnsky|firstmate|captain|crewmate|remielle/i.test(decode(m[1])));
+    // No provider may ship a credential path that names a specific third-party
+    // harness unless that harness IS the provider (chatgpt/zai ship their own
+    // tool's default). The antigravity entry once shipped another agent tool's
+    // auth path, which no ordinary user has, and a refreshed token is written
+    // back to whatever path is configured - so a vendor name there is a real
+    // hazard, not just a bad example.
+    const provs = (tpl.subs && Array.isArray(tpl.subs.providers)) ? tpl.subs.providers : [];
+    check('template: antigravity ships no default credential path',
+      provs.filter((p) => p.type === 'antigravity').every((p) => !p.authPath),
+      JSON.stringify(provs.filter((p) => p.type === 'antigravity').map((p) => p.authPath)));
   }
 }
 

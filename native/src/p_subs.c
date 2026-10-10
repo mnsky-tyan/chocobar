@@ -567,13 +567,22 @@ typedef struct {
 
 // auth.json: { "antigravity": { access, refresh, expires, projectId } }
 // Fallback: the IDE state.vscdb needle "apiKey":"ya29...." (no refresh).
+//
+// There is deliberately NO built-in default path. Which file holds an
+// Antigravity login depends on which tool the user signs in with, so guessing
+// one vendor's store would read - and, after a refresh, REWRITE - a file the
+// user never named. An empty authPath uses the vscdb fallback or reports no
+// login; the log line says so rather than silently failing.
 static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *authPathOut, int cch) {
     memset(out, 0, sizeof(*out));
     const wchar_t *raw = subsNz(cfg->subsProviders[idx].authPath);
-    if (!raw) raw = L"~/.pi/agent/auth.json";
-    subsPathExpand(raw, authPathOut, cch);
+    authPathOut[0] = 0;
     int len = 0;
-    char *buf = readFileUtf8(authPathOut, &len);
+    char *buf = NULL;
+    if (raw) {
+        subsPathExpand(raw, authPathOut, cch);
+        buf = readFileUtf8(authPathOut, &len);
+    }
     if (buf) {
         jsmntok_t t[512];
         jsmn_parser p;
@@ -982,7 +991,13 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
     AgyAuth auth;
     wchar_t authPath[MAX_PATH];
     if (!subsAgyReadAuth(cfg, idx, &auth, authPath, MAX_PATH)) {
-        writeLogA("[wizbar] subs agy: no login (open Antigravity once)");
+        // Name the actual gap: an empty authPath is the common case now that
+        // there is no built-in default, and "open Antigravity once" alone would
+        // not tell the user that the fix is a config key.
+        if (!subsNz(cfg->subsProviders[idx].authPath) && !subsNz(cfg->subsProviders[idx].vscdbPath))
+            writeLogA("[wizbar] subs agy: no login source - set authPath (or vscdbPath) in subs.providers");
+        else
+            writeLogA("[wizbar] subs agy: no login (open Antigravity once, or check authPath)");
         subsSetState(idx, 0, 0);
         return 0;
     }
