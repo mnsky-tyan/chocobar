@@ -491,7 +491,7 @@ typedef struct {
 static IconDib g_iconDib[SVG_ID_MAX];
 static IconDib g_battDib;         // battery cache (charge bucket + ac + colors)
 static IconDib g_ssDib;           // 2x supersample scratch (AA quality)
-static int g_battKey[7];          // pct bucket, ac, accent, warn, line, valid, warn-fill
+static int g_battKey[6];          // pct bucket, ac, accent, warn, valid, warn-fill
 
 static void iconDrop(IconDib *d) {
     if (d->dc) { DeleteDC(d->dc); d->dc = NULL; }
@@ -516,8 +516,6 @@ static int iconDibMake(IconDib *d, int w, int h) {
     d->w = w; d->h = h;
     return 1;
 }
-
-static void iconDibPremultiply(IconDib *d);
 
 // render one flattened path set into an icon DIB with GDI+ AA strokes
 // Draw the icon into `g` at supersample factor ss (path units -> pixels).
@@ -723,15 +721,15 @@ static void svgDraw(HDC hdc, int id, COLORREF color, int x, int y) {
 // adds the zigzag bolt, it never widens the fill). Body outline comes from
 // the static SVG_BAT part.
 static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn,
-                        COLORREF lineCr, int x, int y) {
+                        int x, int y) {
     int bw = (int)(12 * g_scale + 0.5);
     int bucket = (pct < 0 ? 0 : (pct > 100 ? 100 : pct)) / 2;
     // the fill color switches on the raw pct (not the 2% bucket): key on the
     // warn fact too or 10/11% share bucket 5 and the color goes stale
-    int key[7] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, (int)lineCr, 1,
+    int key[6] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, 1,
                    (pct < 10) ? 1 : 0 };
     if (g_gdipOk) {
-        if (!g_battKey[5] || memcmp(g_battKey, key, sizeof(key)) != 0 || g_battDib.w != bw) {
+        if (!g_battKey[4] || memcmp(g_battKey, key, sizeof(key)) != 0 || g_battDib.w != bw) {
             if (iconRenderGdip(&g_battDib, SVG_BAT, accent, bw, bw)) {
                 float s = (float)g_scale / 2;
                 // inner fill: Electron ICONS.batBody - innerX 4.3, innerW 12.4,
