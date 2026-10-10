@@ -173,8 +173,9 @@ def main():
             return []
         check("cursor serialization round-trips escaped paths", cursor_contract)
         # The antigravity provider must not invent a credential path. The child
-        # plants a plausible vendor store in its own scratch profile and asserts
-        # the reader never resolves to it when the config names no path.
+        # plants a plausible vendor store plus a second user-named store in its
+        # own scratch profile and asserts the reader resolves nothing when the
+        # config names no path, and reads exactly the named file when it does.
         def agy_no_default_path():
             profile = fixture(root, "agy-path")
             command = [windows_path(exe), "--agy-probe", windows_path(profile)]
@@ -185,21 +186,39 @@ def main():
             else:
                 # WSL cannot exec a Windows binary directly, and the launcher's
                 # own exit status does not carry the child's - the child prints
-                # its own verdict and a non-zero exit is reported in that text.
+                # one verdict line per case instead.
                 if not shutil.which("win-run-hidden"):
                     raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
                 command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
             child = subprocess.run(command, **kwargs)
             text = child.stdout or ""
-            if "found=1" in text and "empty_authPath" in text:
-                raise AssertionError(f"a config with an empty authPath still resolved a credential: {text}")
-            if "found=1" in text and "absent_authPath" in text:
-                raise AssertionError(f"a config with no authPath still resolved a credential: {text}")
-            if "empty_authPath" not in text or "absent_authPath" not in text:
-                raise AssertionError(f"agy probe did not report its cases (exit {child.returncode}): {text}")
+            if os.name == "nt" and child.returncode != 0:
+                raise AssertionError(f"agy probe exited {child.returncode}: {text}")
+            verdicts = {}
+            for line in text.splitlines():
+                label, sep, rest = line.partition(" found=")
+                if not sep:
+                    continue
+                found, _, resolved = rest.partition(" resolved=\"")
+                if found not in ("0", "1") or not resolved.endswith("\""):
+                    raise AssertionError(f"agy probe line did not parse: {line}")
+                if label in verdicts:
+                    raise AssertionError(f"agy probe repeated {label}: {text}")
+                verdicts[label] = (found == "1", resolved[:-1])
+            wanted = {"empty_authPath": False, "absent_authPath": False, "explicit_own": True}
+            if set(verdicts) != set(wanted):
+                raise AssertionError(f"agy probe did not report its cases: {text}")
+            for label, want_found in wanted.items():
+                found, resolved = verdicts[label]
+                if found != want_found:
+                    raise AssertionError(f"{label}: expected found={int(want_found)}: {text}")
+                if ".pi" in resolved:
+                    raise AssertionError(f"{label}: resolved to the vendor store: {resolved}")
+                if want_found and not (".wizbar" in resolved and "antigravity.json" in resolved):
+                    raise AssertionError(f"{label}: {resolved} is not the explicit user path")
             return [line for line in text.splitlines() if line.strip()]
         check("antigravity never invents a credential path", agy_no_default_path)
-    print(f"{15 - len(failures)}/15 executable token cases passed")
+    print(f"{14 - len(failures)}/14 executable token cases passed")
     return 1 if failures else 0
 
 

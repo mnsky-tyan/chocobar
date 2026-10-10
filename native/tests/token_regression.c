@@ -106,6 +106,14 @@ static int agyProbeMain(const wchar_t *profile) {
     HANDLE h = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 2;
     DWORD wrote; WriteFile(h, body, (DWORD)strlen(body), &wrote, NULL); CloseHandle(h);
+    /* and the store the explicit case names, so that leg proves a positive
+       read of exactly the user-named path rather than only a clean miss */
+    wchar_t own[MAX_PATH];
+    if (swprintf(own, MAX_PATH, L"%ls\\.wizbar\\antigravity.json", profile) <= 0) return 2;
+    const char *ownBody = "{\"antigravity\":{\"access\":\"ya29.EXPLICIT\",\"refresh\":\"r2\",\"expires\":9999999999999}}";
+    h = CreateFileW(own, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 2;
+    WriteFile(h, ownBody, (DWORD)strlen(ownBody), &wrote, NULL); CloseHandle(h);
 
     struct { const wchar_t *label; const char *json; } cases[] = {
         { L"empty_authPath",  "{\"subs\":{\"enabled\":true,\"providers\":[{\"type\":\"antigravity\",\"enabled\":true,\"authPath\":\"\"}]}}" },
@@ -129,16 +137,18 @@ static int agyProbeMain(const wchar_t *profile) {
         AgyAuth auth; wchar_t resolved[MAX_PATH];
         int found = subsAgyReadAuth(&g_cfg, 0, &auth, resolved, MAX_PATH);
         int usedOther = wcsstr(resolved, L"\\.pi\\") != NULL;
-        /* the two no-path cases must resolve nothing and touch no vendor file;
-           the explicit case may read whatever the user pointed at (here: a file
-           that does not exist) but still must not reach the vendor store */
+        /* the two no-path cases must resolve nothing; the explicit case must
+           read exactly the user-named planted store, never the vendor one */
         if (i < 2 && (found || usedOther)) rc = 4;
-        if (i == 2 && usedOther) rc = 5;
+        wchar_t want[MAX_PATH];
+        if (i == 2 && (swprintf(want, MAX_PATH, L"%ls/.wizbar/antigravity.json", profile) <= 0
+                       || !found || usedOther || wcscmp(resolved, want) != 0)) rc = 5;
         printf("%ls found=%d resolved=\"%ls\"\n", cases[i].label, found, resolved);
         HeapFree(GetProcessHeap(), 0, t);
         HeapFree(GetProcessHeap(), 0, raw);
     }
     DeleteFileW(file); RemoveDirectoryW(sub); RemoveDirectoryW(dir);
+    DeleteFileW(own);
     return rc;
 }
 
