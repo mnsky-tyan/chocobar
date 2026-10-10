@@ -9,9 +9,10 @@ commands:
   test: "node scripts/portable_regression.js"
 
   # Compile-only C gate: syntax + -Wall -Wextra over the amalgamated source,
-  # no link, no exe written. Self-contained: build.sh installs the distro
-  # mingw when neither a system mingw nor nix is present, so this pin does
-  # not depend on any ci.yml-provided setup step.
+  # no link, no exe written. A pure compile check with no side effects: it uses
+  # the system mingw when present and falls back to nix, and fails loudly when
+  # neither exists - it never installs packages. CI installs the toolchain in
+  # its own ci.yml step, so this pin does not depend on that step's ordering.
   lint: "bash native/build.sh --check"
 
 # The Test step is an agent, so it also reads AGENTS.md. The live bar at
@@ -33,7 +34,7 @@ test:
     alongside it - it exits immediately with ERROR_ALREADY_EXISTS. That is NOT a
     failure of your build; do not stop the user's bar to "make room".
     A dev bar belongs on the Windows 'second' desktop via win-hidden-launch with
-    its own --config (see ~/.local/bin/cbdev and AGENTS.md, "The development
-    split"). Prefer validating the bar's DATA PATH from the log and the source
+    its own --config (see ~/.local/bin/cbdev and AGENTS.md, "Scratch-build state
+    isolation"). Prefer validating the bar's DATA PATH from the log and the source
     over running a second instance. If a validation needs the bar running and
     cannot be isolated, report the gap instead of taking the user's screen.

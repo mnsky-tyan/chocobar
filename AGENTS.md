@@ -41,37 +41,27 @@ After any test round on this repo, **confirm the live bar is still running**
 If a test cannot run in isolation, do not run it against the live bar. Report
 that instead of taking the user's screen.
 
-## Deploy / restart, if the live bar genuinely must be restarted
+## Release and deployment boundary
 
-**A deploy installs a RELEASE asset - never a local build.** The user's bar must
-be the newest published release (see "The development split" below). Local
-builds go to the second desktop.
+The user runs published releases; agents run isolated second-desktop builds.
+Never build into, copy over or relaunch the user's Run path to test something.
+Before any authorized release/deployment, read
+[the single release/install procedure](docs/agent/RELEASE.md). It includes the
+explicit local-build exception, release version checks and immediate relaunch
+requirement. Do not independently maintain a second deployment recipe here.
 
-Only when the user asks for a deploy:
-
-1. Download the release asset, do not build it:
-   `gh release download <tag> --pattern chocobar.exe --dir /tmp/reldl`
-   (the tag must be the newest release; check with `gh release list`), then copy
-   it over the Run path and relaunch. `/mnt/c/Users/tyanw/.wizbar/install_release.ps1`
-   does exactly this (it copies a downloaded asset; it does NOT build).
-2. **Relaunch immediately and verify** - the bar is stopped during the copy, and
-   the user is left with nothing until a process is running again. Confirm with
-   `Get-CimInstance Win32_Process -Filter "Name='chocobar.exe'"`, confirm the
-   installed hash equals the release asset's hash, and tell the user it is back.
-3. `C:\Users\tyanw\.wizbar\deploy_bar.ps1` is the OLD script: it copies
-   `\\wsl.localhost\...\native\chocobar.exe` (a local build) over the Run path.
-   Do not use it to ship a build. It may only be used if the user explicitly
-   asks to run that exact local build, and the version should then be verified
-   in `native.log` afterwards.
-4. Clearing `token-cursors.json` forces a full cold re-scan (~45 s over ~990 MB),
-   during which the dashboard shows "No token data" - that is expected, not a
-   failure.
+The hazard this boundary exists for is a single script, measured 2026-10-08:
+`C:\Users\tyanw\.wizbar\deploy_bar.ps1` does `Stop-Process` + `Copy-Item` over
+the Run path + `Start-Process` onto the **active** desktop. An agent ran it and
+put an unreviewed local build in front of the user mid-session. It installs a
+LOCAL BUILD, never a release; do not use it to ship anything. Installs for the
+user come only from a downloaded release asset, on the user's explicit request.
 
 ## Subscription credentials must never point at Pi's auth store
 
-The `pi-agy` extension (`~/.pi/agent/npm/node_modules/pi-agy`) registers Google
-Antigravity models into pi's `/model` list and stores its OAuth credential under
-the `antigravity` key of `~/.pi/agent/auth.json`. **Do not point
+The legacy `pi-agy` extension (`~/.pi/agent/npm/node_modules/pi-agy`) stored its
+OAuth credential under the `antigravity` key of `~/.pi/agent/auth.json`. It is
+retired/disabled; do not re-enable it to supply the bar's credentials. **Do not point
 `subs.providers[].authPath` at that file.** Logging out of Antigravity in pi
 (which the user does deliberately, to keep Google models out of `/model`)
 deletes that key, and the bar's chip immediately goes stale with
@@ -96,29 +86,7 @@ file. Note the WSL path `~/.wizbar` is a **stale Sep-2026 leftover**, NOT the
 live config directory; the live one is `C:\Users\tyanw\.wizbar`
 (`/mnt/c/Users/tyanw/.wizbar`).
 
-## The development split: the user runs releases, agents run second-desktop builds
-
-This is the standard workflow for this repo and it is not optional.
-
-**The user's bar is a published RELEASE.** It is installed at
-`C:\Users\tyanw\review\chocobar\native\chocobar.exe` (the `HKCU` Run value
-`Chocobar`) and it must be the newest **published release** version. It is not a
-build directory and not a place for a work-in-progress binary.
-
-**Agents develop on the `second` desktop, never on the user's bar.** Every build
-the agent makes is run from an isolated copy: `win-hidden-launch --desktop second`
-with its own `--config` and scratch profile, and a pinned `terminal.className` +
-unique `terminal.title` so it can never attach to the user's terminal (see the
-`evictRivalBars()` note below). Never build into, copy over, or relaunch the
-exe path behind the user's Run value to test something.
-
-Measured failure, 2026-10-08: an agent ran `deploy_bar.ps1` (which does
-`Stop-Process` + `Copy-Item` over the Run path + `Start-Process` onto the ACTIVE
-desktop) and thereby put an unreviewed build in front of the user and on their
-screen mid-session. The user caught it by seeing the bar change in real time.
-That script installs a LOCAL BUILD, not a release - never use it to ship
-anything; installs for the user come only from a downloaded release asset, on
-the user's explicit request.
+## Scratch-build state isolation
 
 **The single-instance mutex is a fixed name** (`APP_MUTEX` =
 `ChocobarSingleInstanceMutex`, `chocobar.c`), so a test copy CANNOT run at the
@@ -134,22 +102,11 @@ effects or it will damage user state from a throwaway build:
 
 The `second`-desktop scratch recipe that does all three is `~/.local/bin/cbdev`.
 
-### Installing a release for the user
-
-1. Get the newest release asset (do not build it): `gh release download <tag>`.
-2. Stop the bar, copy the asset to the Run path, relaunch, and verify the
-   process is up and reports the expected version in `native.log`.
-3. The release must have been produced by `.github/workflows/release.yml` from
-   the tag, so the exe the user runs is reproducible from the tag tree.
-
-### Releasing
-
-Tag `v<major>.<minor>.<patch>` must equal `CB_VER_STR` in `native/src/version.h`
-(the workflow fails the build otherwise). Pushing such a tag makes
-`release.yml` build the exe on the runner and attach it to the GitHub release.
-The asset is then the single source of truth for what users install.
-
 ## Build and the compile gate
+
+Build authority: [native/build.sh](native/build.sh). Release authority:
+[release workflow](.github/workflows/release.yml) and
+[version header](native/src/version.h). Reconcile these notes when they change.
 
 ```sh
 bash native/build.sh            # -> native/chocobar.exe (system mingw if present, else nix pkgsCross.mingwW64)
