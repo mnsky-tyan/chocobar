@@ -208,6 +208,14 @@ void DeleteCriticalSection(CRITICAL_SECTION *cs);
 void EnterCriticalSection(CRITICAL_SECTION *cs);
 void LeaveCriticalSection(CRITICAL_SECTION *cs);
 
+// ---- CRT ---------------------------------------------------------------------
+
+// _atoi64 is a Microsoft CRT function the core uses to read a JSON number that
+// can exceed int range (cursor byte offsets and mtimes). MinGW provides it;
+// macOS does not, so the portable build gets this. The implementation lives in
+// the adapter; this is only the declaration the core needs.
+long long _atoi64(const char *s);
+
 // ---- diagnostics -----------------------------------------------------------------
 
 // The core's only logging channel. Declared here because the core calls it by

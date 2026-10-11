@@ -517,3 +517,12 @@ static FILETIME unixMsToFileTime(long long ms) {
 __attribute__((constructor)) static void exportProfile(void) {
     setenv("USERPROFILE", profileDir(), 1);
 }
+
+// ---- CRT -------------------------------------------------------------------------
+
+// The core's only non-standard C dependency: a 64-bit string-to-integer used to
+// read JSON numbers that exceed int range (cursor byte offsets, mtimes).
+// strtoll is the portable equivalent and has the same semantics for a plain
+// digit string, including the "return 0 on overflow-free garbage" behaviour
+// _atoi64 documents.
+long long _atoi64(const char *s) { return s ? strtoll(s, NULL, 10) : 0; }
