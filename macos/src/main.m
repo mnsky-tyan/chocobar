@@ -82,6 +82,7 @@ static void resolveConfigPath(void) {
 // about the seam, because a scan over zero sources returns before touching
 // any of it.
 static int runSelfTest(void) {
+    resolveConfigPath();   // the app delegate normally does this; headless mode has none
     cbCoreInit();
     cbTokensInit();
     wchar_t wideCfg[1024];
