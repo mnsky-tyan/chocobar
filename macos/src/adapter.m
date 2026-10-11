@@ -450,14 +450,16 @@ int WideCharToMultiByte(unsigned cp, DWORD flags, const wchar_t *w, int wideChar
     // this direction too: Win32 requires room for it and counts it in the return.
     int withNul = wideChars < 0;
     if (wideChars < 0) wideChars = (int)wcslen(w);
-    if (outBytes <= 0) {
-        mbstate_t st;
-        memset(&st, 0, sizeof(st));
-        const wchar_t *p = w;
-        return (int)wcsrtombs(NULL, &p, 0, &st);
-    }
     mbstate_t st;
     memset(&st, 0, sizeof(st));
+    if (outBytes <= 0) {
+        // Size query: the measured length excludes the terminator, so the
+        // NUL-terminated (-1) form is one byte larger, exactly as Win32 reports.
+        const wchar_t *p = w;
+        size_t q = wcsrtombs(NULL, &p, 0, &st);
+        if (q == (size_t)-1) return 0;
+        return (int)q + withNul;
+    }
     const wchar_t *p = w;
     // The bound is the DESTINATION byte count (outBytes), not the input wide
     // count: Win32 writes at most outBytes bytes and returns 0
@@ -476,11 +478,12 @@ int WideCharToMultiByte(unsigned cp, DWORD flags, const wchar_t *w, int wideChar
     size_t n = wcsrtombs(out, &p, (size_t)outBytes, &st);
     if (n == (size_t)-1) return 0;   // EILSEQ etc: Win32 also returns 0
     if (p != NULL && p < w + wideChars + withNul) return 0;   // input remained: did not fit
-    // wcsrtombs does not NUL-terminate when bounded, and the core relies on the
-    // returned length rather than the terminator in several places, so make the
-    // result a proper C string here and report the byte count.
+    // Terminate when there is room (always true on a -1 success, where the
+    // terminator had to fit to convert), and report Win32's count: the byte
+    // length for an explicit span, length+1 for the NUL-terminated form.
+    // tokWideToUtf8 subtracts 1 for the -1 form and must land on strlen.
     if ((size_t)outBytes > n) out[n] = 0;
-    return (int)n;
+    return (int)n + withNul;
 }
 
 // ---- environment -------------------------------------------------------------
