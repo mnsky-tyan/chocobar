@@ -273,26 +273,35 @@ BOOL GetFileAttributesExW(const wchar_t *p, int level, CB_FILE_ATTRIBUTE_DATA *f
 int lstrlenW(const wchar_t *s) { return s ? (int)wcslen(s) : 0; }
 int lstrcmpW(const wchar_t *a, const wchar_t *b) { return wcscmp(a, b); }
 int lstrcmpiW(const wchar_t *a, const wchar_t *b) { return wcscasecmp(a, b); }
-int lstrcpyW(wchar_t *d, const wchar_t *s) { return wcscpy(d, s); }
+int lstrcpyW(wchar_t *d, const wchar_t *s) { wcscpy(d, s); return (int)wcslen(d); }
 int lstrcpynW(wchar_t *d, const wchar_t *s, int n) {
     if (n <= 0) return 0;
     wcsncpy(d, s, n - 1);
     d[n - 1] = 0;
     return (int)wcslen(d);
 }
-int lstrcatW(wchar_t *d, const wchar_t *s) { return wcscat(d, s); }
-wchar_t *wcsrchr(const wchar_t *s, wchar_t c) { return wcsrchr(s, c); }
+int lstrcatW(wchar_t *d, const wchar_t *s) { wcscat(d, s); return (int)wcslen(d); }
+// wcsrchr must forward to the libc function, not to itself: the Win32 spelling
+// and the POSIX spelling are the same identifier here, so a same-named wrapper
+// that calls wcsrchr(...) recurses forever. Alias the libc one first.
+wchar_t *wcsrchr(const wchar_t *s, wchar_t c);
+static wchar_t *(*const cb_wcsrchr)(const wchar_t *, wchar_t) = wcsrchr;
+wchar_t *wcsrchr(const wchar_t *s, wchar_t c) { return cb_wcsrchr(s, c); }
 int lstrcmpA(const char *a, const char *b) { return strcmp(a, b); }
 int lstrcmpiA(const char *a, const char *b) { return strcasecmp(a, b); }
 int lstrlenA(const char *s) { return s ? (int)strlen(s) : 0; }
-int lstrcpyA(char *d, const char *s) { strcpy(d, s); return (int)strlen(d); }
-int lstrcpynA(char *d, const char *s, int n) {
+int lstrcpyA(char *d, const char *s) { strcpy(d, s); return (int)strlen(d); }int lstrcpynA(char *d, const char *s, int n) {
     if (n <= 0) return 0;
     strncpy(d, s, n - 1);
     d[n - 1] = 0;
     return (int)strlen(d);
 }
 int lstrcatA(char *d, const char *s) { strcat(d, s); return (int)strlen(d); }
+
+// The core's fileTimeToUnixMs is static to its translation unit, so the adapter
+// cannot call it and must not redefine it. This is the same arithmetic, used
+// only to turn a POSIX time_t into the FILETIME the core's stat calls hand
+// back. The core converts the other direction itself when it needs epoch ms.
 
 // The two codecs the core's whole string story rests on. wchar_t is UTF-32 here,
 // so mbstowcs/wcstombs are the right tools - not hand-rolled byte widening.
@@ -391,7 +400,7 @@ void GetSystemTime(CB_SYSTEMTIME *st) {
     st->wDayOfWeek = (unsigned short)tmv.tm_wday;
     st->wDay = (unsigned short)tmv.tm_mday;
     st->wHour = (unsigned short)tmv.tm_hour;
-    st->wMinute = (unsigned short)tmv.tm_min);
+    st->wMinute = (unsigned short)tmv.tm_min;
     st->wSecond = (unsigned short)tmv.tm_sec;
     st->wMilliseconds = 0;
 }
@@ -484,7 +493,7 @@ BOOL SetFileTime(HANDLE h, const FILETIME *c, const FILETIME *a, const FILETIME 
     (void)h; (void)c; (void)a;
     if (!w) return FALSE;
     struct timespec ts[2];
-    ts[0].tv_sec = (time_t)(fileTimeToUnixMs(w) / 1000);
+    ts[0].tv_sec = (time_t)(adapterFileTimeToUnixMs(w) / 1000);
     ts[0].tv_nsec = 0;
     ts[1] = ts[0];
     return futimens(HANDLE_TO_FD(h), ts) == 0;
@@ -500,8 +509,14 @@ static long long monotonic_ms(void) {
 
 // ---- time conversion ----------------------------------------------------------
 
-// FILETIME is 100ns ticks since 1601-01-01; the core's fileTimeToUnixMs does
-// this arithmetic itself, so these two only have to agree on the representation.
+// FILETIME is 100ns ticks since 1601-01-01. The core has its own static
+// fileTimeToUnixMs for the other direction; this one is the adapter's, named
+// differently so the two can coexist in one binary.
+static long long adapterFileTimeToUnixMs(const FILETIME *ft) {
+    unsigned long long ticks = ((unsigned long long)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+    return (long long)(ticks / 10000ull) - 11644473600000LL;
+}
+
 static FILETIME unixMsToFileTime(long long ms) {
     long long ticks = (ms + 11644473600000LL) * 10000LL;
     FILETIME ft;
