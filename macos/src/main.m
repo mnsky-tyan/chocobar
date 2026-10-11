@@ -337,15 +337,21 @@ static void tick(void) {
         return;
     }
     // Anchor to the screen the target is ON, not whichever screen is main: a
-    // secondary-display target must clamp against its own visible frame.
+    // secondary-display target must clamp against its own visible frame. The
+    // target arrives as a Quartz rect (top-left origin, global) while
+    // NSScreen.frame is AppKit (bottom-left origin, anchored at the main
+    // screen), so the centre is converted BEFORE the containment test - and
+    // the flip always uses the MAIN screen's height, because that is what the
+    // global Quartz frame is measured from.
     NSScreen *screen = [NSScreen mainScreen];
-    for (NSScreen *s in [NSScreen screens])
-        if (NSPointInRect(NSMakePoint(target.x + target.w / 2, target.y + target.h / 2), s.frame))
-            { screen = s; break; }
     if (!screen) { [g_panel orderOut:nil]; return; }   // headless/background session: nowhere to draw
+    CGFloat mainH = NSHeight(screen.frame);
+    NSPoint centre = NSMakePoint(target.x + target.w / 2,
+                                 mainH - (target.y + target.h / 2));
+    for (NSScreen *s in [NSScreen screens])
+        if (NSPointInRect(centre, s.frame)) { screen = s; break; }
     NSRect vf = screen.visibleFrame;
-    // Quartz y is top-down from the primary's top; AppKit y is bottom-up.
-    CGFloat appY = NSHeight(screen.frame) - (target.y - g_gap) - g_height;
+    CGFloat appY = mainH - (target.y - g_gap) - g_height;
     // Clamp into the visible frame: never above the menu bar's band (a
     // status-level panel would COVER the menu), never below the Dock.
     CGFloat maxY = NSMaxY(vf) - g_height;

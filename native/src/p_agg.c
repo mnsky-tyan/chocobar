@@ -353,7 +353,7 @@ static void tokDrainPending(void) {
             SYSTEMTIME nst; GetLocalTime(&nst);
             char lb[140];
             sprintf(lb, "[wizbar] token scan took %lu ms (off-thread) tick=%d period=%d at %02d:%02d:%02d",
-                    dt, g_tokensTick, g_cfg.tokensRescanSec, nst.wHour, nst.wMinute, nst.wSecond);
+                    (unsigned long)dt, g_tokensTick, g_cfg.tokensRescanSec, nst.wHour, nst.wMinute, nst.wSecond);
             writeLogA(lb);
         }
     }
@@ -403,7 +403,6 @@ int cbTokSourceCount(void) { return g_cfg.tokSrcCount; }
 
 int cbCfgTokensEnabled(void) { return g_cfg.tokensEnabled; }
 int cbCfgRescanSec(void) { return g_cfg.tokensRescanSec; }
-int cbCfgDebug(void) { return g_cfg.debug; }
 int cbCfgHeight(void) { return g_cfg.height; }
 int cbCfgGap(void) { return g_cfg.gap; }
 

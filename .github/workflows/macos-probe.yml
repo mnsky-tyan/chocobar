@@ -33,6 +33,7 @@ on:
       - 'native/src/p_tokens.c'
       - 'native/src/p_agg.c'
       - 'native/src/chocobar_core.h'
+      - 'native/build.sh'
       - '.github/workflows/macos-probe.yml'
   pull_request:
     paths:
@@ -42,6 +43,7 @@ on:
       - 'native/src/p_tokens.c'
       - 'native/src/p_agg.c'
       - 'native/src/chocobar_core.h'
+      - 'native/build.sh'
       - '.github/workflows/macos-probe.yml'
 
 permissions:

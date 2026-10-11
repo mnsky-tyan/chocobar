@@ -518,32 +518,52 @@ void GetSystemTime(CB_SYSTEMTIME *st) {
     st->wMilliseconds = 0;
 }
 
+// Days since 1970-01-01 for a proleptic Gregorian date. Win32's
+// SystemTimeToFileTime reads a SYSTEMTIME as UTC, and timegm is not uniformly
+// declared across the clang/libc pair this file builds against, so the UTC
+// reading is done arithmetically instead.
+static long long civilDays(long long y, int m, int d) {
+    y -= m <= 2;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (long long)doe - 719468;
+}
+
 CB_BOOL SystemTimeToFileTime(const CB_SYSTEMTIME *st, FILETIME *ft) {
-    struct tm tmv;
-    memset(&tmv, 0, sizeof(tmv));
-    tmv.tm_year = st->wYear - 1900;
-    tmv.tm_mon = st->wMonth - 1;
-    tmv.tm_mday = st->wDay;
-    tmv.tm_hour = st->wHour;
-    tmv.tm_min = st->wMinute;
-    tmv.tm_sec = st->wSecond;
-    tmv.tm_isdst = -1;
-    time_t t = mktime(&tmv);
-    if (t == (time_t)-1) return FALSE;
-    *ft = unixMsToFileTime((long long)t * 1000 + st->wMilliseconds);
+    // Win32 applies NO time zone here: the FILETIME handed back is the
+    // wall-clock fields read as if they were UTC, so it is a label rather than
+    // an instant. dashMidnightMs relies on that frame - it subtracts whole
+    // days of wall clock and lets LocalFileTimeToFileTime apply the zone once,
+    // per day. A caller that wants the local instant must apply the zone
+    // itself, exactly as it does on Windows.
+    if (st->wMonth < 1 || st->wMonth > 12 || st->wDay < 1 || st->wDay > 31
+        || st->wHour > 23 || st->wMinute > 59 || st->wSecond > 59) return FALSE;
+    long long secs = civilDays(st->wYear, st->wMonth, st->wDay) * 86400LL
+                   + st->wHour * 3600 + st->wMinute * 60 + st->wSecond;
+    *ft = unixMsToFileTime(secs * 1000 + st->wMilliseconds);
     return TRUE;
 }
 
 CB_BOOL LocalFileTimeToFileTime(const FILETIME *lft, FILETIME *ft) {
-    // Correct ONLY as a pair with this adapter's SystemTimeToFileTime, which
-    // applies the local zone via mktime: what the caller built as "local
-    // wall-clock labelled FILETIME" is already the instant, so the pass-through
-    // is exact. dashMidnightMs uses that pair and is correct. A caller that
-    // uses LocalFileTimeToFileTime WITHOUT that SystemTimeToFileTime first -
-    // wallNowLocalMs in p_utils.c is the standing example - wants the Windows
-    // local->UTC flip and would get a zone-shifted value instead. Do not bring
-    // such a caller across without re-deriving its frame.
-    *ft = *lft;
+    // Win32 applies the zone FOR THE DATE BEING CONVERTED, so a whole-day
+    // subtraction taken in the wall-clock frame still lands on the target
+    // day's true local midnight when the zone offset changes in between. The
+    // input's numeric value is a local wall clock read as if it were UTC, so
+    // gmtime_r recovers those fields and mktime turns them into the instant
+    // for that date's own offset.
+    long long ms = adapterFileTimeToUnixMs(lft);
+    long long sec = ms / 1000;
+    int msec = (int)(ms % 1000);
+    if (msec < 0) { msec += 1000; sec -= 1; }
+    time_t t = (time_t)sec;
+    struct tm tmv;
+    if (!gmtime_r(&t, &tmv)) return FALSE;
+    tmv.tm_isdst = -1;
+    time_t u = mktime(&tmv);
+    if (u == (time_t)-1) return FALSE;
+    *ft = unixMsToFileTime((long long)u * 1000 + msec);
     return TRUE;
 }
 

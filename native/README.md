@@ -44,7 +44,7 @@ The two differ only in the default thread library the wrapper links: Nix forces
 so both produce the same binary behaviour. `--no-nix` forces the system recipe
 and fails if no system toolchain is present.
 
-`build.sh` assembles `src/chocobar_full.c` from the seven source parts, then
+`build.sh` assembles `src/chocobar_full.c` from the eight source parts, then
 compiles. Edit the PARTS listed in the `PARTS` array at the top of `build.sh`
 (the authoritative list), never the assembled file.
 
