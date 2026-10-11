@@ -45,7 +45,7 @@
 #include <wctype.h>
 #include <dirent.h>
 
-#include "../native/src/chocobar_core.h"
+#include "chocobar_core.h"
 
 // ---- forward declarations -----------------------------------------------------
 //

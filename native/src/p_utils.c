@@ -59,6 +59,27 @@ static void stripLineComments(char *s) {
     }
 }
 
+// The "~" prefix means "the profile directory". On Windows that is %USERPROFILE%,
+// which is why this lived in p_subs.c beside the credential-path readers.
+// It is pure path logic used by the config parser, the token-source key
+// derivation and the cursor-file path, so it lives here with the other
+// string helpers and every platform gets it.
+static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
+    // "~" -> %USERPROFILE%, keep absolute paths as-is
+    if (in[0] == L'~' && (in[1] == L'/' || in[1] == L'\\' || in[1] == 0)) {
+        wchar_t up[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
+        if (!n || n >= MAX_PATH) { out[0] = 0; return; }
+        lstrcpynW(out, up, outCch);
+        // the remainder has to stay inside the caller's buffer: a long profile
+        // plus a long path would otherwise run off the end of it
+        int ul = lstrlenW(out);
+        if (ul < outCch) lstrcpynW(out + ul, in + 1, outCch - ul);
+    } else {
+        lstrcpynW(out, in, outCch);
+    }
+}
+
 static wchar_t *utf8ToWide(const char *s, int bytes) {
     if (!s) return NULL;
     int n = MultiByteToWideChar(CP_UTF8, 0, s, bytes, NULL, 0);

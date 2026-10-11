@@ -78,6 +78,14 @@ CFLAGS=(
   -Wall
   -Wextra
   -Wno-unused-parameter
+  # The portable build compiles a SUBSET of the Windows translation unit, so
+  # helpers the renderer and the provider readers use are genuinely unreferenced
+  # here (wallNowLocalMs, hexToColorref, cfgPin, appLabelW, findStr, ...). They
+  # stay in the shared source because the Windows build needs them and deleting
+  # them to quiet a warning would mean the two platforms stop sharing code.
+  -Wno-unused-function
+  -Wno-unused-variable
+  -Wno-unused-private-field
   -DCHOCOBAR_PORTABLE=1
   -Inative/src
   -Inative/vendor

@@ -49,21 +49,6 @@ static void subsProvPlan(int i, wchar_t *out, int cb);
 static int subsProvWins(int i, SubsWin *out, int max);
 static int subsProvEnabled(int i);
 
-static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch) {
-    // "~" -> %USERPROFILE%, keep absolute paths as-is
-    if (in[0] == L'~' && (in[1] == L'/' || in[1] == L'\\' || in[1] == 0)) {
-        wchar_t up[MAX_PATH];
-        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
-        if (!n || n >= MAX_PATH) { out[0] = 0; return; }
-        lstrcpynW(out, up, outCch);
-        // the remainder has to stay inside the caller's buffer: a long profile
-        // plus a long path would otherwise run off the end of it
-        int ul = lstrlenW(out);
-        if (ul < outCch) lstrcpynW(out + ul, in + 1, outCch - ul);
-    } else {
-        lstrcpynW(out, in, outCch);
-    }
-}
 
 
 // jsmn helper: string value of obj[key] as wide (caller frees), NULL if absent
