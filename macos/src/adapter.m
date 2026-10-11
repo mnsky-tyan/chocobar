@@ -539,7 +539,7 @@ CB_BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value) {
 
 // ---- time --------------------------------------------------------------------
 
-// Both time readers fill the same nine fields; keep the struct filling in one
+// Both time readers fill the same eight fields; keep the struct filling in one
 // place so CB_SYSTEMTIME cannot grow a field under one of them.
 static void fillSystemTime(CB_SYSTEMTIME *out, const struct tm *tmv) {
     out->wYear = (unsigned short)(tmv->tm_year + 1900);
@@ -647,6 +647,9 @@ void writeLogA(const char *s) {
     // loop the write so a signal or a short write cannot drop half a line.
     char line[1200];
     int n = snprintf(line, sizeof(line), "%s\n", s);
+    // snprintf returns the length the output WOULD have had; clamp to what
+    // was actually written before it can become a write() byte count.
+    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
     if (n > 0) {
         const char *lp = line;
         size_t left = (size_t)n;
