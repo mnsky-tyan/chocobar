@@ -33,6 +33,7 @@
 // Declared here rather than in a shared header: this is the entire surface the
 // macOS bar has on the portable core, and keeping it in one block makes the
 // coupling auditable at a glance.
+extern void cbCoreInit(void);
 extern int  cbLoadConfig(const wchar_t *path);
 extern void cbTokensInit(void);
 extern long long cbScanTokens(void);
@@ -336,6 +337,10 @@ static void timerFired(NSTimer *t) {
     (void)note;
     resolveConfigPath();
 
+
+    // Initialise the config-generation lock before anything reads config state,
+    // exactly as the Windows entry point does before its first loadConfig.
+    cbCoreInit();
 
     // Load cursors before the config, then the config, then the first scan:
     // the same startup ordering the Windows bar uses (tokLiveInit is called

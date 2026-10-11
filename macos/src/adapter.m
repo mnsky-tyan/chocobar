@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -532,6 +533,37 @@ static FILETIME unixMsToFileTime(long long ms) {
 // Windows). Export it from HOME so the core's existing path logic is unchanged.
 __attribute__((constructor)) static void exportProfile(void) {
     setenv("USERPROFILE", profileDir(), 1);
+}
+
+// ---- critical sections --------------------------------------------------------------
+//
+// These are real, not no-ops. The core pins a config generation (cfgPin) so a
+// reload cannot pull a generation out from under a reader mid-walk; that is a
+// correctness guarantee the macOS build must keep too, or a config save could
+// hand a half-retired Config pointer to a scan in progress.
+
+void InitializeCriticalSection(CRITICAL_SECTION *cs) {
+    pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+    if (m) {
+        pthread_mutexattr_t a;
+        pthread_mutexattr_init(&a);
+        pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(m, &a);
+        pthread_mutexattr_destroy(&a);
+    }
+    cs->_opaque = m;
+}
+
+void DeleteCriticalSection(CRITICAL_SECTION *cs) {
+    if (cs->_opaque) { pthread_mutex_destroy((pthread_mutex_t *)cs->_opaque); free(cs->_opaque); cs->_opaque = NULL; }
+}
+
+void EnterCriticalSection(CRITICAL_SECTION *cs) {
+    if (cs->_opaque) pthread_mutex_lock((pthread_mutex_t *)cs->_opaque);
+}
+
+void LeaveCriticalSection(CRITICAL_SECTION *cs) {
+    if (cs->_opaque) pthread_mutex_unlock((pthread_mutex_t *)cs->_opaque);
 }
 
 // ---- CRT -------------------------------------------------------------------------

@@ -443,4 +443,10 @@ int cbLoadConfig(const wchar_t *path) {
 // the bar's timer reads the aggregates directly.
 void tokScanFinishedNotify(void) { }
 
+// Startup: the config-generation lock is static in the core TU and the Windows
+// entry point initialises it in wWinMain before anything reads config state.
+// The macOS bar must do the same before its first cbLoadConfig, or cfgInstall's
+// EnterCriticalSection would lock an uninitialised mutex. Call once, at launch.
+void cbCoreInit(void) { InitializeCriticalSection(&g_cfgGenLock); }
+
 #endif // CHOCOBAR_PORTABLE
