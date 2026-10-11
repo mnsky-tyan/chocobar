@@ -56,7 +56,18 @@
 #pragma comment(lib, "advapi32.lib")
 #endif
 
+// On Windows this is one translation unit, so a static forward declaration
+// ahead of its definition in p_ui.c is correct and load bearing. The macOS
+// build amalgamates the core parts into ONE translation unit (core_tu.c) by the
+// same concatenation-order mechanism native/build.sh uses - that amalgamation
+// is the portability mechanism, and macos/build.sh's drift guard exists to keep
+// the order - while writeLogA itself is defined with external linkage in the
+// adapter's separate TU. Declaring it static here would give the amalgamated TU
+// internal linkage and fail to link. CHOCOBAR_PORTABLE is defined only by the
+// macOS build, so the Windows path is untouched.
+#ifndef CHOCOBAR_PORTABLE
 static void writeLogA(const char *s); // p_ui
+#endif
 
 #define APP_CLASS   L"ChocobarBar"
 #define APP_MUTEX   L"ChocobarSingleInstanceMutex"
@@ -122,7 +133,7 @@ static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key)
 static int jtokSpan(const jsmntok_t *t, int i);
 static void jstrCopyA(char *dst, int cch, const char *js, const jsmntok_t *t, int i,
                       const char *dflt);
-static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_subs
+static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_utils: profile-path logic shared by config + tokens
 
 // one bounded, NUL-terminated UTF-8 copy of a config string. Every reader of
 // the aggregation key decodes it back as UTF-8 (aggRecord's appFilter loop,

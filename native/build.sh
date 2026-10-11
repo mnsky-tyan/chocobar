@@ -14,6 +14,7 @@ PARTS=(
   src/p_subs.c
   src/p_icons.c
   src/p_tokens.c
+  src/p_agg.c
   src/p_ui.c
 )
 

@@ -1,0 +1,193 @@
+# macOS window-follow probe: MEASUREMENT, not a product gate.
+#
+# WHY THIS EXISTS
+# The cross-platform feasibility study concluded - from documentation - that on
+# macOS the bar cannot be a child window of the terminal (nothing allows
+# cross-process parenting) and must instead be a non-activating NSPanel at a
+# floating level that tracks the target window's bounds, found through
+# CGWindowListCopyWindowInfo without any permission prompt. That is a claim
+# about behaviour, and documentation is not measurement.
+#
+# macos/probe/probe.m answers it directly. If the panel tracks a real window
+# owned by another process, never steals focus, and hides when the target is
+# minimized, the macOS port of the bar concept is viable. If it does not, the
+# macOS port needs a different product shape and we want to know that before
+# writing the portable core.
+#
+# THIS MUST NOT BLOCK THE WINDOWS RELEASE PATH
+# `continue-on-error: true` and the release gate does not depend on this job.
+# A failing probe is information, not a broken build.
+name: macOS
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC daily: cheap, and off the hour so it does not pile onto
+    # GitHub's busiest minute.
+    - cron: '17 3 * * *'
+  push:
+    paths:
+      - 'macos/**'
+      - 'native/src/chocobar.c'
+      - 'native/src/p_utils.c'
+      - 'native/src/p_tokens.c'
+      - 'native/src/p_agg.c'
+      - 'native/src/chocobar_core.h'
+      - 'native/build.sh'
+      - '.github/workflows/macos-probe.yml'
+  pull_request:
+    paths:
+      - 'macos/**'
+      - 'native/src/chocobar.c'
+      - 'native/src/p_utils.c'
+      - 'native/src/p_tokens.c'
+      - 'native/src/p_agg.c'
+      - 'native/src/chocobar_core.h'
+      - 'native/build.sh'
+      - '.github/workflows/macos-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # The macOS bar must COMPILE on every PR that touches it. This is a real
+    # gate, unlike the probe below: a broken macOS build is a broken build.
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the macOS bar
+        run: bash macos/build.sh
+
+      - name: Self-test the core seam (headless, real data)
+        # A bar that launches and idles proves nothing: a scan over zero
+        # sources returns before touching the adapter's file code. This seeds
+        # a scratch profile with a real JSONL store (two files, one nested),
+        # runs the bar's CHOCOBAR_SELFTEST mode, and asserts the exact token
+        # totals - including the warm path: scan, append mid-process, rescan,
+        # and require the totals to hold while only the appended record is
+        # newly counted (cursor size+mtime skip + byte-offset resume through
+        # SetFilePointerEx). This is the regression net for the whole seam:
+        # path translation, directory enumeration, seek semantics, codecs,
+        # cursor persistence, aggregation.
+        run: |
+          set -euo pipefail
+          SCRATCH="$RUNNER_TEMP/cb-selftest"
+          CBHOME="$SCRATCH/home"
+          mkdir -p "$CBHOME/.wizbar" "$CBHOME/store/proj"
+          NOW_MS=$(( $(date +%s) * 1000 ))
+          REC() { local ts=$((NOW_MS - $5)); printf '{"type":"message","message":{"role":"assistant","model":"selftest-model","usage":{"input":%s,"output":%s,"cacheRead":%s,"cacheWrite":%s}},"timestamp":%s}\n' "$1" "$2" "$3" "$4" "$ts"; }
+          # top-level file: 2 records; nested project dir: 1 record (recursive
+          # enumeration); 3 x (100+50+10+5) = 495 all-time
+          REC 100 50 10 5  1000 > "$CBHOME/store/a.jsonl"
+          REC 100 50 10 5  2000 >> "$CBHOME/store/a.jsonl"
+          REC 100 50 10 5  3000 > "$CBHOME/store/proj/b.jsonl"
+          # the record the second scan must pick up through the warm path
+          REC 100 50 10 5  4000 > "$SCRATCH/append.jsonl"
+          cat > "$CBHOME/.wizbar/config.json" <<CFG
+          {"tokens":{"enabled":true,"sources":[{"app":"pi","path":"~/store","recursive":true}]},"general":{"debug":true}}
+          CFG
+          env CHOCOBAR_SELFTEST=2 CHOCOBAR_SELFTEST_MARKER="$SCRATCH/append.done" \
+            HOME="$CBHOME" ./macos/build/chocobar-mac --config "$CBHOME/.wizbar/config.json" > "$SCRATCH/selftest.out" &
+          SELFTEST_PID=$!
+          sleep 2
+          cat "$SCRATCH/append.jsonl" >> "$CBHOME/store/a.jsonl"
+          touch "$SCRATCH/append.done"
+          wait "$SELFTEST_PID"
+          cat "$SCRATCH/selftest.out"
+          grep -q "SELFTEST SCAN1 495 TOK_ALL 495 APPS 1 SOURCES 1" "$SCRATCH/selftest.out" \
+            || { echo "FAIL: scan 1 expected 495 from 3 records (recursion + codecs + aggregation)"; exit 1; }
+          grep -q "SELFTEST SCAN2 165 TOK_ALL 660" "$SCRATCH/selftest.out" \
+            || { echo "FAIL: warm rescan expected only the appended record to count (cursor + seek + preserved aggregates)"; exit 1; }
+          {
+            echo "### macOS core-seam self-test"
+            echo ""
+            echo '```'
+            cat "$SCRATCH/selftest.out"
+            echo '```'
+            echo ""
+            echo "Seeded store: 3 records (495) across a nested dir; mid-process append (165)"
+            echo "picked up through the byte cursor with totals preserved."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test (launch, stay up 3s, exit cleanly)
+        # The runner has a virtual display, so the panel can be created: this
+        # catches startup crashes in the AppKit path (panel, timer, tracking),
+        # which the headless self-test above deliberately does not touch.
+        run: |
+          set -uo pipefail
+          ./macos/build/chocobar-mac --config /tmp/chocobar-smoke.json &
+          PID=$!
+          sleep 3
+          if ! kill -0 $PID 2>/dev/null; then
+            echo "the bar exited on its own within 3s"
+            exit 1
+          fi
+          kill -TERM $PID
+          wait $PID || true
+          echo "smoke ok: up 3s, terminated on request"
+
+      - name: Upload the bar bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chocobar-mac
+          path: macos/build/Chocobar-mac.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  probe:
+    runs-on: macos-14
+    timeout-minutes: 10
+    # Measurement, not a gate. See the header.
+    continue-on-error: true
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the probe
+        run: |
+          set -euo pipefail
+          clang -fobjc-arc -Wall -Wextra -O1 \
+            -framework Cocoa macos/probe/probe.m -o macos/probe/probe
+
+      - name: Report the session type
+        # A probe that runs headless cannot see on-screen windows, so record
+        # what kind of session we landed in alongside the verdict.
+        run: |
+          echo "user: $(whoami)"
+          echo "console user: $(stat -f%Su /dev/console 2>/dev/null || echo unknown)"
+          launchctl managername 2>/dev/null || echo "launchctl managername unavailable"
+
+      - name: Run the probe
+        id: probe
+        run: |
+          set -uo pipefail
+          ./macos/probe/probe 2>&1 | tee macos-probe.log
+          # Propagate the probe's own exit code so the log and the status agree.
+          exit "${PIPESTATUS[0]}"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### macOS window-follow probe"
+            echo ""
+            echo '```'
+            cat macos-probe.log 2>/dev/null || echo "(no log produced)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the raw log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-probe-log
+          path: macos-probe.log
+          if-no-files-found: warn
+          retention-days: 14
