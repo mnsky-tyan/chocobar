@@ -1,0 +1,89 @@
+# macOS window-follow probe: MEASUREMENT, not a product gate.
+#
+# WHY THIS EXISTS
+# The cross-platform feasibility study concluded - from documentation - that on
+# macOS the bar cannot be a child window of the terminal (nothing allows
+# cross-process parenting) and must instead be a non-activating NSPanel at a
+# floating level that tracks the target window's bounds, found through
+# CGWindowListCopyWindowInfo without any permission prompt. That is a claim
+# about behaviour, and documentation is not measurement.
+#
+# macos/probe/probe.m answers it directly. If the panel tracks a real window
+# owned by another process, never steals focus, and hides when the target is
+# minimized, the macOS port of the bar concept is viable. If it does not, the
+# macOS port needs a different product shape and we want to know that before
+# writing the portable core.
+#
+# THIS MUST NOT BLOCK THE WINDOWS RELEASE PATH
+# `continue-on-error: true` and the release gate does not depend on this job.
+# A failing probe is information, not a broken build.
+name: macOS probe
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC daily: cheap, and off the hour so it does not pile onto
+    # GitHub's busiest minute.
+    - cron: '17 3 * * *'
+  push:
+    paths:
+      - 'macos/probe/**'
+      - '.github/workflows/macos-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: macos-14
+    timeout-minutes: 10
+    # Measurement, not a gate. See the header.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the probe
+        run: |
+          set -euo pipefail
+          clang -fobjc-arc -Wall -Wextra -O1 \
+            -framework Cocoa macos/probe/probe.m -o macos/probe/probe
+
+      - name: Report the session type
+        # A probe that runs headless cannot see on-screen windows, so record
+        # what kind of session we landed in alongside the verdict.
+        run: |
+          echo "user: $(whoami)"
+          echo "console user: $(stat -f%Su /dev/console 2>/dev/null || echo unknown)"
+          launchctl managername 2>/dev/null || echo "launchctl managername unavailable"
+
+      - name: Run the probe
+        id: probe
+        run: |
+          set -uo pipefail
+          ./macos/probe/probe 2>&1 | tee macos-probe.log
+          # Propagate the probe's own exit code so the log and the status agree.
+          exit "${PIPESTATUS[0]}"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### macOS window-follow probe"
+            echo ""
+            echo '```'
+            cat macos-probe.log 2>/dev/null || echo "(no log produced)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the raw log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-probe-log
+          path: macos-probe.log
+          if-no-files-found: warn
+          retention-days: 14
