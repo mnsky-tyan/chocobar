@@ -105,3 +105,36 @@ clang -o "$OUT/chocobar-mac" \
   -framework Cocoa -framework CoreGraphics
 
 echo "built: $OUT/chocobar-mac ($(stat -f%z "$OUT/chocobar-mac" 2>/dev/null || stat -c%s "$OUT/chocobar-mac") bytes)"
+
+# --- bundle ----------------------------------------------------------------------
+# A bare binary works from a terminal, but a .app is what a person can actually
+# run: double-click, and the accessory activation policy keeps it out of the
+# Dock. LSUIElement in the Info.plist is the bundle-level version of that policy,
+# so even a plain `open` shows no Dock icon.
+APP="$OUT/Chocobar.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$OUT/chocobar-mac" "$APP/Contents/MacOS/Chocobar"
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>                <string>Chocobar</string>
+    <key>CFBundleDisplayName</key>         <string>Chocobar</string>
+    <key>CFBundleIdentifier</key>          <string>com.mnsky.chocobar</string>
+    <key>CFBundleExecutable</key>          <string>Chocobar</string>
+    <key>CFBundlePackageType</key>         <string>APPL</string>
+    <key>CFBundleShortVersionString</key>  <string>0.1.0</string>
+    <key>CFBundleVersion</key>             <string>1</string>
+    <key>LSMinimumSystemVersion</key>      <string>13.0</string>
+    <!-- Accessory app: no Dock icon, no menu bar takeover. The bar is a
+         floating panel, not an application the user manages. -->
+    <key>LSUIElement</key>                 <true/>
+    <key>NSHighResolutionCapable</key>     <true/>
+</dict>
+</plist>
+PLIST
+codesign --force --sign - "$APP" 2>/dev/null || true   # ad-hoc: no identity needed
+ditto -c -k --keepParent "$APP" "$OUT/Chocobar-mac.zip"
+echo "bundled: $OUT/Chocobar.app -> $OUT/Chocobar-mac.zip ($(stat -f%z "$OUT/Chocobar-mac.zip" 2>/dev/null || stat -c%s "$OUT/Chocobar-mac.zip") bytes)"

@@ -49,13 +49,37 @@ jobs:
       - name: Build the macOS bar
         run: bash macos/build.sh
 
-      - name: Upload the bar
+      - name: Smoke test (launch, stay up 3s, exit cleanly)
+        # The runner has a virtual display, so the panel can be created and the
+        # core can actually run: config read (none here, so defaults), cursor
+        # load, one scan of zero sources. This catches adapter crashes at
+        # startup - the kind that only happen when the code actually runs.
+        run: |
+          set -uo pipefail
+          ./macos/build/chocobar-mac --config /tmp/chocobar-smoke.json &
+          PID=$!
+          sleep 3
+          if ! kill -0 $PID 2>/dev/null; then
+            echo "the bar exited on its own within 3s"
+            exit 1
+          fi
+          kill -TERM $PID
+          wait $PID || true
+          echo "smoke ok: up 3s, terminated on request"
+          {
+            echo "### macOS bar smoke test"
+            echo ""
+            echo "Launched, stayed up 3s, terminated cleanly. Config pointed at an"
+            echo "empty scratch file, so it ran on defaults with zero token sources."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the bar bundle
         uses: actions/upload-artifact@v4
         with:
-          name: chocobar-mac
-          path: macos/build/chocobar-mac
+          name: Chocobar-mac
+          path: macos/build/Chocobar-mac.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
   probe:
     runs-on: macos-14
