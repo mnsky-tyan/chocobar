@@ -20,6 +20,12 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+// Declares the Win32 spellings the core compiles against. main.m needs exactly
+// one of them: MultiByteToWideChar, to hand the core a wide config path the way
+// it expects. Without this the codec call compiles as an implicit declaration
+// and CP_UTF8 does not exist at all.
+#include "chocobar_core.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,16 +60,20 @@ extern int  cbCfgGap(void);
 // ~/.wizbar/config.json, with a --config override for testing.
 static char g_configPath[1024];
 
-static void resolveConfigPath(int argc, const char *argv[]) {
-    for (int i = 1; i < argc - 1; i++) {
-        if (!strcmp(argv[i], "--config") && argv[i + 1][0]) {
-            snprintf(g_configPath, sizeof(g_configPath), "%s", argv[i + 1]);
+// Real C argv, captured in main(). NSProcessInfo.arguments is an NSArray of
+// NSString, which cannot be passed where the C loop below expects const char **.
+static int g_argc = 0;
+static const char *const *g_argv = NULL;
+
+static void resolveConfigPath(void) {
+    for (int i = 1; i < g_argc - 1; i++) {
+        if (!strcmp(g_argv[i], "--config") && g_argv[i + 1][0]) {
+            snprintf(g_configPath, sizeof(g_configPath), "%s", g_argv[i + 1]);
             return;
         }
     }
     const char *home = getenv("HOME");
-    if (!home) home = NSHomeDirectory().UTF8String;
-    snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home);
+    snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home ? home : "/tmp");
 }
 
 // ---- terminal discovery --------------------------------------------------------
@@ -324,8 +334,7 @@ static void timerFired(NSTimer *t) {
 @implementation Chocobar
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     (void)note;
-    resolveConfigPath(NSProcessInfo.processInfo.arguments.count,
-                      *NSProcessInfo.processInfo.arguments);
+    resolveConfigPath();
 
 
     // Load cursors before the config, then the config, then the first scan:
@@ -367,7 +376,8 @@ static void timerFired(NSTimer *t) {
 @end
 
 int main(int argc, const char *argv[]) {
-    (void)argc; (void)argv;
+    g_argc = argc;
+    g_argv = argv;
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         // Accessory, not regular: no Dock icon, no menu bar takeover. The bar
