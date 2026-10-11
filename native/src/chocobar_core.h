@@ -35,13 +35,21 @@
 
 // BOOL is already defined by Objective-C (objc/objc.h, as `bool`), which every
 // .m file in the macOS build pulls in through Foundation. Redefining it as int
-// there is a hard error. The plain-C core translation unit has no objc header,
-// so it needs the Windows spelling. Both spellings behave identically for
-// everything the core does with them: assignment of TRUE/FALSE and truth tests.
+// there is a hard error, so under __OBJC__ the platform's BOOL is kept for any
+// core DATA typed BOOL.
+//
+// The shim's FUNCTION signatures, though, must not follow the platform's BOOL:
+// a `_Bool`-returning function only guarantees the low 8 bits of the return
+// register, while the plain-C core reads these calls as int. That mismatch is
+// silent at link time and reads garbage in the upper bits (measured on
+// SysV x86-64: a 0 return read as -1833971711). CB_BOOL is therefore ALWAYS
+// C int, on every platform, and every function this header declares uses it.
 #if defined(__OBJC__)
 #import <objc/objc.h>
+typedef int CB_BOOL;
 #else
 typedef int BOOL;
+typedef int CB_BOOL;
 #endif
 #ifndef TRUE
 #define TRUE 1
@@ -50,7 +58,13 @@ typedef int BOOL;
 #define FALSE 0
 #endif
 
-typedef unsigned long DWORD;
+// DWORD is 4 bytes on every Windows target, including x64. "unsigned long" is
+// 8 bytes on LP64, which silently broke ULARGE_INTEGER: the union's struct arm
+// became 16 bytes and QuadPart aliased only LowPart, so fileTimeToUnixMs
+// discarded the high dword and every day boundary collapsed to ~-1.16e13.
+// unsigned int is the faithful spelling. The static asserts below turn any
+// future width regression into a compile error instead of a wrong number.
+typedef unsigned int DWORD;
 typedef unsigned long long ULONGLONG;
 typedef size_t SIZE_T;
 typedef unsigned char BYTE;
@@ -58,12 +72,12 @@ typedef void *HANDLE;
 typedef void *LPVOID;
 typedef const wchar_t *LPCWSTR;
 typedef DWORD *LPDWORD;
-typedef long long CB_LARGE;
 
 typedef struct { long long QuadPart; } CB_LARGE_INTEGER;
 typedef CB_LARGE_INTEGER LARGE_INTEGER;
 
 typedef union { struct { DWORD LowPart, HighPart; }; ULONGLONG QuadPart; } ULARGE_INTEGER;
+
 
 // HANDLE is a pointer, so the INVALID_HANDLE_VALUE sentinel must be a value no
 // real descriptor can produce. -1 cast to a pointer satisfies that.
@@ -75,6 +89,12 @@ typedef struct { int _reserved; } OVERLAPPED, *LPOVERLAPPED;
 // 100-nanosecond ticks since 1601-01-01. The core does the epoch arithmetic
 // itself (fileTimeToUnixMs), so only the representation matters.
 typedef struct { DWORD dwLowDateTime, dwHighDateTime; } FILETIME;
+// The layout contract the whole seam rests on: FILETIME must be the Windows
+// 8-byte split and ULARGE_INTEGER must overlay both halves with QuadPart.
+// Both broke silently when DWORD was 8 bytes; these cannot.
+_Static_assert(sizeof(DWORD) == 4, "DWORD must be 4 bytes like Windows");
+_Static_assert(sizeof(FILETIME) == 8, "FILETIME must be two 32-bit dwords");
+_Static_assert(sizeof(ULARGE_INTEGER) == 8, "ULARGE_INTEGER must overlay QuadPart");
 
 typedef struct {
     unsigned short wYear, wMonth, wDayOfWeek, wDay,
@@ -89,7 +109,7 @@ typedef struct { void *_opaque; } CB_CRITICAL_SECTION;
 typedef CB_CRITICAL_SECTION CRITICAL_SECTION;
 
 typedef struct {
-    unsigned long dwFileAttributes;
+    DWORD dwFileAttributes;
     FILETIME ftCreationTime, ftLastAccessTime, ftLastWriteTime;
     DWORD nFileSizeHigh, nFileSizeLow;
 } CB_FILE_ATTRIBUTE_DATA;
@@ -157,25 +177,25 @@ void *GetProcessHeap(void);
 
 HANDLE CreateFileW(const wchar_t *path, DWORD access, DWORD share, void *sa,
                    DWORD creation, DWORD flags, HANDLE tmpl);
-BOOL ReadFile(HANDLE h, void *buf, DWORD bytes, DWORD *got, LPOVERLAPPED o);
-BOOL WriteFile(HANDLE h, const void *buf, DWORD bytes, DWORD *wrote, LPOVERLAPPED o);
-BOOL GetFileSizeEx(HANDLE h, LARGE_INTEGER *size);
-BOOL SetFilePointerEx(HANDLE h, LARGE_INTEGER dist, LARGE_INTEGER *out, DWORD method);
+CB_BOOL ReadFile(HANDLE h, void *buf, DWORD bytes, DWORD *got, LPOVERLAPPED o);
+CB_BOOL WriteFile(HANDLE h, const void *buf, DWORD bytes, DWORD *wrote, LPOVERLAPPED o);
+CB_BOOL GetFileSizeEx(HANDLE h, LARGE_INTEGER *size);
+CB_BOOL SetFilePointerEx(HANDLE h, LARGE_INTEGER dist, LARGE_INTEGER *out, DWORD method);
 DWORD GetFileSize(HANDLE h, LPDWORD high);
-BOOL GetFileInformationByHandle(HANDLE h, BY_HANDLE_FILE_INFORMATION *fi);
-BOOL GetFileAttributesExW(const wchar_t *path, int level, WIN32_FILE_ATTRIBUTE_DATA *fa);
-BOOL CloseHandle(HANDLE h);
-BOOL DeleteFileW(const wchar_t *path);
-BOOL CopyFileW(const wchar_t *from, const wchar_t *to, BOOL failIfExists);
-BOOL CreateDirectoryW(const wchar_t *path, void *sa);
-BOOL GetFileTime(HANDLE h, FILETIME *created, FILETIME *accessed, FILETIME *written);
-BOOL SetFileTime(HANDLE h, const FILETIME *created, const FILETIME *accessed, const FILETIME *written);
+CB_BOOL GetFileInformationByHandle(HANDLE h, BY_HANDLE_FILE_INFORMATION *fi);
+CB_BOOL GetFileAttributesExW(const wchar_t *path, int level, WIN32_FILE_ATTRIBUTE_DATA *fa);
+CB_BOOL CloseHandle(HANDLE h);
+CB_BOOL DeleteFileW(const wchar_t *path);
+CB_BOOL CopyFileW(const wchar_t *from, const wchar_t *to, CB_BOOL failIfExists);
+CB_BOOL CreateDirectoryW(const wchar_t *path, void *sa);
+CB_BOOL GetFileTime(HANDLE h, FILETIME *created, FILETIME *accessed, FILETIME *written);
+CB_BOOL SetFileTime(HANDLE h, const FILETIME *created, const FILETIME *accessed, const FILETIME *written);
 
 // ---- directory enumeration ---------------------------------------------------
 
 HANDLE FindFirstFileW(const wchar_t *pattern, WIN32_FIND_DATAW *fd);
-BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd);
-BOOL FindClose(HANDLE h);
+CB_BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd);
+CB_BOOL FindClose(HANDLE h);
 
 // ---- wide strings ------------------------------------------------------------
 
@@ -202,14 +222,23 @@ int WideCharToMultiByte(unsigned codepage, DWORD flags, const wchar_t *w, int wi
 // ---- environment --------------------------------------------------------------
 
 DWORD GetEnvironmentVariableW(const wchar_t *name, wchar_t *out, DWORD cch);
-BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value);
+CB_BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value);
+
+// ---- interlocked ---------------------------------------------------------------
+
+// The scan's busy/done flags are interlocked on Windows (the worker thread and
+// the UI thread meet here). The portable build must provide the same
+// semantics, not drop them: the extraction briefly replaced the drain's
+// interlocked clear with a plain store, which silently removed the release
+// barrier from the Windows binary too.
+long InterlockedExchange(long volatile *target, long value);
 
 // ---- time ---------------------------------------------------------------------
 
 void GetLocalTime(SYSTEMTIME *st);
 void GetSystemTime(SYSTEMTIME *st);
-BOOL SystemTimeToFileTime(const SYSTEMTIME *st, FILETIME *ft);
-BOOL LocalFileTimeToFileTime(const FILETIME *lft, FILETIME *ft);
+CB_BOOL SystemTimeToFileTime(const SYSTEMTIME *st, FILETIME *ft);
+CB_BOOL LocalFileTimeToFileTime(const FILETIME *lft, FILETIME *ft);
 DWORD GetTickCount(void);
 ULONGLONG GetTickCount64(void);
 void Sleep(DWORD ms);

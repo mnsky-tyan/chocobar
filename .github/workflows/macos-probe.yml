@@ -27,7 +27,21 @@ on:
     - cron: '17 3 * * *'
   push:
     paths:
-      - 'macos/probe/**'
+      - 'macos/**'
+      - 'native/src/chocobar.c'
+      - 'native/src/p_utils.c'
+      - 'native/src/p_tokens.c'
+      - 'native/src/p_agg.c'
+      - 'native/src/chocobar_core.h'
+      - '.github/workflows/macos-probe.yml'
+  pull_request:
+    paths:
+      - 'macos/**'
+      - 'native/src/chocobar.c'
+      - 'native/src/p_utils.c'
+      - 'native/src/p_tokens.c'
+      - 'native/src/p_agg.c'
+      - 'native/src/chocobar_core.h'
       - '.github/workflows/macos-probe.yml'
 
 permissions:
@@ -49,11 +63,58 @@ jobs:
       - name: Build the macOS bar
         run: bash macos/build.sh
 
+      - name: Self-test the core seam (headless, real data)
+        # A bar that launches and idles proves nothing: a scan over zero
+        # sources returns before touching the adapter's file code. This seeds
+        # a scratch profile with a real JSONL store (two files, one nested),
+        # runs the bar's CHOCOBAR_SELFTEST mode, and asserts the exact token
+        # totals. The second scan runs after an append, which forces the warm
+        # path: resume from a byte cursor through SetFilePointerEx. This is
+        # the regression net for the whole seam - path translation, directory
+        # enumeration, seek semantics, codecs, aggregation.
+        run: |
+          set -euo pipefail
+          SCRATCH="$RUNNER_TEMP/cb-selftest"
+          CBHOME="$SCRATCH/home"
+          mkdir -p "$CBHOME/.wizbar" "$SCRATCH/store/proj"
+          NOW_MS=$(( $(date +%s) * 1000 ))
+          REC() { local ts=$((NOW_MS - $5)); printf '{"type":"message","message":{"role":"assistant","model":"selftest-model","usage":{"input":%s,"output":%s,"cacheRead":%s,"cacheWrite":%s}},"timestamp":%s}\n' "$1" "$2" "$3" "$4" "$ts"; }
+          # top-level file: 2 records = 2 x 165 = 330
+          REC 100 50 10 5  1000 > "$SCRATCH/store/a.jsonl"
+          REC 100 50 10 5  2000 >> "$SCRATCH/store/a.jsonl"
+          # nested project dir: 1 record = 165 (exercises recursive enumeration)
+          REC 100 50 10 5  3000 > "$SCRATCH/store/proj/b.jsonl"
+          # the append that turns the second run into the warm path (1 more record = 165)
+          REC 100 50 10 5  4000 > "$SCRATCH/append.jsonl"
+          cat > "$CBHOME/.wizbar/config.json" <<CFG
+          {"tokens":{"enabled":true,"sources":[{"app":"pi","path":"~/store","recursive":true}]},"general":{"debug":true}}
+          CFG
+          OUT1=$(env CHOCOBAR_SELFTEST=1 HOME="$CBHOME" ./macos/build/chocobar-mac --config "$CBHOME/.wizbar/config.json")
+          echo "$OUT1"
+          grep -q "SELFTEST SCAN1 330 TOK_ALL 330 APPS 1 SOURCES 1" <<<"$OUT1" \
+            || { echo "FAIL: scan 1 expected 330 from 3 records (recursion + codecs + aggregation)"; exit 1; }
+          cat "$SCRATCH/append.jsonl" >> "$SCRATCH/store/a.jsonl"
+          OUT2=$(env CHOCOBAR_SELFTEST=1 HOME="$CBHOME" ./macos/build/chocobar-mac --config "$CBHOME/.wizbar/config.json")
+          echo "$OUT2"
+          # cold start again (separate process): cursor file resumes, the 3 old
+          # records warm-skip by size+mtime, only the appended one is read
+          grep -q "SELFTEST SCAN1 165 TOK_ALL 495" <<<"$OUT2" \
+            || { echo "FAIL: warm resume expected only the appended record to count (cursor + seek path)"; exit 1; }
+          {
+            echo "### macOS core-seam self-test"
+            echo ""
+            echo '```'
+            echo "$OUT1"; echo "$OUT2"
+            echo '```'
+            echo ""
+            echo "Seeded store: 3 records (330) across a nested dir; then an append (165)"
+            echo "read back warm through the byte cursor. Totals exact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Smoke test (launch, stay up 3s, exit cleanly)
-        # The runner has a virtual display, so the panel can be created and the
-        # core can actually run: config read (none here, so defaults), cursor
-        # load, one scan of zero sources. This catches adapter crashes at
-        # startup - the kind that only happen when the code actually runs.
+        # The runner has a virtual display, so the panel can be created: this
+        # catches startup crashes in the AppKit path (panel, timer, tracking),
+        # which the headless self-test above deliberately does not touch.
         run: |
           set -uo pipefail
           ./macos/build/chocobar-mac --config /tmp/chocobar-smoke.json &
@@ -66,12 +127,6 @@ jobs:
           kill -TERM $PID
           wait $PID || true
           echo "smoke ok: up 3s, terminated on request"
-          {
-            echo "### macOS bar smoke test"
-            echo ""
-            echo "Launched, stayed up 3s, terminated cleanly. Config pointed at an"
-            echo "empty scratch file, so it ran on defaults with zero token sources."
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the bar bundle
         uses: actions/upload-artifact@v4

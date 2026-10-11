@@ -130,7 +130,7 @@ static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key)
 static int jtokSpan(const jsmntok_t *t, int i);
 static void jstrCopyA(char *dst, int cch, const char *js, const jsmntok_t *t, int i,
                       const char *dflt);
-static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_subs
+static void subsPathExpand(const wchar_t *in, wchar_t *out, int outCch); // p_utils: profile-path logic shared by config + tokens
 
 // one bounded, NUL-terminated UTF-8 copy of a config string. Every reader of
 // the aggregation key decodes it back as UTF-8 (aggRecord's appFilter loop,

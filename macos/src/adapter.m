@@ -11,27 +11,39 @@
 // below are the seam, so the core stays byte-identical to what ships on Windows
 // and the two platforms cannot drift apart.
 //
-// TWO MACOS FACTS THAT SHAPE EVERYTHING HERE
+// THREE MACOS FACTS THAT SHAPE EVERYTHING HERE
 //
 // 1. wchar_t is 4 bytes on macOS (UTF-32) and 2 on Windows (UTF-16). The core
 //    holds paths in wchar_t and converts at the boundary with
 //    WideCharToMultiByte/MultiByteToWideChar, so as long as those two are real
 //    codecs this is invisible. They are implemented with mbstowcs/wcstombs
-//    below, which are correct for UTF-32. An implementation that widened bytes
-//    by hand would corrupt every non-ASCII path, so do not "optimise" them.
+//    below, which are correct for UTF-32 UNDER A UTF-8 LOCALE - see the
+//    locale constructor at the bottom of this file, which establishes one.
+//    An implementation that widened bytes by hand would corrupt every non-ASCII
+//    path, so do not "optimise" them.
 //
-// 2. macOS filenames are decomposed UTF-8 (NFD) and Apple APIs expect
-//    composed (NFC). A path containing a non-ASCII character is therefore two
-//    different byte sequences for the same file. Every path that goes to a
-//    POSIX call below goes through pathArg() first, which normalises to
-//    UTF-8/NFC. Without it, the bar reads token-cursors.json fine on a pure
-//    ASCII profile and then silently fails to find its own cursor file the
-//    moment a user's home directory has an accented character in it.
+// 2. The core joins paths with Win32 backslashes (p_tokens.c swprintf
+//    "%ls\\%ls", subsPathExpand "~\\.wizbar\\..."). On macOS a backslash is an
+//    ordinary filename character, so every one of those paths would be an
+//    ENOENT. pathArg() therefore translates separator backslashes to slashes
+//    at the POSIX boundary - the last place that still knows both conventions.
+//    It does NOT do Unicode normalisation (NFC/NFD): macOS stores decomposed
+//    filenames and a profile directory with a non-ASCII name would need
+//    CFString normalisation here. That is a recorded limitation, not a
+//    protection: pure-ASCII profiles are unaffected, and non-ASCII ones need
+//    the normalisation pass added before they can be trusted.
+//
+// 3. Directory enumeration state lives in the HANDLE, not in a process global.
+//    The core walks stores recursively (tokScanDir calls FindFirstFileW inside
+//    its own FindNextFileW loop), so a single static DIR* would close the
+//    parent's directory on the first nested call and silently drop every entry
+//    after it. Each enumeration owns its state; the handle carries it.
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <locale.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -86,12 +98,14 @@ static const char *profileDir(void) {
     return cached;
 }
 
-// ---- path normalisation ------------------------------------------------------
+// ---- path boundary ------------------------------------------------------------
 
-// UTF-8 <-> UTF-16 normalisation. The core never sees these: they exist only so
-// a path handed to a POSIX call names the same file macOS will open.
-#include <string.h>
-
+// Win32 path -> POSIX path. Translates separator backslashes to slashes; a
+// double backslash is collapsed too, so "C:\\x\\y" and "~\\.wizbar" both become
+// single-separator POSIX paths. A POSIX filename containing a literal backslash
+// cannot be named through this boundary - the core never creates one, because
+// every backslash it emits is a separator. Unicode normalisation is NOT done
+// here (see the file header, fact 2).
 static char *pathArg(const wchar_t *w) {
     static _Thread_local char buf[4][PATH_MAX];
     static _Thread_local int slot = 0;
@@ -100,10 +114,13 @@ static char *pathArg(const wchar_t *w) {
     out[0] = 0;
     if (!w) return out;
     // The core's paths are UTF-32 (wchar_t is 4 bytes here), so this is a plain
-    // narrowing, not a codec. Normalising is what actually matters.
+    // narrowing, not a codec. In a non-UTF-8 locale wcstombs fails on every
+    // non-ASCII byte; the constructor at the bottom of this file establishes a
+    // UTF-8 locale so this narrowing is exact.
     size_t n = wcstombs(out, w, PATH_MAX - 1);
     if (n == (size_t)-1) { out[0] = 0; return out; }
     out[n] = 0;
+    for (char *p = out; *p; p++) if (*p == '\\') *p = '/';
     return out;
 }
 
@@ -123,7 +140,7 @@ void *GetProcessHeap(void) { return NULL; }
 
 #define FD_TO_HANDLE(fd) ((HANDLE)(intptr_t)(fd))
 #define HANDLE_TO_FD(h) ((int)(intptr_t)(h))
-#define INVALID_HANDLE_VALUE_LOCAL ((HANDLE)(intptr_t)-1)
+#define INVALID_HANDLE_VALUE_LOCAL INVALID_HANDLE_VALUE
 
 static HANDLE openFor(const wchar_t *path, int flags, int mode) {
     const char *p = pathArg(path);
@@ -146,7 +163,7 @@ HANDLE CreateFileW(const wchar_t *path, DWORD access, DWORD share, void *sa,
     return openFor(path, oflags, 0644);
 }
 
-BOOL ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, LPOVERLAPPED o) {
+CB_BOOL ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, LPOVERLAPPED o) {
     (void)o;
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
     // Sequential from the descriptor's own position: the core seeks explicitly
@@ -157,16 +174,28 @@ BOOL ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, LPOVERLAPPED o) {
     return TRUE;
 }
 
-BOOL WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *wrote, LPOVERLAPPED o) {
+CB_BOOL WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *wrote, LPOVERLAPPED o) {
     (void)o;
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
-    ssize_t k = write(HANDLE_TO_FD(h), buf, n);
-    if (k < 0) return FALSE;
-    if (wrote) *wrote = (DWORD)k;
+    // Win32's non-overlapped WriteFile writes the whole buffer; a bare write()
+    // can short-write (pipes, signals), and a truncated cursor JSON would
+    // silently lose cursors. Loop until the buffer is done or an error lands.
+    const char *p = (const char *)buf;
+    DWORD left = n;
+    while (left > 0) {
+        ssize_t k = write(HANDLE_TO_FD(h), p, left);
+        if (k < 0) {
+            if (errno == EINTR) continue;
+            return FALSE;
+        }
+        if (k == 0) return FALSE;
+        p += k; left -= (DWORD)k;
+    }
+    if (wrote) *wrote = n;
     return TRUE;
 }
 
-BOOL GetFileSizeEx(HANDLE h, CB_LARGE_INTEGER *sz) {
+CB_BOOL GetFileSizeEx(HANDLE h, CB_LARGE_INTEGER *sz) {
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
     struct stat st;
     if (fstat(HANDLE_TO_FD(h), &st)) return FALSE;
@@ -174,17 +203,23 @@ BOOL GetFileSizeEx(HANDLE h, CB_LARGE_INTEGER *sz) {
     return TRUE;
 }
 
-BOOL CloseHandle(HANDLE h) {
+CB_BOOL CloseHandle(HANDLE h) {
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
     return close(HANDLE_TO_FD(h)) == 0;
 }
 
-BOOL DeleteFileW(const wchar_t *p) { const char *s = pathArg(p); return s[0] && unlink(s) == 0; }
+CB_BOOL DeleteFileW(const wchar_t *p) { const char *s = pathArg(p); return (CB_BOOL)(s[0] && unlink(s) == 0); }
 
-BOOL SetFilePointerEx(HANDLE h, CB_LARGE_INTEGER dist, CB_LARGE_INTEGER *out, DWORD method) {
+CB_BOOL SetFilePointerEx(HANDLE h, CB_LARGE_INTEGER dist, CB_LARGE_INTEGER *out, DWORD method) {
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
-    int whence = (method == 1 /* FILE_END */) ? SEEK_END
-                 : (method == 2 /* FILE_BEGIN */) ? SEEK_SET : SEEK_CUR;
+    // The header's constants ARE the contract: FILE_BEGIN 0, FILE_CURRENT 1,
+    // FILE_END 2. An earlier mapping here was shifted by one for all three
+    // (1->SEEK_END, 2->SEEK_SET, 0 falling into SEEK_CUR), which made every
+    // warm scan seek to pos+from instead of from - the scanner counted the
+    // wrong bytes or gave up. Use the named constants so this cannot drift
+    // from the header again.
+    int whence = (method == FILE_BEGIN) ? SEEK_SET
+                 : (method == FILE_END) ? SEEK_END : SEEK_CUR;
     if (lseek(HANDLE_TO_FD(h), (off_t)dist.QuadPart, whence) < 0) return FALSE;
     if (out) { out->QuadPart = lseek(HANDLE_TO_FD(h), 0, SEEK_CUR); }
     return TRUE;
@@ -197,7 +232,7 @@ DWORD GetFileSize(HANDLE h, LPDWORD high) {
     return (DWORD)(st.st_size & 0xffffffffu);
 }
 
-BOOL GetFileInformationByHandle(HANDLE h, CB_BY_HANDLE_FILE_INFORMATION *fi) {
+CB_BOOL GetFileInformationByHandle(HANDLE h, CB_BY_HANDLE_FILE_INFORMATION *fi) {
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
     struct stat st;
     if (fstat(HANDLE_TO_FD(h), &st)) return FALSE;
@@ -211,60 +246,83 @@ BOOL GetFileInformationByHandle(HANDLE h, CB_BY_HANDLE_FILE_INFORMATION *fi) {
 
 // ---- directory enumeration ---------------------------------------------------
 //
-// The core uses the FindFirstFileW triple to walk session stores recursively.
-// opendir/readdir is the equivalent; the pattern is ignored (the core always
-// passes "<dir>\\*") and entries are returned one at a time.
+// The core uses the FindFirstFileW triple to walk session stores RECURSIVELY:
+// tokScanDir calls FindFirstFileW from inside its own FindNextFileW loop. The
+// enumeration state therefore lives in the handle, never in a global - a
+// static DIR* would be closed by the nested call and every parent entry after
+// it would be silently dropped. The handle is a heap CB_FIND whose DIR carries
+// its directory fd, so each entry's size/mtime comes from fstatat with no
+// extra path work.
+//
+// The core also fills ftLastWriteTime and nFileSizeLow/High straight from the
+// enumeration and uses them as the warm-skip test (cursor size+mtime equality)
+// - an earlier version left the timestamps zero and stored the inode as the
+// size, which made the skip impossible and re-opened every file every rescan.
 
-static DIR *g_findDir = NULL;
+typedef struct {
+    DIR *dir;
+} CB_FIND;
 
 HANDLE FindFirstFileW(const wchar_t *pattern, WIN32_FIND_DATAW *fd) {
     const char *p = pathArg(pattern);
     if (!p[0]) return INVALID_HANDLE_VALUE_LOCAL;
-    // strip the trailing wildcard the core appends
+    // strip the trailing wildcard the core appends: "<dir>/*" (separators are
+    // already translated by pathArg; accept a raw backslash form too)
     size_t n = strlen(p);
     while (n && (p[n - 1] == '*' || p[n - 1] == '/' || p[n - 1] == '\\')) n--;
     char dir[PATH_MAX];
     if (n >= sizeof(dir)) return INVALID_HANDLE_VALUE_LOCAL;
     memcpy(dir, p, n);
     dir[n] = 0;
-    if (g_findDir) { closedir(g_findDir); g_findDir = NULL; }
-    g_findDir = opendir(n ? dir : "/");
-    if (!g_findDir) return INVALID_HANDLE_VALUE_LOCAL;
-    if (!FindNextFileW((HANDLE)(intptr_t)1, fd)) return INVALID_HANDLE_VALUE_LOCAL;
-    return (HANDLE)(intptr_t)1;
+    CB_FIND *f = (CB_FIND *)malloc(sizeof(CB_FIND));
+    if (!f) return INVALID_HANDLE_VALUE_LOCAL;
+    f->dir = opendir(n ? dir : "/");
+    if (!f->dir) { free(f); return INVALID_HANDLE_VALUE_LOCAL; }
+    if (!FindNextFileW((HANDLE)f, fd)) { FindClose((HANDLE)f); return INVALID_HANDLE_VALUE_LOCAL; }
+    return (HANDLE)f;
 }
 
-BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd) {
-    (void)h;
-    if (!g_findDir) return FALSE;
+CB_BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd) {
+    CB_FIND *f = (CB_FIND *)h;
+    if (!f || f == INVALID_HANDLE_VALUE_LOCAL || !f->dir) return FALSE;
     struct dirent *e;
-    while ((e = readdir(g_findDir))) {
+    while ((e = readdir(f->dir))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        // Real attributes, straight from the directory: the core's warm-skip
+        // compares cursor size+mtime against exactly these two fields.
+        struct stat st;
+        if (fstatat(dirfd(f->dir), e->d_name, &st, 0)) continue;
+        int isDir = (e->d_type == DT_DIR)
+                    || (e->d_type == DT_UNKNOWN && S_ISDIR(st.st_mode));
         memset(fd, 0, sizeof(*fd));
-        mbstowcs(fd->cFileName, e->d_name, MAX_PATH - 1);
-        if (e->d_type == DT_DIR) fd->dwFileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
-        if (e->d_type == DT_REG || e->d_type == DT_LNK)
-            fd->nFileSizeLow = (DWORD)e->d_ino;
+        if (isDir) fd->dwFileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+        if (mbstowcs(fd->cFileName, e->d_name, MAX_PATH - 1) == (size_t)-1)
+            continue;   // undecodable name: skip it rather than hand up an empty string
+        fd->nFileSizeLow = (DWORD)((unsigned long long)st.st_size & 0xffffffffu);
+        fd->nFileSizeHigh = (DWORD)((unsigned long long)st.st_size >> 32);
+        fd->ftLastWriteTime = unixMsToFileTime((long long)st.st_mtime * 1000);
         return TRUE;
     }
-    closedir(g_findDir);
-    g_findDir = NULL;
+    closedir(f->dir);
+    f->dir = NULL;
     return FALSE;
 }
 
-BOOL FindClose(HANDLE h) {
-    (void)h;
-    if (g_findDir) { closedir(g_findDir); g_findDir = NULL; }
+CB_BOOL FindClose(HANDLE h) {
+    CB_FIND *f = (CB_FIND *)h;
+    if (!f || f == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (f->dir) closedir(f->dir);
+    free(f);
     return TRUE;
 }
 
-BOOL CreateDirectoryW(const wchar_t *p, void *sa) {
+CB_BOOL CreateDirectoryW(const wchar_t *p, void *sa) {
     (void)sa;
     const char *s = pathArg(p);
-    return s[0] && mkdir(s, 0755) == 0;
+    return (CB_BOOL)(s[0] && mkdir(s, 0755) == 0);
 }
 
-BOOL GetFileAttributesExW(const wchar_t *p, int level, CB_FILE_ATTRIBUTE_DATA *fa) {
+CB_BOOL GetFileAttributesExW(const wchar_t *p, int level, CB_FILE_ATTRIBUTE_DATA *fa) {
     (void)level;
     const char *s = pathArg(p);
     struct stat st;
@@ -279,6 +337,16 @@ BOOL GetFileAttributesExW(const wchar_t *p, int level, CB_FILE_ATTRIBUTE_DATA *f
 }
 
 // ---- wide strings ------------------------------------------------------------
+//
+// NOTE ON THE RESERVED SURFACE: several functions below (lstrcpy*/lstrcat*,
+// CopyFileW, SetFileTime, GetFileTime, CreateDirectoryW, GetSystemTime,
+// GetTickCount64, Sleep, ...) have zero call sites in the parts the macOS build
+// compiles today. They are kept because chocobar_core.h declares the Win32
+// surface and the pending p_metrics/p_subs ports compile against exactly that
+// surface; deleting the implementations would leave declared-but-undefined
+// symbols that link fine until the day they are called. They are untested
+// code - treat any first real caller with suspicion and add it to the
+// self-test.
 
 int lstrlenW(const wchar_t *s) { return s ? (int)wcslen(s) : 0; }
 int lstrcmpW(const wchar_t *a, const wchar_t *b) { return wcscmp(a, b); }
@@ -300,7 +368,8 @@ wchar_t *wcsrchr(const wchar_t *s, wchar_t c) { return cb_wcsrchr(s, c); }
 int lstrcmpA(const char *a, const char *b) { return strcmp(a, b); }
 int lstrcmpiA(const char *a, const char *b) { return strcasecmp(a, b); }
 int lstrlenA(const char *s) { return s ? (int)strlen(s) : 0; }
-int lstrcpyA(char *d, const char *s) { strcpy(d, s); return (int)strlen(d); }int lstrcpynA(char *d, const char *s, int n) {
+int lstrcpyA(char *d, const char *s) { strcpy(d, s); return (int)strlen(d); }
+int lstrcpynA(char *d, const char *s, int n) {
     if (n <= 0) return 0;
     strncpy(d, s, n - 1);
     d[n - 1] = 0;
@@ -328,8 +397,13 @@ int MultiByteToWideChar(unsigned cp, DWORD flags, const char *s, int bytes, wcha
     mbstate_t st;
     memset(&st, 0, sizeof(st));
     const char *p = s;
-    size_t n = mbsrtowcs(out, &p, (size_t)bytes, &st);
+    // The bound is the DESTINATION width (outChars wchar_t), not the input byte
+    // count: Win32 writes at most outChars wide chars including the terminator
+    // and returns 0 (ERROR_INSUFFICIENT_BUFFER) when they do not fit. Bounding
+    // by the input instead would overflow a tight destination buffer.
+    size_t n = mbsrtowcs(out, &p, (size_t)outChars, &st);
     if (n == (size_t)-1) return 0;
+    if (n >= (size_t)outChars && p < s + bytes) return 0;   // did not fit: Win32 returns 0
     return (int)n;
 }
 
@@ -372,7 +446,7 @@ DWORD GetEnvironmentVariableW(const wchar_t *name, wchar_t *out, DWORD cch) {
     return (DWORD)need;
 }
 
-BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value) {
+CB_BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value) {
     char nbuf[256];
     size_t nl = wcstombs(nbuf, name, sizeof(nbuf) - 1);
     if (nl == (size_t)-1) return FALSE;
@@ -415,7 +489,7 @@ void GetSystemTime(CB_SYSTEMTIME *st) {
     st->wMilliseconds = 0;
 }
 
-BOOL SystemTimeToFileTime(const CB_SYSTEMTIME *st, FILETIME *ft) {
+CB_BOOL SystemTimeToFileTime(const CB_SYSTEMTIME *st, FILETIME *ft) {
     struct tm tmv;
     memset(&tmv, 0, sizeof(tmv));
     tmv.tm_year = st->wYear - 1900;
@@ -431,12 +505,23 @@ BOOL SystemTimeToFileTime(const CB_SYSTEMTIME *st, FILETIME *ft) {
     return TRUE;
 }
 
-BOOL LocalFileTimeToFileTime(const FILETIME *lft, FILETIME *ft) {
-    // On macOS the local time zone is applied by mktime, so a "local" filetime
-    // is already correct once converted out of UTC. This mirrors Windows: both
-    // frames are epoch-based here, so the value passes through unchanged.
+CB_BOOL LocalFileTimeToFileTime(const FILETIME *lft, FILETIME *ft) {
+    // Correct ONLY as a pair with this adapter's SystemTimeToFileTime, which
+    // applies the local zone via mktime: what the caller built as "local
+    // wall-clock labelled FILETIME" is already the instant, so the pass-through
+    // is exact. dashMidnightMs uses that pair and is correct. A caller that
+    // uses LocalFileTimeToFileTime WITHOUT that SystemTimeToFileTime first -
+    // wallNowLocalMs in p_utils.c is the standing example - wants the Windows
+    // local->UTC flip and would get a zone-shifted value instead. Do not bring
+    // such a caller across without re-deriving its frame.
     *ft = *lft;
     return TRUE;
+}
+
+long InterlockedExchange(long volatile *target, long value) {
+    // Full exchange with release/acquire semantics, matching the Windows
+    // intrinsic the core's worker/UI hand-off is written against.
+    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
 }
 
 DWORD GetTickCount(void) { return (DWORD)((unsigned long long)(monotonic_ms() & 0xffffffffu)); }
@@ -470,11 +555,13 @@ void writeLogA(const char *s) {
 
 // ---- process ------------------------------------------------------------------
 
-BOOL CopyFileW(const wchar_t *from, const wchar_t *to, BOOL failIfExists) {
+CB_BOOL CopyFileW(const wchar_t *from, const wchar_t *to, CB_BOOL failIfExists) {
     const char *a = pathArg(from), *b = pathArg(to);
     int in = open(a, O_RDONLY);
     if (in < 0) return FALSE;
-    int out = open(b, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    // failIfExists is the Windows contract: CREATE_NEW semantics for the
+    // destination, not a silent overwrite.
+    int out = open(b, O_WRONLY | O_CREAT | (failIfExists ? O_EXCL : O_TRUNC), 0644);
     if (out < 0) { close(in); return FALSE; }
     char buf[65536];
     ssize_t k;
@@ -484,11 +571,10 @@ BOOL CopyFileW(const wchar_t *from, const wchar_t *to, BOOL failIfExists) {
     }
     close(in); close(out);
     if (!ok) unlink(b);
-    (void)failIfExists;
-    return ok;
+    return (CB_BOOL)ok;
 }
 
-BOOL GetFileTime(HANDLE h, FILETIME *c, FILETIME *a, FILETIME *w) {
+CB_BOOL GetFileTime(HANDLE h, FILETIME *c, FILETIME *a, FILETIME *w) {
     if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
     struct stat st;
     if (fstat(HANDLE_TO_FD(h), &st)) return FALSE;
@@ -499,7 +585,7 @@ BOOL GetFileTime(HANDLE h, FILETIME *c, FILETIME *a, FILETIME *w) {
     return TRUE;
 }
 
-BOOL SetFileTime(HANDLE h, const FILETIME *c, const FILETIME *a, const FILETIME *w) {
+CB_BOOL SetFileTime(HANDLE h, const FILETIME *c, const FILETIME *a, const FILETIME *w) {
     (void)h; (void)c; (void)a;
     if (!w) return FALSE;
     struct timespec ts[2];
@@ -529,10 +615,31 @@ static FILETIME unixMsToFileTime(long long ms) {
 
 // ---- wide env for the core -----------------------------------------------------
 
-// The core reads USERPROFILE (its profile-dir convention, carried over from
-// Windows). Export it from HOME so the core's existing path logic is unchanged.
+// Establish the locale the codecs assume, and export USERPROFILE for the core's
+// path logic. Constructors here run before main(); the order between this file's
+// two initialisers does not matter because both are in this one function.
+//
+// Without this, a .app launched from Finder inherits the C locale, where
+// mbstowcs/wcstombs reject every byte >= 0x80: non-ASCII paths and env values
+// would fail silently (pathArg -> "", open -> ENOENT). Try explicit UTF-8
+// locales first because they do not depend on the user's environment; the
+// ambient locale is the last resort, and the outcome is logged so a future
+// encoding failure is attributable from native.log alone.
 __attribute__((constructor)) static void exportProfile(void) {
     setenv("USERPROFILE", profileDir(), 1);
+
+    static const char *const candidates[] = { "en_US.UTF-8", "UTF-8", "C.UTF-8", "" };
+    for (int i = 0; i < 4; i++) {
+        // "" means "take the ambient environment's locale"
+        if (setlocale(LC_ALL, candidates[i])) {
+            char lb[96];
+            snprintf(lb, sizeof(lb), "[wizbar] mac adapter: locale set to %s",
+                     i == 3 ? (getenv("LANG") ? getenv("LANG") : "(ambient)") : candidates[i]);
+            writeLogA(lb);
+            return;
+        }
+    }
+    writeLogA("[wizbar] mac adapter: WARNING no UTF-8 locale available - non-ASCII paths will fail");
 }
 
 // ---- critical sections --------------------------------------------------------------
@@ -550,6 +657,10 @@ void InitializeCriticalSection(CRITICAL_SECTION *cs) {
         pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
         pthread_mutex_init(m, &a);
         pthread_mutexattr_destroy(&a);
+    } else {
+        // A NULL _opaque silently turns every Enter/Leave into a no-op, which
+        // would quietly strip the config-generation guarantee. Say so once.
+        writeLogA("[wizbar] mac adapter: WARNING critical section init failed (out of memory)");
     }
     cs->_opaque = m;
 }

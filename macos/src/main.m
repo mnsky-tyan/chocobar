@@ -32,23 +32,18 @@
 // ---- the core bridge (compiled into chocobar-core.o) ------------------------
 // Declared here rather than in a shared header: this is the entire surface the
 // macOS bar has on the portable core, and keeping it in one block makes the
-// coupling auditable at a glance.
+// coupling auditable at a glance. (A generated cb_bridge.h shared with p_agg.c
+// would turn signature drift into a compile error instead of a link error -
+// planned, not rushed.)
 extern void cbCoreInit(void);
 extern int  cbLoadConfig(const wchar_t *path);
 extern void cbTokensInit(void);
 extern long long cbScanTokens(void);
 extern long long cbTokAll(void);
-extern long long cbTokWeek(void);
-extern long long cbTokMonth(void);
-extern long long cbTokensToday(void);
 extern int  cbTokAppCount(void);
 extern const char *cbTokAppName(int i);
 extern long long cbTokAppSum(int i);
-extern int  cbTokModelCount(void);
-extern const char *cbTokModelLabel(int i);
-extern long long cbTokModelSum(int i);
 extern int  cbTokSourceCount(void);
-extern const char *cbTokSourceApp(int i);
 extern int  cbCfgTokensEnabled(void);
 extern int  cbCfgRescanSec(void);
 extern int  cbCfgHeight(void);
@@ -77,22 +72,39 @@ static void resolveConfigPath(void) {
     snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home ? home : "/tmp");
 }
 
-// ---- terminal discovery --------------------------------------------------------
+// ---- headless self-test --------------------------------------------------------
+//
+// CHOCOBAR_SELFTEST=1 runs the ENTIRE core seam with no GUI: adapter init,
+// config load, cursor load, two full scans (the second after the harness has
+// appended a record, which forces the warm path - resume from a byte cursor
+// through SetFilePointerEx). It prints one line per scan and exits 0. This is
+// what makes CI's gate real: a bar that launches and idles proves nothing
+// about the seam, because a scan over zero sources returns before touching
+// any of it.
+static int runSelfTest(void) {
+    cbCoreInit();
+    cbTokensInit();
+    wchar_t wideCfg[1024];
+    int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
+    if (wl <= 0) { fprintf(stderr, "SELFTEST FAIL cannot encode config path\n"); return 1; }
+    wideCfg[wl] = 0;
+    if (!cbLoadConfig(wideCfg)) { fprintf(stderr, "SELFTEST FAIL config did not load\n"); return 1; }
+    long long first = cbScanTokens();
+    printf("SELFTEST SCAN1 %lld TOK_ALL %lld APPS %d SOURCES %d\n",
+           first, cbTokAll(), cbTokAppCount(), cbTokSourceCount());
+    long long second = cbScanTokens();
+    printf("SELFTEST SCAN2 %lld TOK_ALL %lld\n", second, cbTokAll());
+    return 0;
+}
 
+// ---- terminal discovery --------------------------------------------------------
+//
 // Which window to follow. The Windows bar identifies the terminal by window
 // CLASS then by a title substring (terminal.className / terminal.title in the
-// config). macOS has no window classes, so the equivalent is BUNDLE ID plus
-// title substring: bundle id is the stable, user-visible identity of a terminal
-// app, and it is what a person would put in a config.
-//
-// Defaults to the frontmost app that is not us, which is the macOS-native
-// behaviour: the bar belongs to whatever you are looking at. That is a better
-// default than Windows' class list because it needs no configuration at all.
-
-static NSArray<NSString *> *terminalBundleIDs(void) {
-    // Read from the config if the user named one, else follow the frontmost app.
-    return nil; // frontmost-app mode
-}
+// config). macOS has no window classes, so the frontmost app is the target:
+// the bar belongs to whatever you are looking at, which needs no configuration
+// at all. A config-selected bundle-id allowlist is the natural next step and
+// is why the tracking helpers take a PID instead of a global.
 
 static pid_t frontmostPID(void) {
     return [NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier;
@@ -146,17 +158,14 @@ static pid_t targetPID(void) {
 
 // ---- the bar view ---------------------------------------------------------------
 
-static const double kBarHeight = 30.0;
-static const double kBarGap = 4.0;
 static const double kCorner = 8.0;
 
 // One bar: a rounded, translucent strip with the token numbers. Drawn with
-// CoreGraphics into the panel's view; no GDI, no layered window.
+// CoreGraphics into the panel's view; no GDI, no layered window. The bar's
+// height and gap come from the config through g_height/g_gap; there are no
+// separate constants to keep in sync.
 @interface BarView : NSView
 @property(nonatomic, assign) long long tokAll;
-@property(nonatomic, assign) long long tokToday;
-@property(nonatomic, assign) long long tokWeek;
-@property(nonatomic, assign) long long tokMonth;
 @property(nonatomic, assign) int appCount;
 @property(nonatomic, copy) NSString *statusLine;
 @end
@@ -192,17 +201,20 @@ static const double kCorner = 8.0;
     double midY = NSHeight(self.bounds) / 2.0;
 
     // The headline number: all-time tokens, the same figure the Windows bar
-    // leads with. -1 means "nothing read yet", which is an em dash on Windows
-    // and must not print as a literal -1 here.
+    // leads with. 0 means nothing has been counted yet (fresh start, or the
+    // master switch reset everything) - print an em-dash-like placeholder,
+    // never a bare 0 that reads like a real measurement.
     NSString *head = self.tokAll > 0
         ? [NSString stringWithFormat:@"%@", [BarView compact:self.tokAll]]
         : @"--";
     [head drawAtPoint:NSMakePoint(x, midY - 7) withAttributes:attrs];
     x += [head sizeWithAttributes:attrs].width + 14.0;
 
-    // Per-app breakdown, capped so a long source list cannot overflow the strip.
+    // Per-app breakdown, capped at four rows AND at the strip's width: the
+    // count only advances for rows actually drawn, so blank or zero-sum apps
+    // cannot eat the budget and leave the strip showing fewer real rows.
     int shown = 0;
-    for (int i = 0; i < self.appCount && shown < 4; i++, shown++) {
+    for (int i = 0; i < self.appCount && shown < 4; i++) {
         const char *name = cbTokAppName(i);
         if (!name || !*name) continue;
         long long sum = cbTokAppSum(i);
@@ -210,6 +222,7 @@ static const double kCorner = 8.0;
         NSString *line = [NSString stringWithFormat:@"%s %@", name, [BarView compact:sum]];
         [line drawAtPoint:NSMakePoint(x, midY - 6.5) withAttributes:dim];
         x += [line sizeWithAttributes:dim].width + 12.0;
+        shown++;
         if (x > NSWidth(self.bounds) - 120) break;
     }
 
@@ -244,7 +257,6 @@ static const double kCorner = 8.0;
 static NSPanel *g_panel = nil;
 static BarView *g_view = nil;
 static pid_t g_target = 0;
-static BOOL g_quit = NO;
 static int g_height = 30, g_gap = 4;
 
 static NSPanel *makePanel(void) {
@@ -277,9 +289,6 @@ static NSPanel *makePanel(void) {
 
 static void refreshNumbers(void) {
     g_view.tokAll = cbTokAll();
-    g_view.tokToday = cbTokensToday();
-    g_view.tokWeek = cbTokWeek();
-    g_view.tokMonth = cbTokMonth();
     g_view.appCount = cbTokAppCount();
 
     if (!cbCfgTokensEnabled()) {
@@ -293,6 +302,14 @@ static void refreshNumbers(void) {
 
 // One tracking + refresh tick. The panel follows the target window's top edge,
 // exactly as the probe measured.
+//
+// WHAT THE PROBE DID AND DID NOT MEASURE (probe.m carries the matching note):
+// the probe proved that a panel CAN track another process's window with zero
+// focus theft. It runs a 200x200 predicate at 20 Hz for ~6 s and hides on its
+// own schedule. This bar runs a 200x120 predicate at 4 Hz forever, and hides
+// when the target has no qualifying window (minimized, or on another Space).
+// The probe is evidence the mechanism works; only this code defines the bar's
+// rules.
 static void tick(void) {
     pid_t t = targetPID();
     g_target = t;
@@ -305,11 +322,23 @@ static void tick(void) {
         [g_panel orderOut:nil];
         return;
     }
-    CGFloat screenH = NSHeight([NSScreen mainScreen].frame);
-    NSRect want = NSMakeRect(target.x,
-                             screenH - (target.y - g_gap) - g_height,
-                             target.w,
-                             g_height);
+    // Anchor to the screen the target is ON, not whichever screen is main: a
+    // secondary-display target must clamp against its own visible frame.
+    NSScreen *screen = [NSScreen mainScreen];
+    for (NSScreen *s in [NSScreen screens])
+        if (NSPointInRect(NSMakePoint(target.x + target.w / 2, target.y + target.h / 2), s.frame))
+            { screen = s; break; }
+    if (!screen) { [g_panel orderOut:nil]; return; }   // headless/background session: nowhere to draw
+    NSRect vf = screen.visibleFrame;
+    // Quartz y is top-down from the primary's top; AppKit y is bottom-up.
+    CGFloat appY = NSHeight(screen.frame) - (target.y - g_gap) - g_height;
+    // Clamp into the visible frame: never above the menu bar's band (a
+    // status-level panel would COVER the menu), never below the Dock.
+    CGFloat maxY = NSMaxY(vf) - g_height;
+    CGFloat minY = NSMinY(vf);
+    if (appY > maxY) appY = maxY;
+    if (appY < minY) appY = minY;
+    NSRect want = NSMakeRect(target.x, appY, target.w, g_height);
     if (![g_panel isVisible]) [g_panel orderFrontRegardless];
     [g_panel setFrame:want display:YES];
     [g_panel displayIfNeeded];
@@ -324,12 +353,6 @@ static void tick(void) {
         refreshNumbers();
     }
     tickCount++;
-}
-
-static void timerFired(NSTimer *t) {
-    (void)t;
-    tick();
-    if (g_quit) [NSApp terminate:nil];
 }
 
 @implementation Chocobar
@@ -347,9 +370,17 @@ static void timerFired(NSTimer *t) {
     // before the first scan so a warm start resumes from its byte cursors).
     cbTokensInit();
 
-    // The core takes a wide path, exactly as on Windows.
+    // The core takes a wide path, exactly as on Windows. MultiByteToWideChar
+    // does not terminate on an explicit pass through this adapter's bounded
+    // conversion; terminate at the returned length and refuse an empty one.
     wchar_t wideCfg[1024];
-    MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
+    int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
+    if (wl <= 0) {
+        NSLog(@"[wizbar] mac bar: cannot encode config path, aborting");
+        [NSApp terminate:nil];
+        return;
+    }
+    wideCfg[wl] = 0;
     cbLoadConfig(wideCfg);
 
     int h = cbCfgHeight();
@@ -372,7 +403,10 @@ static void timerFired(NSTimer *t) {
     NSLog(@"[wizbar] mac bar up: config=%s height=%d gap=%d", g_configPath, g_height, g_gap);
 }
 
-- (void)onTick:(NSTimer *)t { timerFired(t); }
+- (void)onTick:(NSTimer *)t {
+    (void)t;
+    tick();
+}
 
 - (void)applicationWillTerminate:(NSNotification *)note {
     (void)note;
@@ -383,6 +417,9 @@ static void timerFired(NSTimer *t) {
 int main(int argc, const char *argv[]) {
     g_argc = argc;
     g_argv = argv;
+    // Headless self-test: exercise the core seam and exit before any AppKit
+    // work, so CI can run it on a runner with no window server interaction.
+    if (getenv("CHOCOBAR_SELFTEST")) return runSelfTest();
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         // Accessory, not regular: no Dock icon, no menu bar takeover. The bar

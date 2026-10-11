@@ -612,17 +612,11 @@ static void scanTokenCache(void) {
     g_tokScanAdded = 0;
     g_tokScanStart = GetTickCount();
     if (!g_cfg.tokensEnabled) {
-        // off = zero scans, zero dashboard data (master switch): drop every
-        // aggregate and the live cursors with them, so a re-enable is one
-        // clean full re-read instead of resuming from cursors that skipped
-        // what arrived while off. Memory-only: apply it inline.
-        g_tokPendSeedReset = 1;
-        g_tokInnerToday = -1;
-        g_tokInnerTodayValid = 1;
-        g_cacheReadDone = 0; // a later re-enable must re-read the seed
-        tokLiveReset();
-        InterlockedExchange(&g_tokScanDone, 1);
-        tokDrainPending();
+        // off = zero scans, zero dashboard data (master switch). The reset
+        // lives in p_agg.c (tokMasterOffReset) so the macOS scan takes the
+        // exact same path: a re-enable is one clean full re-read, never a
+        // resume from cursors that skipped what arrived while off.
+        tokMasterOffReset();
         return;
     }
     dashDayRollover();

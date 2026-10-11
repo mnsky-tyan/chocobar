@@ -47,8 +47,9 @@ static const double kPollInterval = 0.05;   // 20 Hz
 static const double kPosTolerance = 6.0;
 
 // The child's move schedule, in seconds from its own start. The parent reads
-// these same constants so both roles agree without a shared header.
-static const double kChildT0 = 0.3;    // settle: window is at its start rect
+// these same constants so both roles agree without a shared header. (There is
+// no separate settle constant: the child creates its window and immediately
+// holds the start rect until T1, so the settle phase IS [0, T1).)
 static const double kChildT1 = 1.5;    // move to the second rect
 static const double kChildT2 = 3.0;    // minimize
 static const double kChildT3 = 3.6;    // restore
@@ -352,7 +353,7 @@ static int runParent(void) {
         [panel orderOut:nil];
         [task waitUntilExit];
 
-        printf("SAMPLES %d\n", pr.samples ? pr.samples : pr.targetSeen);
+        printf("SAMPLES %d\n", pr.samples);
         printf("TARGET_SEEN %d\n", pr.targetSeen);
         printf("TRACKED_OK %d\n", pr.trackedOk);
         printf("TRACK_BAD %d\n", pr.trackBad);

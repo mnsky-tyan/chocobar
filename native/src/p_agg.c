@@ -57,8 +57,16 @@ static long long g_tokScanAdded = 0;    // the "+N tokens" the worker folded in
 // Called at the end of the drain so the platform can react to a completed scan.
 // On Windows this posts the message that wakes the bar's paint; the macOS bar
 // polls the aggregates from its timer, so it does nothing. Each platform
-// defines it exactly once.
+// defines it exactly once. The linkage differs by build ON PURPOSE: in the
+// Windows single-TU build p_ui.c defines it static (so the forward decl here
+// must be static too - declaring static then defining extern is C11 6.2.2p7
+// UB); in the portable build the definition at the bottom of this file has
+// external linkage and the decl must match.
+#ifdef CHOCOBAR_PORTABLE
+void tokScanFinishedNotify(void);
+#else
 static void tokScanFinishedNotify(void);
+#endif
 
 // ---- dashboard aggregation (filled by scanTokenCache) ----------------------
 #define DASH_MAX_APPS 12
@@ -99,8 +107,11 @@ static int g_modelCount = 0;
 static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day detail)
 static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
 static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
-// The dashboard window/type are declared here (before configCheckTick, which
-// needs to invalidate the open board after a config reload).
+// Everything above these tables is the aggregation PRODUCER side, shared by
+// both platforms. The CONSUMER is each platform's renderer: p_ui.c draws the
+// dashboard from these tables on Windows (DASH_MODEL_ROWS, g_dash*, the day
+// heatmap), main.m reads the totals through the cb* accessors on macOS.
+// The tables' shape is the contract between the two front-ends.
 
 // first boundary at or before ts: bnd[1] is today, bnd[DASH_MAX_DAYS] the
 // oldest bucket, bnd[0] (tomorrow) rejects later-dated records. Returns 1 for
@@ -328,7 +339,13 @@ static void tokDrainPending(void) {
         writeLogA(lb);
     }
     g_tokDataVersion++;
-    g_tokScanBusy = 0;
+    // Release the busy flag with the same interlocked store the Windows drain
+    // has always used: the scan worker's CompareExchange on this flag pairs
+    // with it, and dropping the barrier here silently changed the Windows
+    // binary when this code was extracted (volatile stores carry release
+    // semantics on MSVC x86-64 in practice, but that is a compiler property,
+    // not something the extraction was entitled to assume).
+    InterlockedExchange(&g_tokScanBusy, 0);
     tokScanFinishedNotify();
     if (g_cfg.debug) { // total scan duration (the bar stayed responsive throughout)
         DWORD dt = GetTickCount() - g_tokScanStart;
@@ -342,6 +359,23 @@ static void tokDrainPending(void) {
     }
 }
 
+// tokens.enabled = 0 is a master switch, not a pause: drop every aggregate and
+// the live cursors, so a re-enable is one clean full re-read instead of
+// resuming from cursors that skipped what arrived while off. Extracted from
+// p_ui.c's scanTokenCache so BOTH platforms take the same reset - the macOS
+// scan previously returned without resetting, leaving stale totals painted and
+// stale cursors on disk. Memory-only; the drain applies it inline.
+static void tokMasterOffReset(void) {
+    g_tokPendSeedReset = 1;
+    g_tokInnerToday = -1;
+    g_tokInnerTodayValid = 1;
+    g_cacheReadDone = 0; // a later re-enable must re-read the seed
+    tokLiveReset();
+    InterlockedExchange(&g_tokScanDone, 1);
+    tokDrainPending();
+}
+
+
 // ---- macOS bridge accessors -----------------------------------------------------
 //
 // The core is built as one translation unit and is almost entirely `static`, so
@@ -350,26 +384,22 @@ static void tokDrainPending(void) {
 // the Windows translation unit is byte-for-byte unchanged and cannot grow a
 // symbol that collides with anything.
 //
-// Everything here is a read of state the shared code already computed. None of
-// it recomputes anything: if a number appears on the macOS bar it came from the
-// same aggRecord/tokDeriveWindows path the Windows bar uses.
+// WHAT THIS BLOCK ACTUALLY DOES: cbTok*/cbCfg* are pure reads of state the
+// shared code already computed. cbCoreInit, cbTokensInit, cbLoadConfig and
+// cbScanTokens are NOT reads - they initialise the config lock, run the
+// production scan, and install a whole config generation. The macOS bar calls
+// them from its main thread only; cbScanTokens pins the config generation for
+// the walk exactly as the Windows worker does, so the day a scan moves off the
+// main thread the pinning is already right.
 
 #ifdef CHOCOBAR_PORTABLE
 
 long long cbTokAll(void) { return g_tokAll; }
-long long cbTokWeek(void) { return g_tokWeek; }
-long long cbTokMonth(void) { return g_tokMonth; }
-long long cbTokensToday(void) { return g_tokensToday; }
 int cbTokAppCount(void) { return g_appCount; }
 const char *cbTokAppName(int i) { return (i >= 0 && i < g_appCount) ? g_appName[i] : ""; }
 long long cbTokAppSum(int i) { return (i >= 0 && i < g_appCount) ? tokAggSum(&g_appAgg[i]) : 0; }
-long long cbTokAppCalls(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].req : 0; }
-int cbTokModelCount(void) { return g_modelCount; }
-const char *cbTokModelLabel(int i) { return (i >= 0 && i < g_modelCount) ? g_modelLabel[i] : ""; }
-long long cbTokModelSum(int i) { return (i >= 0 && i < g_modelCount) ? tokAggSum(&g_modelAgg[i]) : 0; }
 
 int cbTokSourceCount(void) { return g_cfg.tokSrcCount; }
-const char *cbTokSourceApp(int i) { return (i >= 0 && i < g_cfg.tokSrcCount) ? g_cfg.tokSrc[i].app : ""; }
 
 int cbCfgTokensEnabled(void) { return g_cfg.tokensEnabled; }
 int cbCfgRescanSec(void) { return g_cfg.tokensRescanSec; }
@@ -385,7 +415,12 @@ int cbCfgGap(void) { return g_cfg.gap; }
 // which is the correct behaviour for a first run with nothing to reconcile
 // against.
 long long cbScanTokens(void) {
-    if (!g_cfgLoaded || !g_cfg.tokensEnabled || !g_cfg.tokSrcCount) return 0;
+    if (!g_cfgLoaded) return 0;
+    if (!g_cfg.tokensEnabled || !g_cfg.tokSrcCount) { tokMasterOffReset(); return 0; }
+    // Hold a generation alive for the walk, exactly as the Windows worker does
+    // ("a worker must hold a generation alive"): a config reload during the
+    // scan must retire, not free, the generation being read.
+    const Config *cfg = cfgPin();
     tokPendClear();
     g_tokPendSeedReset = 1;   // nothing seeded: derive every aggregate from scratch
     g_tokScanAdded = 0;
@@ -394,19 +429,26 @@ long long cbScanTokens(void) {
     g_cacheMaxTsScan = 0;
     g_cacheMtimeScan = 0;
     tokLiveSeed(0, 0);
-    g_tokScanAdded = tokLiveScan(&g_cfg);
+    g_tokScanAdded = tokLiveScan(cfg);
     g_tokScanDone = 1;       // the drain early-returns unless this is set
-    tokDrainPending();
+    tokDrainPending();       // reads g_cfg (debug/rescan) - unpin only after
+    cfgUnpin();
     return g_tokScanAdded;
 }
 
 void cbTokensInit(void) { tokLiveInit(); }
-
 // Config load, mirroring p_ui.c's loadConfig minus the Windows-only tail (there
 // is no Run value to register, and the icon/custom-chip machinery the Windows
 // build starts here is not part of the first macOS bar). Everything that decides
 // WHAT the numbers mean - readFileUtf8, stripLineComments, jsmn, and
 // parseConfigInto, where every default lives - is production code.
+//
+// KNOWN DIVERGENCE, recorded 2026-10-11: p_ui.c's loadConfig also writes a
+// first-run config template when the file is missing; this copy does not, so a
+// fresh macOS profile runs on defaults until the user creates a config (the
+// Windows one keeps working, since the file shape is identical). Factoring the
+// read-strip-parse-install core into one shared function is planned work, not
+// something to rush into the same pass as a behaviour fix.
 int cbLoadConfig(const wchar_t *path) {
     int len = 0;
     char *raw = readFileUtf8(path, &len);

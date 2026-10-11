@@ -42,6 +42,30 @@ CORE_PARTS=(
   native/src/p_agg.c
 )
 
+# --- part-list drift guard -------------------------------------------------------
+# native/build.sh calls its PARTS array "authoritative". The macOS core list is
+# a SUBSEQUENCE of it (this build deliberately skips p_metrics.c and p_subs.c,
+# which are wholly Win32-coupled) but the relative order must match, because the
+# amalgamated translation unit resolves the core's cross-part `static` forward
+# declarations by concatenation order. A part renamed or reordered on the
+# Windows side would otherwise silently drop or misorder here; this makes it a
+# hard error. (Windows entries are "src/x.c" relative to native/.)
+native_parts=$(sed -n '/^PARTS=(/,/^)/p' native/build.sh | grep -o 'src/[a-z_]*\.c' | sed 's|^|native/|')
+prev=-1
+for p in "${CORE_PARTS[@]}"; do
+  idx=$(grep -nx "$p" <<<"$native_parts" | cut -d: -f1 | head -n1)
+  if [ -z "$idx" ]; then
+    echo "FATAL: $p is not in native/build.sh's authoritative PARTS list" >&2
+    exit 1
+  fi
+  if [ "$idx" -le "$prev" ]; then
+    echo "FATAL: $p is out of order relative to native/build.sh's PARTS" >&2
+    exit 1
+  fi
+  prev=$idx
+done
+echo "part list: subsequence of native/build.sh PARTS, order verified"
+
 # --- assemble the core translation unit -----------------------------------------
 # Same concatenation the Windows build does, plus two substitutions the Windows
 # build does not need:
@@ -73,19 +97,31 @@ print('core TU: %d lines' % len(full.splitlines()))
 PY
 
 # --- compile ---------------------------------------------------------------------
-CFLAGS=(
+# The unused-symbol suppressions live ONLY on the core translation unit: it
+# compiles a SUBSET of the Windows TU, so helpers the renderer and provider
+# readers use are genuinely unreferenced here (wallNowLocalMs, cfgPin on the
+# Windows side, appLabelW until macOS draws a dashboard). They stay in the
+# shared source because the Windows build needs them; deleting them to quiet a
+# warning would stop the platforms sharing code. adapter.m and main.m are
+# macOS-native files where EVERY symbol should earn its place, so they compile
+# at full strictness - that is what surfaced the dead code the review found.
+CORE_CFLAGS=(
   -O2
   -Wall
   -Wextra
   -Wno-unused-parameter
-  # The portable build compiles a SUBSET of the Windows translation unit, so
-  # helpers the renderer and the provider readers use are genuinely unreferenced
-  # here (wallNowLocalMs, hexToColorref, cfgPin, appLabelW, findStr, ...). They
-  # stay in the shared source because the Windows build needs them and deleting
-  # them to quiet a warning would mean the two platforms stop sharing code.
   -Wno-unused-function
   -Wno-unused-variable
-  -Wno-unused-private-field
+  -DCHOCOBAR_PORTABLE=1
+  -Inative/src
+  -Inative/vendor
+  -mmacosx-version-min=13.0
+)
+APP_CFLAGS=(
+  -O2
+  -Wall
+  -Wextra
+  -Wno-unused-parameter
   -DCHOCOBAR_PORTABLE=1
   -Inative/src
   -Inative/vendor
@@ -93,11 +129,11 @@ CFLAGS=(
 )
 
 echo "compiling the core + adapter..."
-clang "${CFLAGS[@]}" -c "$CORE_TU" -o "$OUT/core.o"
-clang "${CFLAGS[@]}" -c macos/src/adapter.m -o "$OUT/adapter.o"
+clang "${CORE_CFLAGS[@]}" -c "$CORE_TU" -o "$OUT/core.o"
+clang "${APP_CFLAGS[@]}" -c macos/src/adapter.m -o "$OUT/adapter.o"
 
 echo "compiling the bar..."
-clang "${CFLAGS[@]}" -c macos/src/main.m -o "$OUT/main.o"
+clang "${APP_CFLAGS[@]}" -c macos/src/main.m -o "$OUT/main.o"
 
 echo "linking..."
 clang -o "$OUT/chocobar-mac" \
