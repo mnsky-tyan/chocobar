@@ -26,7 +26,7 @@
 // costs a re-read, never a wrong number, because the ts filter still applies).
 
 // helpers that live in the later parts of the assembled translation unit
-// (aggRecord and dashMidnightMs are p_ui.c's: the drain owns the aggregates)
+// (aggRecord and dashMidnightMs are p_agg.c's: the drain owns the aggregates)
 static long long parseLL(const char *p, const char *end);
 static char *readFileUtf8(const wchar_t *path, int *outLen);
 static void stripLineComments(char *s);
@@ -77,7 +77,7 @@ static long long g_cacheMtimeMs = 0;   // when that cache was last written
 // The scan runs on a worker thread, but the dashboard's aggregates stay
 // UI-thread-affine: parsing only STAGES records here and the UI thread
 // applies them through aggRecord when the scan's done message lands
-// (tokDrainPending, p_ui.c). One scan at a time (g_tokScanBusy), so this
+// (tokDrainPending, p_agg.c). One scan at a time (g_tokScanBusy), so this
 // buffer needs no lock of its own.
 typedef struct {
     char app[20];   // aggRecord clamps to 19 + NUL

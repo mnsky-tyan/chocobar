@@ -454,28 +454,63 @@ void cbTokensInit(void) { tokLiveInit(); }
 // Windows one keeps working, since the file shape is identical). Factoring the
 // read-strip-parse-install core into one shared function is planned work, not
 // something to rush into the same pass as a behaviour fix.
+//
+// g_cfgGen0 is zero-filled, so a load that can neither read nor parse the file
+// must still leave a generation installed, or the whole bar runs on a zeroed
+// config (tokens off, gap 0, no scan) while the log line above claims defaults.
+// parseConfigInto is where every default lives, so the defaults generation is
+// that same parser fed an empty document; a generation already installed is
+// kept, which is what the "keeping previous" log line below promises.
+static int cfgDefaultsInstall(void) {
+    if (g_cfgLoaded) return 1;
+    static const char empty[] = "{}";
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    int ntok = jsmn_parse(&parser, empty, sizeof(empty) - 1, NULL, 0);
+    if (ntok < 0) return 0;
+    jsmntok_t *toks = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (ntok + 1));
+    if (!toks) return 0;
+    jsmn_init(&parser);
+    jsmn_parse(&parser, empty, sizeof(empty) - 1, toks, (unsigned int)ntok);
+    Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
+    if (!next) { HeapFree(GetProcessHeap(), 0, toks); return 0; }
+    parseConfigInto(next, empty, toks, 0);
+    HeapFree(GetProcessHeap(), 0, toks);
+    cfgInstall(next);
+    g_cfgLoaded = 1;
+    return 1;
+}
+
 int cbLoadConfig(const wchar_t *path) {
     int len = 0;
     char *raw = readFileUtf8(path, &len);
     if (!raw) {
         writeLogA("[wizbar] mac: no config at the configured path - running on defaults");
-        return 0;
+        return cfgDefaultsInstall();
     }
     stripLineComments(raw);
     jsmn_parser parser;
     jsmn_init(&parser);
+    // The counting pass only sizes the array; the fill pass is the binding
+    // verdict, because it is the one that rejects what the counter tolerates
+    // (an unmatched bracket, a primitive used as a key). Handing a
+    // partially-filled array to parseConfigInto walks uninitialised tokens, so
+    // its return value decides, and a failed count simply sizes the array to
+    // one slot for the fill pass to reject again.
     int ntok = jsmn_parse(&parser, raw, (size_t)len, NULL, 0);
+    if (ntok < 0) ntok = 0;
+    jsmntok_t *toks = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (ntok + 1));
+    if (!toks) { HeapFree(GetProcessHeap(), 0, raw); return 0; }
+    jsmn_init(&parser);
+    ntok = jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
     if (ntok < 0) {
         char lb[96];
         sprintf(lb, "[wizbar] mac: config parse failed (jsmn %d) - keeping previous", ntok);
         writeLogA(lb);
+        HeapFree(GetProcessHeap(), 0, toks);
         HeapFree(GetProcessHeap(), 0, raw);
-        return 0;
+        return cfgDefaultsInstall();
     }
-    jsmntok_t *toks = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (ntok + 1));
-    if (!toks) { HeapFree(GetProcessHeap(), 0, raw); return 0; }
-    jsmn_init(&parser);
-    jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
     Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
     if (!next) { HeapFree(GetProcessHeap(), 0, toks); HeapFree(GetProcessHeap(), 0, raw); return 0; }
     parseConfigInto(next, raw, toks, 0);
