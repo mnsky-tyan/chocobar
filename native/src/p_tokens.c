@@ -39,7 +39,7 @@ static void writeLogA(const char *s);
 #endif
 
 // how many tokens the live scan folded in (the "+N" log line). Every number
-// the bar shows is derived in p_ui.c from the shared per-day buckets, so this
+// the bar shows is derived in p_agg.c from the shared per-day buckets, so this
 // scan keeps no totals of its own to drift out of step with them.
 long long g_tokAllLive = 0;
 // scan diagnostics (one log line per rescan while general.debug is on)

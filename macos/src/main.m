@@ -5,7 +5,7 @@
 // computes. It is deliberately a NEW implementation rather than a port: the
 // Windows bar is GDI into a layered window with a hand-rolled layout, and none
 // of that carries over. What carries over is the tracking contract the probe
-// measured (docs/reviews/2026-10-11-window-attachment-research.md):
+// measured (macos/probe/probe.m, which the macOS workflow runs on a schedule):
 //
 //   - the bar is NOT a child of the terminal. macOS has no cross-process
 //     window parenting, so the bar is a non-activating NSPanel at status level

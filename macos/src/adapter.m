@@ -1,11 +1,11 @@
 // macOS adapter: the platform layer the portable Chocobar core compiles against.
 //
 // WHY THIS FILE EXISTS
-// Measured 2026-10-11 with native gcc on Linux: `chocobar.c` + `p_utils.c` +
-// `p_icons.c` + `p_tokens.c` assemble into a 2849-line translation unit that
-// compiles with ZERO errors once the Windows SDK types are replaced. This file
-// is the replacement, for macOS. It implements the entire surface the core
-// touches: heap, file I/O, wide-string helpers, UTF conversion and logging.
+// The core parts macos/build.sh assembles compile UNCHANGED on macOS once the
+// Windows SDK types are replaced: chocobar_core.h declares the Win32 surface
+// and this file is its POSIX implementation. It implements the entire surface
+// the core touches: heap, file I/O, wide-string helpers, UTF conversion and
+// logging.
 //
 // Nothing in the core changes. That is the whole point: the Win32 spellings
 // below are the seam, so the core stays byte-identical to what ships on Windows

@@ -1,14 +1,16 @@
 // Win32-compatible surface declarations for the portable Chocobar core.
 //
-// This header exists so `chocobar.c`, `p_utils.c`, `p_icons.c` and
-// `p_tokens.c` compile UNCHANGED on macOS. The core is written against the
+// This header exists so the core parts compile UNCHANGED on macOS -
+// `chocobar.c`, `p_utils.c`, `p_tokens.c` and `p_agg.c`, the list
+// macos/build.sh's CORE_PARTS array owns. The core is written against the
 // Win32 spellings; this file declares them and macos/src/adapter.m implements
 // them on top of POSIX. The core source is never edited to accommodate a
 // platform, which is what keeps the Windows and macOS builds from drifting.
 //
-// Measured 2026-10-11: with exactly these declarations in place, the four core
-// parts assemble into a 2849-line translation unit that compiles with zero
-// errors under clang. See docs/reviews/2026-10-11-portable-core-boundary.md.
+// Measured 2026-10-11: with exactly these declarations in place those parts
+// assemble into one translation unit that compiles with zero errors under
+// clang, and the macOS build job in .github/workflows/macos-probe.yml keeps
+// that true on every pull request that touches them.
 //
 // NOT INCLUDED HERE, ON PURPOSE:
 // - p_metrics.c and p_subs.c. They are wholly Win32-coupled at the type level
