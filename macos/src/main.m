@@ -94,7 +94,6 @@ static int runSelfTest(void) {
     wchar_t wideCfg[1024];
     int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
     if (wl <= 0) { fprintf(stderr, "SELFTEST FAIL cannot encode config path\n"); return 1; }
-    wideCfg[wl] = 0;
     if (!cbLoadConfig(wideCfg)) { fprintf(stderr, "SELFTEST FAIL config did not load\n"); return 1; }
     long long first = cbScanTokens();
     printf("SELFTEST SCAN1 %lld TOK_ALL %lld APPS %d SOURCES %d\n",
@@ -390,9 +389,9 @@ static void tick(void) {
     // before the first scan so a warm start resumes from its byte cursors).
     cbTokensInit();
 
-    // The core takes a wide path, exactly as on Windows. MultiByteToWideChar
-    // does not terminate on an explicit pass through this adapter's bounded
-    // conversion; terminate at the returned length and refuse an empty one.
+    // The core takes a wide path, exactly as on Windows. The -1 pass converts
+    // the whole string including its terminating NUL and counts it, so the
+    // buffer arrives terminated; refuse an empty one.
     wchar_t wideCfg[1024];
     int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
     if (wl <= 0) {
@@ -400,7 +399,6 @@ static void tick(void) {
         [NSApp terminate:nil];
         return;
     }
-    wideCfg[wl] = 0;
     cbLoadConfig(wideCfg);
 
     int h = cbCfgHeight();

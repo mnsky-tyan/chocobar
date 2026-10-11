@@ -415,6 +415,10 @@ int cbCfgGap(void) { return g_cfg.gap; }
 // against.
 long long cbScanTokens(void) {
     if (!g_cfgLoaded) return 0;
+    // The drain derives its debug duration from this stamp, and the Windows
+    // scan starter sets it before its own enabled check - so the master-off
+    // path below is stamped too, exactly as it is there.
+    g_tokScanStart = GetTickCount();
     if (!g_cfg.tokensEnabled || !g_cfg.tokSrcCount) { tokMasterOffReset(); return 0; }
     // Hold a generation alive for the walk, exactly as the Windows worker does
     // ("a worker must hold a generation alive"): a config reload during the

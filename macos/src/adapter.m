@@ -402,6 +402,10 @@ int MultiByteToWideChar(unsigned cp, DWORD flags, const char *s, int bytes, wcha
     memset(&st, 0, sizeof(st));
     const char *p = s;
     int left = bytes;
+    // bytes < 0 is the NUL-terminated whole string, and Win32 counts that
+    // terminating NUL as INPUT: it is converted, written, and included in the
+    // return, so a caller never has to terminate the result itself.
+    int withNul = left < 0;
     if (left < 0) left = (int)strlen(s);
     if (outChars <= 0) {
         // size query: how many wchar_t exactly `left` bytes would need
@@ -413,7 +417,7 @@ int MultiByteToWideChar(unsigned cp, DWORD flags, const char *s, int bytes, wcha
             if (k == 0) { total++; break; }                     // an embedded NUL is one char
             total++; p += k; left -= (int)k;
         }
-        return total;
+        return withNul ? total + 1 : total;
     }
     int total = 0;
     while (left > 0 && total < outChars) {
@@ -424,6 +428,10 @@ int MultiByteToWideChar(unsigned cp, DWORD flags, const char *s, int bytes, wcha
         out[total++] = wc; p += k; left -= (int)k;
     }
     if (left > 0) return 0;   // input remained but the destination is full
+    if (withNul) {
+        if (total >= outChars) return 0;   // the terminating NUL needs a slot too
+        out[total++] = 0;
+    }
     return total;
 }
 
