@@ -77,8 +77,9 @@ python scripts/token_regression.py --exe native/token-regression.exe
 ```
 
 WSL execution requires the `win-run-hidden` windowless launcher and a harness
-on a local Windows drive. Nix builds need the same static mcfgthreads link
-flags as `build.sh`. Release publishing waits for these CI tests to pass.
+on a local Windows drive. The build script follows `build.sh`'s toolchain
+split, so its nix fallback carries the same static mcfgthread link. Release
+publishing waits for these CI tests to pass.
 
 ## Run
 
