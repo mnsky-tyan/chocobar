@@ -33,9 +33,22 @@
 #define MAX_PATH 1024
 #endif
 
+// BOOL is already defined by Objective-C (objc/objc.h, as `bool`), which every
+// .m file in the macOS build pulls in through Foundation. Redefining it as int
+// there is a hard error. The plain-C core translation unit has no objc header,
+// so it needs the Windows spelling. Both spellings behave identically for
+// everything the core does with them: assignment of TRUE/FALSE and truth tests.
+#if defined(__OBJC__)
+#import <objc/objc.h>
+#else
 typedef int BOOL;
+#endif
+#ifndef TRUE
 #define TRUE 1
+#endif
+#ifndef FALSE
 #define FALSE 0
+#endif
 
 typedef unsigned long DWORD;
 typedef unsigned long long ULONGLONG;
