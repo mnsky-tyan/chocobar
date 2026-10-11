@@ -73,8 +73,21 @@ static WinRect panelRectForTarget(WinRect t) {
 
 // Quartz -> AppKit (bottom-left origin) for the main screen. Only used on the
 // main display, which is all the child's window is placed on.
+// NSScreen/NSRunningProcess are AppKit/Foundation classes; reference them
+// explicitly rather than relying on what Cocoa.h happens to re-export.
+@class NSScreen;
+@class NSRunningProcess;
+
+// The main screen's height in AppKit (bottom-left origin) coordinates. Guarded
+// because a headless/background session can report no screen at all, which is
+// itself a result the probe should surface rather than crash on.
+static CGFloat mainScreenHeight(void) {
+    NSScreen *screen = [NSScreen mainScreen];
+    return screen ? NSHeight(screen.frame) : 0;
+}
+
 static NSRect quartzToAppKit(WinRect r) {
-    CGFloat screenH = NSMainScreen ? NSMainScreen.frame.size.height : 0;
+    CGFloat screenH = mainScreenHeight();
     return NSMakeRect(r.x, screenH - (r.y + r.h), r.w, r.h);
 }
 
@@ -98,10 +111,12 @@ static NSArray<NSValue *> *windowsForPID(pid_t pid) {
     for (CFIndex i = 0; i < n; i++) {
         CFDictionaryRef info = (CFDictionaryRef)CFArrayGetValueAtIndex(list, i);
         CFNumberRef owner = (CFNumberRef)CFDictionaryGetValue(info, kCGWindowOwnerPID);
-        if (!owner || CFNumberGetValue(owner, kCFNumberIntType) != pid) continue;
+        int ownerPid = 0;
+        if (!owner || !CFNumberGetValue(owner, kCFNumberIntType, &ownerPid) || ownerPid != pid) continue;
         // Only the normal window layer: skip tooltips, shadows and menus.
         CFNumberRef layer = (CFNumberRef)CFDictionaryGetValue(info, kCGWindowLayer);
-        if (layer && CFNumberGetValue(layer, kCFNumberIntType) != 0) continue;
+        int layerNo = 0;
+        if (layer && CFNumberGetValue(layer, kCFNumberIntType, &layerNo) && layerNo != 0) continue;
         CFDictionaryRef b = (CFDictionaryRef)CFDictionaryGetValue(info, kCGWindowBounds);
         if (!b) continue;
         CGRect rect;
@@ -174,7 +189,7 @@ static int runChild(void) {
         w.title = @"ChocobarProbeTarget";
         [w makeKeyAndOrderFront:nil];
         // place at the intended Quartz y (main screen, top-left origin)
-        CGFloat screenH = NSMainScreen.frame.size.height;
+        CGFloat screenH = mainScreenHeight();
         [w setFrameOrigin:NSMakePoint(kRect0X, screenH - kRect0Y - kRect0H)];
 
         printf("CHILD_PID %d\n", (int)[[NSRunningProcess currentProcess] processIdentifier]);
@@ -222,6 +237,17 @@ static int runParent(void) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
+        // A session with no attached display (a plain CI runner) cannot place
+        // or observe windows at all. Report that as its own outcome instead of
+        // letting the numbers below silently read as "tracking works".
+        if (![NSScreen mainScreen]) {
+            printf("NO_SCREEN\n");
+            printf("VERDICT INCONCLUSIVE\n");
+            printf("REASON no attached display: CGWindowList cannot observe on-screen windows here\n");
+            fflush(stdout);
+            return 3;
+        }
+
         // Launch the child and learn its PID.
         NSTask *task = [[NSTask alloc] init];
         task.launchPath = [[NSBundle mainBundle] executablePath] ?: @"probe";
@@ -254,7 +280,7 @@ static int runParent(void) {
         NSPanel *panel = makePanel();
         [panel orderFrontRegardless];
 
-        pid_t us = [NSRunningProcess currentProcess].processIdentifier;
+        pid_t us = [[NSRunningProcess currentProcess] processIdentifier];
         pid_t focusBefore = frontmostPID();
 
         Probe pr = {0};
@@ -273,7 +299,7 @@ static int runParent(void) {
 
             // Where the panel actually ended up, in Quartz coordinates.
             NSRect pf = [panel frame];
-            CGFloat screenH = NSMainScreen.frame.size.height;
+            CGFloat screenH = mainScreenHeight();
             WinRect got = {NSMinX(pf), screenH - (NSMinY(pf) + NSHeight(pf)),
                            NSWidth(pf), NSHeight(pf), YES};
 
