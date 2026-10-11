@@ -56,7 +56,15 @@
 #pragma comment(lib, "advapi32.lib")
 #endif
 
+// On Windows this is one translation unit, so a static forward declaration
+// ahead of its definition in p_ui.c is correct and load bearing. The macOS
+// build compiles the core parts as separate translation units against
+// chocobar_core.h, where the adapter supplies the real definition; declaring it
+// static here as well would be a conflicting-declaration error. CHOCOBAR_PORTABLE
+// is defined only by the macOS build, so the Windows path is untouched.
+#ifndef CHOCOBAR_PORTABLE
 static void writeLogA(const char *s); // p_ui
+#endif
 
 #define APP_CLASS   L"ChocobarBar"
 #define APP_MUTEX   L"ChocobarSingleInstanceMutex"

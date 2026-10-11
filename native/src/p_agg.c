@@ -1,0 +1,343 @@
+// p_agg.c - dashboard aggregation, shared by the Windows and macOS bars.
+//
+// WHY THIS PART EXISTS
+// Measured 2026-10-11: chocobar.c + p_utils.c + p_tokens.c compile off-Windows
+// with zero errors, but the token AGGREGATION - the per-app, per-model and
+// per-day buckets the bar displays - lived inside p_ui.c, the Windows renderer,
+// which is not portable. So the code that PRODUCES usage records was portable
+// while the code that TOTALS them was not, and the numbers were unreachable from
+// macOS.
+//
+// This part is that aggregation, lifted out of p_ui.c unchanged. It is appended
+// to the Windows translation unit exactly where it came from, so Windows is
+// behaviourally identical, and it is compiled into the macOS build beside the
+// portable core. One implementation, two platforms: two builds disagreeing about
+// totals would be a worse bug than either being wrong alone.
+//
+// WHAT MOVED HERE
+//   - the aggregation tables and their limits (DASH_MAX_*)
+//   - aggRecord, the only writer of those tables
+//   - the day-boundary arithmetic (aggDayIndex, dashMidnightMs,
+//     dashDayRollover), which is where the DST correctness lives
+//   - tokDeriveWindows, the stat cards
+//   - appLabelW, the tokens.labels display-name mapping
+//   - tokDrainPending, the apply step for one finished scan
+//   - the JSON helpers the cache reader needs (findStr, parseLL)
+//
+// WHAT STAYED IN p_ui.c, AND WHY
+//   - scanTokenCacheInner: reads the Electron cache through Win32 file APIs
+//   - blendCr: COLORREF/GDI colour math, pure renderer
+//   - the worker thread and the PostMessage hand-off
+//   - everything that draws
+//
+// The seam is tokScanFinishedNotify(): on Windows the drain ends by posting a
+// message to the bar window, on macOS there is no window message loop, so each
+// platform supplies that one call.
+
+// ---- shared scan state ----------------------------------------------------------
+//
+// These were p_ui.c statics. They move here because the drain below writes them
+// and both platforms' front-ends read them. Types stay as they were on Windows
+// (LONG for the interlocked flags) so the Windows build is unchanged.
+
+static long long g_tokensToday = -1;
+static int g_tokensTick = 0;
+static unsigned long long g_tokDataVersion = 0;   // moves on every completed scan
+static long long g_cacheMaxTsScan = 0;
+static long long g_cacheMtimeScan = 0;
+static DWORD g_cacheStamp[4];      // cache mtime+size stamp of the last full read
+static int g_cacheReadDone = 0;    // a full read has completed at least once
+static DWORD g_tokScanStart = 0;
+static volatile long g_tokScanBusy = 0; // one scan at a time (busy ticks are skipped)
+static volatile long g_tokScanDone = 0; // worker finished: the UI must drain
+static long long g_tokScanAdded = 0;    // the "+N tokens" the worker folded in
+
+// ---- platform seam ------------------------------------------------------------
+
+// Called at the end of the drain so the platform can react to a completed scan.
+// On Windows this posts the message that wakes the bar's paint; the macOS bar
+// polls the aggregates from its timer, so it does nothing. Each platform
+// defines it exactly once.
+static void tokScanFinishedNotify(void);
+
+// ---- dashboard aggregation (filled by scanTokenCache) ----------------------
+#define DASH_MAX_APPS 12
+#define DASH_MAX_MODELS 64
+#define DASH_MAX_DAYS 190
+// displayed by-model rows (Electron capped at 7; this store has 13 models and
+// a request asked for the space to be used, so the table reaches further)
+#define DASH_MODEL_ROWS 13
+// token-cache record fields kept separately: the Electron dash shows the
+// input/output/cache R/cache W/calls table columns, not one lumped sum
+typedef struct { long long in, out, cr, cw, req; } TokAgg;
+// the total a row shows and ranks by: raw input+output plus the cache columns
+// (the token convention the README's "Token accounting" section states). One
+// home, so a fifth field cannot be added in eight places and missed in two.
+static long long tokAggSum(const TokAgg *a) { return a->in + a->out + a->cr + a->cw; }
+static TokAgg g_appAgg[DASH_MAX_APPS];
+static char g_appName[DASH_MAX_APPS][20];
+// tokens.labels maps a raw source key to its dashboard display name (e.g.
+// "pi" -> "pi-wsl" when the store lives on WSL). The aggregation keys stay
+// raw; only rendered text is swapped, and the row dot colour still keys on
+// the raw name so an app keeps its colour.
+static void appLabelW(int ai, wchar_t *out, int cb) {
+    wchar_t key[24];
+    MultiByteToWideChar(CP_UTF8, 0, g_appName[ai], -1, key, 24);
+    for (int i = 0; i < g_cfg.tokLabelCount; i++) {
+        if (lstrcmpiW(key, g_cfg.tokLabelKeys[i]) == 0) {
+            lstrcpynW(out, g_cfg.tokLabelVals[i], cb);
+            return;
+        }
+    }
+    lstrcpynW(out, key, cb);
+}
+static int g_appCount = 0;
+static char g_modelName[DASH_MAX_MODELS][48]; // "app|model", Electron byModel key
+static char g_modelLabel[DASH_MAX_MODELS][48]; // first-seen raw model id (display)
+static TokAgg g_modelAgg[DASH_MAX_MODELS];
+static int g_modelCount = 0;
+static TokAgg g_dayApp[DASH_MAX_DAYS][DASH_MAX_APPS]; // per-day per-app (day detail)
+static long long g_tokWeek = 0, g_tokMonth = 0, g_tokAll = 0;
+static long long g_dayTot[DASH_MAX_DAYS]; // [DASH_MAX_DAYS-1] = today
+// The dashboard window/type are declared here (before configCheckTick, which
+// needs to invalidate the open board after a config reload).
+
+// first boundary at or before ts: bnd[1] is today, bnd[DASH_MAX_DAYS] the
+// oldest bucket, bnd[0] (tomorrow) rejects later-dated records. Returns 1 for
+// today and one more per day back, or -1 outside the span.
+static int aggDayIndex(long long ts, const long long *bnd) {
+    int lo = 0, hi = DASH_MAX_DAYS, j = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (bnd[mid] <= ts) { j = mid; hi = mid - 1; } else lo = mid + 1;
+    }
+    return j;
+}
+
+static void aggRecord(const char *app, int alen, long long ts,
+                      long long vin, long long vout, long long vcr, long long vcw,
+                      const char *model, int mlen, const long long *bnd) {
+    if (alen <= 0) alen = 1;
+    if (alen > 19) alen = 19;
+    // tokens.appFilter: when set, only the listed harness apps are tracked
+    if (g_cfg.tokensAppCount > 0) {
+        int ok = 0;
+        for (int i = 0; i < g_cfg.tokensAppCount && !ok; i++) {
+            wchar_t wide[20];
+            int wl = MultiByteToWideChar(CP_UTF8, 0, app, alen, wide, 20);
+            // MultiByteToWideChar does NOT terminate on an explicit input
+            // length: terminate at the RETURNED length, because the app key is
+            // UTF-8 and one byte is no longer one wide character
+            wide[wl > 0 ? wl : 0] = 0;
+            if (lstrcmpiW(wide, g_cfg.tokensApps[i]) == 0) ok = 1;
+        }
+        if (!ok) return;
+    }
+    long long sum = vin + vout + vcr + vcw;
+    int ai = -1;
+    for (int i = 0; i < g_appCount; i++)
+        if (memcmp(g_appName[i], app, alen) == 0 && g_appName[i][alen] == 0) { ai = i; break; }
+    if (ai < 0 && g_appCount < DASH_MAX_APPS) {
+        ai = g_appCount++;
+        memcpy(g_appName[ai], app, alen);
+        g_appName[ai][alen] = 0;
+    }
+    if (ai >= 0) {
+        g_appAgg[ai].in += vin; g_appAgg[ai].out += vout;
+        g_appAgg[ai].cr += vcr; g_appAgg[ai].cw += vcw;
+        g_appAgg[ai].req++;
+    }
+    // byModel: Electron keys are "app|lowercased model" (case-insensitive
+    // grouping), so the same model recorded under two casings merges
+    if (model && mlen > 0 && ai >= 0) {
+        // the key must fit g_modelName's 48-byte row: clamp to 46 chars + NUL
+        if (mlen > 40) mlen = 40;
+        char mk[48];
+        int n = 0;
+        memcpy(mk, app, alen); n = alen;
+        mk[n++] = '|';
+        int room = 46 - n;
+        if (mlen > room) mlen = room;
+        for (int i = 0; i < mlen; i++) {
+            char c = model[i];
+            mk[n + i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+        }
+        n += mlen;
+        mk[n] = 0;
+        int mi = -1;
+        for (int i = 0; i < g_modelCount; i++)
+            if (strncmp(g_modelName[i], mk, 47) == 0) { mi = i; break; }
+        if (mi < 0 && g_modelCount < DASH_MAX_MODELS) {
+            mi = g_modelCount++;
+            memcpy(g_modelName[mi], mk, (size_t)n + 1);
+            memcpy(g_modelLabel[mi], model, (size_t)mlen); // display: first-seen raw casing
+            g_modelLabel[mi][mlen] = 0;
+        }
+        if (mi >= 0) {
+            g_modelAgg[mi].in += vin; g_modelAgg[mi].out += vout;
+            g_modelAgg[mi].cr += vcr; g_modelAgg[mi].cw += vcw;
+            g_modelAgg[mi].req++;
+        }
+    }
+    int j = aggDayIndex(ts, bnd);
+    if (j >= 1) {
+        int di = DASH_MAX_DAYS - j;
+        g_dayTot[di] += sum;
+        if (ai >= 0) {
+            g_dayApp[di][ai].in += vin; g_dayApp[di][ai].out += vout;
+            g_dayApp[di][ai].cr += vcr; g_dayApp[di][ai].cw += vcw;
+            g_dayApp[di][ai].req++;
+        }
+    }
+}
+
+
+static const char *findStr(const char *p, const char *end, const char *needle) {
+    int n = 0; while (needle[n]) n++;
+    while (p + n <= end) {
+        if (*p == needle[0] && memcmp(p, needle, n) == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
+static long long parseLL(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == ':')) p++;
+    int neg = 0; if (p < end && *p == '-') { neg = 1; p++; }
+    long long v = 0;
+    while (p < end && *p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    return neg ? -v : v;
+}
+
+// true epoch-ms of local midnight, daysBack days ago. The subtraction runs in
+// the local wall-clock frame (exact calendar arithmetic, as dashColDate does);
+// only the last step applies the time zone, so every day gets its own
+// DST-correct boundary instead of a fixed 24h multiple of today's.
+static long long dashMidnightMs(const FILETIME *localMidnight, int daysBack) {
+    long long v = ((((long long)localMidnight->dwHighDateTime) << 32) | localMidnight->dwLowDateTime)
+                - (long long)daysBack * 864000000000LL;
+    FILETIME sub; sub.dwHighDateTime = (DWORD)(v >> 32); sub.dwLowDateTime = (DWORD)v;
+    FILETIME ft;
+    LocalFileTimeToFileTime(&sub, &ft);
+    return fileTimeToUnixMs(&ft);
+}
+
+// local midnight the day-indexed arrays are currently framed at
+static long long g_dashMidnight = 0;
+
+// A local midnight makes every day-indexed array one bucket older. The live
+// scan indexes each record with a freshly built boundary array, so only the
+// heatmap arrays need aging here - on the unchanged-cache fast path this
+// rollover is the only thing that moves them into today's frame.
+static void dashDayRollover(void) {
+    SYSTEMTIME st; GetLocalTime(&st);
+    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
+    FILETIME fm; SystemTimeToFileTime(&st, &fm);
+    long long mid = dashMidnightMs(&fm, 0);
+    if (g_dashMidnight && mid > g_dashMidnight) {
+        int days = (int)((mid - g_dashMidnight + 43200000LL) / 86400000LL);
+        if (days >= DASH_MAX_DAYS) {
+            memset(g_dayTot, 0, sizeof(g_dayTot));
+            memset(g_dayApp, 0, sizeof(g_dayApp));
+        } else if (days > 0) {
+            // g_dayTot/g_dayApp run oldest-first ([DASH_MAX_DAYS-1] = today), so
+            // the buckets move toward LOWER indices
+            memmove(g_dayTot, g_dayTot + days, (DASH_MAX_DAYS - days) * sizeof(g_dayTot[0]));
+            memset(g_dayTot + DASH_MAX_DAYS - days, 0, (size_t)days * sizeof(g_dayTot[0]));
+            memmove(g_dayApp, g_dayApp + days, (DASH_MAX_DAYS - days) * sizeof(g_dayApp[0]));
+            memset(g_dayApp + DASH_MAX_DAYS - days, 0, (size_t)days * sizeof(g_dayApp[0]));
+        }
+    }
+    g_dashMidnight = mid;
+}
+
+// The four stat cards are derived from the SAME per-day buckets the heatmap
+// draws: today is today's bucket, Last 7/Last 30 the in-window day sums, All
+// time every bucket. Those buckets are aged at each local midnight, so a card
+// can never keep counting a day that has already fallen out of the heatmap the
+// way a cache-side base captured once did.
+static void tokDeriveWindows(void) {
+    long long today = g_dayTot[DASH_MAX_DAYS - 1];
+    g_tokWeek = g_tokMonth = g_tokAll = 0;
+    for (int i = 0; i < DASH_MAX_DAYS; i++) {
+        long long v = g_dayTot[i];
+        if (!v) continue;
+        int back = DASH_MAX_DAYS - 1 - i;
+        if (back < 7) g_tokWeek += v;
+        if (back < 30) g_tokMonth += v;
+        g_tokAll += v;
+    }
+    // -1 = nothing was read at all: the chip shows an em dash and the board
+    // shows its empty state instead of a wall of zeros
+    if (g_tokAll > 0 || g_tokensToday >= 0) g_tokensToday = today;
+}
+
+// today's raw (cache-exclusive) input+output, mirroring tokens.js; the
+// Electron app rewrites this cache every rescan, we just read it
+// every completed scan (data OR no-data) moves the version, so the open
+// dashboard can repaint on change instead of on a fixed heartbeat
+// g_tokensToday is UI-thread-affine like the aggregates: the worker hands its
+// "today" number over through these and the drain publishes it.
+static long long g_tokInnerToday = 0;
+static int g_tokInnerTodayValid = 0;
+static void tokTodaySet(long long v) { g_tokInnerToday = v; g_tokInnerTodayValid = 1; }
+
+
+// The UI-thread apply of one finished scan - the ONLY writer of the
+// dashboard's aggregates (aggRecord). Runs when the worker's done message
+// lands; the 1s metrics tick calls it too, so a lost message only delays
+// the numbers by a tick instead of freezing them forever.
+static void tokDrainPending(void) {
+    if (g_tokScanDone != 1) return;
+    g_tokScanDone = 0;
+    // the buckets' frame date and the boundary array built just below must come
+    // from the SAME instant: the scan is off-thread, so local midnight can pass
+    // between the scan start's dashDayRollover and this drain, which would file
+    // a whole scan's records one day too old
+    dashDayRollover();
+    long long added = g_tokScanAdded;
+    long long bnd[DASH_MAX_DAYS + 1];
+    SYSTEMTIME st; GetLocalTime(&st);
+    st.wHour = st.wMinute = st.wSecond = st.wMilliseconds = 0;
+    FILETIME localMidnight;
+    SystemTimeToFileTime(&st, &localMidnight);
+    // one DST-exact boundary per heatmap bucket: bnd[j] opens the bucket that
+    // holds day j-1, so a bucket never straddles a calendar day
+    for (int j = 0; j <= DASH_MAX_DAYS; j++) bnd[j] = dashMidnightMs(&localMidnight, j - 1);
+    if (g_tokPendSeedReset) { // a full re-read re-derives from scratch
+        memset(g_dayTot, 0, sizeof(g_dayTot));
+        memset(g_appAgg, 0, sizeof(g_appAgg));
+        memset(g_dayApp, 0, sizeof(g_dayApp));
+        memset(g_modelAgg, 0, sizeof(g_modelAgg));
+        g_appCount = 0;
+        g_modelCount = 0;
+        g_tokPendSeedReset = 0;
+    }
+    for (int i = 0; i < g_tokPendN; i++) {
+        TokPend *r = &g_tokPend[i];
+        aggRecord(r->app, r->alen, r->ts, r->in, r->out, r->cr, r->cw, r->model, r->mlen, bnd);
+    }
+    tokPendShrink(); // the applied scan's high-water mark is no longer needed
+    if (g_tokInnerTodayValid) { g_tokensToday = g_tokInnerToday; g_tokInnerTodayValid = 0; }
+    // the stat cards read the same day buckets the heatmap draws, so the two
+    // can never disagree once the window slides past a midnight
+    tokDeriveWindows();
+    if (added > 0) {
+        char lb[128];
+        sprintf(lb, "[wizbar] token live scan: +%lld tokens (live all-time %lld), today=%lld", added, g_tokAllLive, g_tokensToday);
+        writeLogA(lb);
+    }
+    g_tokDataVersion++;
+    g_tokScanBusy = 0;
+    tokScanFinishedNotify();
+    if (g_cfg.debug) { // total scan duration (the bar stayed responsive throughout)
+        DWORD dt = GetTickCount() - g_tokScanStart;
+        if (dt >= 15) {
+            SYSTEMTIME nst; GetLocalTime(&nst);
+            char lb[140];
+            sprintf(lb, "[wizbar] token scan took %lu ms (off-thread) tick=%d period=%d at %02d:%02d:%02d",
+                    dt, g_tokensTick, g_cfg.tokensRescanSec, nst.wHour, nst.wMinute, nst.wSecond);
+            writeLogA(lb);
+        }
+    }
+}

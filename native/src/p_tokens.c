@@ -31,7 +31,12 @@ static long long parseLL(const char *p, const char *end);
 static char *readFileUtf8(const wchar_t *path, int *outLen);
 static void stripLineComments(char *s);
 static int jtokSpan(const jsmntok_t *t, int i);
+// writeLogA is defined by the adapter in the macOS build and by p_ui.c in the
+// Windows single-translation-unit build; the header declares it, so a second
+// static forward declaration here would conflict there.
+#ifndef CHOCOBAR_PORTABLE
 static void writeLogA(const char *s);
+#endif
 
 // how many tokens the live scan folded in (the "+N" log line). Every number
 // the bar shows is derived in p_ui.c from the shared per-day buckets, so this
