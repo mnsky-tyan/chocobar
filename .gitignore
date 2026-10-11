@@ -12,3 +12,6 @@ AGENTS.md
 .no-mistakes.yaml
 docs/agent/
 docs/reviews/
+
+# macOS build output
+macos/build/

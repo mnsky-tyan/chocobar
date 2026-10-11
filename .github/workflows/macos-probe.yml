@@ -17,7 +17,7 @@
 # THIS MUST NOT BLOCK THE WINDOWS RELEASE PATH
 # `continue-on-error: true` and the release gate does not depend on this job.
 # A failing probe is information, not a broken build.
-name: macOS probe
+name: macOS
 
 on:
   workflow_dispatch:
@@ -38,11 +38,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build:
+    # The macOS bar must COMPILE on every PR that touches it. This is a real
+    # gate, unlike the probe below: a broken macOS build is a broken build.
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the macOS bar
+        run: bash macos/build.sh
+
+      - name: Upload the bar
+        uses: actions/upload-artifact@v4
+        with:
+          name: chocobar-mac
+          path: macos/build/chocobar-mac
+          if-no-files-found: error
+          retention-days: 14
+
   probe:
     runs-on: macos-14
     timeout-minutes: 10
     # Measurement, not a gate. See the header.
     continue-on-error: true
+    needs: build
     steps:
       - uses: actions/checkout@v4
 

@@ -341,3 +341,106 @@ static void tokDrainPending(void) {
         }
     }
 }
+
+// ---- macOS bridge accessors -----------------------------------------------------
+//
+// The core is built as one translation unit and is almost entirely `static`, so
+// the macOS bar cannot see any of it. These accessors are the entire surface it
+// gets. They are compiled ONLY for the portable build (CHOCOBAR_PORTABLE), so
+// the Windows translation unit is byte-for-byte unchanged and cannot grow a
+// symbol that collides with anything.
+//
+// Everything here is a read of state the shared code already computed. None of
+// it recomputes anything: if a number appears on the macOS bar it came from the
+// same aggRecord/tokDeriveWindows path the Windows bar uses.
+
+#ifdef CHOCOBAR_PORTABLE
+
+long long cbTokAll(void) { return g_tokAll; }
+long long cbTokWeek(void) { return g_tokWeek; }
+long long cbTokMonth(void) { return g_tokMonth; }
+long long cbTokensToday(void) { return g_tokensToday; }
+int cbTokAppCount(void) { return g_appCount; }
+const char *cbTokAppName(int i) { return (i >= 0 && i < g_appCount) ? g_appName[i] : ""; }
+long long cbTokAppSum(int i) { return (i >= 0 && i < g_appCount) ? tokAggSum(&g_appAgg[i]) : 0; }
+long long cbTokAppCalls(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].req : 0; }
+int cbTokModelCount(void) { return g_modelCount; }
+const char *cbTokModelLabel(int i) { return (i >= 0 && i < g_modelCount) ? g_modelLabel[i] : ""; }
+long long cbTokModelSum(int i) { return (i >= 0 && i < g_modelCount) ? tokAggSum(&g_modelAgg[i]) : 0; }
+
+int cbTokSourceCount(void) { return g_cfg.tokSrcCount; }
+const char *cbTokSourceApp(int i) { return (i >= 0 && i < g_cfg.tokSrcCount) ? g_cfg.tokSrc[i].app : ""; }
+
+int cbCfgTokensEnabled(void) { return g_cfg.tokensEnabled; }
+int cbCfgRescanSec(void) { return g_cfg.tokensRescanSec; }
+int cbCfgDebug(void) { return g_cfg.debug; }
+int cbCfgHeight(void) { return g_cfg.height; }
+int cbCfgGap(void) { return g_cfg.gap; }
+
+// The scan, start to finish, for a platform with no worker thread.
+//
+// The staged records are applied through the PRODUCTION drain, so the
+// aggregates are built by exactly the code that builds them on Windows. There is
+// no Electron cache on macOS, so the seed is empty and every record counts -
+// which is the correct behaviour for a first run with nothing to reconcile
+// against.
+long long cbScanTokens(void) {
+    if (!g_cfgLoaded || !g_cfg.tokensEnabled || !g_cfg.tokSrcCount) return 0;
+    tokPendClear();
+    g_tokPendSeedReset = 1;   // nothing seeded: derive every aggregate from scratch
+    g_tokScanAdded = 0;
+    g_tokInnerToday = -1;
+    g_tokInnerTodayValid = 1;
+    g_cacheMaxTsScan = 0;
+    g_cacheMtimeScan = 0;
+    tokLiveSeed(0, 0);
+    g_tokScanAdded = tokLiveScan(&g_cfg);
+    g_tokScanDone = 1;       // the drain early-returns unless this is set
+    tokDrainPending();
+    return g_tokScanAdded;
+}
+
+void cbTokensInit(void) { tokLiveInit(); }
+
+// Config load, mirroring p_ui.c's loadConfig minus the Windows-only tail (there
+// is no Run value to register, and the icon/custom-chip machinery the Windows
+// build starts here is not part of the first macOS bar). Everything that decides
+// WHAT the numbers mean - readFileUtf8, stripLineComments, jsmn, and
+// parseConfigInto, where every default lives - is production code.
+int cbLoadConfig(const wchar_t *path) {
+    int len = 0;
+    char *raw = readFileUtf8(path, &len);
+    if (!raw) {
+        writeLogA("[wizbar] mac: no config at the configured path - running on defaults");
+        return 0;
+    }
+    stripLineComments(raw);
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    int ntok = jsmn_parse(&parser, raw, (size_t)len, NULL, 0);
+    if (ntok < 0) {
+        char lb[96];
+        sprintf(lb, "[wizbar] mac: config parse failed (jsmn %d) - keeping previous", ntok);
+        writeLogA(lb);
+        HeapFree(GetProcessHeap(), 0, raw);
+        return 0;
+    }
+    jsmntok_t *toks = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (ntok + 1));
+    if (!toks) { HeapFree(GetProcessHeap(), 0, raw); return 0; }
+    jsmn_init(&parser);
+    jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
+    Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
+    if (!next) { HeapFree(GetProcessHeap(), 0, toks); HeapFree(GetProcessHeap(), 0, raw); return 0; }
+    parseConfigInto(next, raw, toks, 0);
+    HeapFree(GetProcessHeap(), 0, toks);
+    HeapFree(GetProcessHeap(), 0, raw);
+    cfgInstall(next);
+    g_cfgLoaded = 1;
+    return 1;
+}
+
+// The macOS bar has no window message loop, so the drain's notify is a no-op:
+// the bar's timer reads the aggregates directly.
+void tokScanFinishedNotify(void) { }
+
+#endif // CHOCOBAR_PORTABLE
