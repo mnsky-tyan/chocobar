@@ -56,6 +56,15 @@ static long long monotonic_ms(void);
 static FILETIME unixMsToFileTime(long long ms);
 static const char *profileDir(void);
 static char *pathArg(const wchar_t *w);
+static long long adapterFileTimeToUnixMs(const FILETIME *ft);
+
+// FILETIME is 100ns ticks since 1601-01-01. The core has its own static
+// fileTimeToUnixMs for the other direction; this one is the adapter's, named
+// differently so the two coexist in one binary without shadowing each other.
+static long long adapterFileTimeToUnixMs(const FILETIME *ft) {
+    unsigned long long ticks = ((unsigned long long)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+    return (long long)(ticks / 10000ull) - 11644473600000LL;
+}
 
 // ---- HOME -------------------------------------------------------------------
 
@@ -508,14 +517,6 @@ static long long monotonic_ms(void) {
 }
 
 // ---- time conversion ----------------------------------------------------------
-
-// FILETIME is 100ns ticks since 1601-01-01. The core has its own static
-// fileTimeToUnixMs for the other direction; this one is the adapter's, named
-// differently so the two can coexist in one binary.
-static long long adapterFileTimeToUnixMs(const FILETIME *ft) {
-    unsigned long long ticks = ((unsigned long long)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
-    return (long long)(ticks / 10000ull) - 11644473600000LL;
-}
 
 static FILETIME unixMsToFileTime(long long ms) {
     long long ticks = (ms + 11644473600000LL) * 10000LL;
