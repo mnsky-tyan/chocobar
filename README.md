@@ -74,12 +74,12 @@ Every `Default` in the tables below is that built-in fallback, and so is the com
 | Key | Default | What it does |
 |---|---|---|
 | `height` | `24` | Bar height in CSS px. |
-| `gap` | `8` | Horizontal gap between chips, and the gap between dashboard panels. |
+| `gap` | `8` | Vertical offset between the terminal's top edge and the bar above it. |
 | `fontSize` | `12` | Chip text size. |
 | `fontFamily` | `"Cascadia Mono"` | Chip font. Takes a CSS font stack (`"'Segoe Print', cursive"` works); empty falls back to Segoe UI. |
 | `backgroundTint` | `"#FBF2E2"` | The cream tint you see through the acrylic. |
 | `backgroundAlpha` | `110` | How solid the tint is (0-255). |
-| `backdrop` | `"acrylic"` | `"acrylic"` for the blurred DWM backdrop, `"solid"` for a flat opaque bar. |
+| `backdrop` | `"acrylic"` | `"acrylic"` for the translucent tint (no DWM blur is applied), `"solid"` for a flat opaque bar. |
 | `radius` | `8` | Corner radius, 0-26. |
 
 ### `theme` - colors and icons
@@ -195,25 +195,46 @@ A config from before the array form (`"sources": { "pi": { "sessionsDir": ... } 
 | Key | Default | What it does |
 |---|---|---|
 | `enabled` | `false` | Master switch for the board and the gauge chip. |
-| `intervalMinutes` | `2` | Minutes between quota polls. |
-| `fetchTimeoutMs` | `20000` | Per-provider deadline: WinHTTP's connect and receive timeouts (resolve and send stay 5s). |
+| `intervalMinutes` | `2` | Minutes between quota polls (clamped 1-1440). |
+| `fetchTimeoutMs` | `20000` | Per-provider deadline: WinHTTP's connect and receive timeouts (resolve and send stay 5s). Clamped 1000-120000. |
 | `rotateSec` | `60` | Seconds each plan stays on the rotating gauge chip (5-3600). |
 | `width` / `height` | `880` / `580` | Board window size in CSS px. |
-| `providers` | `[]` | Up to 6 entries; the board fits every enabled one. |
+| `providers` | `[]` | Up to 6 entries. Each enabled provider gets a panel; if they cannot all fit the board height, the ones that fit are drawn and the rest are skipped (logged under `general.debug`). |
 
 Each provider entry:
 
 ```json
 { "type": "antigravity", "enabled": true, "label": "Antigravity",
-  "authPath": "~/.pi/agent/auth.json",
-  "clientId": "", "clientSecret": "" }
+  "authPath": "", "clientId": "", "clientSecret": "" }
 ```
 
+**Where each provider looks for a login.** Chocobar never asks you to log in itself.
+It reads the login file that another tool already saved, so you point each entry at
+that tool's file. The path is yours to choose; the file's **shape** is not - each
+reader expects a specific layout, listed below.
+
+| `type` | Config keys | The file it reads | What that file must contain |
+|---|---|---|---|
+| `chatgpt` | `authPath` | a Codex CLI login, by default `~/.codex/auth.json` | `{ "auth_mode": "chatgpt", "tokens": { "access_token": "..." } }` |
+| `zai` | `configPath`, `provider` | a Z.ai CLI config, by default `~/.zcode/v2/config.json` | `{ "provider": { "<provider>": { "enabled": true, "options": { "apiKey": "..." } } } }`; `provider` selects the key (default `builtin:zai-coding-plan`) |
+| `antigravity` | `authPath`, or `vscdbPath` | **no default** - whichever file your tool writes it to | `{ "antigravity": { "access": "...", "refresh": "...", "expires": <epoch ms>, "projectId": "..." } }` |
+| `generic` | `url`, `auth`, `windows` | any REST endpoint, declared here | see below |
+
+- `authPath` / `configPath`: `~` expands to `%USERPROFILE%`, and an absolute or UNC
+  path works too. `antigravity` has **no built-in default** on purpose: which file
+  holds an Antigravity login depends on the tool you signed in with, and a wrong
+  guess would not just read a stranger's file - a refreshed token is written back to
+  it. Point it at your own file, or leave it empty and use `vscdbPath`.
 - `enabled`: per-provider switch, honoured only when the `subs` master above is on. Defaults to **on** - declaring a provider is the act of turning it on; the first-run template ships its four examples off.
 - `type`: `chatgpt` (reads `authPath`, a Codex CLI login), `zai` (reads `configPath` + `provider`), `antigravity` (reads `authPath`, a Google Cloud Code login), `generic` (a REST quota endpoint declared entirely in config, below).
-- `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none.
+- `vscdbPath`: Antigravity only - an IDE `state.vscdb` needle-scanned for an access token when `authPath` has none. This one needs no login file from a CLI, so it is the simplest option if you sign in through the Antigravity IDE.
 - `clientId` / `clientSecret`: the Antigravity token refresh needs them (the Google desktop-client pair); there is no other quota source to fall back to, so a token that needs refreshing without them leaves the panel with no data. They are personal - keep them in your own config file, never in the repo.
-- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints: production is authoritative per family, so the daily endpoint only fills a family production does not report and the 5h pool survives. Each row is labeled with the pool it holds (`5h` or `day`). Same source as the harness's `/quota`; no IDE or language server required.
+- One `antigravity` entry renders ONE panel with two rows, Gemini and Claude/GPT, straight from `fetchAvailableModels` on both Google endpoints: production is authoritative per family, so the daily endpoint only fills a family production does not report and the 5h pool survives. Each row is labeled with the pool it holds (`5h` or `day`); no IDE or language server is required.
+
+**If your tool is not one of these**, you do not need a new Chocobar feature: the
+`generic` type below can describe any JSON quota endpoint in config. And if your
+tool stores a plain token you would rather not keep on disk at all, `auth` accepts
+`env` (an environment variable) or `literal` (the value inline in `config.json`).
 
 **`type: "generic"`** - any REST quota endpoint, declared entirely in config. This is what makes a new subscription plan a config edit rather than a code change:
 
@@ -238,14 +259,14 @@ Each provider entry:
 - `require`: a path that must be present, for endpoints that answer `200` with an error body.
 - `insecure`: authorize plain `http` (the scheme decides TLS; without this flag an `http://` URL is refused). Documented risk: it sends the token in the clear.
 
-**Layout across 0-5 providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside; with five the panels compress just enough that all five fit one screen (nothing is dropped). A failed poll keeps that provider's last good windows marked stale on the board. The gauge chip rotates through your enabled plans, one entry per `rotateSec`, showing each plan's weekly window (or its lowest window when the plan reports no weekly one); it reads `stale` only when every plan that has a number failed its last poll - one timeout no longer blanks a chip that still has fresh data.
+**Layout across providers**: zero providers shows the `No providers enabled.` empty state; each enabled provider gets one full-width panel with its quota windows side by side inside. Up to five fit comfortably; with six (the maximum) the panels compress and any that still overflow the board height are skipped, with a `general.debug` log line naming how many of the declared panels fit. A failed poll keeps that provider's last good windows marked stale on the board. The gauge chip rotates through your enabled plans, one entry per `rotateSec`, showing each plan's weekly window (or its lowest window when the plan reports no weekly one); it reads `stale` only when every plan that has a number failed its last poll - one timeout no longer blanks a chip that still has fresh data.
 
 ### `dashboard`, `terminal`, `general`
 
 | Key | Default | What it does |
 |---|---|---|
 | `dashboard.width` / `dashboard.height` | `900` / `520` | Token dashboard window size. |
-| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, ConEmu, and mintty by class, in that order. |
+| `terminal.className` | `""` | Pin one terminal window class (Win32 class name). Empty = probe Windows Terminal, conhost, VirtualConsole, and mintty by class, in that order. |
 | `terminal.title` | `""` | Optional title substring a followed window must contain (case-insensitive). Empty = any window of a probed class qualifies. |
 | `general.showTray` | `true` | Show the tray icon. |
 | `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. If you later move the exe, the bar repoints the Run value to the path you are actually running - so "start with Windows" follows the file. |
@@ -296,7 +317,7 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
                 "configPath": "~/.zcode/v2/config.json",
                 "provider": "builtin:zai-coding-plan" },
               { "type": "antigravity", "enabled": false, "label": "Antigravity",
-                "authPath": "~/.pi/agent/auth.json",
+                "authPath": "",
                 "clientId": "", "clientSecret": "" },
               { "type": "generic", "enabled": false, "label": "MyPlan",
                 "url": "https://api.example.com/v1/quota", "method": "GET",
@@ -407,11 +428,11 @@ Tests are headless and require no GUI:
 npm test
 ```
 
-The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, and the blind-turn estimator on by default with no override block.
+The suite decodes the first-run config template the bar writes (`g_template` in `native/src/p_ui.c`), parses it as JSONC and asserts it ships neutral: every usage source off, no SQLite paths, pet and subscription board off, no personal identifiers, an empty `authPath` on the `antigravity` provider (so the reader never falls back to a vendor store), and the blind-turn estimator on by default with no override block.
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
-CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals and cursor serialization. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
+CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals, cursor serialization, that the `antigravity` provider never invents a credential path when the config names none, and that omitting a config key keeps its built-in default. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
 
 ## License
 

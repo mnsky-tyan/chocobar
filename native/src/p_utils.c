@@ -37,7 +37,8 @@ static char *readFileUtf8(const wchar_t *path, int *outLen) {
     CloseHandle(h);
     if (!ok) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
     buf[got] = 0;
-    if (got >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB) {
+    if (got >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB
+                  && (unsigned char)buf[2] == 0xBF) {
         memmove(buf, buf + 3, got - 2);
         got -= 3;
     }

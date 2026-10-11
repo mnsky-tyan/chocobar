@@ -108,11 +108,18 @@ def main():
     # WSL executions keep fixtures with the local Windows-drive executable.
     parent = exe.parent if os.name != "nt" else None
     failures = []
+    total = 0
     def check(name, action):
+        nonlocal total
+        total += 1
         try:
             scans = action()
             print("PASS: " + name + " " + json.dumps(scans), flush=True)
-        except (AssertionError, OSError, ValueError, subprocess.SubprocessError, RuntimeError) as error:
+        # KeyError/TypeError included: a child JSON or cursor file missing an
+        # expected key used to escape check() and abort the whole run with a
+        # traceback instead of one counted FAIL line.
+        except (AssertionError, OSError, ValueError, TypeError, KeyError,
+                subprocess.SubprocessError, RuntimeError) as error:
             failures.append(name)
             print(f"FAIL: {name}: {error}", flush=True)
 
@@ -172,7 +179,83 @@ def main():
                 raise AssertionError("cursor did not round-trip the file position and zero transcript length")
             return []
         check("cursor serialization round-trips escaped paths", cursor_contract)
-    print(f"{13 - len(failures)}/13 executable token cases passed")
+        # The antigravity provider must not invent a credential path. The child
+        # plants a plausible vendor store plus a second user-named store in its
+        # own scratch profile and asserts the reader resolves nothing when the
+        # config names no path, and reads exactly the named file when it does.
+        def agy_no_default_path():
+            profile = fixture(root, "agy-path")
+            command = [windows_path(exe), "--agy-probe", windows_path(profile)]
+            kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                      "stdin": subprocess.DEVNULL, "timeout": 45}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                # WSL cannot exec a Windows binary directly, and the launcher's
+                # own exit status does not carry the child's - the child prints
+                # one verdict line per case instead.
+                if not shutil.which("win-run-hidden"):
+                    raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
+                command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
+            child = subprocess.run(command, **kwargs)
+            text = child.stdout or ""
+            if os.name == "nt" and child.returncode != 0:
+                raise AssertionError(f"agy probe exited {child.returncode}: {text}")
+            verdicts = {}
+            for line in text.splitlines():
+                label, sep, rest = line.partition(" found=")
+                if not sep:
+                    continue
+                found, _, resolved = rest.partition(" resolved=\"")
+                if found not in ("0", "1") or not resolved.endswith("\""):
+                    raise AssertionError(f"agy probe line did not parse: {line}")
+                if label in verdicts:
+                    raise AssertionError(f"agy probe repeated {label}: {text}")
+                verdicts[label] = (found == "1", resolved[:-1])
+            wanted = {"empty_authPath": False, "absent_authPath": False, "explicit_own": True}
+            if set(verdicts) != set(wanted):
+                raise AssertionError(f"agy probe did not report its cases: {text}")
+            for label, want_found in wanted.items():
+                found, resolved = verdicts[label]
+                if found != want_found:
+                    raise AssertionError(f"{label}: expected found={int(want_found)}: {text}")
+                if ".pi" in resolved:
+                    raise AssertionError(f"{label}: resolved to the vendor store: {resolved}")
+                if want_found and not (".wizbar" in resolved and "antigravity.json" in resolved):
+                    raise AssertionError(f"{label}: {resolved} is not the explicit user path")
+            return [line for line in text.splitlines() if line.strip()]
+        check("antigravity never invents a credential path", agy_no_default_path)
+
+        # Omitting a key must keep its built-in default (the template promises
+        # "delete a key and the built-in default applies").
+        def omitted_keys_keep_defaults():
+            command = [windows_path(exe), "--defaults-probe"]
+            kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                      "stdin": subprocess.DEVNULL, "timeout": 45}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                if not shutil.which("win-run-hidden"):
+                    raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
+                command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
+            child = subprocess.run(command, **kwargs)
+            text = child.stdout or ""
+            if os.name == "nt" and child.returncode != 0:
+                raise AssertionError(f"defaults probe exited {child.returncode}: {text}")
+            seen = {}
+            for line in text.splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key in ("backgroundTint", "backdrop", "fontFamily", "verdict"):
+                    seen[key] = value.strip()
+            wanted = {"backgroundTint": "#FBF2E2", "backdrop": "acrylic", "fontFamily": "Cascadia Mono"}
+            for key, want in wanted.items():
+                if seen.get(key) != want:
+                    raise AssertionError(f"{key}: expected {want}, got {seen.get(key)!r}: {text}")
+            if seen.get("verdict") != "DEFAULTS_KEPT":
+                raise AssertionError(f"defaults were lost when keys were omitted: {text}")
+            return [line for line in text.splitlines() if line.strip()]
+        check("omitted config keys keep their built-in defaults", omitted_keys_keep_defaults)
+    print(f"{total - len(failures)}/{total} executable token cases passed")
     return 1 if failures else 0
 
 
