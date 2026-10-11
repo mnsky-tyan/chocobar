@@ -28,7 +28,12 @@
 // Run:   ./probe            (parent: spawns the child, prints a verdict)
 //        ./probe --child    (child: owns the window, prints its PID)
 
-#import <Cocoa/Cocoa.h>
+// Cocoa.h is the umbrella, but relying on what it happens to re-export has
+// already cost one build. Import the frameworks explicitly so NSScreen and
+// NSRunningProcess resolve regardless of header ordering.
+#import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <string.h>
 
 // ---- tunables shared by both roles -----------------------------------------
@@ -74,9 +79,6 @@ static WinRect panelRectForTarget(WinRect t) {
 // Quartz -> AppKit (bottom-left origin) for the main screen. Only used on the
 // main display, which is all the child's window is placed on.
 // NSScreen/NSRunningProcess are AppKit/Foundation classes; reference them
-// explicitly rather than relying on what Cocoa.h happens to re-export.
-@class NSScreen;
-@class NSRunningProcess;
 
 // The main screen's height in AppKit (bottom-left origin) coordinates. Guarded
 // because a headless/background session can report no screen at all, which is
