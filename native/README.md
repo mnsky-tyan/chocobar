@@ -67,9 +67,7 @@ With a system MinGW toolchain, from the repository root:
 
 ```sh
 bash native/build.sh --check
-x86_64-w64-mingw32-gcc -O2 -municode -mconsole native/tests/token_regression.c \
-  -Inative/vendor -Inative/src -o native/token-regression.exe \
-  -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32
+bash scripts/build_token_regression.sh   # -> native/token-regression.exe
 ```
 
 Run on Windows with Python 3:

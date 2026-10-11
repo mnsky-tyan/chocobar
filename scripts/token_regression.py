@@ -60,9 +60,13 @@ def fixture(root, name, seeded=False):
     return profile
 
 
-def run_child(exe, profile, mode="normal", expected_exit=0):
-    result = profile / ("result-" + uuid.uuid4().hex + ".json")
-    args = [windows_path(exe), windows_path(profile), windows_path(result), mode]
+def run_exe(args):
+    """Launch the console harness the platform-appropriate way.
+
+    WSL cannot exec a Windows binary directly, and the launcher's own exit
+    status does not carry the child's - probes print verdict lines instead.
+    One launcher owns the subprocess shape so a new flag lands everywhere.
+    """
     kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
               "stdin": subprocess.DEVNULL, "timeout": 45}
     if os.name == "nt":
@@ -72,7 +76,13 @@ def run_child(exe, profile, mode="normal", expected_exit=0):
         if not shutil.which("win-run-hidden"):
             raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
         command = ["win-run-hidden", "--stdout", "--timeout", "25"] + args
-    child = subprocess.run(command, **kwargs)
+    return subprocess.run(command, **kwargs)
+
+
+def run_child(exe, profile, mode="normal", expected_exit=0):
+    result = profile / ("result-" + uuid.uuid4().hex + ".json")
+    args = [windows_path(exe), windows_path(profile), windows_path(result), mode]
+    child = run_exe(args)
     if not result.is_file():
         raise AssertionError(f"Missing child completion file (launcher {child.returncode}): {child.stdout}")
     data = json.loads(result.read_text(encoding="utf-8"))
@@ -185,19 +195,7 @@ def main():
         # config names no path, and reads exactly the named file when it does.
         def agy_no_default_path():
             profile = fixture(root, "agy-path")
-            command = [windows_path(exe), "--agy-probe", windows_path(profile)]
-            kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
-                      "stdin": subprocess.DEVNULL, "timeout": 45}
-            if os.name == "nt":
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-            else:
-                # WSL cannot exec a Windows binary directly, and the launcher's
-                # own exit status does not carry the child's - the child prints
-                # one verdict line per case instead.
-                if not shutil.which("win-run-hidden"):
-                    raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
-                command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
-            child = subprocess.run(command, **kwargs)
+            child = run_exe([windows_path(exe), "--agy-probe", windows_path(profile)])
             text = child.stdout or ""
             if os.name == "nt" and child.returncode != 0:
                 raise AssertionError(f"agy probe exited {child.returncode}: {text}")
@@ -229,16 +227,7 @@ def main():
         # Omitting a key must keep its built-in default (the template promises
         # "delete a key and the built-in default applies").
         def omitted_keys_keep_defaults():
-            command = [windows_path(exe), "--defaults-probe"]
-            kwargs = {"text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
-                      "stdin": subprocess.DEVNULL, "timeout": 45}
-            if os.name == "nt":
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-            else:
-                if not shutil.which("win-run-hidden"):
-                    raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
-                command = ["win-run-hidden", "--stdout", "--timeout", "25"] + command
-            child = subprocess.run(command, **kwargs)
+            child = run_exe([windows_path(exe), "--defaults-probe"])
             text = child.stdout or ""
             if os.name == "nt" and child.returncode != 0:
                 raise AssertionError(f"defaults probe exited {child.returncode}: {text}")

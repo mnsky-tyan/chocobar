@@ -78,10 +78,6 @@ static WinRect panelRectForTarget(WinRect t) {
     return p;
 }
 
-// Quartz -> AppKit (bottom-left origin) for the main screen. Only used on the
-// main display, which is all the child's window is placed on.
-// NSScreen/NSRunningProcess are AppKit/Foundation classes; reference them
-
 // The main screen's height in AppKit (bottom-left origin) coordinates. Guarded
 // because a headless/background session can report no screen at all, which is
 // itself a result the probe should surface rather than crash on.

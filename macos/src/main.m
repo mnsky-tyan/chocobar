@@ -87,14 +87,25 @@ static void resolveConfigPath(void) {
 // net for the whole seam: path translation, directory enumeration, seek
 // semantics, codecs, cursor persistence, aggregation. A bar that merely
 // launches proves none of it.
-static int runSelfTest(void) {
-    resolveConfigPath();   // the app delegate normally does this; headless mode has none
+// The seam startup both entry points share: init the config lock, load byte
+// cursors, encode the resolved config path wide (the -1 pass converts and
+// counts the terminating NUL), and load it. Returns -1 when the path cannot
+// be encoded, 0 when the load fails, 1 on success. The self-test refuses on
+// any non-1; the GUI path logs instead of proceeding silently.
+static int loadCoreConfig(wchar_t *wideCfg, size_t cap) {
     cbCoreInit();
     cbTokensInit();
+    int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, (int)cap);
+    if (wl <= 0) return -1;
+    return cbLoadConfig(wideCfg) ? 1 : 0;
+}
+
+static int runSelfTest(void) {
+    resolveConfigPath();   // the app delegate normally does this; headless mode has none
     wchar_t wideCfg[1024];
-    int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
-    if (wl <= 0) { fprintf(stderr, "SELFTEST FAIL cannot encode config path\n"); return 1; }
-    if (!cbLoadConfig(wideCfg)) { fprintf(stderr, "SELFTEST FAIL config did not load\n"); return 1; }
+    int r = loadCoreConfig(wideCfg, 1024);
+    if (r < 0) { fprintf(stderr, "SELFTEST FAIL cannot encode config path\n"); return 1; }
+    if (r == 0) { fprintf(stderr, "SELFTEST FAIL config did not load\n"); return 1; }
     long long first = cbScanTokens();
     printf("SELFTEST SCAN1 %lld TOK_ALL %lld APPS %d SOURCES %d\n",
            first, cbTokAll(), cbTokAppCount(), cbTokSourceCount());
@@ -269,8 +280,12 @@ static const double kCorner = 8.0;
 
 static NSPanel *g_panel = nil;
 static BarView *g_view = nil;
-static pid_t g_target = 0;
 static int g_height = 30, g_gap = 4;
+
+// The tracking tick's cadence. The rescan period is computed from this same
+// constant (see tick), so retuning the tick rescales scans deliberately - the
+// two numbers can no longer drift apart silently.
+static const double kTickInterval = 0.25;   // seconds: 4 Hz
 
 static NSPanel *makePanel(void) {
     NSPanel *p = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 10, g_height)
@@ -325,7 +340,6 @@ static void refreshNumbers(void) {
 // rules.
 static void tick(void) {
     pid_t t = targetPID();
-    g_target = t;
     if (!t) {
         [g_panel orderOut:nil];
         return;
@@ -367,7 +381,7 @@ static void tick(void) {
     // numbers must be current when the panel repaints.
     static int tickCount = 0;
     int period = cbCfgRescanSec() > 0 ? cbCfgRescanSec() : 60;
-    if (tickCount % (period * 4) == 0) {   // the tick runs at 4 Hz
+    if (tickCount % (int)(period / kTickInterval) == 0) {
         cbScanTokens();
         refreshNumbers();
     }
@@ -379,27 +393,18 @@ static void tick(void) {
     (void)note;
     resolveConfigPath();
 
-
-    // Initialise the config-generation lock before anything reads config state,
-    // exactly as the Windows entry point does before its first loadConfig.
-    cbCoreInit();
-
     // Load cursors before the config, then the config, then the first scan:
     // the same startup ordering the Windows bar uses (tokLiveInit is called
     // before the first scan so a warm start resumes from its byte cursors).
-    cbTokensInit();
-
-    // The core takes a wide path, exactly as on Windows. The -1 pass converts
-    // the whole string including its terminating NUL and counts it, so the
-    // buffer arrives terminated; refuse an empty one.
     wchar_t wideCfg[1024];
-    int wl = MultiByteToWideChar(CP_UTF8, 0, g_configPath, -1, wideCfg, 1024);
-    if (wl <= 0) {
+    int r = loadCoreConfig(wideCfg, 1024);
+    if (r < 0) {
         NSLog(@"[wizbar] mac bar: cannot encode config path, aborting");
         [NSApp terminate:nil];
         return;
     }
-    cbLoadConfig(wideCfg);
+    if (r == 0)
+        NSLog(@"[wizbar] mac bar: config did not load - running on the core defaults");
 
     int h = cbCfgHeight();
     int gp = cbCfgGap();
@@ -413,7 +418,7 @@ static void tick(void) {
     cbScanTokens();
     refreshNumbers();
 
-    [NSTimer scheduledTimerWithTimeInterval:0.25
+    [NSTimer scheduledTimerWithTimeInterval:kTickInterval
                                      target:self
                                    selector:@selector(onTick:)
                                    userInfo:nil
