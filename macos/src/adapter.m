@@ -387,24 +387,44 @@ int lstrcatA(char *d, const char *s) { strcat(d, s); return (int)strlen(d); }
 int MultiByteToWideChar(unsigned cp, DWORD flags, const char *s, int bytes, wchar_t *out, int outChars) {
     (void)cp; (void)flags;
     if (!s) return 0;
-    if (bytes < 0) bytes = (int)strlen(s);
-    if (outChars <= 0) {
-        // size query: how many wchar_t would the whole string need
-        mbstate_t st;
-        memset(&st, 0, sizeof(st));
-        return (int)mbsrtowcs(NULL, &s, 0, &st);
-    }
+    // Win32 contract: convert EXACTLY `bytes` input bytes (bytes < 0 = the
+    // NUL-terminated whole string), write at most `outChars` wide chars,
+    // return 0 on invalid input or when the result does not fit.
+    //
+    // mbsrtowcs cannot express the input-side bound - it converts until the
+    // NUL or the output limit, whichever comes first. The core passes
+    // mid-buffer SPANS (jdup hands utf8ToWide a byte range inside the raw
+    // config text; aggRecord hands an app key inside a session line), so a
+    // conversion that runs to the NUL turns every span into the rest of the
+    // buffer: sources resolved to garbage paths and the scan found zero files.
+    // This mbrtowc loop is the only spelling that honours both bounds.
     mbstate_t st;
     memset(&st, 0, sizeof(st));
     const char *p = s;
-    // The bound is the DESTINATION width (outChars wchar_t), not the input byte
-    // count: Win32 writes at most outChars wide chars including the terminator
-    // and returns 0 (ERROR_INSUFFICIENT_BUFFER) when they do not fit. Bounding
-    // by the input instead would overflow a tight destination buffer.
-    size_t n = mbsrtowcs(out, &p, (size_t)outChars, &st);
-    if (n == (size_t)-1) return 0;
-    if (n >= (size_t)outChars && p < s + bytes) return 0;   // did not fit: Win32 returns 0
-    return (int)n;
+    int left = bytes;
+    if (left < 0) left = (int)strlen(s);
+    if (outChars <= 0) {
+        // size query: how many wchar_t exactly `left` bytes would need
+        int total = 0;
+        while (left > 0) {
+            wchar_t wc;
+            size_t k = mbrtowc(&wc, p, (size_t)left, &st);
+            if (k == (size_t)-1 || k == (size_t)-2) return 0;   // invalid | incomplete
+            if (k == 0) { total++; break; }                     // an embedded NUL is one char
+            total++; p += k; left -= (int)k;
+        }
+        return total;
+    }
+    int total = 0;
+    while (left > 0 && total < outChars) {
+        wchar_t wc;
+        size_t k = mbrtowc(&wc, p, (size_t)left, &st);
+        if (k == (size_t)-1 || k == (size_t)-2) return 0;
+        if (k == 0) { out[total++] = 0; break; }
+        out[total++] = wc; p += k; left -= (int)k;
+    }
+    if (left > 0) return 0;   // input remained but the destination is full
+    return total;
 }
 
 int WideCharToMultiByte(unsigned cp, DWORD flags, const wchar_t *w, int wideChars,
@@ -421,8 +441,17 @@ int WideCharToMultiByte(unsigned cp, DWORD flags, const wchar_t *w, int wideChar
     mbstate_t st;
     memset(&st, 0, sizeof(st));
     const wchar_t *p = w;
-    size_t n = wcsrtombs(out, &p, (size_t)wideChars, &st);
-    if (n == (size_t)-1) return 0;
+    // The bound is the DESTINATION byte count (outBytes), not the input wide
+    // count: Win32 writes at most outBytes bytes and returns 0
+    // (ERROR_INSUFFICIENT_BUFFER) when they do not fit. Passing the input count
+    // here made tokUtf8Copy's shrink loop dead - it exists precisely because
+    // this call must be able to refuse - and a long token then memcpy'd a
+    // 60-byte conversion into a 20-byte app row, corrupting the heap. This is
+    // the same class of bug as MultiByteToWideChar's, and it was caught by the
+    // Linux seam harness, not by review: bounded conversion, refuse if short.
+    size_t n = wcsrtombs(out, &p, (size_t)outBytes, &st);
+    if (n == (size_t)-1) return 0;   // EILSEQ etc: Win32 also returns 0
+    if (n >= (size_t)outBytes && p < w + wideChars) return 0;   // did not fit
     // wcsrtombs does not NUL-terminate when bounded, and the core relies on the
     // returned length rather than the terminator in several places, so make the
     // result a proper C string here and report the byte count.

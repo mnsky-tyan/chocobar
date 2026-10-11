@@ -68,47 +68,50 @@ jobs:
         # sources returns before touching the adapter's file code. This seeds
         # a scratch profile with a real JSONL store (two files, one nested),
         # runs the bar's CHOCOBAR_SELFTEST mode, and asserts the exact token
-        # totals. The second scan runs after an append, which forces the warm
-        # path: resume from a byte cursor through SetFilePointerEx. This is
-        # the regression net for the whole seam - path translation, directory
-        # enumeration, seek semantics, codecs, aggregation.
+        # totals - including the warm path: scan, append mid-process, rescan,
+        # and require the totals to hold while only the appended record is
+        # newly counted (cursor size+mtime skip + byte-offset resume through
+        # SetFilePointerEx). This is the regression net for the whole seam:
+        # path translation, directory enumeration, seek semantics, codecs,
+        # cursor persistence, aggregation.
         run: |
           set -euo pipefail
           SCRATCH="$RUNNER_TEMP/cb-selftest"
           CBHOME="$SCRATCH/home"
-          mkdir -p "$CBHOME/.wizbar" "$SCRATCH/store/proj"
+          mkdir -p "$CBHOME/.wizbar" "$CBHOME/store/proj"
           NOW_MS=$(( $(date +%s) * 1000 ))
           REC() { local ts=$((NOW_MS - $5)); printf '{"type":"message","message":{"role":"assistant","model":"selftest-model","usage":{"input":%s,"output":%s,"cacheRead":%s,"cacheWrite":%s}},"timestamp":%s}\n' "$1" "$2" "$3" "$4" "$ts"; }
-          # top-level file: 2 records = 2 x 165 = 330
-          REC 100 50 10 5  1000 > "$SCRATCH/store/a.jsonl"
-          REC 100 50 10 5  2000 >> "$SCRATCH/store/a.jsonl"
-          # nested project dir: 1 record = 165 (exercises recursive enumeration)
-          REC 100 50 10 5  3000 > "$SCRATCH/store/proj/b.jsonl"
-          # the append that turns the second run into the warm path (1 more record = 165)
+          # top-level file: 2 records; nested project dir: 1 record (recursive
+          # enumeration); 3 x (100+50+10+5) = 495 all-time
+          REC 100 50 10 5  1000 > "$CBHOME/store/a.jsonl"
+          REC 100 50 10 5  2000 >> "$CBHOME/store/a.jsonl"
+          REC 100 50 10 5  3000 > "$CBHOME/store/proj/b.jsonl"
+          # the record the second scan must pick up through the warm path
           REC 100 50 10 5  4000 > "$SCRATCH/append.jsonl"
           cat > "$CBHOME/.wizbar/config.json" <<CFG
           {"tokens":{"enabled":true,"sources":[{"app":"pi","path":"~/store","recursive":true}]},"general":{"debug":true}}
           CFG
-          OUT1=$(env CHOCOBAR_SELFTEST=1 HOME="$CBHOME" ./macos/build/chocobar-mac --config "$CBHOME/.wizbar/config.json")
-          echo "$OUT1"
-          grep -q "SELFTEST SCAN1 330 TOK_ALL 330 APPS 1 SOURCES 1" <<<"$OUT1" \
-            || { echo "FAIL: scan 1 expected 330 from 3 records (recursion + codecs + aggregation)"; exit 1; }
-          cat "$SCRATCH/append.jsonl" >> "$SCRATCH/store/a.jsonl"
-          OUT2=$(env CHOCOBAR_SELFTEST=1 HOME="$CBHOME" ./macos/build/chocobar-mac --config "$CBHOME/.wizbar/config.json")
-          echo "$OUT2"
-          # cold start again (separate process): cursor file resumes, the 3 old
-          # records warm-skip by size+mtime, only the appended one is read
-          grep -q "SELFTEST SCAN1 165 TOK_ALL 495" <<<"$OUT2" \
-            || { echo "FAIL: warm resume expected only the appended record to count (cursor + seek path)"; exit 1; }
+          env CHOCOBAR_SELFTEST=2 CHOCOBAR_SELFTEST_MARKER="$SCRATCH/append.done" \
+            HOME="$CBHOME" ./macos/build/chocobar-mac --config "$CBHOME/.wizbar/config.json" > "$SCRATCH/selftest.out" &
+          SELFTEST_PID=$!
+          sleep 2
+          cat "$SCRATCH/append.jsonl" >> "$CBHOME/store/a.jsonl"
+          touch "$SCRATCH/append.done"
+          wait "$SELFTEST_PID"
+          cat "$SCRATCH/selftest.out"
+          grep -q "SELFTEST SCAN1 495 TOK_ALL 495 APPS 1 SOURCES 1" "$SCRATCH/selftest.out" \
+            || { echo "FAIL: scan 1 expected 495 from 3 records (recursion + codecs + aggregation)"; exit 1; }
+          grep -q "SELFTEST SCAN2 165 TOK_ALL 660" "$SCRATCH/selftest.out" \
+            || { echo "FAIL: warm rescan expected only the appended record to count (cursor + seek + preserved aggregates)"; exit 1; }
           {
             echo "### macOS core-seam self-test"
             echo ""
             echo '```'
-            echo "$OUT1"; echo "$OUT2"
+            cat "$SCRATCH/selftest.out"
             echo '```'
             echo ""
-            echo "Seeded store: 3 records (330) across a nested dir; then an append (165)"
-            echo "read back warm through the byte cursor. Totals exact."
+            echo "Seeded store: 3 records (495) across a nested dir; mid-process append (165)"
+            echo "picked up through the byte cursor with totals preserved."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test (launch, stay up 3s, exit cleanly)

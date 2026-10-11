@@ -28,6 +28,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 // ---- the core bridge (compiled into chocobar-core.o) ------------------------
 // Declared here rather than in a shared header: this is the entire surface the
@@ -75,12 +76,17 @@ static void resolveConfigPath(void) {
 // ---- headless self-test --------------------------------------------------------
 //
 // CHOCOBAR_SELFTEST=1 runs the ENTIRE core seam with no GUI: adapter init,
-// config load, cursor load, two full scans (the second after the harness has
-// appended a record, which forces the warm path - resume from a byte cursor
-// through SetFilePointerEx). It prints one line per scan and exits 0. This is
-// what makes CI's gate real: a bar that launches and idles proves nothing
-// about the seam, because a scan over zero sources returns before touching
-// any of it.
+// config load, cursor load, one full scan. Prints one line, exits 0.
+//
+// CHOCOBAR_SELFTEST=2 additionally performs a SECOND scan after waiting for
+// the file named by CHOCOBAR_SELFTEST_MARKER: the harness appends a record to
+// the store and creates that file, so the second scan exercises the real warm
+// path - unchanged files skipped by cursor size+mtime, the appended tail read
+// by resuming from the stored byte offset through SetFilePointerEx, and the
+// aggregates PRESERVED (only the new record may add). This is the regression
+// net for the whole seam: path translation, directory enumeration, seek
+// semantics, codecs, cursor persistence, aggregation. A bar that merely
+// launches proves none of it.
 static int runSelfTest(void) {
     resolveConfigPath();   // the app delegate normally does this; headless mode has none
     cbCoreInit();
@@ -93,8 +99,15 @@ static int runSelfTest(void) {
     long long first = cbScanTokens();
     printf("SELFTEST SCAN1 %lld TOK_ALL %lld APPS %d SOURCES %d\n",
            first, cbTokAll(), cbTokAppCount(), cbTokSourceCount());
-    long long second = cbScanTokens();
-    printf("SELFTEST SCAN2 %lld TOK_ALL %lld\n", second, cbTokAll());
+    fflush(stdout);
+    const char *mode = getenv("CHOCOBAR_SELFTEST");
+    if (mode && strcmp(mode, "2") == 0) {
+        const char *marker = getenv("CHOCOBAR_SELFTEST_MARKER");
+        for (int i = 0; marker && i < 200 && access(marker, F_OK) != 0; i++)
+            usleep(50000);   // up to 10s for the harness to append and signal
+        long long second = cbScanTokens();
+        printf("SELFTEST SCAN2 %lld TOK_ALL %lld\n", second, cbTokAll());
+    }
     return 0;
 }
 

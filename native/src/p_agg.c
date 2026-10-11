@@ -422,7 +422,13 @@ long long cbScanTokens(void) {
     // scan must retire, not free, the generation being read.
     const Config *cfg = cfgPin();
     tokPendClear();
-    g_tokPendSeedReset = 1;   // nothing seeded: derive every aggregate from scratch
+    // Re-derive the aggregates from scratch ONLY when this scan is a full
+    // re-read (process start, or after a master-off/tokLiveReset). Every scan
+    // used to set this, which wiped the aggregates and re-added only what the
+    // warm-skipped walk staged - the totals would have collapsed to the last
+    // scan's new records exactly once the cursor fast path worked. Windows
+    // parity: scanTokenCache sets this only on the seed/reset paths.
+    g_tokPendSeedReset = g_tokForceFullRead;
     g_tokScanAdded = 0;
     g_tokInnerToday = -1;
     g_tokInnerTodayValid = 1;
