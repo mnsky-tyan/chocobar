@@ -359,12 +359,19 @@ int lstrcpynW(wchar_t *d, const wchar_t *s, int n) {
     return (int)wcslen(d);
 }
 int lstrcatW(wchar_t *d, const wchar_t *s) { wcscat(d, s); return (int)wcslen(d); }
-// wcsrchr must forward to the libc function, not to itself: the Win32 spelling
-// and the POSIX spelling are the same identifier here, so a same-named wrapper
-// that calls wcsrchr(...) recurses forever. Alias the libc one first.
-wchar_t *wcsrchr(const wchar_t *s, wchar_t c);
-static wchar_t *(*const cb_wcsrchr)(const wchar_t *, wchar_t) = wcsrchr;
-wchar_t *wcsrchr(const wchar_t *s, wchar_t c) { return cb_wcsrchr(s, c); }
+// wcsrchr must not call the identifier wcsrchr: the Win32 and the POSIX
+// spelling are the same identifier, and this file's definition shadows libc's
+// for every reference in the translation unit, so a wrapper that calls it
+// recurses until the stack dies. Scan for the last occurrence directly.
+wchar_t *wcsrchr(const wchar_t *s, wchar_t c) {
+    if (!s) return NULL;
+    const wchar_t *last = NULL;
+    for (const wchar_t *p = s;; p++) {
+        if (*p == c) last = p;
+        if (!*p) break;
+    }
+    return (wchar_t *)last;
+}
 int lstrcmpA(const char *a, const char *b) { return strcmp(a, b); }
 int lstrcmpiA(const char *a, const char *b) { return strcasecmp(a, b); }
 int lstrlenA(const char *s) { return s ? (int)strlen(s) : 0; }
@@ -439,6 +446,9 @@ int WideCharToMultiByte(unsigned cp, DWORD flags, const wchar_t *w, int wideChar
                         char *out, int outBytes, void *def, void *used) {
     (void)cp; (void)flags; (void)def; (void)used;
     if (!w) return 0;
+    // wideChars < 0 is the NUL-terminated whole string, and the NUL is input for
+    // this direction too: Win32 requires room for it and counts it in the return.
+    int withNul = wideChars < 0;
     if (wideChars < 0) wideChars = (int)wcslen(w);
     if (outBytes <= 0) {
         mbstate_t st;
@@ -457,9 +467,15 @@ int WideCharToMultiByte(unsigned cp, DWORD flags, const wchar_t *w, int wideChar
     // 60-byte conversion into a 20-byte app row, corrupting the heap. This is
     // the same class of bug as MultiByteToWideChar's, and it was caught by the
     // Linux seam harness, not by review: bounded conversion, refuse if short.
+    //
+    // wcsrtombs stops on a CHARACTER boundary and leaves the source pointer
+    // inside the string when the bytes ran out, so unconsumed input - not the
+    // byte count, which is short on every partial fill - is the refusal signal.
+    // It resets the pointer to NULL only once the whole string has converted, so
+    // a non-NULL pointer short of the end means it did not fit.
     size_t n = wcsrtombs(out, &p, (size_t)outBytes, &st);
     if (n == (size_t)-1) return 0;   // EILSEQ etc: Win32 also returns 0
-    if (n >= (size_t)outBytes && p < w + wideChars) return 0;   // did not fit
+    if (p != NULL && p < w + wideChars + withNul) return 0;   // input remained: did not fit
     // wcsrtombs does not NUL-terminate when bounded, and the core relies on the
     // returned length rather than the terminator in several places, so make the
     // result a proper C string here and report the byte count.
