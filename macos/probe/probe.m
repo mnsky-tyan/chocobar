@@ -29,11 +29,12 @@
 //        ./probe --child    (child: owns the window, prints its PID)
 
 // Cocoa.h is the umbrella, but relying on what it happens to re-export has
-// already cost one build. Import the frameworks explicitly so NSScreen and
-// NSRunningProcess resolve regardless of header ordering.
+// already cost two builds. Import the frameworks explicitly so class resolution
+// does not depend on header ordering.
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <unistd.h>
 #import <string.h>
 
 // ---- tunables shared by both roles -----------------------------------------
@@ -194,7 +195,7 @@ static int runChild(void) {
         CGFloat screenH = mainScreenHeight();
         [w setFrameOrigin:NSMakePoint(kRect0X, screenH - kRect0Y - kRect0H)];
 
-        printf("CHILD_PID %d\n", (int)[[NSRunningProcess currentProcess] processIdentifier]);
+        printf("CHILD_PID %d\n", (int)getpid());
         fflush(stdout);
 
         NSDate *start = [NSDate date];
@@ -282,7 +283,7 @@ static int runParent(void) {
         NSPanel *panel = makePanel();
         [panel orderFrontRegardless];
 
-        pid_t us = [[NSRunningProcess currentProcess] processIdentifier];
+        pid_t us = getpid();
         pid_t focusBefore = frontmostPID();
 
         Probe pr = {0};
