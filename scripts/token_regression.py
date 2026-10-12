@@ -1,5 +1,9 @@
 """Execute token aggregation through the production Win32 scanner in isolation.
 
+The harness compiles the GENERATED amalgamation (native/src/chocobar_full.c);
+build it with scripts/build_token_regression.sh, which refuses a stale one -
+run `bash native/build.sh --check` first after any source edit.
+
 Windows: python scripts/token_regression.py --exe native/token-regression.exe
 WSL: use a local-Windows-drive executable and the windowless win-run-hidden tool.
 """
@@ -98,9 +102,12 @@ def run_child(exe, profile, mode="normal", expected_exit=0):
 def verify(scans, expected):
     if len(scans) != len(expected):
         raise AssertionError(f"Expected {len(expected)} scans, got {scans!r}")
-    for i, (scan, (total, calls, models, warm)) in enumerate(zip(scans, expected)):
-        observed = tuple(scan[k] for k in ("total", "app_total", "model_total", "calls", "models"))
-        wanted = (total, total, total, calls, models)
+    for i, (scan, (total, calls, models, apps, warm)) in enumerate(zip(scans, expected)):
+        # apps is pinned too: without it, a bug in aggRecord's app keying (two
+        # apps merged by truncation, rows misattributed) leaves every case
+        # green, because single-source fixtures cannot see WHERE rows landed.
+        observed = tuple(scan[k] for k in ("total", "app_total", "model_total", "calls", "models", "apps"))
+        wanted = (total, total, total, calls, models, apps)
         if observed != wanted:
             raise AssertionError(f"scan {i}: expected {wanted}, got {observed}")
         if warm and scan["bytes"] != 0:
@@ -137,9 +144,9 @@ def main():
         root = Path(folder)
         fresh = fixture(root, "fresh")
         seeded = fixture(root, "seeded", seeded=True)
-        warm265 = [(265, 2, 2, False), (265, 2, 2, True)]
-        warm355 = [(355, 3, 3, False), (355, 3, 3, True)]
-        warm320 = [(320, 3, 3, False), (320, 3, 3, True)]
+        warm265 = [(265, 2, 2, 1, False), (265, 2, 2, 1, True)]
+        warm355 = [(355, 3, 3, 2, False), (355, 3, 3, 2, True)]
+        warm320 = [(320, 3, 3, 1, False), (320, 3, 3, 1, True)]
         # Invalid actual JSON exercises a real child failure and its propagation.
         invalid = fixture(root, "invalid")
         (invalid / ".wizbar" / "config.json").write_text("{", encoding="utf-8")
@@ -147,17 +154,17 @@ def main():
         check("seedless first start and unchanged warm scan", lambda: verify(run_child(exe, fresh), warm265))
         check("seedless restart preserves cards/apps/models/calls", lambda: verify(run_child(exe, fresh), warm265))
         check("append in-process preserves history", lambda: verify(run_child(exe, fresh, "append"),
-              [(265, 2, 2, False), (320, 3, 3, False), (320, 3, 3, True)]))
+              [(265, 2, 2, 1, False), (320, 3, 3, 1, False), (320, 3, 3, 1, True)]))
         check("restart after append preserves history", lambda: verify(run_child(exe, fresh), warm320))
         check("seeded first start", lambda: verify(run_child(exe, seeded), warm355))
         check("seeded restart", lambda: verify(run_child(exe, seeded), warm355))
         check("seed reread with unchanged timestamp boundary", lambda: verify(run_child(exe, seeded, "refresh"),
-              [(355, 3, 3, False), (355, 3, 3, False), (355, 3, 3, True)]))
+              [(355, 3, 3, 2, False), (355, 3, 3, 2, False), (355, 3, 3, 2, True)]))
         check("seed reread with moved timestamp boundary", lambda: verify(run_child(exe, seeded, "boundary"),
-              [(355, 3, 3, False), (355, 3, 3, False), (355, 3, 3, True)]))
+              [(355, 3, 3, 2, False), (355, 3, 3, 2, False), (355, 3, 3, 2, True)]))
         toggled = fixture(root, "toggle")
         check("master off/on clears then rebuilds without doubling", lambda: verify(run_child(exe, toggled, "toggle"),
-              [(265, 2, 2, False), (0, 0, 0, True), (265, 2, 2, False), (265, 2, 2, True)]))
+              [(265, 2, 2, 1, False), (0, 0, 0, 0, True), (265, 2, 2, 1, False), (265, 2, 2, 1, True)]))
         def source_toggle(name, partial=False):
             profile = fixture(root, name)
             path = profile / ".wizbar" / "config.json"
@@ -170,13 +177,13 @@ def main():
                     **config["tokens"]["sources"][0],
                     "app": "secondary-cli", "path": windows_path(other)})
                 path.write_text(json.dumps(config), encoding="utf-8")
-            baseline = warm320 if partial else warm265
+            baseline = [(320, 3, 3, 2, False), (320, 3, 3, 2, True)] if partial else warm265
             verify(run_child(exe, profile), baseline)  # A prior process persists EOF cursors.
             (profile / "config-on.json").write_text(json.dumps(config), encoding="utf-8")
             config["tokens"]["sources"][-1]["enabled"] = False
             path.write_text(json.dumps(config), encoding="utf-8")
-            expected = ([(265, 2, 2, False), (320, 3, 3, False), (320, 3, 3, True)]
-                        if partial else [(0, 0, 0, True), (265, 2, 2, False), (265, 2, 2, True)])
+            expected = ([(265, 2, 2, 1, False), (320, 3, 3, 2, False), (320, 3, 3, 2, True)]
+                        if partial else [(0, 0, 0, 0, True), (265, 2, 2, 1, False), (265, 2, 2, 1, True)])
             return verify(run_child(exe, profile, "source-toggle"), expected)
         check("disabled source enabled after restart recovers history", lambda: source_toggle("source-off"))
         check("disabled source enabled alongside active source", lambda: source_toggle("source-partial", True))
@@ -204,8 +211,42 @@ def main():
             {"prompt_tokens": 0, "completion_tokens": 0, "cache_read_tokens": 0,
              "cache_write_tokens": 0, "at": now - 700, "model_name": "Model-A",
              "provider": "mimo", "message": {"content": "d" * 10}}])
+        # Estimator state is cursor state: chars/real only exist once
+        # tokens.estimateMissingUsage has been on for the file. Pin that the
+        # whole-file list survives the cursor round-trip: the save side is
+        # what the portable checks only pin as source text, and deleting it
+        # would silently re-estimate aborted turns after every restart.
+        def nested_cursor_real():
+            scans = run_child(exe, nested)
+            data = json.loads((nested / ".wizbar" / "token-cursors.json").read_text(encoding="utf-8"))
+            row = data[windows_path(nested / "sessions" / "usage.jsonl")]
+            if row["real"] != "mimo-desktop,mimo":
+                raise AssertionError(f"cursor real did not round-trip: {row!r}")
+            if row["chars"] != 130:  # 40 + 60 + 20 + 10 content chars
+                raise AssertionError(f"cursor chars wrong: {row!r}")
+            return scans
         check("nested route names are element-matched, not substring-matched",
-              lambda: verify(run_child(exe, nested), [(244, 3, 1, False), (244, 3, 1, True)]))
+              lambda: verify(nested_cursor_real(), [(244, 3, 1, 1, False), (244, 3, 1, 1, True)]))
+
+        # A file first scanned while the estimator was OFF has no transcript
+        # total in its cursor. Switching the estimator on mid-run must repair
+        # that cursor WITHOUT re-counting the file: the re-read establishes
+        # the total, staging stops at the old cursor, and only the record
+        # appended while the estimator was off is newly counted. The old code
+        # re-staged the whole file and doubled the totals (585 here).
+        def estimate_toggle(name):
+            profile = fixture(root, name)
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            config["tokens"]["estimateMissingUsage"] = False
+            path.write_text(json.dumps(config), encoding="utf-8")
+            on = json.loads(path.read_text(encoding="utf-8"))
+            on["tokens"]["estimateMissingUsage"] = True
+            (profile / "config-on.json").write_text(json.dumps(on), encoding="utf-8")
+            return verify(run_child(exe, profile, "estimate-toggle"),
+                          [(265, 2, 2, 1, False), (320, 3, 3, 1, False), (320, 3, 3, 1, True)])
+        check("enabling the estimator mid-run repairs the cursor without re-counting",
+              lambda: estimate_toggle("est-off"))
         # Verify the cursor serialization as persisted output, not source text.
         def cursor_contract():
             data = json.loads((fresh / ".wizbar" / "token-cursors.json").read_text(encoding="utf-8"))

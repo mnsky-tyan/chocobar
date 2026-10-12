@@ -464,7 +464,8 @@ static int tokRealHas(const char *real, const char *pv) {
 }
 
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
-                             const TokKeys *tk, const Config *cfg, TokCursor *cur) {
+                             const TokKeys *tk, const Config *cfg, TokCursor *cur,
+                             long long stageFrom) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
@@ -532,6 +533,14 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
         if (!nl) break; // partial tail: do not advance the cursor past it
         int len = (int)(nl - p);
         if (len > 0) {
+            // stage only lines ENDING past stageFrom. It equals `from` on every
+            // normal read, so behaviour is unchanged; a cursor-repair re-read
+            // (below) passes 0 and the OLD cursor size instead, so it can
+            // establish the transcript total over the whole file without
+            // re-staging rows the aggregates already hold. The END bound (not
+            // the start) also catches a line that straddled the old cursor: it
+            // was a partial tail then, uncounted, and completes now.
+            int stage = (start + consumed + len) > stageFrom;
             // The transcript size is the text of EVERY line so far, not only the
             // ones carrying usage - a user turn and a tool result both go into
             // the prompt. One scan per line, which is why it sits behind the
@@ -562,9 +571,11 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                     }
                     // staged, not aggregated: the aggregates are UI-thread-affine
                     // and this runs on the scan worker (the drain applies them)
-                    tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
-                                r.model, r.modelLen, 0);
-                    g_tokAllLive += sum;
+                    if (stage) {
+                        tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
+                                    r.model, r.modelLen, 0);
+                        g_tokAllLive += sum;
+                    }
                 } else if (estimating) {
                     // No usage at all. Estimate it unless this route reports
                     // elsewhere in the file, in which case the turn was aborted
@@ -582,7 +593,7 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                         long long pin = tokEstimate(chars + lineChars, replyChars,
                                                     cfg->tokEstIn, cfg->tokEstSat,
                                                     cfg->tokEstOut, &oout);
-                        if (pin > 0) {
+                        if (pin > 0 && stage) {
                             tokPendPush(appName, (int)strlen(appName), r.ts,
                                         pin, oout, 0, 0, r.model, r.modelLen, 1);
                             g_tokAllLive += pin + oout;
@@ -810,16 +821,25 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         // rescan is what blocked the bar for ~600ms and made refresh lag.
         if (c && !g_tokFullReadNow && c->size == fsz && c->mtimeMs == mt) { g_tokDbgFiles++; g_tokDbgHits++; continue; }
         long long from = (c && !g_tokFullReadNow) ? c->size : 0;
+        long long stageFrom = from;
         // The estimator counts a file's transcript from byte zero and carries the
-        // running total in the cursor. A cursor with no total yet (TOK_CHARS_NONE;
-        // a real total of 0 is a store whose lines carry no transcript text) would
-        // otherwise resume as if the transcript were tiny: re-read the file once.
-        if (cfg->tokEstimate && c && c->size > 0 && c->chars < 0) from = 0;
+        // running total in the cursor. A cursor with no total yet (TOK_CHARS_NONE:
+        // written while the estimator was off, or before it existed; a real total
+        // of 0 is a store whose lines carry no transcript text) would otherwise
+        // resume as if the transcript were tiny: re-read the whole file once to
+        // establish it. On a forced full rebuild that re-read stages everything
+        // anyway (the aggregates are being rebuilt); on a warm scan it must stage
+        // ONLY the bytes past the old cursor, or every usage row in the file
+        // lands in the live aggregates a second time and the totals double.
+        if (cfg->tokEstimate && c && c->size > 0 && c->chars < 0) {
+            from = 0;
+            if (!g_tokFullReadNow) stageFrom = c->size;
+        }
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
         // the cursor must exist BEFORE the read so the count this scan just made
         // (chars, real) lands in it instead of being lost to a fresh memset
-        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA));
+        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA), stageFrom);
         if (neu >= 0) { g_tokDbgRead += (neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);

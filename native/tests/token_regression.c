@@ -9,8 +9,24 @@
 typedef struct {
     long long total, appTotal, modelTotal, calls;
     int models;
+    int apps;
     long long bytes;
 } TestScan;
+
+/* count -> alloc -> fill, the parse dance every probe needs. NULL means the
+   text is not JSON (or the token array could not be allocated); the caller
+   keeps ownership of `raw` and frees the returned tokens. */
+static jsmntok_t *testParseJson(const char *raw, int len, int *outN) {
+    jsmn_parser p; jsmn_init(&p);
+    int nt = jsmn_parse(&p, raw, (size_t)len, NULL, 0);
+    if (nt <= 0) return NULL;
+    jsmntok_t *t = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*t) * (size_t)(nt + 1));
+    if (!t) return NULL;
+    jsmn_init(&p);
+    if (jsmn_parse(&p, raw, (size_t)len, t, (unsigned)nt) != nt) { HeapFree(GetProcessHeap(), 0, t); return NULL; }
+    *outN = nt;
+    return t;
+}
 
 static int testConfig(const wchar_t *profile) {
     wchar_t path[MAX_PATH];
@@ -19,15 +35,10 @@ static int testConfig(const wchar_t *profile) {
     char *raw = readFileUtf8(path, &len);
     if (!raw) return 2;
     stripLineComments(raw);
-    jsmn_parser p; jsmn_init(&p);
-    int nt = jsmn_parse(&p, raw, (size_t)len, NULL, 0);
-    if (nt <= 0) { HeapFree(GetProcessHeap(), 0, raw); return 3; }
-    jsmntok_t *t = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*t) * (nt + 1));
-    if (!t) { HeapFree(GetProcessHeap(), 0, raw); return 4; }
-    jsmn_init(&p);
-    int parsed = jsmn_parse(&p, raw, (size_t)len, t, (unsigned)nt);
+    int nt = 0;
+    jsmntok_t *t = testParseJson(raw, len, &nt);
     int rc = 0;
-    if (parsed != nt || t[0].type != JSMN_OBJECT) rc = 3;
+    if (!t || t[0].type != JSMN_OBJECT) rc = 3;
     else parseConfigInto(&g_cfg, raw, t, 0);
     HeapFree(GetProcessHeap(), 0, t);
     HeapFree(GetProcessHeap(), 0, raw);
@@ -79,7 +90,10 @@ static int testAppend(const wchar_t *profile) {
     return ok ? 0 : 6;
 }
 
-static int testEnableSource(const wchar_t *profile) {
+/* Replace the live config from profile/config-on.json and reparse. Used by
+   the source-toggle mode (a source re-enabled mid-run) and the estimate-toggle
+   mode (estimateMissingUsage switched on mid-run). */
+static int testSwapConfig(const wchar_t *profile) {
     wchar_t path[MAX_PATH], src[MAX_PATH];
     if (swprintf(path, MAX_PATH, L"%ls\\.wizbar\\config.json", profile) <= 0 ||
         swprintf(src, MAX_PATH, L"%ls\\config-on.json", profile) <= 0 || !CopyFileW(src, path, FALSE)) return 9;
@@ -169,15 +183,9 @@ static int defaultsProbeMain(void) {
     char *raw = HeapAlloc(GetProcessHeap(), 0, len + 1);
     if (!raw) return 1;
     memcpy(raw, js, len + 1);
-    jsmn_parser p; jsmn_init(&p);
-    int nt = jsmn_parse(&p, raw, (size_t)len, NULL, 0);
-    if (nt <= 0) { HeapFree(GetProcessHeap(), 0, raw); return 2; }
-    jsmntok_t *t = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*t) * (nt + 1));
+    int nt = 0;
+    jsmntok_t *t = testParseJson(raw, len, &nt);
     if (!t) { HeapFree(GetProcessHeap(), 0, raw); return 3; }
-    jsmn_init(&p);
-    if (jsmn_parse(&p, raw, (size_t)len, t, (unsigned)nt) != nt) {
-        HeapFree(GetProcessHeap(), 0, t); HeapFree(GetProcessHeap(), 0, raw); return 3;
-    }
     Config c; memset(&c, 0, sizeof(c));
     parseConfigInto(&c, raw, t, 0);
     struct { const wchar_t *label; const wchar_t *got; const wchar_t *want; } cases[] = {
@@ -210,8 +218,9 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
     int append = wcscmp(mode, L"append") == 0;
     int toggle = wcscmp(mode, L"toggle") == 0;
     int sourceToggle = wcscmp(mode, L"source-toggle") == 0;
-    if (!refresh && !boundary && !append && !toggle && !sourceToggle && wcscmp(mode, L"normal") != 0) return 7;
-    int n = toggle ? 4 : (refresh || boundary || append || sourceToggle) ? 3 : 2;
+    int estToggle = wcscmp(mode, L"estimate-toggle") == 0;
+    if (!refresh && !boundary && !append && !toggle && !sourceToggle && !estToggle && wcscmp(mode, L"normal") != 0) return 7;
+    int n = toggle ? 4 : (refresh || boundary || append || sourceToggle || estToggle) ? 3 : 2;
     if (n > TEST_SCANS) return 2; // scans[pass] is written unguarded below
     for (int pass = 0; pass < n; pass++) {
         if (toggle) g_cfg.tokensEnabled = pass == 1 ? 0 : 1;
@@ -226,6 +235,7 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
         tokDrainPending();
         scans[pass].total = g_tokAll;
         scans[pass].models = g_modelCount;
+        scans[pass].apps = g_appCount;
         for (int i = 0; i < g_appCount; i++) {
             scans[pass].appTotal += tokAggSum(&g_appAgg[i]);
             scans[pass].calls += g_appAgg[i].req;
@@ -234,7 +244,13 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
         *count = pass + 1;
         if (pass == 0 && (refresh || boundary)) rc = testSeedChange(profile, boundary);
         if (pass == 0 && append) rc = testAppend(profile);
-        if (pass == 0 && sourceToggle) rc = testEnableSource(profile);
+        if (pass == 0 && sourceToggle) rc = testSwapConfig(profile);
+        /* the estimate-toggle path: append a record while the estimator is off
+           (the cursor records no transcript total), then switch it on. The
+           next scan must count ONLY the appended record - the cursor-repair
+           re-read establishes the transcript total without re-staging rows
+           the aggregates already hold. */
+        if (pass == 0 && estToggle) { rc = testAppend(profile); if (!rc) rc = testSwapConfig(profile); }
         if (rc) return rc;
     }
     return 0;
@@ -252,8 +268,8 @@ int wmain(int argc, wchar_t **argv) {
     fprintf(out, "{\"exit\":%d,\"scans\":[", rc);
     for (int i = 0; i < count; i++) {
         TestScan *s = &scans[i];
-        fprintf(out, "%s{\"total\":%lld,\"app_total\":%lld,\"model_total\":%lld,\"calls\":%lld,\"models\":%d,\"bytes\":%lld}",
-                i ? "," : "", s->total, s->appTotal, s->modelTotal, s->calls, s->models, s->bytes);
+        fprintf(out, "%s{\"total\":%lld,\"app_total\":%lld,\"model_total\":%lld,\"calls\":%lld,\"models\":%d,\"apps\":%d,\"bytes\":%lld}",
+                i ? "," : "", s->total, s->appTotal, s->modelTotal, s->calls, s->models, s->apps, s->bytes);
     }
     fprintf(out, "]}\n");
     if (fclose(out) != 0) return 66;

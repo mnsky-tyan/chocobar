@@ -67,7 +67,7 @@ Point it somewhere else with `chocobar.exe --config <path>` or the `WIZBAR_CONFI
 
 Everything below is optional: delete a key and the built-in default applies. Sizes are CSS pixels (the bar scales them by the display DPI), colors are `#RRGGBB`.
 
-Every `Default` in the tables below is that built-in fallback, and so is the complete starting point at the end of this section. The template the bar writes on a first run ships a softer look on purpose - a taller bar, the `Segoe Print` font, and a pastel tint - and it leaves the token scan and the subscription board switched off, so an untouched install reads nothing; deleting a key from it brings the fallback listed below back.
+Every `Default` in the tables below is that built-in fallback. The complete starting point at the end of this section is built on those defaults but is NOT the fallback itself: it adds example wiring - two token sources, a label, a custom toggle chip, and the four subscription providers - all switched on. Paste it and the bar scans those two example stores and asks those providers; leave the file as the template wrote it and nothing is read. The template the bar writes on a first run ships a softer look on purpose - a taller bar, the `Segoe Print` font, and a pastel tint - and it leaves the token scan and the subscription board switched off, so an untouched install reads nothing; deleting a key from it brings the fallback listed below back.
 
 ### `bar` - the strip itself
 
@@ -381,7 +381,7 @@ A route that is a real API answers with a usage block, so the numbers above are 
 }
 ```
 
-**How a turn is chosen.** Per session file, per route: a turn is estimated only when its own route has never reported a real number anywhere in that file. One session routinely mixes a reporting route with a bridged one - on the store this was measured against, 824 of 1,028 CodeBuddy turns sit in such files, where a whole-file rule would discard every one of them as an abort. No route name is compiled in; the decision comes from what reported in that file, so a new harness needs no code change and a route that starts reporting is picked up the same day.
+**How a turn is chosen.** Per session file, per route: a turn is estimated only when its own route has not reported a real number earlier in that file, as the file is read - including bytes already consumed by earlier scans, which the per-file cursor persists, so a turn appended later is judged against routes that reported before it. One session routinely mixes a reporting route with a bridged one - on the store this was measured against, 824 of 1,028 CodeBuddy turns sit in such files, where a whole-file rule would discard every one of them as an abort. No route name is compiled in; the decision comes from what reported in that file, so a new harness needs no code change and a route that starts reporting is picked up the same day.
 
 **How the numbers are derived.**
 
@@ -418,7 +418,7 @@ The constants are machine-specific, because they absorb how one harness's transc
 
 The shipped defaults read nothing: every usage source and board provider is switched off, so an untouched install performs no scan and no request even though the template names example store paths. The tokens and subscription chips are not on the bar at all until you switch those masters on; with nothing wired behind them they then show an em dash instead of a number. Chocobar has no telemetry. The opt-in `general.checkUpdates` probe (off by default) is the only request the bar makes on its own; a subscription plan you switch on asks that plan's own API with the login that plan already saved here, and a custom chip or shortcut command you set up yourself reaches the network on its own.
 
-Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar`. The application and all user-visible strings use Chocobar.
+Internal compatibility paths and filenames still use `wizbar`, including `~/.wizbar`. The application and all user-visible strings use Chocobar (the two tray menu items, `Reload chocobar` and `Quit chocobar`, keep the lowercase spelling).
 
 ## Tests
 
@@ -432,7 +432,7 @@ The suite decodes the first-run config template the bar writes (`g_template` in 
 
 It then guards the estimator itself in `native/src/p_tokens.c` and its parser in `native/src/chocobar.c`: that a blind turn is decided by its own route rather than a compiled-in provider list, that the per-file transcript total and the set of reporting routes persist in the cursor file, that the prompt is capped, that only an all-zero usage block is ever estimated, and that the flag and its three constants default the way the docs say.
 
-CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals, cursor serialization, that the `antigravity` provider never invents a credential path when the config names none, and that omitting a config key keeps its built-in default. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
+CI also runs `scripts/token_regression.py` on Windows against a console harness compiled from the production scanner. Its isolated profiles test first scans, separate-process restarts, appends, seed rereads with unchanged and changed timestamps, master off/on, sources enabled by config reload after a disabled startup, app/model/request totals and per-app attribution, cursor serialization (including the estimator's per-file route list), the estimator's per-route rule - nested route names matched as exact elements, and enabling the estimator mid-run repairing its cursor state without re-counting a file - that the `antigravity` provider never invents a credential path when the config names none, and that omitting a config key keeps its built-in default. Warm scans must not reread unchanged files or double-count. This is executable counting coverage, separate from the portable source/config checks above. See [native test instructions](native/README.md#executable-token-regressions).
 
 ## License
 
