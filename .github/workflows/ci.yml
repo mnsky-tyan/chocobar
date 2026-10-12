@@ -33,10 +33,7 @@ jobs:
           node scripts/portable_regression.js
 
       - name: Build console token harness
-        run: |
-          x86_64-w64-mingw32-gcc -O2 -municode -mconsole native/tests/token_regression.c \
-            -Inative/vendor -Inative/src -o native/token-regression.exe \
-            -ldwmapi -lpdh -lole32 -lgdi32 -lwinhttp -lmsimg32 -luser32 -lshell32 -ladvapi32
+        run: bash scripts/build_token_regression.sh native/token-regression.exe
 
       - uses: actions/upload-artifact@v4
         with:

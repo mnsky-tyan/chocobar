@@ -140,32 +140,36 @@ void *GetProcessHeap(void) { return NULL; }
 
 #define FD_TO_HANDLE(fd) ((HANDLE)(intptr_t)(fd))
 #define HANDLE_TO_FD(h) ((int)(intptr_t)(h))
-#define INVALID_HANDLE_VALUE_LOCAL INVALID_HANDLE_VALUE
 
 static HANDLE openFor(const wchar_t *path, int flags, int mode) {
     const char *p = pathArg(path);
-    if (!p[0]) return INVALID_HANDLE_VALUE_LOCAL;
+    if (!p[0]) return INVALID_HANDLE_VALUE;
     int fd = open(p, flags, mode);
-    return fd < 0 ? INVALID_HANDLE_VALUE_LOCAL : FD_TO_HANDLE(fd);
+    return fd < 0 ? INVALID_HANDLE_VALUE : FD_TO_HANDLE(fd);
 }
 
 HANDLE CreateFileW(const wchar_t *path, DWORD access, DWORD share, void *sa,
                    DWORD creation, DWORD flags, HANDLE tmpl) {
     (void)sa; (void)share; (void)tmpl; (void)flags;
+    // The header's disposition constants ARE the contract (chocobar_core.h):
+    // match each one explicitly and refuse what is not one, so a future caller
+    // cannot get create-or-overwrite semantics out of a typo'd disposition.
     int oflags = 0;
-    int isWrite = (access & 0x40000000u) != 0;   // GENERIC_WRITE
-    int isAppend = (access & 0x00000004u) != 0; // FILE_APPEND_DATA
+    int isWrite = (access & GENERIC_WRITE) != 0;
+    int isAppend = (access & FILE_APPEND_DATA) != 0; // FILE_APPEND_DATA
     int isRead = !isWrite && !isAppend;
-    if (creation == 2 /* CREATE_ALWAYS */) oflags = O_WRONLY | O_CREAT | O_TRUNC;
-    else if (creation == 3 /* OPEN_EXISTING */) oflags = isAppend ? O_WRONLY | O_APPEND
+    if (creation == CREATE_ALWAYS) oflags = O_WRONLY | O_CREAT | O_TRUNC;
+    else if (creation == OPEN_EXISTING) oflags = isAppend ? O_WRONLY | O_APPEND
                                                                  : (isRead ? O_RDONLY : O_RDWR);
-    else oflags = O_RDWR | O_CREAT;
+    else if (creation == CREATE_NEW) oflags = O_WRONLY | O_CREAT | O_EXCL;
+    else if (creation == OPEN_ALWAYS) oflags = O_RDWR | O_CREAT;
+    else return INVALID_HANDLE_VALUE;   // unknown disposition: refuse, as Win32
     return openFor(path, oflags, 0644);
 }
 
 CB_BOOL ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, LPOVERLAPPED o) {
     (void)o;
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     // Sequential from the descriptor's own position: the core seeks explicitly
     // via SetFilePointerEx before every read, so an offset here would fight it.
     ssize_t k = read(HANDLE_TO_FD(h), buf, n);
@@ -176,7 +180,7 @@ CB_BOOL ReadFile(HANDLE h, void *buf, DWORD n, DWORD *got, LPOVERLAPPED o) {
 
 CB_BOOL WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *wrote, LPOVERLAPPED o) {
     (void)o;
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     // Win32's non-overlapped WriteFile writes the whole buffer; a bare write()
     // can short-write (pipes, signals), and a truncated cursor JSON would
     // silently lose cursors. Loop until the buffer is done or an error lands.
@@ -196,7 +200,7 @@ CB_BOOL WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *wrote, LPOVERLAPPED
 }
 
 CB_BOOL GetFileSizeEx(HANDLE h, CB_LARGE_INTEGER *sz) {
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     struct stat st;
     if (fstat(HANDLE_TO_FD(h), &st)) return FALSE;
     sz->QuadPart = st.st_size;
@@ -204,14 +208,14 @@ CB_BOOL GetFileSizeEx(HANDLE h, CB_LARGE_INTEGER *sz) {
 }
 
 CB_BOOL CloseHandle(HANDLE h) {
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     return close(HANDLE_TO_FD(h)) == 0;
 }
 
 CB_BOOL DeleteFileW(const wchar_t *p) { const char *s = pathArg(p); return (CB_BOOL)(s[0] && unlink(s) == 0); }
 
 CB_BOOL SetFilePointerEx(HANDLE h, CB_LARGE_INTEGER dist, CB_LARGE_INTEGER *out, DWORD method) {
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     // The header's constants ARE the contract: FILE_BEGIN 0, FILE_CURRENT 1,
     // FILE_END 2. An earlier mapping here was shifted by one for all three
     // (1->SEEK_END, 2->SEEK_SET, 0 falling into SEEK_CUR), which made every
@@ -225,21 +229,33 @@ CB_BOOL SetFilePointerEx(HANDLE h, CB_LARGE_INTEGER dist, CB_LARGE_INTEGER *out,
     return TRUE;
 }
 
+// One definition of the st_size split and the mtime conversion: the warm-skip
+// of the whole scanner compares cursor size+mtime against exactly these fields,
+// so every site must compute them identically.
+static FILETIME statMtimeToFileTime(const struct stat *st) {
+    return unixMsToFileTime((long long)st->st_mtime * 1000);
+}
+static void statSizeToWin32(const struct stat *st, DWORD *low, DWORD *high) {
+    *low = (DWORD)((unsigned long long)st->st_size & 0xffffffffu);
+    *high = (DWORD)((unsigned long long)st->st_size >> 32);
+}
+
 DWORD GetFileSize(HANDLE h, LPDWORD high) {
     struct stat st;
-    if (h == INVALID_HANDLE_VALUE_LOCAL || fstat(HANDLE_TO_FD(h), &st)) return INVALID_FILE_SIZE;
-    if (high) *high = (DWORD)(st.st_size >> 32);
-    return (DWORD)(st.st_size & 0xffffffffu);
+    if (h == INVALID_HANDLE_VALUE || fstat(HANDLE_TO_FD(h), &st)) return INVALID_FILE_SIZE;
+    DWORD lo = 0, hi = 0;
+    statSizeToWin32(&st, &lo, &hi);
+    if (high) *high = hi;
+    return lo;
 }
 
 CB_BOOL GetFileInformationByHandle(HANDLE h, CB_BY_HANDLE_FILE_INFORMATION *fi) {
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     struct stat st;
     if (fstat(HANDLE_TO_FD(h), &st)) return FALSE;
     memset(fi, 0, sizeof(*fi));
-    fi->nFileSizeLow = (DWORD)(st.st_size & 0xffffffffu);
-    fi->nFileSizeHigh = (DWORD)(st.st_size >> 32);
-    fi->ftLastWriteTime = unixMsToFileTime((long long)st.st_mtime * 1000);
+    statSizeToWin32(&st, &fi->nFileSizeLow, &fi->nFileSizeHigh);
+    fi->ftLastWriteTime = statMtimeToFileTime(&st);
     fi->ftCreationTime = fi->ftLastWriteTime;
     return TRUE;
 }
@@ -265,26 +281,26 @@ typedef struct {
 
 HANDLE FindFirstFileW(const wchar_t *pattern, WIN32_FIND_DATAW *fd) {
     const char *p = pathArg(pattern);
-    if (!p[0]) return INVALID_HANDLE_VALUE_LOCAL;
+    if (!p[0]) return INVALID_HANDLE_VALUE;
     // strip the trailing wildcard the core appends: "<dir>/*" (separators are
     // already translated by pathArg; accept a raw backslash form too)
     size_t n = strlen(p);
     while (n && (p[n - 1] == '*' || p[n - 1] == '/' || p[n - 1] == '\\')) n--;
     char dir[PATH_MAX];
-    if (n >= sizeof(dir)) return INVALID_HANDLE_VALUE_LOCAL;
+    if (n >= sizeof(dir)) return INVALID_HANDLE_VALUE;
     memcpy(dir, p, n);
     dir[n] = 0;
     CB_FIND *f = (CB_FIND *)malloc(sizeof(CB_FIND));
-    if (!f) return INVALID_HANDLE_VALUE_LOCAL;
+    if (!f) return INVALID_HANDLE_VALUE;
     f->dir = opendir(n ? dir : "/");
-    if (!f->dir) { free(f); return INVALID_HANDLE_VALUE_LOCAL; }
-    if (!FindNextFileW((HANDLE)f, fd)) { FindClose((HANDLE)f); return INVALID_HANDLE_VALUE_LOCAL; }
+    if (!f->dir) { free(f); return INVALID_HANDLE_VALUE; }
+    if (!FindNextFileW((HANDLE)f, fd)) { FindClose((HANDLE)f); return INVALID_HANDLE_VALUE; }
     return (HANDLE)f;
 }
 
 CB_BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd) {
     CB_FIND *f = (CB_FIND *)h;
-    if (!f || f == INVALID_HANDLE_VALUE_LOCAL || !f->dir) return FALSE;
+    if (!f || f == INVALID_HANDLE_VALUE || !f->dir) return FALSE;
     struct dirent *e;
     while ((e = readdir(f->dir))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
@@ -298,9 +314,8 @@ CB_BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd) {
         if (isDir) fd->dwFileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
         if (mbstowcs(fd->cFileName, e->d_name, MAX_PATH - 1) == (size_t)-1)
             continue;   // undecodable name: skip it rather than hand up an empty string
-        fd->nFileSizeLow = (DWORD)((unsigned long long)st.st_size & 0xffffffffu);
-        fd->nFileSizeHigh = (DWORD)((unsigned long long)st.st_size >> 32);
-        fd->ftLastWriteTime = unixMsToFileTime((long long)st.st_mtime * 1000);
+        statSizeToWin32(&st, &fd->nFileSizeLow, &fd->nFileSizeHigh);
+        fd->ftLastWriteTime = statMtimeToFileTime(&st);
         return TRUE;
     }
     closedir(f->dir);
@@ -310,7 +325,7 @@ CB_BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd) {
 
 CB_BOOL FindClose(HANDLE h) {
     CB_FIND *f = (CB_FIND *)h;
-    if (!f || f == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (!f || f == INVALID_HANDLE_VALUE) return FALSE;
     if (f->dir) closedir(f->dir);
     free(f);
     return TRUE;
@@ -330,9 +345,8 @@ CB_BOOL GetFileAttributesExW(const wchar_t *p, int level, CB_FILE_ATTRIBUTE_DATA
     memset(fa, 0, sizeof(*fa));
     if (S_ISDIR(st.st_mode)) fa->dwFileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
     if (S_ISREG(st.st_mode)) fa->dwFileAttributes |= FILE_ATTRIBUTE_NORMAL;
-    fa->ftLastWriteTime = unixMsToFileTime((long long)st.st_mtime * 1000);
-    fa->nFileSizeLow = (DWORD)(st.st_size & 0xffffffffu);
-    fa->nFileSizeHigh = (DWORD)(st.st_size >> 32);
+    fa->ftLastWriteTime = statMtimeToFileTime(&st);
+    statSizeToWin32(&st, &fa->nFileSizeLow, &fa->nFileSizeHigh);
     return TRUE;
 }
 
@@ -495,11 +509,19 @@ DWORD GetEnvironmentVariableW(const wchar_t *name, wchar_t *out, DWORD cch) {
     nbuf[nl] = 0;
     const char *v = getenv(nbuf);
     if (!v) return 0;
-    if (!out || cch == 0) return (DWORD)strlen(v);
-    size_t need = mbstowcs(out, v, cch - 1);
+    // Win32's contract for this API is exact: the size query and the
+    // too-small-buffer case both return the required count INCLUDING the NUL,
+    // and a too-small buffer leaves the destination untouched - never a
+    // silent truncate. The canonical query-then-refill caller (p_subs.c)
+    // allocates the queried count and would run one short otherwise.
+    size_t wneed = mbstowcs(NULL, v, 0);   // wide chars, excluding the NUL
+    if (wneed == (size_t)-1) return 0;
+    if (!out || cch == 0) return (DWORD)wneed + 1;
+    if ((size_t)cch < wneed + 1) return (DWORD)wneed + 1;   // refuse, untouched
+    size_t need = mbstowcs(out, v, cch);
     if (need == (size_t)-1) return 0;
     out[need] = 0;
-    return (DWORD)need;
+    return (DWORD)need;   // success count excludes the NUL, as Win32 documents
 }
 
 CB_BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value) {
@@ -517,32 +539,31 @@ CB_BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value) {
 
 // ---- time --------------------------------------------------------------------
 
+// Both time readers fill the same eight fields; keep the struct filling in one
+// place so CB_SYSTEMTIME cannot grow a field under one of them.
+static void fillSystemTime(CB_SYSTEMTIME *out, const struct tm *tmv) {
+    out->wYear = (unsigned short)(tmv->tm_year + 1900);
+    out->wMonth = (unsigned short)(tmv->tm_mon + 1);
+    out->wDayOfWeek = (unsigned short)tmv->tm_wday;
+    out->wDay = (unsigned short)tmv->tm_mday;
+    out->wHour = (unsigned short)tmv->tm_hour;
+    out->wMinute = (unsigned short)tmv->tm_min;
+    out->wSecond = (unsigned short)tmv->tm_sec;
+    out->wMilliseconds = 0;
+}
+
 void GetLocalTime(CB_SYSTEMTIME *st) {
     time_t t = time(NULL);
     struct tm tmv;
     localtime_r(&t, &tmv);
-    st->wYear = (unsigned short)(tmv.tm_year + 1900);
-    st->wMonth = (unsigned short)(tmv.tm_mon + 1);
-    st->wDayOfWeek = (unsigned short)tmv.tm_wday;
-    st->wDay = (unsigned short)tmv.tm_mday;
-    st->wHour = (unsigned short)tmv.tm_hour;
-    st->wMinute = (unsigned short)tmv.tm_min;
-    st->wSecond = (unsigned short)tmv.tm_sec;
-    st->wMilliseconds = 0;
+    fillSystemTime(st, &tmv);
 }
 
 void GetSystemTime(CB_SYSTEMTIME *st) {
     time_t t = time(NULL);
     struct tm tmv;
     gmtime_r(&t, &tmv);
-    st->wYear = (unsigned short)(tmv.tm_year + 1900);
-    st->wMonth = (unsigned short)(tmv.tm_mon + 1);
-    st->wDayOfWeek = (unsigned short)tmv.tm_wday;
-    st->wDay = (unsigned short)tmv.tm_mday;
-    st->wHour = (unsigned short)tmv.tm_hour;
-    st->wMinute = (unsigned short)tmv.tm_min;
-    st->wSecond = (unsigned short)tmv.tm_sec;
-    st->wMilliseconds = 0;
+    fillSystemTime(st, &tmv);
 }
 
 // Days since 1970-01-01 for a proleptic Gregorian date. Win32's
@@ -622,10 +643,23 @@ void writeLogA(const char *s) {
     }
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
-    // One write per line keeps concurrent writers from interleaving.
+    // One logical write per line keeps concurrent writers from interleaving;
+    // loop the write so a signal or a short write cannot drop half a line.
     char line[1200];
     int n = snprintf(line, sizeof(line), "%s\n", s);
-    if (n > 0 && write(fd, line, (size_t)n) < 0) { /* best effort */ }
+    // snprintf returns the length the output WOULD have had; clamp to what
+    // was actually written before it can become a write() byte count.
+    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
+    if (n > 0) {
+        const char *lp = line;
+        size_t left = (size_t)n;
+        while (left > 0) {
+            ssize_t w = write(fd, lp, left);
+            if (w < 0) { if (errno == EINTR) continue; break; }
+            if (w == 0) break;
+            lp += w; left -= (size_t)w;
+        }
+    }
     close(fd);
 }
 
@@ -642,8 +676,30 @@ CB_BOOL CopyFileW(const wchar_t *from, const wchar_t *to, CB_BOOL failIfExists) 
     char buf[65536];
     ssize_t k;
     int ok = 1;
-    while ((k = read(in, buf, sizeof(buf))) > 0) {
-        if (write(out, buf, (size_t)k) != k) { ok = 0; break; }
+    // Same standard as WriteFile above: loop EINTR, fail on real errors, and
+    // complete every destination write - an interrupted read must not report
+    // success with a truncated destination left on disk.
+    for (;;) {
+        k = read(in, buf, sizeof(buf));
+        if (k < 0) {
+            if (errno == EINTR) continue;
+            ok = 0;
+            break;
+        }
+        if (k == 0) break;
+        const char *bp = buf;
+        size_t left = (size_t)k;
+        while (left > 0) {
+            ssize_t w = write(out, bp, left);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                ok = 0;
+                break;
+            }
+            if (w == 0) { ok = 0; break; }
+            bp += w; left -= (size_t)w;
+        }
+        if (!ok) break;
     }
     close(in); close(out);
     if (!ok) unlink(b);
@@ -651,10 +707,10 @@ CB_BOOL CopyFileW(const wchar_t *from, const wchar_t *to, CB_BOOL failIfExists) 
 }
 
 CB_BOOL GetFileTime(HANDLE h, FILETIME *c, FILETIME *a, FILETIME *w) {
-    if (h == INVALID_HANDLE_VALUE_LOCAL) return FALSE;
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
     struct stat st;
     if (fstat(HANDLE_TO_FD(h), &st)) return FALSE;
-    FILETIME ft = unixMsToFileTime((long long)st.st_mtime * 1000);
+    FILETIME ft = statMtimeToFileTime(&st);
     if (c) *c = ft;
     if (a) *a = ft;
     if (w) *w = ft;

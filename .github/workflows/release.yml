@@ -44,9 +44,6 @@ jobs:
             exit 1
           fi
 
-      - name: Compile gate
-        run: bash native/build.sh --check
-
       - name: Build
         run: |
           bash native/build.sh --no-nix

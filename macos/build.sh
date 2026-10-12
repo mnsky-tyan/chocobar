@@ -53,7 +53,7 @@ CORE_PARTS=(
 native_parts=$(sed -n '/^PARTS=(/,/^)/p' native/build.sh | grep -o 'src/[a-z_]*\.c' | sed 's|^|native/|')
 prev=-1
 for p in "${CORE_PARTS[@]}"; do
-  idx=$(grep -nx "$p" <<<"$native_parts" | cut -d: -f1 | head -n1)
+  idx=$(grep -nFx "$p" <<<"$native_parts" | cut -d: -f1 | head -n1)
   if [ -z "$idx" ]; then
     echo "FATAL: $p is not in native/build.sh's authoritative PARTS list" >&2
     exit 1

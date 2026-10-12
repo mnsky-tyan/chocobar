@@ -11,6 +11,13 @@
 
 const fs = require('fs');
 const path = require('path');
+// Each source file is read ONCE up front; the thematic blocks below work from
+// this snapshot instead of re-loading the same file inside their own scope.
+const sources = {
+  p_ui: fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_ui.c'), 'utf8'),
+  p_tokens: fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'),
+  chocobar: fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'chocobar.c'), 'utf8'),
+};
 
 let failures = 0;
 function check(name, ok, detail) {
@@ -24,7 +31,7 @@ function check(name, ok, detail) {
 // untouched install reads nothing and makes no request. Decode the C string,
 // strip the JSONC comments and assert meaning from the parsed object.
 {
-  const c = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_ui.c'), 'utf8');
+  const c = sources.p_ui;
   const m = c.match(/static const char \*g_template =([\s\S]*?);\n/);
   const decode = (body) => (body.match(/"((?:[^"\\]|\\.)*)"/g) || [])
     .map((s) => s.slice(1, -1))
@@ -103,8 +110,8 @@ function check(name, ok, detail) {
 // easy to break in a way that only shows up as a slightly wrong number months
 // later, so pin the properties that make the estimate honest.
 {
-  const pt = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8');
-  const cb = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'chocobar.c'), 'utf8');
+  const pt = sources.p_tokens;
+  const cb = sources.chocobar;
 
   // a bridge turn must be judged by its route, not by a hardcoded provider list:
   // mimo rows have been toggled off and on, and workbuddy-2 appeared later, so any
@@ -185,7 +192,7 @@ function check(name, ok, detail) {
 // at all when that copy is gone. The heal must (a) rewrite on a mismatch, and
 // (b) leave an absent value alone, because absence is the user's "off".
 {
-  const ui = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_ui.c'), 'utf8');
+  const ui = sources.p_ui;
   const heal = ui.match(/static void autoStartHeal\(void\) \{([\s\S]*?)\n\}/);
   check('autostart: a moved exe is rewritten on mismatch',
     !!heal && /lstrcmpiW\(cur, want\)/.test(heal[1]) && !/lstrcmpW\(cur, want\)/.test(heal[1]),
@@ -212,7 +219,7 @@ function check(name, ok, detail) {
 // Unchanged warm scans must stay incremental. Executable restart/reset
 // coverage lives in token_regression.py; these older text guards are retained.
 {
-  const tk = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8');
+  const tk = sources.p_tokens;
   const seed = tk.match(/void tokLiveSeed\(long long cacheMaxTs[\s\S]*?\n\}/);
   check('tokens: a moved seed boundary forces a full re-read',
     !!seed && /if \(g_cacheMaxTs != cacheMaxTs\) g_tokForceFullRead = 1;/.test(seed[0]),

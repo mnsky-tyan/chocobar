@@ -33,6 +33,7 @@ on:
       - 'native/src/p_tokens.c'
       - 'native/src/p_agg.c'
       - 'native/src/chocobar_core.h'
+      - 'native/vendor/jsmn.h'
       - 'native/build.sh'
       - '.github/workflows/macos-probe.yml'
   pull_request:
@@ -43,6 +44,7 @@ on:
       - 'native/src/p_tokens.c'
       - 'native/src/p_agg.c'
       - 'native/src/chocobar_core.h'
+      - 'native/vendor/jsmn.h'
       - 'native/build.sh'
       - '.github/workflows/macos-probe.yml'
 
@@ -190,4 +192,4 @@ jobs:
           name: macos-probe-log
           path: macos-probe.log
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
