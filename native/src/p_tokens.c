@@ -443,6 +443,26 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
 // provider is not among them. That matters because one session routinely mixes
 // a reporting route with a bridged one - 824 of 1,028 real CodeBuddy turns sit
 // in such files, where a per-file rule would discard every one as an abort.
+
+// Exact element test against `real` (the comma-joined list of routes that DID
+// report in this file). A bare strstr is a SUBSTRING test, and real stores have
+// route names that nest - mimo inside mimo-desktop, workbuddy inside
+// workbuddy-2 - so the substring match read a blind turn on the shorter
+// route as an aborted reporting one and dropped it instead of estimating it
+// (and the append side refused to record the shorter route at all).
+static int tokRealHas(const char *real, const char *pv) {
+    int n = (int)strlen(pv);
+    const char *p = real;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        const char *segEnd = e ? e : p + strlen(p);
+        if (segEnd - p == n && memcmp(p, pv, (size_t)n) == 0) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
                              const TokKeys *tk, const Config *cfg, TokCursor *cur) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
@@ -529,8 +549,9 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                     if (estimating && r.provLen > 0) {
                         char pv[40]; int pl = r.provLen < 39 ? r.provLen : 39;
                         memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
-                        // already listed? a substring test is enough at <10 entries
-                        if (!strstr(real, pv)) {
+                        // already listed? an exact element test - a substring
+                        // test would refuse to record mimo after mimo-desktop
+                        if (!tokRealHas(real, pv)) {
                             int need = (realSeen ? 1 : 0) + pl;
                             if (realSeen + need < (int)sizeof(real) - 1) {
                                 if (realSeen) real[realSeen++] = ',';
@@ -554,7 +575,7 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                     if (r.provLen > 0) {
                         int pl = r.provLen < 39 ? r.provLen : 39;
                         memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
-                        if (realSeen && strstr(real, pv)) blind = 0;
+                        if (realSeen && tokRealHas(real, pv)) blind = 0;
                     }
                     if (blind) {
                         long long oout = 0;

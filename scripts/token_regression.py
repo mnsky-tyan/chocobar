@@ -20,7 +20,7 @@ def windows_path(path):
     return subprocess.check_output(["wslpath", "-w", str(path)], text=True, timeout=5).strip()
 
 
-def fixture(root, name, seeded=False):
+def fixture(root, name, seeded=False, records=None):
     profile = root / name
     configdir = profile / ".wizbar"
     sessions = profile / "sessions"
@@ -38,12 +38,12 @@ def fixture(root, name, seeded=False):
         "general": {"autoStart": False, "checkUpdates": False, "debug": False}}
     dump = lambda value: json.dumps(value, separators=(",", ":"))
     (configdir / "config.json").write_text(dump(config), encoding="utf-8")
-    records = [
+    rows = records if records is not None else [
         {"prompt_tokens": 100, "completion_tokens": 40, "cache_read_tokens": 10,
          "cache_write_tokens": 0, "at": now - 1000, "model_name": "Model-A"},
         {"prompt_tokens": 80, "completion_tokens": 20, "cache_read_tokens": 10,
          "cache_write_tokens": 5, "at": now - 900, "model_name": "Model-B"}]
-    (sessions / "usage.jsonl").write_text("".join(dump(r) + "\n" for r in records), encoding="utf-8")
+    (sessions / "usage.jsonl").write_text("".join(dump(r) + "\n" for r in rows), encoding="utf-8")
     extra = {"prompt_tokens": 50, "completion_tokens": 5, "cache_read_tokens": 0,
              "cache_write_tokens": 0, "at": now - 800, "model_name": "Model-C"}
     (profile / "append-record.json").write_text(dump(extra) + "\n", encoding="utf-8")
@@ -180,6 +180,32 @@ def main():
             return verify(run_child(exe, profile, "source-toggle"), expected)
         check("disabled source enabled after restart recovers history", lambda: source_toggle("source-off"))
         check("disabled source enabled alongside active source", lambda: source_toggle("source-partial", True))
+
+        # Route names that NEST ("mimo" inside "mimo-desktop", both real) must
+        # be matched as exact comma-delimited elements, never as substrings: a
+        # substring test read a blind turn on the shorter route as an aborted
+        # reporting one and dropped it instead of estimating it, and refused to
+        # record the shorter route in the reported list at all. Numbers, from
+        # the default factors (inputFactor 1.10, outputFactor 1.04): the row-2
+        # estimate is (40+60)/4*1.10 -> 28 prompt tokens and 60/4*1.04 -> 16
+        # completion tokens, staged as 44; row 4 must NOT be estimated because
+        # its route reported at row 3. 150 + 44 + 50 = 244, three calls, one model.
+        now = int(time.time() * 1000)
+        nested = fixture(root, "nested", records=[
+            {"prompt_tokens": 100, "completion_tokens": 40, "cache_read_tokens": 10,
+             "cache_write_tokens": 0, "at": now - 1000, "model_name": "Model-A",
+             "provider": "mimo-desktop", "message": {"content": "a" * 40}},
+            {"prompt_tokens": 0, "completion_tokens": 0, "cache_read_tokens": 0,
+             "cache_write_tokens": 0, "at": now - 900, "model_name": "Model-A",
+             "provider": "mimo", "message": {"content": "b" * 60}},
+            {"prompt_tokens": 30, "completion_tokens": 10, "cache_read_tokens": 5,
+             "cache_write_tokens": 5, "at": now - 800, "model_name": "Model-A",
+             "provider": "mimo", "message": {"content": "c" * 20}},
+            {"prompt_tokens": 0, "completion_tokens": 0, "cache_read_tokens": 0,
+             "cache_write_tokens": 0, "at": now - 700, "model_name": "Model-A",
+             "provider": "mimo", "message": {"content": "d" * 10}}])
+        check("nested route names are element-matched, not substring-matched",
+              lambda: verify(run_child(exe, nested), [(244, 3, 1, False), (244, 3, 1, True)]))
         # Verify the cursor serialization as persisted output, not source text.
         def cursor_contract():
             data = json.loads((fresh / ".wizbar" / "token-cursors.json").read_text(encoding="utf-8"))
