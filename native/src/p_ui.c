@@ -1494,11 +1494,18 @@ static void configCheckTick(void) {
     if (CompareFileTime(&fa.ftLastWriteTime, &g_cfgMtime) != 0) {
         g_cfgMtime = fa.ftLastWriteTime;
         loadConfig();
-        // font may change with the config: rebuild it
-        if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); g_font = NULL; }
+        // font may change with the config: rebuild it. Build the replacement
+        // FIRST and swap only on success - the old code destroyed the old font
+        // before the retry, so a failed barFont() left g_font NULL and the bar
+        // froze on its last painted frame until a later reload succeeded.
         HFONT nf = barFont();
-        if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
-        else writeLogA("[wizbar] config reload: barFont failed; keeping the old font metrics");
+        if (nf) {
+            if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); }
+            g_font = nf;
+            g_fontOld = (HFONT)SelectObject(g_memDc, g_font);
+        } else {
+            writeLogA("[wizbar] config reload: barFont failed; keeping the previous font");
+        }
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
         // The subs board renders from the live config at paint time, but its
@@ -3880,12 +3887,15 @@ static void resolveConfigPath(void) {
     }
     if (!g_cfgPath[0]) {
         wchar_t home[MAX_PATH];
-        if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) && home[0]) {
+        // the too-small case returns the REQUIRED size (positive) and leaves
+        // the buffer contents undefined, so bound the return, not just home[0]
+        DWORD hn = GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+        if (hn > 0 && hn < MAX_PATH) {
             swprintf(g_cfgPath, MAX_PATH, L"%ls\\.wizbar\\config.json", home);
         } else {
             // No USERPROFILE: without this the path would be "\.wizbar\config.json",
             // resolved against the process's current directory
-            writeLogA("[wizbar] resolveConfigPath: USERPROFILE unset; no config path");
+            writeLogA("[wizbar] resolveConfigPath: USERPROFILE unset or too long; no config path");
         }
     }
 }

@@ -647,9 +647,11 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
                     while (e < vl && vb[e] != '"' && vb[e] != '\\' && (e - j) < 4000) e++;
                     int tl = e - j;
                     if (tl > 5 && tl < 4000) {
-                        // a 0 return means the bytes are not valid UTF-8; leaving
-                        // out->access empty and returning 1 would make the caller
-                        // fall through to an exit that logs nothing at all
+                        // belt-and-braces: with CP_UTF8 and flags 0 an invalid
+                        // sequence is SUBSTITUTED (U+FFFD), not failed, and the
+                        // length fits the buffer by construction - but a 0
+                        // return would leave out->access undefined, so clear
+                        // it and report no login rather than proceed on it
                         if (MultiByteToWideChar(CP_UTF8, 0, vb + j, tl, out->access, AGY_ACCESS_CCH) <= 0)
                             out->access[0] = 0;
                         HeapFree(GetProcessHeap(), 0, vb);
