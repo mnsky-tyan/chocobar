@@ -52,7 +52,6 @@ static int g_customState[MAX_CUSTOM];
 
 // cross-part declarations - all parts build as one translation unit
 // (chocobar_full.c), so these only make later sections visible early
-extern long long g_tokAllLive; // p_tokens
 void tokLiveSeed(long long cacheMaxTs, long long cacheMtimeMs); // p_tokens
 long long tokLiveScan(const Config *cfg); // p_tokens
 void tokLiveReset(void); // p_tokens: tokens.enabled off - forget cursors + live counters
@@ -79,6 +78,7 @@ static HFONT g_font = NULL;
 static HFONT g_fontOld = NULL;
 static NOTIFYICONDATAW g_nid;
 static int g_trayAdded = 0;
+static int g_trayIconOwned = 0; // the icon is ours (not the shared fallback)
 static int g_barVisible = 0;
 static HWND g_owner = NULL; // the bar's owner window (the followed terminal)
 static int g_subsRotIdx = 0;    // rotating subs chip position
@@ -160,7 +160,12 @@ static int initRender(void) {
     g_memDc = CreateCompatibleDC(NULL);
     if (!g_memDc) return 0;
     g_font = barFont();
-    if (!g_font) return 0;
+    if (!g_font) {
+        // Without a font repaintBar returns immediately, so the bar would show
+        // nothing at all; say why instead of leaving a blank window
+        writeLogA("[wizbar] render init: barFont failed; bar will not paint");
+        return 0;
+    }
     g_fontOld = (HFONT)SelectObject(g_memDc, g_font);
     return 1;
 }
@@ -417,7 +422,6 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
 // Scan timestamps: written just below, read by the dashboard paint. Both live
 // in p_ui.c because only the renderer shows them; the shared aggregation in
 // p_agg.c never needs them.
-static long long g_lastScanMs = 0;
 static long long g_lastScanEpoch = 0;
 
 // ---- renderer state (not shared) ------------------------------------------------
@@ -556,7 +560,6 @@ static void scanTokenCacheInner(const Config *cfg) {
     }
     HeapFree(GetProcessHeap(), 0, buf);
     tokTodaySet(total);
-    g_lastScanMs = (long long)GetTickCount64();
     g_lastScanEpoch = wallNowLocalMs();
     // remember the seed boundary so the live session scan only counts records
     // NEWER than anything the cache already holds (no double counting)
@@ -597,7 +600,7 @@ static DWORD WINAPI tokScanThread(LPVOID unused) {
     InterlockedExchange(&g_tokScanDone, 1);
     // land the apply immediately; the 1s tick drains as a fallback if this
     // never arrives (e.g. the bar window is already gone at shutdown)
-    PostMessageW(g_bar, WM_APP_TOKSCANDONE, 0, 0);
+    tokScanFinishedNotify();
     return 0;
 }
 
@@ -1495,6 +1498,7 @@ static void configCheckTick(void) {
         if (g_font) { SelectObject(g_memDc, g_fontOld); DeleteObject(g_font); g_font = NULL; }
         HFONT nf = barFont();
         if (nf) { g_font = nf; g_fontOld = (HFONT)SelectObject(g_memDc, g_font); }
+        else writeLogA("[wizbar] config reload: barFont failed; keeping the old font metrics");
         followTick();
         InvalidateRect(g_bar, NULL, FALSE);
         // The subs board renders from the live config at paint time, but its
@@ -3365,6 +3369,10 @@ static void showTrayMenu(HWND hwnd) {
 static void trayRemove(void) {
     if (!g_trayAdded) return;
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
+    // only the icon we made; the shared IDI_APPLICATION fallback must not be
+    // destroyed (DestroyIcon on a shared icon is not ours to call)
+    if (g_trayIconOwned && g_nid.hIcon) { DestroyIcon(g_nid.hIcon); g_trayIconOwned = 0; }
+    g_nid.hIcon = NULL;
     g_trayAdded = 0;
 }
 
@@ -3448,8 +3456,13 @@ static void trayRetip(void) {
         int n = lstrlenW(tip);
         lstrcpynW(tip + n, note, 256 - n);
     }
-    if (lstrcmpW(tip, g_nid.szTip) == 0) return;
-    lstrcpynW(g_nid.szTip, tip, 128);
+    // Truncate to what szTip can actually hold BEFORE comparing: tip can be
+    // ~210 chars, so comparing it against the stored 128-char form never
+    // matched and NIM_MODIFY was re-sent every second for the process's life.
+    wchar_t cur[128];
+    lstrcpynW(cur, tip, 128);
+    if (lstrcmpW(cur, g_nid.szTip) == 0) return;
+    lstrcpynW(g_nid.szTip, cur, 128);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
@@ -3462,9 +3475,17 @@ static void trayAdd(HWND hwnd) {
     g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY;
     g_nid.hIcon = makeBarIcon(32);
+    g_trayIconOwned = g_nid.hIcon != NULL;
     if (!g_nid.hIcon) g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     lstrcpynW(g_nid.szTip, L"Chocobar", 128);
-    if (Shell_NotifyIconW(NIM_ADD, &g_nid)) g_trayAdded = 1;
+    if (Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+        g_trayAdded = 1;
+    } else if (g_trayIconOwned) {
+        // NIM_ADD failed: the icon is never handed to the shell, so free it
+        DestroyIcon(g_nid.hIcon);
+        g_nid.hIcon = NULL;
+        g_trayIconOwned = 0;
+    }
 }
 
 
@@ -3859,8 +3880,13 @@ static void resolveConfigPath(void) {
     }
     if (!g_cfgPath[0]) {
         wchar_t home[MAX_PATH];
-        GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
-        swprintf(g_cfgPath, MAX_PATH, L"%ls\\.wizbar\\config.json", home);
+        if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) && home[0]) {
+            swprintf(g_cfgPath, MAX_PATH, L"%ls\\.wizbar\\config.json", home);
+        } else {
+            // No USERPROFILE: without this the path would be "\.wizbar\config.json",
+            // resolved against the process's current directory
+            writeLogA("[wizbar] resolveConfigPath: USERPROFILE unset; no config path");
+        }
     }
 }
 

@@ -64,6 +64,7 @@ typedef struct {
 } TokCursor;
 static TokCursor g_tokCursor[TOK_MAX_FILES];
 static int g_tokCursorN = 0;
+static int g_tokCursorFullLogged = 0;
 static int g_tokCursorDirty = 0;
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def);
 
@@ -656,7 +657,7 @@ static void tokCursorLoad(const Config *cfg) {
                     c->chars = tokJll(raw, t, k + 1, "chars", TOK_CHARS_NONE);
                     jstrCopyA(c->real, (int)sizeof(c->real), raw, t,
                               jobjGet(raw, t, k + 1, "real"), "");
-                    c->real[tokJsonUnesc(c->real, (int)strlen(c->real))] = 0;
+                    int rl = tokJsonUnesc(c->real, (int)strlen(c->real)); c->real[rl] = 0;
                 }
             }
             k += 1 + jtokSpan(t, k + 1);
@@ -724,7 +725,15 @@ static TokCursor *tokCursorFind(const char *path) {
 static TokCursor *tokCursorGet(const char *path) {
     TokCursor *c = tokCursorFind(path);
     if (!c) {
-        if (g_tokCursorN >= TOK_MAX_FILES) return NULL;
+        if (g_tokCursorN >= TOK_MAX_FILES) {
+            // Past the cap a file gets no cursor, so it is re-read from byte 0
+            // on every rescan forever and never persists. Say so once.
+            if (!g_tokCursorFullLogged) {
+                g_tokCursorFullLogged = 1;
+                writeLogA("[wizbar] token cursors: TOK_MAX_FILES reached; further session files re-read each scan");
+            }
+            return NULL;
+        }
         c = &g_tokCursor[g_tokCursorN++];
         memset(c, 0, sizeof(*c));
         lstrcpynA(c->path, path, 520);
@@ -770,7 +779,10 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         // every enumerable file gets a stable cursor key: the UTF-8 name when
         // it fits, else a hash of the wide path, so it warm-skips, resumes and
         // persists like any other file instead of being re-read from 0 forever
-        if (tokWideToUtf8(full, pathA, 520) < 0) tokCursorKeyWide(full, pathA, 520);
+        // <= 0, not < 0: a conversion that produced nothing (or failed, as the
+        // macOS adapter does for an unpaired surrogate) must still key by the
+        // wide path, or every such file would share the empty-key cursor row
+        if (tokWideToUtf8(full, pathA, 520) <= 0) tokCursorKeyWide(full, pathA, 520);
         TokCursor *c = tokCursorFind(pathA);
         // Unchanged since the last scan: skip it. Opening one file over the WSL
         // redirector costs ~25ms, and re-opening all 21 active files every

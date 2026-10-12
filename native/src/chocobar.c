@@ -715,12 +715,8 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     // content-fit never has to grow it past the screen
     c->dashW = 900; c->dashH = 520; c->subsW = 880; c->subsH = 580;
     c->tokenCachePath = wideDup(L"");
-    c->tokensAppCount = 0;
-    c->tokLabelCount = 0;
     c->tokensEnabled = 1;
     c->tokensRescanSec = 60;
-    c->tokSrcCount = 0;
-    c->iconCount = 0;
     c->divider = wideDup(L"#D9CCB2"); c->warn = wideDup(L"#A00000");
     c->pinkBg = wideDup(L"#FEF7F9");
     c->yellow = wideDup(L"#B8A96A"); c->good = wideDup(L"#006400");
