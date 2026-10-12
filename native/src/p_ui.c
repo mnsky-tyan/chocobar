@@ -419,9 +419,9 @@ static void addChipI(int type, int customIdx, const wchar_t *text, int warn,
 
 // newest ts + mtime seen in the cache file, for the live scan's seed boundary
 
-// Scan timestamps: written just below, read by the dashboard paint. Both live
-// in p_ui.c because only the renderer shows them; the shared aggregation in
-// p_agg.c never needs them.
+// Scan timestamp: written just below, read by the dashboard paint. It lives in
+// p_ui.c because only the renderer shows it; the shared aggregation in
+// p_agg.c never needs it.
 static long long g_lastScanEpoch = 0;
 
 // ---- renderer state (not shared) ------------------------------------------------
