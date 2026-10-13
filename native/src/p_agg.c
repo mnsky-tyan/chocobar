@@ -122,7 +122,10 @@ static int aggDayIndex(long long ts, const long long *bnd) {
         int mid = lo + (hi - lo) / 2;
         if (bnd[mid] <= ts) { j = mid; hi = mid - 1; } else lo = mid + 1;
     }
-    return j;
+    // j == 0 is tomorrow's boundary (bnd[0]): not a bucket, so never return it
+    // - a caller that indexed g_dayTot[DASH_MAX_DAYS - 0] would run one past
+    // the end of both g_dayTot and g_dayApp's first dimension.
+    return j > 0 ? j : -1;
 }
 
 static void aggRecord(const char *app, int alen, long long ts,
@@ -191,6 +194,10 @@ static void aggRecord(const char *app, int alen, long long ts,
         }
     }
     int j = aggDayIndex(ts, bnd);
+    // the app/model tables above are lifetime; this day table is a fixed
+    // DASH_MAX_DAYS window, so a store holding records older than the window
+    // makes the per-app/per-model totals and the day-derived stat cards
+    // legitimately disagree
     if (j >= 1) {
         int di = DASH_MAX_DAYS - j;
         g_dayTot[di] += sum;

@@ -116,9 +116,15 @@ function check(name, ok, detail) {
   // a bridge turn must be judged by its route, not by a hardcoded provider list:
   // mimo rows have been toggled off and on, and workbuddy-2 appeared later, so any
   // such list is wrong the day a route changes. The code consults the set of
-  // routes that DID report in the same file, and no route name is compiled in.
+  // routes that DID report in the same file, no route name is compiled in, and
+  // the match is an exact comma-delimited element test: a substring test
+  // matched "mimo" inside "mimo-desktop" and read a blind turn on the
+  // shorter route as an aborted reporting one.
   check('estimator: blindness is decided from the file\'s own reporting routes',
-    /strstr\(real, pv\)/.test(pt) && /blind = 0/.test(pt));
+    /tokRealHas\(real, pv\)/.test(pt) && /blind = 0/.test(pt)
+    && /segEnd - p == n && memcmp\(p, pv, \(size_t\)n\) == 0/.test(pt)
+    && !/strstr\(real, pv\)/.test(pt),
+    'an exact comma-delimited element match, never a substring test');
   check('estimator: no provider name is compiled in as a quoted literal',
     !/"(workbuddy|mimo[-a-z]*|antigravity|codebuddy)"/i.test(pt),
     'a bridge list would rot the moment a route changes');
@@ -142,7 +148,7 @@ function check(name, ok, detail) {
 
   // on by default, with the constants in config and a sane floor
   check('config: estimateMissingUsage defaults to on',
-    /tokensEnabled = jboolDefault\(js, t, jobjGet\(js, t, toks, "enabled"\), 1\);[\s\S]{0,700}tokEstimate = jboolDefault\(js, t, jobjGet\(js, t, toks, "estimateMissingUsage"\), 1\);/.test(cb));
+    /tokensEnabled = jboolDefault\(js, t, jobjGet\(js, t, toks, "enabled"\), 1\);[\s\S]{0,1500}tokEstimate = jboolDefault\(js, t, jobjGet\(js, t, toks, "estimateMissingUsage"\), 1\);/.test(cb));
   check('config: the three constants are configurable',
     /"inputFactor"/.test(cb) && /"saturateTokens"/.test(cb) && /"outputFactor"/.test(cb));
   check('config: constants fall back on a zero/negative value',

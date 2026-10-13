@@ -77,7 +77,9 @@ jobs:
         # newly counted (cursor size+mtime skip + byte-offset resume through
         # SetFilePointerEx). This is the regression net for the whole seam:
         # path translation, directory enumeration, seek semantics, codecs,
-        # cursor persistence, aggregation.
+        # cursor persistence, aggregation - AND the estimator, which is compiled
+        # into the same core TU: the blank turn below must be filled in from
+        # its transcript, or the estimator half of the seam never runs on mac.
         run: |
           set -euo pipefail
           SCRATCH="$RUNNER_TEMP/cb-selftest"
@@ -85,10 +87,14 @@ jobs:
           mkdir -p "$CBHOME/.wizbar" "$CBHOME/store/proj"
           NOW_MS=$(( $(date +%s) * 1000 ))
           REC() { local ts=$((NOW_MS - $5)); printf '{"type":"message","message":{"role":"assistant","model":"selftest-model","usage":{"input":%s,"output":%s,"cacheRead":%s,"cacheWrite":%s}},"timestamp":%s}\n' "$1" "$2" "$3" "$4" "$ts"; }
-          # top-level file: 2 records; nested project dir: 1 record (recursive
-          # enumeration); 3 x (100+50+10+5) = 495 all-time
+          # top-level file: 2 reporting records + 1 blank turn; nested project
+          # dir: 1 record (recursive enumeration); 3 x (100+50+10+5) = 495
+          # reported + 21 estimated for the blank turn (40 content chars at the
+          # 1.10/1.04 factors -> 11 prompt + 10 completion) = 516 all-time
           REC 100 50 10 5  1000 > "$CBHOME/store/a.jsonl"
           REC 100 50 10 5  2000 >> "$CBHOME/store/a.jsonl"
+          printf '{"type":"message","message":{"role":"assistant","model":"selftest-model","provider":"probe-blank","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","timestamp":%s}}\n' \
+            "$((NOW_MS - 2500))" >> "$CBHOME/store/a.jsonl"
           REC 100 50 10 5  3000 > "$CBHOME/store/proj/b.jsonl"
           # the record the second scan must pick up through the warm path
           REC 100 50 10 5  4000 > "$SCRATCH/append.jsonl"
@@ -103,10 +109,10 @@ jobs:
           touch "$SCRATCH/append.done"
           wait "$SELFTEST_PID"
           cat "$SCRATCH/selftest.out"
-          grep -q "SELFTEST SCAN1 495 TOK_ALL 495 APPS 1 SOURCES 1" "$SCRATCH/selftest.out" \
-            || { echo "FAIL: scan 1 expected 495 from 3 records (recursion + codecs + aggregation)"; exit 1; }
-          grep -q "SELFTEST SCAN2 165 TOK_ALL 660" "$SCRATCH/selftest.out" \
-            || { echo "FAIL: warm rescan expected only the appended record to count (cursor + seek + preserved aggregates)"; exit 1; }
+          grep -q "SELFTEST SCAN1 516 TOK_ALL 516 APPS 1 SOURCES 1" "$SCRATCH/selftest.out" \
+            || { echo "FAIL: scan 1 expected 516 (3 reporting records = 495, plus the blank turn estimated at 21)"; exit 1; }
+          grep -q "SELFTEST SCAN2 165 TOK_ALL 681" "$SCRATCH/selftest.out" \
+            || { echo "FAIL: warm rescan expected only the appended record to count (cursor + seek + preserved aggregates + persisted estimator state)"; exit 1; }
           {
             echo "### macOS core-seam self-test"
             echo ""
@@ -114,8 +120,9 @@ jobs:
             cat "$SCRATCH/selftest.out"
             echo '```'
             echo ""
-            echo "Seeded store: 3 records (495) across a nested dir; mid-process append (165)"
-            echo "picked up through the byte cursor with totals preserved."
+            echo "Seeded store: 3 reporting records (495) + 1 blank turn (estimated 21) across a"
+            echo "nested dir; mid-process append (165) picked up through the byte cursor with totals"
+            echo "and the estimator's cursor state preserved."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test (launch, stay up 3s, exit cleanly)

@@ -171,6 +171,7 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
                 }
                 k.open = -1;
                 k.cx = k.sx; k.cy = k.sy;
+                k.prev = L'Z'; // a closepath is not C/S: reflection must not survive it
                 continue;
             }
         }
@@ -182,6 +183,7 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
             if (!svgNum(d, &i, &y)) break;
             if (rel) { x += k.cx; y += k.cy; }
             svgSubStart(&k, x, y);
+            k.prev = L'M'; // only C/S reflect; any other command clears the handle
             cmd = rel ? L'l' : L'L'; // implicit lineto continuation
             break;
         }
@@ -191,6 +193,7 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
             if (!svgNum(d, &i, &y)) break;
             if (rel) { x += k.cx; y += k.cy; }
             svgLine(&k, x, y);
+            k.prev = L'L';
             break;
         }
         case L'H': case L'h': {
@@ -198,6 +201,7 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
             if (!svgNum(d, &i, &x)) break;
             if (rel) x += k.cx;
             svgLine(&k, x, k.cy);
+            k.prev = L'H';
             break;
         }
         case L'V': case L'v': {
@@ -205,6 +209,7 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
             if (!svgNum(d, &i, &y)) break;
             if (rel) y += k.cy;
             svgLine(&k, k.cx, y);
+            k.prev = L'V';
             break;
         }
         case L'A': case L'a': {
@@ -245,6 +250,7 @@ static void svgWalk(SvgPath *out, const wchar_t *d) {
         }
         default:
             i++; // skip unknown
+            k.prev = 0; // an unrecognised command clears the C/S reflection handle
             break;
         }
     }
@@ -371,7 +377,6 @@ static GpStatus (WINAPI *t_GdipDrawEllipse)(GpGraphics *, GpPen *, float, float,
 static GpStatus (WINAPI *t_GdipFillEllipse)(GpGraphics *, GpBrush *, float, float, float, float);
 static GpStatus (WINAPI *t_GdipFillPath)(GpGraphics *, GpBrush *, GpPath *);
 static GpStatus (WINAPI *t_GdipAddPathArc)(GpPath *, float, float, float, float, float, float);
-static GpStatus (WINAPI *t_GdipCloseFigure)(GpPath *);
 static GpStatus (WINAPI *t_GdipCreateSolidFill)(unsigned int argb, GpBrush **);
 static GpStatus (WINAPI *t_GdipDeleteBrush)(GpBrush *);
 
@@ -388,7 +393,7 @@ static void gdipInit(void) {
     GBIND(GdipDeletePath, "GdipDeletePath");
     GBIND(GdipStartPathFigure, "GdipStartPathFigure");
     GBIND(GdipAddPathLine2, "GdipAddPathLine2");
-    GBIND(GdipClosePathFigure, "GdipClosePathFigure");
+    GBIND(GdipClosePathFigure, "GdipClosePathFigure"); // flat API has no GdipCloseFigure
     GBIND(GdipCreatePen1, "GdipCreatePen1");
     GBIND(GdipDeletePen, "GdipDeletePen");
     GBIND(GdipSetPenStartCap, "GdipSetPenStartCap");
@@ -400,7 +405,6 @@ static void gdipInit(void) {
     GBIND(GdipFillEllipse, "GdipFillEllipse");
     GBIND(GdipFillPath, "GdipFillPath");
     GBIND(GdipAddPathArc, "GdipAddPathArc");
-    GBIND(GdipCloseFigure, "GdipClosePathFigure"); // flat API has no GdipCloseFigure
     GBIND(GdipCreateSolidFill, "GdipCreateSolidFill");
     GBIND(GdipDeleteBrush, "GdipDeleteBrush");
 #undef GBIND
@@ -412,7 +416,7 @@ static void gdipInit(void) {
         (void *)t_GdipSetPenStartCap, (void *)t_GdipSetPenEndCap, (void *)t_GdipSetPenLineJoin,
         (void *)t_GdipDrawPath, (void *)t_GdipDrawArc, (void *)t_GdipDrawEllipse,
         (void *)t_GdipFillEllipse, (void *)t_GdipFillPath, (void *)t_GdipAddPathArc,
-        (void *)t_GdipCloseFigure, (void *)t_GdipCreateSolidFill, (void *)t_GdipDeleteBrush };
+        (void *)t_GdipCreateSolidFill, (void *)t_GdipDeleteBrush };
     for (int i = 0; i < (int)(sizeof(tabs) / sizeof(tabs[0])); i++) {
         if (!tabs[i]) { writeLogA("[wizbar] gdiplus bind missing, falling back to GDI"); return; }
     }
@@ -442,7 +446,7 @@ static void gdipRoundRect(HDC hdc, COLORREF fill, COLORREF border, int x, int y,
         t_GdipAddPathArc(p, (float)x + w - 2 * fr, (float)y, 2 * fr, 2 * fr, 270, 90);
         t_GdipAddPathArc(p, (float)x + w - 2 * fr, (float)y + h - 2 * fr, 2 * fr, 2 * fr, 0, 90);
         t_GdipAddPathArc(p, (float)x, (float)y + h - 2 * fr, 2 * fr, 2 * fr, 90, 90);
-        t_GdipCloseFigure(p);
+        t_GdipClosePathFigure(p);
         if (fill) {
             GpBrush *br = NULL;
             if (t_GdipCreateSolidFill(GDIP_ARGB(fill), &br) == 0) {
@@ -626,7 +630,6 @@ static void iconStrokeGdi(HDC hdc, int id, COLORREF color, int x, int y) {
         HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND, (DWORD)w, &lb, 0, NULL);
         if (!pen) return;
         HGDIOBJ old = SelectObject(hdc, pen);
-        HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
         SvgPath *p = &fl[j].path;
         for (int si = 0; si < p->nsub; si++) {
             SvgSub *ss = &p->s[si];
@@ -641,7 +644,6 @@ static void iconStrokeGdi(HDC hdc, int id, COLORREF color, int x, int y) {
             Polyline(hdc, pts, n2);
         }
         SelectObject(hdc, old);
-        SelectObject(hdc, ob);
         DeleteObject(pen);
     }
 }
@@ -752,7 +754,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
                         t_GdipAddPathArc(fp, fx + fw2 - 2 * fr, fy, 2 * fr, 2 * fr, 270, 90);
                         t_GdipAddPathArc(fp, fx + fw2 - 2 * fr, fy + fh - 2 * fr, 2 * fr, 2 * fr, 0, 90);
                         t_GdipAddPathArc(fp, fx, fy + fh - 2 * fr, 2 * fr, 2 * fr, 90, 90);
-                        t_GdipCloseFigure(fp);
+                        t_GdipClosePathFigure(fp);
                         GpBrush *br = NULL;
                         unsigned int argb = alpha << 24 | ((unsigned int)GetRValue(fc) << 16)
                                          | ((unsigned int)GetGValue(fc) << 8) | (unsigned int)GetBValue(fc);

@@ -64,6 +64,7 @@ typedef struct {
 } TokCursor;
 static TokCursor g_tokCursor[TOK_MAX_FILES];
 static int g_tokCursorN = 0;
+static int g_tokCursorFullLogged = 0;
 static int g_tokCursorDirty = 0;
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def);
 
@@ -442,8 +443,29 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
 // provider is not among them. That matters because one session routinely mixes
 // a reporting route with a bridged one - 824 of 1,028 real CodeBuddy turns sit
 // in such files, where a per-file rule would discard every one as an abort.
+
+// Exact element test against `real` (the comma-joined list of routes that DID
+// report in this file). A bare strstr is a SUBSTRING test, and real stores have
+// route names that nest - mimo inside mimo-desktop, workbuddy inside
+// workbuddy-2 - so the substring match read a blind turn on the shorter
+// route as an aborted reporting one and dropped it instead of estimating it
+// (and the append side refused to record the shorter route at all).
+static int tokRealHas(const char *real, const char *pv) {
+    int n = (int)strlen(pv);
+    const char *p = real;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        const char *segEnd = e ? e : p + strlen(p);
+        if (segEnd - p == n && memcmp(p, pv, (size_t)n) == 0) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
-                             const TokKeys *tk, const Config *cfg, TokCursor *cur) {
+                             const TokKeys *tk, const Config *cfg, TokCursor *cur,
+                             long long stageFrom) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
@@ -511,6 +533,14 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
         if (!nl) break; // partial tail: do not advance the cursor past it
         int len = (int)(nl - p);
         if (len > 0) {
+            // stage only lines ENDING past stageFrom. It equals `from` on every
+            // normal read, so behaviour is unchanged; a cursor-repair re-read
+            // (below) passes 0 and the OLD cursor size instead, so it can
+            // establish the transcript total over the whole file without
+            // re-staging rows the aggregates already hold. The END bound (not
+            // the start) also catches a line that straddled the old cursor: it
+            // was a partial tail then, uncounted, and completes now.
+            int stage = (start + consumed + len) > stageFrom;
             // The transcript size is the text of EVERY line so far, not only the
             // ones carrying usage - a user turn and a tool result both go into
             // the prompt. One scan per line, which is why it sits behind the
@@ -528,8 +558,9 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                     if (estimating && r.provLen > 0) {
                         char pv[40]; int pl = r.provLen < 39 ? r.provLen : 39;
                         memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
-                        // already listed? a substring test is enough at <10 entries
-                        if (!strstr(real, pv)) {
+                        // already listed? an exact element test - a substring
+                        // test would refuse to record mimo after mimo-desktop
+                        if (!tokRealHas(real, pv)) {
                             int need = (realSeen ? 1 : 0) + pl;
                             if (realSeen + need < (int)sizeof(real) - 1) {
                                 if (realSeen) real[realSeen++] = ',';
@@ -540,9 +571,11 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                     }
                     // staged, not aggregated: the aggregates are UI-thread-affine
                     // and this runs on the scan worker (the drain applies them)
-                    tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
-                                r.model, r.modelLen, 0);
-                    g_tokAllLive += sum;
+                    if (stage) {
+                        tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
+                                    r.model, r.modelLen, 0);
+                        g_tokAllLive += sum;
+                    }
                 } else if (estimating) {
                     // No usage at all. Estimate it unless this route reports
                     // elsewhere in the file, in which case the turn was aborted
@@ -553,14 +586,14 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                     if (r.provLen > 0) {
                         int pl = r.provLen < 39 ? r.provLen : 39;
                         memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
-                        if (realSeen && strstr(real, pv)) blind = 0;
+                        if (realSeen && tokRealHas(real, pv)) blind = 0;
                     }
                     if (blind) {
                         long long oout = 0;
                         long long pin = tokEstimate(chars + lineChars, replyChars,
                                                     cfg->tokEstIn, cfg->tokEstSat,
                                                     cfg->tokEstOut, &oout);
-                        if (pin > 0) {
+                        if (pin > 0 && stage) {
                             tokPendPush(appName, (int)strlen(appName), r.ts,
                                         pin, oout, 0, 0, r.model, r.modelLen, 1);
                             g_tokAllLive += pin + oout;
@@ -656,7 +689,7 @@ static void tokCursorLoad(const Config *cfg) {
                     c->chars = tokJll(raw, t, k + 1, "chars", TOK_CHARS_NONE);
                     jstrCopyA(c->real, (int)sizeof(c->real), raw, t,
                               jobjGet(raw, t, k + 1, "real"), "");
-                    c->real[tokJsonUnesc(c->real, (int)strlen(c->real))] = 0;
+                    int rl = tokJsonUnesc(c->real, (int)strlen(c->real)); c->real[rl] = 0;
                 }
             }
             k += 1 + jtokSpan(t, k + 1);
@@ -724,7 +757,15 @@ static TokCursor *tokCursorFind(const char *path) {
 static TokCursor *tokCursorGet(const char *path) {
     TokCursor *c = tokCursorFind(path);
     if (!c) {
-        if (g_tokCursorN >= TOK_MAX_FILES) return NULL;
+        if (g_tokCursorN >= TOK_MAX_FILES) {
+            // Past the cap a file gets no cursor, so it is re-read from byte 0
+            // on every rescan forever and never persists. Say so once.
+            if (!g_tokCursorFullLogged) {
+                g_tokCursorFullLogged = 1;
+                writeLogA("[wizbar] token cursors: TOK_MAX_FILES reached; further session files re-read each scan");
+            }
+            return NULL;
+        }
         c = &g_tokCursor[g_tokCursorN++];
         memset(c, 0, sizeof(*c));
         lstrcpynA(c->path, path, 520);
@@ -770,23 +811,35 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         // every enumerable file gets a stable cursor key: the UTF-8 name when
         // it fits, else a hash of the wide path, so it warm-skips, resumes and
         // persists like any other file instead of being re-read from 0 forever
-        if (tokWideToUtf8(full, pathA, 520) < 0) tokCursorKeyWide(full, pathA, 520);
+        // <= 0, not < 0: a conversion that produced nothing (or failed, as the
+        // macOS adapter does for an unpaired surrogate) must still key by the
+        // wide path, or every such file would share the empty-key cursor row
+        if (tokWideToUtf8(full, pathA, 520) <= 0) tokCursorKeyWide(full, pathA, 520);
         TokCursor *c = tokCursorFind(pathA);
         // Unchanged since the last scan: skip it. Opening one file over the WSL
         // redirector costs ~25ms, and re-opening all 21 active files every
         // rescan is what blocked the bar for ~600ms and made refresh lag.
         if (c && !g_tokFullReadNow && c->size == fsz && c->mtimeMs == mt) { g_tokDbgFiles++; g_tokDbgHits++; continue; }
         long long from = (c && !g_tokFullReadNow) ? c->size : 0;
+        long long stageFrom = from;
         // The estimator counts a file's transcript from byte zero and carries the
-        // running total in the cursor. A cursor with no total yet (TOK_CHARS_NONE;
-        // a real total of 0 is a store whose lines carry no transcript text) would
-        // otherwise resume as if the transcript were tiny: re-read the file once.
-        if (cfg->tokEstimate && c && c->size > 0 && c->chars < 0) from = 0;
+        // running total in the cursor. A cursor with no total yet (TOK_CHARS_NONE:
+        // written while the estimator was off, or before it existed; a real total
+        // of 0 is a store whose lines carry no transcript text) would otherwise
+        // resume as if the transcript were tiny: re-read the whole file once to
+        // establish it. On a forced full rebuild that re-read stages everything
+        // anyway (the aggregates are being rebuilt); on a warm scan it must stage
+        // ONLY the bytes past the old cursor, or every usage row in the file
+        // lands in the live aggregates a second time and the totals double.
+        if (cfg->tokEstimate && c && c->size > 0 && c->chars < 0) {
+            from = 0;
+            if (!g_tokFullReadNow) stageFrom = c->size;
+        }
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
         // the cursor must exist BEFORE the read so the count this scan just made
         // (chars, real) lands in it instead of being lost to a fresh memset
-        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA));
+        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA), stageFrom);
         if (neu >= 0) { g_tokDbgRead += (neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);

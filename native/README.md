@@ -70,6 +70,11 @@ bash native/build.sh --check
 bash scripts/build_token_regression.sh   # -> native/token-regression.exe
 ```
 
+The second command compiles the generated `src/chocobar_full.c` and refuses to
+build while any source part is newer than that amalgamation, so run the first
+command after every edit - otherwise the harness would silently test yesterday's
+product.
+
 Run on Windows with Python 3:
 
 ```sh

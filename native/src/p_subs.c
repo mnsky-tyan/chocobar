@@ -87,15 +87,15 @@ static wchar_t *subsChatgptToken(const Config *cfg, int idx) {
     char *buf = readFileUtf8(path, &len);
 
     wchar_t *tok = NULL;
-    jsmntok_t t[256];
-    jsmn_parser p;
-    jsmn_init(&p);
-    int n = jsmn_parse(&p, buf, len, t, 256);
+    // Growable parse: the Codex auth.json is a user file, and a fixed token cap
+    // silently returned "no auth token" (blaming the user) once it filled up.
+    jsmntok_t *t = NULL;
+    int n = subsParseBig(buf, len, &t);
     if (n > 0 && t[0].type == JSMN_OBJECT) {
         int am = jobjGet(buf, t, 0, "auth_mode");
         if (am >= 0 && t[am].type == JSMN_STRING) {
             wchar_t *mode = subsJstr(buf, t, 0, "auth_mode");
-            if (!mode || lstrcmpiW(mode, L"chatgpt") != 0) { wideFree(&mode); HeapFree(GetProcessHeap(), 0, buf); return NULL; }
+            if (!mode || lstrcmpiW(mode, L"chatgpt") != 0) { wideFree(&mode); HeapFree(GetProcessHeap(), 0, t); HeapFree(GetProcessHeap(), 0, buf); return NULL; }
             wideFree(&mode);
         }
         int toks = jobjGet(buf, t, 0, "tokens");
@@ -103,6 +103,7 @@ static wchar_t *subsChatgptToken(const Config *cfg, int idx) {
             tok = subsJstr(buf, t, toks, "access_token");
         }
     }
+    HeapFree(GetProcessHeap(), 0, t);
     HeapFree(GetProcessHeap(), 0, buf);
     return tok;
 }
@@ -605,10 +606,10 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
         buf = readFileUtf8(authPathOut, &len);
     }
     if (buf) {
-        jsmntok_t t[512];
-        jsmn_parser p;
-        jsmn_init(&p);
-        if (jsmn_parse(&p, buf, len, t, 512) > 0 && t[0].type == JSMN_OBJECT) {
+        // Growable parse: authPath is a user-named file of unbounded size, and
+        // a fixed cap reported "no login" (blaming the user) once it filled up.
+        jsmntok_t *t = NULL;
+        if (subsParseBig(buf, len, &t) > 0 && t[0].type == JSMN_OBJECT) {
             int a = jobjGet(buf, t, 0, "antigravity");
             if (a >= 0 && t[a].type == JSMN_OBJECT) {
                 wchar_t *acc = subsJstr(buf, t, a, "access");
@@ -624,6 +625,7 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
                 wideFree(&pid);
             }
         }
+        HeapFree(GetProcessHeap(), 0, t);
         HeapFree(GetProcessHeap(), 0, buf);
         if (*out->access || out->hasRefresh) return 1;
     }
@@ -645,9 +647,15 @@ static int subsAgyReadAuth(const Config *cfg, int idx, AgyAuth *out, wchar_t *au
                     while (e < vl && vb[e] != '"' && vb[e] != '\\' && (e - j) < 4000) e++;
                     int tl = e - j;
                     if (tl > 5 && tl < 4000) {
-                        MultiByteToWideChar(CP_UTF8, 0, vb + j, tl, out->access, AGY_ACCESS_CCH);
+                        // belt-and-braces: with CP_UTF8 and flags 0 an invalid
+                        // sequence is SUBSTITUTED (U+FFFD), not failed, and the
+                        // length fits the buffer by construction - but a 0
+                        // return would leave out->access undefined, so clear
+                        // it and report no login rather than proceed on it
+                        if (MultiByteToWideChar(CP_UTF8, 0, vb + j, tl, out->access, AGY_ACCESS_CCH) <= 0)
+                            out->access[0] = 0;
                         HeapFree(GetProcessHeap(), 0, vb);
-                        return 1;
+                        return (*out->access || out->hasRefresh) ? 1 : 0;
                     }
                 }
             }
@@ -812,11 +820,14 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
         writeLogA("[wizbar] subs agy refresh: clientId/clientSecret too long");
         return 0;
     }
-    char body[2048];
+    char body[256 + 256 + 3 * AGY_REFRESH_CCH + 256];
     int bl = snprintf(body, sizeof(body),
         "{\"client_id\":\"%s\",\"client_secret\":\"%s\",\"refresh_token\":\"%ls\",\"grant_type\":\"refresh_token\"}",
         cid, cs, a->refresh);
-    if (bl <= 0 || bl >= (int)sizeof(body)) return 0;
+    if (bl <= 0 || bl >= (int)sizeof(body)) {
+        writeLogA("[wizbar] subs agy refresh: request body too long");
+        return 0;
+    }
     int status = 0, len = 0;
     char *resp = subsHttpPost("token", AGY_UA, L"oauth2.googleapis.com", 0, L"/token",
                               L"Content-Type: application/json", body, bl, 0, 20000, &status, &len);
@@ -1042,7 +1053,11 @@ static int subsFetchAntigravity(const Config *cfg, int idx) {
         subsAgySaveAuth(authPath, auth.access, auth.refresh, auth.expires);
     }
     unsigned long long tAgy = GetTickCount64();
-    if (!*auth.access) { subsSetState(idx, 0, 0); return 0; }
+    if (!*auth.access) {
+        writeLogA("[wizbar] subs agy: access token empty after refresh check");
+        subsSetState(idx, 0, 0);
+        return 0;
+    }
     wchar_t hdrs[4600];
     if (!subsAgyHeaders(hdrs, 4600, auth.access)) {
         writeLogA("[wizbar] subs agy: auth token too long for the header block");
@@ -1298,7 +1313,7 @@ static int subsGenAuthLine(const GenAuth *ga, wchar_t **buf, int *cap, int *used
         if (txt) {
             // the file is small (an auth.json); parse it in place
             jsmntok_t *tk = NULL;
-            int n = subsParseBig(txt, (int)strlen(txt), &tk);
+            int n = subsParseBig(txt, txtLen, &tk);
             int v = -1;
             if (n > 0) {
                 // a key that starts with $ is a json path (a secret nested in
@@ -1448,8 +1463,17 @@ static int subsFetchGeneric(const Config *cfg, int idx) {
     hdrs = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)hlen * sizeof(wchar_t));
     if (!hdrs) { subsSetState(idx, 0, 0); return 0; }
     hdrs[0] = 0;
-    for (int i = 0; i < sp->nAuth; i++)
-        subsGenAuthLine(&sp->auth[i], &hdrs, &hlen, &used);
+    for (int i = 0; i < sp->nAuth; i++) {
+        if (!subsGenAuthLine(&sp->auth[i], &hdrs, &hlen, &used)) {
+            // A secret that failed to resolve (env unset, file unreadable, key
+            // absent) used to send the request bare, so the only clue was a
+            // downstream 401/403. Name the entry and header, never the value.
+            char lb[160];
+            snprintf(lb, sizeof(lb), "[wizbar] subs gen: auth[%d] %.40ls: no secret resolved",
+                     i, sp->auth[i].header);
+            writeLogA(lb);
+        }
+    }
     // static headers from the config, appended after the resolved auth
     if (sp->headerBlob && *sp->headerBlob) {
         int need = used + lstrlenW(sp->headerBlob) + 1;
@@ -1650,7 +1674,9 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                 CloseHandle(th[0]);
             }
             if (!anyEnabled) {
-                for (int i = 0; i < n; i++) subsSetState(i, -1, 0); // no-data marker
+                // Nothing to fetch: mark every slot as never-succeeded so the
+                // board shows the no-data marker instead of stale numbers.
+                for (int i = 0; i < n; i++) subsSetState(i, -1, 0);
             }
             if (view->debug) {
                 char lb[64];
@@ -1700,6 +1726,10 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
 // "Check for updates" entry remains the manual route to the releases page.
 typedef struct { char msg[192]; } UpdateVerdict;
 static UpdateVerdict g_upd;
+// The probe thread fills g_upd and then releases this flag; the UI thread only
+// reads the buffer once the flag is set, so the 192-byte message can never be
+// observed half-written (a plain unsynchronised read of it would be UB).
+static volatile LONG g_updReady = 0;
 
 // "1.10.2" -> 1010002-ish, so 1.10 > 1.9 (a string compare would say otherwise)
 static long long verParse(const char *s) {
@@ -1749,6 +1779,7 @@ static DWORD WINAPI updThread(LPVOID unused) {
         lstrcpynA(g_upd.msg, "update check: unreadable answer", (int)sizeof(g_upd.msg));
     }
     HeapFree(GetProcessHeap(), 0, body);
+    InterlockedExchange(&g_updReady, 1);
     return 0;
 }
 
@@ -1763,7 +1794,7 @@ static void updCheckStart(void) {
 // The tray tooltip note, appended once the probe has landed (p_ui.c calls this
 // from its trace: the check never blocks the bar).
 static int updNote(wchar_t *out, int cb) {
-    if (!g_upd.msg[0]) return 0;
+    if (!InterlockedCompareExchange(&g_updReady, 1, 1) || !g_upd.msg[0]) return 0;
     MultiByteToWideChar(CP_UTF8, 0, g_upd.msg, -1, out, cb);
     return 1;
 }
