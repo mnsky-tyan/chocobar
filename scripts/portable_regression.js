@@ -242,5 +242,49 @@ function check(name, ok, detail) {
     'left set, every later rescan would re-read from byte 0');
 }
 
+// --- two ledgers, one request ---------------------------------------------------
+// A gateway that logs every call it serves (Magpie) plus the client's own
+// session files both hold the SAME request, so a naive sum double-counts it.
+// The fix is config, not a dedup table: the source that owns the traffic lists
+// its providers, the other excludes them. Two properties must hold for that to
+// be safe. The match must be an EXACT element test - a substring test matches
+// "mimo" inside "mimo-desktop" and would drop or keep whole routes. And an
+// empty include list must mean "every provider", so a source that declares
+// neither list behaves exactly as it did before this feature existed.
+{
+  const cb = sources.chocobar;
+  const tk = sources.p_tokens;
+  check('sources: provider routing is an exact element test, never a substring',
+    /\(int\)\(segEnd - p\) == pl && memcmp\(p, pv, \(size_t\)pl\) == 0/.test(cb)
+    && /strchr\(p, ','\)/.test(cb),
+    'route names nest, so a substring match would swallow whole providers');
+  check('sources: an empty providers list means every provider',
+    /\(!tk->provList \|\| !\*tk->provList\) \? 1/.test(tk),
+    'a source that declares no include list must keep its old behaviour');
+  check('sources: both lists are honoured in the scan loop',
+    /int owned =/.test(tk) && /int skip =/.test(tk)
+    && /have = owned && !skip;/.test(tk),
+    'the include list alone would not stop the overlap being counted twice');
+  check('sources: timestampFormat iso decodes a string timestamp',
+    /tokIsoToMs\(vs, ve\)/.test(tk) && /tk->tsIso/.test(tk),
+    'an ISO-only store is otherwise unreadable, every record rejected');
+  check('sources: the epoch path is untouched for every existing source',
+    /out->ts = parseLL\(tp, end\);/.test(tk) && /if \(!tk->tsIso\) \{/.test(tk),
+    'one flag picks the shape; the default must stay byte-identical');
+  check('sources: the ISO offset is applied, so a record lands on the right day',
+    /if \(haveOff\) ms -= \(long long\)offMin \* 60000;/.test(tk),
+    'a naive local-time read is wrong by the offset on every non-UTC record');
+  check('sources: an undecodable timestamp is skipped, not counted as epoch 0',
+    /if \(out->ts > 0\) break;/.test(tk) && /out->ts = 0;/.test(tk),
+    'epoch 0 is 1970 and would corrupt the day buckets');
+  // A `continue` here spins the scan forever: the line-advance at the bottom
+  // of the loop (consumed += len + 1; p = nl + 1) has to run for EVERY line.
+  // This shipped once as a real hang - the scan thread never set its done
+  // flag and every case timed out at exit 8 - so the shape is pinned.
+  check('sources: provider routing never skips the line advance',
+    /have = owned && !skip;/.test(tk) && !/\bskip\) continue;/.test(tk),
+    'a continue here leaves p unmoved and the scan hangs');
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);

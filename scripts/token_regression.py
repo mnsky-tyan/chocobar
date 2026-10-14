@@ -24,6 +24,10 @@ def windows_path(path):
     return subprocess.check_output(["wslpath", "-w", str(path)], text=True, timeout=5).strip()
 
 
+def dump(value):
+    return json.dumps(value, separators=(",", ":"))
+
+
 def fixture(root, name, seeded=False, records=None):
     profile = root / name
     configdir = profile / ".wizbar"
@@ -40,6 +44,7 @@ def fixture(root, name, seeded=False, records=None):
              "enabled": True, "recursive": True, "fields": fields}]},
         "subs": {"enabled": False},
         "general": {"autoStart": False, "checkUpdates": False, "debug": False}}
+    dump = lambda value: json.dumps(value, separators=(",", ":"))
     dump = lambda value: json.dumps(value, separators=(",", ":"))
     (configdir / "config.json").write_text(dump(config), encoding="utf-8")
     rows = records if records is not None else [
@@ -227,6 +232,114 @@ def main():
             return scans
         check("nested route names are element-matched, not substring-matched",
               lambda: verify(nested_cursor_real(), [(244, 3, 1, 1, False), (244, 3, 1, 1, True)]))
+
+        # A gateway that logs every call it serves (Magpie) and the client's
+        # own session store BOTH hold the same request, so counting both
+        # double-counts it. The routing is config: the gateway declares the
+        # providers it owns, the session store excludes them. Measured
+        # 2026-10-14 on the real ledgers: 2,893 requests both sides saw, and
+        # every one reported identical numbers, so the union is exact - but
+        # only if the exclude list actually suppresses the overlap.
+        #
+        # Three things are pinned at once: the ISO-8601 string timestamp is
+        # decoded (epoch-ms parsers reject the whole record), the include
+        # list admits a gateway record, and the exclude list suppresses the
+        # client's copy of the SAME request. 100 + 200 + 30 = 330 counted
+        # once; without the exclude list it would be 530.
+        def gateway_union(name):
+            profile = fixture(root, name)
+            sessions = profile / "sessions"
+            gateway = profile / "gateway"
+            gateway.mkdir()
+            # The client's copy of the same two requests, plus one the
+            # gateway never saw (a direct provider, which must still count).
+            rows = [
+                {"prompt_tokens": 100, "completion_tokens": 40, "cache_read_tokens": 10,
+                 "cache_write_tokens": 0, "at": now - 1000, "model_name": "Model-A",
+                 "provider": "magpie-qoder"},
+                {"prompt_tokens": 200, "completion_tokens": 60, "cache_read_tokens": 20,
+                 "cache_write_tokens": 5, "at": now - 900, "model_name": "Model-B",
+                 "provider": "magpie-cline"},
+                {"prompt_tokens": 30, "completion_tokens": 10, "cache_read_tokens": 5,
+                 "cache_write_tokens": 0, "at": now - 800, "model_name": "Model-C",
+                 "provider": "zcode"}]
+            (sessions / "usage.jsonl").write_text(
+                "".join(dump(r) + "\n" for r in rows), encoding="utf-8")
+            # The gateway's own ledger: the same two requests (identical
+            # numbers) plus one subagent call the client never logged, in
+            # Magpie's real shape - a string timestamp with a +08:00 offset
+            # and the short field names.
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime((now - 1000) / 1000))
+            gw = [
+                {"t": stamp + ".123456789+08:00", "provider": "qoder", "model": "Model-A",
+                 "in": 100, "out": 40, "cache_read": 10, "cache_write": 0, "status": 200},
+                {"t": stamp + ".223456789+08:00", "provider": "cline", "model": "Model-B",
+                 "in": 200, "out": 60, "cache_read": 20, "cache_write": 5, "status": 200},
+                {"t": stamp + ".323456789+08:00", "provider": "qoder", "model": "Model-D",
+                 "in": 400, "out": 100, "cache_read": 50, "cache_write": 0, "status": 200}]
+            (gateway / "usage.jsonl").write_text(
+                "".join(dump(r) + "\n" for r in gw), encoding="utf-8")
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            client = config["tokens"]["sources"][0]
+            client["exclude"] = ["magpie-qoder", "magpie-cline"]
+            config["tokens"]["sources"].append({
+                "app": "magpie", "path": windows_path(gateway), "enabled": True,
+                "recursive": False, "timestampFormat": "iso",
+                "fields": {"input": "in", "output": "out", "cacheRead": "cache_read",
+                           "cacheWrite": "cache_write", "timestamp": "t",
+                           "model": "model"},
+                "providers": ["qoder", "cline"]})
+            path.write_text(json.dumps(config), encoding="utf-8")
+            # 100 + 40 + 10 (qoder, counted once) + 200 + 60 + 25 (cline, once)
+            # + 30 + 10 + 5 (zcode, direct) + 400 + 100 + 50 (the subagent
+            # call only the gateway saw) = 1030, five calls, four models.
+            return verify(run_child(exe, profile),
+                          [(1030, 4, 4, 2, False), (1030, 4, 4, 2, True)])
+        check("gateway ledger and session store count one request once",
+              lambda: gateway_union("gw-union"))
+        # The mirror image: a provider the gateway does NOT own must fall
+        # through to the client's number, so a narrow include list cannot
+        # silently drop a whole route from the bar.
+        def gateway_filtered(name):
+            profile = fixture(root, name)
+            sessions = profile / "sessions"
+            gateway = profile / "gateway"
+            gateway.mkdir()
+            rows = [
+                {"prompt_tokens": 100, "completion_tokens": 40, "cache_read_tokens": 10,
+                 "cache_write_tokens": 0, "at": now - 1000, "model_name": "Model-A",
+                 "provider": "magpie-qoder"},
+                {"prompt_tokens": 30, "completion_tokens": 10, "cache_read_tokens": 5,
+                 "cache_write_tokens": 0, "at": now - 800, "model_name": "Model-C",
+                 "provider": "zcode"}]
+            (sessions / "usage.jsonl").write_text(
+                "".join(dump(r) + "\n" for r in rows), encoding="utf-8")
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime((now - 1000) / 1000))
+            gw = [{"t": stamp + ".123456789+08:00", "provider": "unlisted-route",
+                   "model": "Model-Z", "in": 999, "out": 999, "cache_read": 0,
+                   "cache_write": 0, "status": 200}]
+            (gateway / "usage.jsonl").write_text(
+                "".join(dump(r) + "\n" for r in gw), encoding="utf-8")
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            client = config["tokens"]["sources"][0]
+            client["exclude"] = ["magpie-qoder"]
+            config["tokens"]["sources"].append({
+                "app": "magpie", "path": windows_path(gateway), "enabled": True,
+                "recursive": False, "timestampFormat": "iso",
+                "fields": {"input": "in", "output": "out", "cacheRead": "cache_read",
+                           "cacheWrite": "cache_write", "timestamp": "t",
+                           "model": "model"},
+                "providers": ["qoder", "cline"]})
+            path.write_text(json.dumps(config), encoding="utf-8")
+            # The gateway's unlisted route is NOT counted (999+999 dropped by
+            # the include list) and the client's copy of magpie-qoder is NOT
+            # counted either (excluded), so only zcode's 30+10+5 survives.
+            return verify(run_child(exe, profile),
+                          [(45, 1, 1, 1, False), (45, 1, 1, 1, True)])
+        check("gateway include list drops what it does not own, exclude keeps the rest",
+              lambda: gateway_filtered("gw-filter"))
 
         # A file first scanned while the estimator was OFF has no transcript
         # total in its cursor. Switching the estimator on mid-run must repair
