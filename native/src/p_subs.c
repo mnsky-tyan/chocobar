@@ -276,7 +276,7 @@ static char *subsHttpPost(const char *tag, const wchar_t *ua, const wchar_t *hos
                            insecure, timeoutMs, outStatus, outLen);
 }
 
-static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def); // chocobar
+static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def);
 
 static double subsJdouble(const char *js, jsmntok_t *t, int obj, const char *key, double dflt) {
     // jdoubleTok: null/true/false and an oversized token return the default

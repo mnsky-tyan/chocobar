@@ -141,12 +141,9 @@ static int agyProbeMain(const wchar_t *profile) {
         char *raw = HeapAlloc(GetProcessHeap(), 0, len + 1);
         memcpy(raw, cases[i].json, len + 1);
         stripLineComments(raw);
-        jsmn_parser p; jsmn_init(&p);
-        int nt = jsmn_parse(&p, raw, (size_t)strlen(raw), NULL, 0);
-        if (nt <= 0) { rc = 3; break; }
-        jsmntok_t *t = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*t) * (nt + 1));
-        jsmn_init(&p);
-        if (jsmn_parse(&p, raw, (size_t)strlen(raw), t, (unsigned)nt) != nt) { rc = 3; break; }
+        int nt = 0;
+        jsmntok_t *t = testParseJson(raw, (int)strlen(raw), &nt);
+        if (!t) { rc = 3; break; }
         parseConfigInto(&g_cfg, raw, t, 0);
         g_cfgLoaded = 1;
         AgyAuth auth; wchar_t resolved[MAX_PATH];

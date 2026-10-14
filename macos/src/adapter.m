@@ -233,7 +233,12 @@ CB_BOOL SetFilePointerEx(HANDLE h, CB_LARGE_INTEGER dist, CB_LARGE_INTEGER *out,
 // of the whole scanner compares cursor size+mtime against exactly these fields,
 // so every site must compute them identically.
 static FILETIME statMtimeToFileTime(const struct stat *st) {
-    return unixMsToFileTime((long long)st->st_mtime * 1000);
+    // Win32 FILETIME carries sub-second precision and the warm-skip compares
+    // cursor mtime against exactly this field: keep the milliseconds the
+    // timespec member exposes (st_mtimespec is Darwin's own spelling, present
+    // on every SDK), or a store rewritten inside the same second as the
+    // stored cursor warm-skips until its size changes
+    return unixMsToFileTime((long long)st->st_mtimespec.tv_sec * 1000 + st->st_mtimespec.tv_nsec / 1000000);
 }
 static void statSizeToWin32(const struct stat *st, DWORD *low, DWORD *high) {
     *low = (DWORD)((unsigned long long)st->st_size & 0xffffffffu);
@@ -762,11 +767,16 @@ __attribute__((constructor)) static void exportProfile(void) {
 
     static const char *const candidates[] = { "en_US.UTF-8", "UTF-8", "C.UTF-8", "" };
     for (int i = 0; i < 4; i++) {
-        // "" means "take the ambient environment's locale"
-        if (setlocale(LC_ALL, candidates[i])) {
+        // "" means "take the ambient environment's locale", and setlocale
+        // SUCCEEDS with the plain C locale when the environment names none -
+        // the Finder-launch case this loop exists for. Trust the RESULT, not
+        // the non-NULL return: any installed locale whose name carries UTF-8
+        // is the only acceptable outcome, and the log must say what was
+        // actually installed, not what LANG claimed.
+        const char *got = setlocale(LC_ALL, candidates[i]);
+        if (got && (strstr(got, "UTF-8") || strstr(got, "utf8"))) {
             char lb[96];
-            snprintf(lb, sizeof(lb), "[wizbar] mac adapter: locale set to %s",
-                     i == 3 ? (getenv("LANG") ? getenv("LANG") : "(ambient)") : candidates[i]);
+            snprintf(lb, sizeof(lb), "[wizbar] mac adapter: locale set to %s", got);
             writeLogA(lb);
             return;
         }

@@ -20,6 +20,16 @@
 //      - focus theft: the panel must never become the frontmost app
 //      - the panel following a MINIMIZED window (it must hide instead)
 //
+// WHAT IT DOES NOT MEASURE (deliberate, from the 2026-10-12 round-5 review)
+// This probe re-implements the discovery + placement step, and only that step:
+// it has no screen-selection pass and no visibleFrame clamp, and its minimum
+// window size is 200x200 where the shipped bar uses 200x120. A VERDICT PASS
+// therefore proves the raw "place the panel at the flipped target rect" step
+// works; it says nothing about where the bar lands on a multi-display setup or
+// near the menu bar / Dock, which main.m tick() alone defines. The geometry
+// helpers here are intentionally a subset of main.m's, so the probe tracks the
+// shipped math only loosely; sharing them is planned work, not a bug.
+//
 // The child is used instead of a real terminal so the test is deterministic and
 // needs no interactive session: CI can run it, and a failure points at the
 // tracking logic rather than at whatever window happened to be open.
@@ -291,25 +301,20 @@ static int runParent(void) {
             t = -[start timeIntervalSinceNow];
 
             WinRect target = largestWindowForPID(childPID);
-            if (!target.valid) continue;
-            pr.targetSeen++;
-            pr.samples++;
-
-            WinRect want = panelRectForTarget(target);
-
+            pr.samples++;   // every poll iteration, so SAMPLES and TARGET_SEEN
+                            // stop printing the same number twice (U4-F5)
             BOOL minimized = (t >= kChildT2 && t < kChildT3);
-            BOOL visible = [panel isVisible];
-
-            if (frontmostPID() != focusBefore && frontmostPID() != us) {
-                pr.focusStolen++;
-                printf("FOCUS_STOLEN t=%.2f frontmost=%d\n", t, (int)frontmostPID());
-                fflush(stdout);
-            }
 
             if (minimized) {
                 // The target is minimized: CGWindowList may or may not still
                 // list it. Either way the panel must not be shown over a
-                // window the user cannot see.
+                // window the user cannot see - and the hide must be CHECKED
+                // either way. This branch used to sit BELOW the target.valid
+                // gate, which made the check silently vacuous whenever the
+                // window server stopped listing the minimized window: the
+                // branch never ran, both counters stayed 0, and hiddenBad == 0
+                // still printed VERDICT PASS. The product handles the same
+                // case correctly (main.m tick() hides on !target.valid too).
                 [panel orderOut:nil];
                 // Re-read AFTER ordering out. isVisible still reported YES for
                 // the sample right after the minimize boundary because the
@@ -317,6 +322,19 @@ static int runParent(void) {
                 // scored the probe's own transition as a tracking failure.
                 if ([panel isVisible]) pr.hiddenBad++; else pr.hiddenOk++;
                 continue;
+            }
+
+            if (!target.valid) continue;
+            pr.targetSeen++;
+
+            WinRect want = panelRectForTarget(target);
+
+            BOOL visible = [panel isVisible];
+
+            if (frontmostPID() != focusBefore && frontmostPID() != us) {
+                pr.focusStolen++;
+                printf("FOCUS_STOLEN t=%.2f frontmost=%d\n", t, (int)frontmostPID());
+                fflush(stdout);
             }
 
             if (!visible) [panel orderFrontRegardless];

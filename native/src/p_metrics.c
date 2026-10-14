@@ -43,7 +43,11 @@ static void pollRam(void) {
 // --- Battery via GetSystemPowerStatus ----------------------------------------
 static void pollBattery(void) {
     SYSTEM_POWER_STATUS ps;
-    if (!GetSystemPowerStatus(&ps)) { g_m.battValid = 0; return; }
+    // zero every output on failure like the other pollers: battValid gates the
+    // chip text, but battAc/battPct are read by the next successful poll's
+    // decision path and by the icon cache key, so a stale pair can survive one
+    // extra cycle through them
+    if (!GetSystemPowerStatus(&ps)) { g_m.battValid = 0; g_m.battAc = 0; g_m.battPct = 0; return; }
     g_m.battAc = ps.ACLineStatus == 1;
     g_m.battValid = ps.BatteryLifePercent <= 100;
     g_m.battPct = ps.BatteryLifePercent;
@@ -145,6 +149,17 @@ static void pickCpuTemp(TempRec *list, int n, int *ok, double *outC, int *hot, i
     *hot = warnAt > 0 && *outC >= warnAt;
 }
 
+// copy a bounded, NUL-terminated string out of the mapped block in the
+// encoding that section of the layout uses (wide UTF-16 or narrow latin-1);
+// every bounds decision for all eight reader sites below lives here, once
+static int hwinfoStr(const BYTE *p, DWORD off, DWORD total, int wide, wchar_t *out, int cap) {
+    int n = 0;
+    if (wide) while (n < cap - 1 && off + (DWORD)(2*n + 1) < total && p[off + 2*n]) { out[n] = *(wchar_t *)(p + off + 2*n); n++; }
+    else       while (n < cap - 1 && off + n < total && p[off + n]) { out[n] = (wchar_t)p[off + n]; n++; }
+    out[n] = 0;
+    return n;
+}
+
 // committed bytes of the mapping behind p: both HWiNFO readers bound every
 // later offset with this walk (the block grows one region at a time)
 static DWORD mapCommitBytes(BYTE *p) {
@@ -157,7 +172,11 @@ static DWORD mapCommitBytes(BYTE *p) {
 }
 
 // SM1: 40-byte header, NUL-terminated sensor array, reading elements
+// A failed or absent mapping falls to the dash like every other poller:
+// pickCpuTemp resets ok on its way in, so the only stale path was the early
+// returns below it.
 static void pollHwinfoSm(void) {
+    g_m.tempOk = 0; g_m.tempHot = 0;
     HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\HWiNFO_SENS_SM");
     if (!h) return;
     BYTE *p = (BYTE *)MapViewOfFile(h, FILE_MAP_READ, 0, 0, 0);
@@ -174,9 +193,8 @@ static void pollHwinfoSm(void) {
         DWORD sensorCount = 0;
         DWORD off = 40;
         for (int i = 0; i < 256; i++) {
-            wchar_t name[64]; name[0] = 0;
-            if (wide) { int n = 0; while (n < 63 && off + (DWORD)(2*n + 1) < total && p[off + 2*n]) { name[n] = *(wchar_t *)(p + off + 2*n); n++; } name[n] = 0; }
-            else { int n = 0; while (n < 63 && off + n < total && p[off + n]) { name[n] = (wchar_t)p[off + n]; n++; } name[n] = 0; }
+            wchar_t name[64];
+            hwinfoStr(p, off, total, wide, name, 64);
             if (!name[0]) break;
             lstrcpynW(sensors[i], name, 64);
             sensorCount = i + 1;
@@ -190,13 +208,11 @@ static void pollHwinfoSm(void) {
             for (int i = 0; i < 1024 && n < 1024; i++) {
                 DWORD ro = start + (DWORD)i * readingSize;
                 if (ro + 48 + labelBytes + suffix + 4 > total) break;
-                wchar_t label[64]; label[0] = 0;
-                if (wide) { int q = 0; while (q < 63 && ro + 48 + (DWORD)(2*q + 1) < total && p[ro + 48 + 2*q]) { label[q] = *(wchar_t *)(p + ro + 48 + 2*q); q++; } label[q] = 0; }
-                else { int q = 0; while (q < 63 && ro + 48 + q < total && p[ro + 48 + q]) { label[q] = (wchar_t)p[ro + 48 + q]; q++; } label[q] = 0; }
+                wchar_t label[64];
+                hwinfoStr(p, ro + 48, total, wide, label, 64);
                 if (!label[0]) break; // zero-filled tail
-                wchar_t sfx[8]; sfx[0] = 0;
-                if (wide) { int q = 0; while (q < 7 && ro + 48 + labelBytes + (DWORD)(2*q + 1) < total && p[ro + 48 + labelBytes + 2*q]) { sfx[q] = *(wchar_t *)(p + ro + 48 + labelBytes + 2*q); q++; } sfx[q] = 0; }
-                else { int q = 0; while (q < 7 && ro + 48 + labelBytes + q < total && p[ro + 48 + labelBytes + q]) { sfx[q] = (wchar_t)p[ro + 48 + labelBytes + q]; q++; } sfx[q] = 0; }
+                wchar_t sfx[8];
+                hwinfoStr(p, ro + 48 + labelBytes, total, wide, sfx, 8);
                 if (!wcsstr(sfx, L"\u00B0")) continue;
                 double v = *(double *)(p + ro + 16);
                 if (!(v > 0 && v < 150)) continue;
@@ -217,6 +233,7 @@ static void pollHwinfoSm(void) {
 
 // SM2 (HWiNFO 8.24+): 48-byte header, byte-oriented latin-1 strings
 static void pollHwinfoSm2(void) {
+    g_m.tempOk = 0; g_m.tempHot = 0;
     HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\HWiNFO_SENS_SM2");
     if (!h) return;
     BYTE *p = (BYTE *)MapViewOfFile(h, FILE_MAP_READ, 0, 0, 0);
@@ -241,14 +258,9 @@ static void pollHwinfoSm2(void) {
             if (!(v > 0 && v < 150)) continue;
             DWORD id = *(DWORD *)(p + rec);
             recs[n].c = (double)(int)(v * 10) / 10;
-            int q = 0;
-            for (; q < 63; q++) { char ch = *(char *)(p + rec + 12 + q); if (!ch) break; recs[n].label[q] = (wchar_t)(unsigned char)ch; }
-            recs[n].label[q] = 0;
-            if (id < sensorCount) {
-                q = 0;
-                for (; q < 63; q++) { char ch = *(char *)(p + 48 + id * sensorSize + 8 + q); if (!ch) break; recs[n].sensor[q] = (wchar_t)(unsigned char)ch; }
-                recs[n].sensor[q] = 0;
-            }
+            hwinfoStr(p, rec + 12, total, 0, recs[n].label, 64);
+            if (id < sensorCount)
+                hwinfoStr(p, 48 + id * sensorSize + 8, total, 0, recs[n].sensor, 64);
             n++;
         }
         pickCpuTemp(recs, n, &g_m.tempOk, &g_m.tempC, &g_m.tempHot, g_cfg.tempWarnAt);

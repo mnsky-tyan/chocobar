@@ -329,8 +329,12 @@ static int g_userCount = 0;
 // name -> id among the config icons, -1 when not defined
 int iconUserFind(const wchar_t *name) {
     if (!name || !*name) return -1;
-    for (int i = 0; i < g_userCount; i++)
-        if (lstrcmpiW(g_userName[i], name) == 0) return SVG_USER_BASE + i;
+    for (int i = 0; i < g_userCount; i++) {
+        // the store holds names truncated to 23 chars (see iconUserAdd), so a
+        // 24+ char config name registers a slot it could never find with a
+        // full-string compare: match the stored prefix instead
+        if (_wcsnicmp(g_userName[i], name, 23) == 0) return SVG_USER_BASE + i;
+    }
     return -1;
 }
 
@@ -495,6 +499,10 @@ typedef struct {
 static IconDib g_iconDib[SVG_ID_MAX];
 static IconDib g_battDib;         // battery cache (charge bucket + ac + colors)
 static IconDib g_ssDib;           // 2x supersample scratch (AA quality)
+// g_battKey[4] is BOTH the key's own fifth element (always 1) and the "this
+// cache has ever been filled" flag; name the role so the double duty is
+// visible at every use
+#define BATTKEY_VALID 1
 static int g_battKey[6];          // pct bucket, ac, accent, warn, valid, warn-fill
 
 static void iconDrop(IconDib *d) {
@@ -686,7 +694,7 @@ int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
     if (g_userCount >= SVG_USER_MAX || !name || !*name || !d || !*d) return -1;
     int slot = -1;
     for (int i = 0; i < g_userCount; i++)
-        if (lstrcmpiW(g_userName[i], name) == 0) { slot = i; break; } // redefine = replace
+        if (_wcsnicmp(g_userName[i], name, 23) == 0) { slot = i; break; } // redefine = replace
     if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, 24); }
     for (int j = 0; j < SVG_MAXPARTS; j++) {
         memset(&g_user[slot][j], 0, sizeof(SvgFlat));
@@ -728,7 +736,7 @@ static void svgDrawBatt(HDC hdc, int pct, int ac, COLORREF accent, COLORREF warn
     int bucket = (pct < 0 ? 0 : (pct > 100 ? 100 : pct)) / 2;
     // the fill color switches on the raw pct (not the 2% bucket): key on the
     // warn fact too or 10/11% share bucket 5 and the color goes stale
-    int key[6] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, 1,
+    int key[6] = { bucket, ac ? 1 : 0, (int)accent, (int)warn, BATTKEY_VALID,
                    (pct < 10) ? 1 : 0 };
     if (g_gdipOk) {
         if (!g_battKey[4] || memcmp(g_battKey, key, sizeof(key)) != 0 || g_battDib.w != bw) {

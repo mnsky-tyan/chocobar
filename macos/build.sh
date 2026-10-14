@@ -151,7 +151,12 @@ APP="$OUT/Chocobar.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$OUT/chocobar-mac" "$APP/Contents/MacOS/Chocobar"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# The bundle's version comes from the same single source of truth the Windows
+# asset and every release tag use (release.yml refuses a tag that disagrees
+# with it), so a downloaded mac artifact can never report a version frozen at
+# 0.1.0.
+CB_VER=$(sed -n 's/^#define CB_VER_STR *"\(.*\)"/\1/p' native/src/version.h)
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -161,8 +166,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>          <string>com.mnsky.chocobar</string>
     <key>CFBundleExecutable</key>          <string>Chocobar</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
-    <key>CFBundleShortVersionString</key>  <string>0.1.0</string>
-    <key>CFBundleVersion</key>             <string>1</string>
+    <key>CFBundleShortVersionString</key>  <string>${CB_VER}</string>
+    <key>CFBundleVersion</key>             <string>${CB_VER}</string>
     <key>LSMinimumSystemVersion</key>      <string>13.0</string>
     <!-- Accessory app: no Dock icon, no menu bar takeover. The bar is a
          floating panel, not an application the user manages. -->
