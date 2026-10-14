@@ -766,11 +766,12 @@ static TokCursor *tokCursorGet(const char *path) {
     TokCursor *c = tokCursorFind(path);
     if (!c) {
         if (g_tokCursorN >= TOK_MAX_FILES) {
-            // Past the cap a file gets no cursor, so it is re-read from byte 0
-            // on every rescan forever and never persists. Say so once.
+            // Past the cap a file gets no cursor, and tokScanDir SKIPS it for
+            // that reason: an uncursored read from byte 0 would restage the
+            // file's whole history on every rescan. Say so once.
             if (!g_tokCursorFullLogged) {
                 g_tokCursorFullLogged = 1;
-                writeLogA("[wizbar] token cursors: TOK_MAX_FILES reached; further session files re-read each scan");
+                writeLogA("[wizbar] token cursors: TOK_MAX_FILES reached; further session files are skipped (not counted)");
             }
             return NULL;
         }

@@ -1,6 +1,7 @@
 /* Single source of truth for the shipped version. Included by chocobar.c
-   (startup log line) and by version.rc (the exe's version resource), so the
-   two can never drift apart. package.json and package-lock.json repeat the
+   (startup log line) and by version.rc (the exe's version resource), and read
+   by macos/build.sh for the .app bundle's Info.plist, so none of them can
+   drift apart. package.json and package-lock.json repeat the
    number for npm metadata; scripts/portable_regression.js fails the suite
    when the copies disagree. Bump all three, then tag the release. */
 #ifndef CB_VERSION_H

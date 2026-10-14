@@ -44,9 +44,8 @@ static void pollRam(void) {
 static void pollBattery(void) {
     SYSTEM_POWER_STATUS ps;
     // zero every output on failure like the other pollers: battValid gates the
-    // chip text, but battAc/battPct are read by the next successful poll's
-    // decision path and by the icon cache key, so a stale pair can survive one
-    // extra cycle through them
+    // chip text, but the icon blit reads battAc/battPct ungated, so a stale
+    // pair would draw one more frame of the old charge/AC state
     if (!GetSystemPowerStatus(&ps)) { g_m.battValid = 0; g_m.battAc = 0; g_m.battPct = 0; return; }
     g_m.battAc = ps.ACLineStatus == 1;
     g_m.battValid = ps.BatteryLifePercent <= 100;
@@ -112,9 +111,10 @@ static void pollGpu(void) {
     g_m.gpu = sum;
 }
 
-// --- CPU temperature via HWiNFO shared memory (SM then SM2) -------------------
-// Mirrors the HWiNFO shared-memory layouts (SM then SM2) as documented by the
-// HWiNFO SDK. Reads Global\\HWiNFO_SENS_SM2 first, falling back to the older SM..
+// --- CPU temperature via HWiNFO shared memory (SM2 first, then SM1) -----------
+// Mirrors the HWiNFO shared-memory layouts (SM1 is the older family, SM2 the
+// newer one) as documented by the HWiNFO SDK. Reads Global\\HWiNFO_SENS_SM2
+// first, falling back to the older SM.
 static int striContains(const wchar_t *hay, const wchar_t *needle) {
     if (!hay || !needle || !*needle) return 0;
     wchar_t h[256], n[64];
@@ -151,7 +151,8 @@ static void pickCpuTemp(TempRec *list, int n, int *ok, double *outC, int *hot, i
 
 // copy a bounded, NUL-terminated string out of the mapped block in the
 // encoding that section of the layout uses (wide UTF-16 or narrow latin-1);
-// every bounds decision for all eight reader sites below lives here, once
+// every bounds decision for the HWiNFO string reads below lives here, once:
+// five call sites replacing eight hand-inlined wide/narrow copies
 static int hwinfoStr(const BYTE *p, DWORD off, DWORD total, int wide, wchar_t *out, int cap) {
     int n = 0;
     if (wide) while (n < cap - 1 && off + (DWORD)(2*n + 1) < total && p[off + 2*n]) { out[n] = *(wchar_t *)(p + off + 2*n); n++; }
@@ -171,7 +172,9 @@ static DWORD mapCommitBytes(BYTE *p) {
     return total;
 }
 
-// SM1: 40-byte header, NUL-terminated sensor array, reading elements
+// SM1 (HWiNFO's older layout): 40-byte header, NUL-terminated sensor array,
+// reading elements. Fallback only - the metrics tick polls SM2 first and calls
+// this one when SM2 reports nothing.
 // A failed or absent mapping falls to the dash like every other poller:
 // pickCpuTemp resets ok on its way in, so the only stale path was the early
 // returns below it.

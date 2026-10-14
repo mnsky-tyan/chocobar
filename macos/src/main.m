@@ -77,7 +77,8 @@ static void resolveConfigPath(void) {
     // (a Finder launch), so the bar reported a config whose stores it could
     // never find.
     const char *home = getenv("USERPROFILE");
-    snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home && *home ? home : "/tmp");}
+    snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home && *home ? home : "/tmp");
+}
 
 // ---- headless self-test --------------------------------------------------------
 //
