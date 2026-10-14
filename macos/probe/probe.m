@@ -20,7 +20,7 @@
 //      - focus theft: the panel must never become the frontmost app
 //      - the panel following a MINIMIZED window (it must hide instead)
 //
-// WHAT IT DOES NOT MEASURE (deliberate, from the 2026-10-12 round-5 review)
+// WHAT IT DOES NOT MEASURE (deliberate, from the 2026-10-14 round-5 review)
 // This probe re-implements the discovery + placement step, and only that step:
 // it has no screen-selection pass and no visibleFrame clamp, and its minimum
 // window size is 200x200 where the shipped bar uses 200x120. A VERDICT PASS

@@ -156,6 +156,11 @@ cp "$OUT/chocobar-mac" "$APP/Contents/MacOS/Chocobar"
 # with it), so a downloaded mac artifact can never report a version frozen at
 # 0.1.0.
 CB_VER=$(sed -n 's/^#define CB_VER_STR *"\(.*\)"/\1/p' native/src/version.h)
+# sed exits 0 with EMPTY output when the pattern misses (a tab separator, a
+# trailing comment, the define moved off column 0), and an empty value would be
+# written verbatim into both plist version keys - the wrong-version artifact
+# this extraction exists to prevent. Fail loudly instead.
+[ -n "$CB_VER" ] || { echo "FATAL: cannot read CB_VER_STR from native/src/version.h" >&2; exit 1; }
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
