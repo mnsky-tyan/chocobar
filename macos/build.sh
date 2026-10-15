@@ -155,17 +155,31 @@ cp "$OUT/chocobar-mac" "$APP/Contents/MacOS/Chocobar"
 # asset and every release tag use (release.yml refuses a tag that disagrees
 # with it), so a downloaded mac artifact can never report a version frozen at
 # 0.1.0.
-CB_VER=$(sed -n 's/^#define CB_VER_STR *"\([0-9.]*\)" */\1/p' native/src/version.h)
-# sed exits 0 with EMPTY output when the pattern misses (a tab separator, the
-# define moved off column 0), and a trailing comment on the define would
-# otherwise be captured verbatim. Either way the extracted value would be
-# written into both plist version keys as an empty or invalid version string -
-# the wrong-version artifact this extraction exists to prevent. Accept only a
-# plain digits-and-dots version and fail loudly on anything else.
+CB_VER=$(sed -n 's/^#define CB_VER_STR *"\(.*\)"/\1/p' native/src/version.h)
+# sed exits 0 with EMPTY output when the pattern misses (a tab separator, a
+# trailing comment, the define moved off column 0), and an empty value would be
+# written verbatim into both plist version keys - the wrong-version artifact
+# this extraction exists to prevent. Fail loudly instead. Validate the SHAPE
+# too: a whitespace-only or otherwise non-version value would sail past a bare
+# -n test and still ship a broken CFBundleShortVersionString.
+[ -n "$CB_VER" ] || { echo "FATAL: cannot read CB_VER_STR from native/src/version.h" >&2; exit 1; }
+# every dot-separated component must be one or more digits, with at least one
+# dot (so '1..4', '1.', '.1', '' and '1' are all rejected, and nothing with a
+# shell or XML metacharacter can reach the plist)
 case "$CB_VER" in
-    ''|*[!0-9.]*) echo "FATAL: cannot read a plain CB_VER_STR from native/src/version.h (got [$CB_VER])" >&2; exit 1;;
+    *[!0-9.]*) echo "FATAL: CB_VER_STR '$CB_VER' is not a dotted version" >&2; exit 1 ;;
 esac
-cat > "$APP/Contents/Info.plist" <<PLIST
+OLDIFS=$IFS; IFS=.; set -- $CB_VER; IFS=$OLDIFS
+[ $# -ge 2 ] || { echo "FATAL: CB_VER_STR '$CB_VER' is not a dotted version" >&2; exit 1; }
+for part in "$@"; do
+    case "$part" in
+        ''|*[!0-9]*) echo "FATAL: CB_VER_STR '$CB_VER' is not a dotted version" >&2; exit 1 ;;
+    esac
+done
+# quoted heredoc: the version is injected by one explicit substitution below,
+# so a CB_VER containing $(...), backticks, & or < cannot be executed by the
+# shell or emit an unparseable plist.
+cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -175,8 +189,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>          <string>com.mnsky.chocobar</string>
     <key>CFBundleExecutable</key>          <string>Chocobar</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
-    <key>CFBundleShortVersionString</key>  <string>${CB_VER}</string>
-    <key>CFBundleVersion</key>             <string>${CB_VER}</string>
+    <key>CFBundleShortVersionString</key>  <string>@CB_VER@</string>
+    <key>CFBundleVersion</key>             <string>@CB_VER@</string>
     <key>LSMinimumSystemVersion</key>      <string>13.0</string>
     <!-- Accessory app: no Dock icon, no menu bar takeover. The bar is a
          floating panel, not an application the user manages. -->
@@ -185,6 +199,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+# single explicit substitution, quoted so the value is never word-split or globbed.
+# python3 is used only for a literal string replace; a missing interpreter must
+# fail loudly, not leave @CB_VER@ in the shipped plist.
+command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 not found (needed to stamp the bundle version)" >&2; exit 1; }
+python3 - "$APP/Contents/Info.plist" "$CB_VER" <<'PY'
+import sys
+path, ver = sys.argv[1], sys.argv[2]
+s = open(path).read()
+if '@CB_VER@' not in s:
+    sys.exit('FATAL: @CB_VER@ placeholder missing from Info.plist')
+open(path, 'w').write(s.replace('@CB_VER@', ver))
+PY
 codesign --force --sign - "$APP" 2>/dev/null || true   # ad-hoc: no identity needed
 ditto -c -k --keepParent "$APP" "$OUT/Chocobar-mac.zip"
 echo "bundled: $OUT/Chocobar.app -> $OUT/Chocobar-mac.zip ($(stat -f%z "$OUT/Chocobar-mac.zip" 2>/dev/null || stat -c%s "$OUT/Chocobar-mac.zip") bytes)"

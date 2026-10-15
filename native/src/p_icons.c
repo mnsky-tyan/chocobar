@@ -321,19 +321,30 @@ static int g_flatN[SVG_COUNT];
 #define SVG_USER_MAX MAX_USER_ICONS   // one capacity for config parse and renderer
 #define SVG_USER_BASE 1000
 #define SVG_ID_MAX (SVG_COUNT + SVG_USER_MAX)
+// the stored name capacity, and the prefix length the store can actually hold
+// (one less, for the NUL). Both the array bound and every compare derive from
+// ICON_NAME_CCH so they cannot drift apart.
+#define ICON_NAME_CCH 24
+#define ICON_NAME_MATCH (ICON_NAME_CCH - 1)
 static SvgFlat g_user[SVG_USER_MAX][SVG_MAXPARTS];
 static int g_userN[SVG_USER_MAX];
-static wchar_t g_userName[SVG_USER_MAX][24];
+static wchar_t g_userName[SVG_USER_MAX][ICON_NAME_CCH];
 static int g_userCount = 0;
 
 // name -> id among the config icons, -1 when not defined
 int iconUserFind(const wchar_t *name) {
     if (!name || !*name) return -1;
     for (int i = 0; i < g_userCount; i++) {
-        // the store holds names truncated to 23 chars (see iconUserAdd), so a
-        // 24+ char config name registers a slot it could never find with a
-        // full-string compare: match the stored prefix instead
-        if (_wcsnicmp(g_userName[i], name, 23) == 0) return SVG_USER_BASE + i;
+        // the store holds names truncated to ICON_NAME_MATCH chars (see
+        // iconUserAdd), so a longer config name registers a slot it could never
+        // find with a full-string compare: match the stored prefix instead. A
+        // stored name that did NOT hit the cap must match exactly, so two
+        // distinct short names sharing a prefix stay distinct.
+        int stored = (int)wcslen(g_userName[i]);
+        int hit = stored < ICON_NAME_MATCH
+                      ? (wcscmp(g_userName[i], name) == 0)
+                      : (_wcsnicmp(g_userName[i], name, ICON_NAME_MATCH) == 0);
+        if (hit) return SVG_USER_BASE + i;
     }
     return -1;
 }
@@ -693,9 +704,21 @@ static IconDib *dibSlot(int id) {
 int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
     if (g_userCount >= SVG_USER_MAX || !name || !*name || !d || !*d) return -1;
     int slot = -1;
-    for (int i = 0; i < g_userCount; i++)
-        if (_wcsnicmp(g_userName[i], name, 23) == 0) { slot = i; break; } // redefine = replace
-    if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, 24); }
+    for (int i = 0; i < g_userCount; i++) {
+        // redefine = replace, but only when it IS the same name. The store can
+        // hold ICON_NAME_MATCH chars, so a stored name that is shorter than the
+        // cap must match the incoming name exactly; only a stored name that hit
+        // the cap is a truncated prefix that a longer incoming name may extend.
+        // Without this, two distinct names sharing ICON_NAME_MATCH chars would
+        // silently collapse into one slot and the first glyph would be lost.
+        int stored = (int)wcslen(g_userName[i]);
+        if (stored < ICON_NAME_MATCH) {
+            if (wcscmp(g_userName[i], name) == 0) { slot = i; break; }
+        } else if (_wcsnicmp(g_userName[i], name, ICON_NAME_MATCH) == 0) {
+            slot = i; break;
+        }
+    }
+    if (slot < 0) { slot = g_userCount++; lstrcpynW(g_userName[slot], name, ICON_NAME_CCH); }
     for (int j = 0; j < SVG_MAXPARTS; j++) {
         memset(&g_user[slot][j], 0, sizeof(SvgFlat));
     }

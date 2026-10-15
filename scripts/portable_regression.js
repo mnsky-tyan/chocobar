@@ -122,7 +122,7 @@ function check(name, ok, detail) {
   // shorter route as an aborted reporting one.
   check('estimator: blindness is decided from the file\'s own reporting routes',
     /tokRealHas\(real, pv\)/.test(pt) && /blind = 0/.test(pt)
-    && /segEnd - p == n && memcmp\(p, pv, \(size_t\)n\) == 0/.test(pt)
+    && /return tokProvIn\(real, pv, \(int\)strlen\(pv\)\)/.test(pt)
     && !/strstr\(real, pv\)/.test(pt),
     'an exact comma-delimited element match, never a substring test');
   check('estimator: no provider name is compiled in as a quoted literal',
@@ -255,9 +255,17 @@ function check(name, ok, detail) {
   const cb = sources.chocobar;
   const tk = sources.p_tokens;
   check('sources: provider routing is an exact element test, never a substring',
-    /\(int\)\(segEnd - p\) == pl && memcmp\(p, pv, \(size_t\)pl\) == 0/.test(cb)
-    && /strchr\(p, ','\)/.test(cb),
+    /\(int\)\(segEnd - p\) == pl && tokNIeq\(p, pv, pl\)/.test(cb)
+    && /strchr\(p, ','\)/.test(cb)
+    && /static int tokNIeq\(const char \*a, const char \*b, int n\)/.test(cb),
     'route names nest, so a substring match would swallow whole providers');
+  check('sources: provider match is case-insensitive like its sibling keys',
+    /tokNIeq/.test(cb) && !/memcmp\(p, pv, \(size_t\)pl\)/.test(cb),
+    'the app allowlist, label lookup and timestampFormat all fold case');
+  check('sources: provider names share one length cap on both sides',
+    /#define TOK_PROV_MAX 63/.test(cb) && /e - v < TOK_PROV_MAX/.test(tk)
+    && /char one\[TOK_PROV_MAX \+ 1\]/.test(cb),
+    'a shorter read cap truncates a long route to a prefix that then matches');
   check('sources: an empty providers list means every provider',
     /\(!tk->provList \|\| !\*tk->provList\) \? 1/.test(tk),
     'a source that declares no include list must keep its old behaviour');

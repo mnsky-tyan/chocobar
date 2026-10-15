@@ -44,8 +44,6 @@ def fixture(root, name, seeded=False, records=None):
              "enabled": True, "recursive": True, "fields": fields}]},
         "subs": {"enabled": False},
         "general": {"autoStart": False, "checkUpdates": False, "debug": False}}
-    dump = lambda value: json.dumps(value, separators=(",", ":"))
-    dump = lambda value: json.dumps(value, separators=(",", ":"))
     (configdir / "config.json").write_text(dump(config), encoding="utf-8")
     rows = records if records is not None else [
         {"prompt_tokens": 100, "completion_tokens": 40, "cache_read_tokens": 10,
@@ -340,6 +338,53 @@ def main():
                           [(45, 1, 1, 1, False), (45, 1, 1, 1, True)])
         check("gateway include list drops what it does not own, exclude keeps the rest",
               lambda: gateway_filtered("gw-filter"))
+
+        # The provider match folds case, like every sibling key in the pipeline
+        # (app allowlist, label lookup, model key, timestampFormat). A config
+        # that spells a route differently from the ledger must still route:
+        # a case-sensitive match would silently drop the whole gateway route
+        # (an include list) or silently re-enable the double-count (an exclude
+        # list). Config says "QODER"/"Magpie-Cline", the ledger says "qoder"/
+        # "magpie-cline".
+        def gateway_casefold(name):
+            profile = fixture(root, name)
+            sessions = profile / "sessions"
+            gateway = profile / "gateway"
+            gateway.mkdir()
+            rows = [
+                {"prompt_tokens": 100, "completion_tokens": 40, "cache_read_tokens": 10,
+                 "cache_write_tokens": 0, "at": now - 1000, "model_name": "Model-A",
+                 "provider": "magpie-qoder"},
+                {"prompt_tokens": 30, "completion_tokens": 10, "cache_read_tokens": 5,
+                 "cache_write_tokens": 0, "at": now - 800, "model_name": "Model-C",
+                 "provider": "zcode"}]
+            (sessions / "usage.jsonl").write_text(
+                "".join(dump(r) + "\n" for r in rows), encoding="utf-8")
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime((now - 1000) / 1000))
+            gw = [{"t": stamp + ".123456789+08:00", "provider": "qoder",
+                   "model": "Model-A", "in": 100, "out": 40, "cache_read": 10,
+                   "cache_write": 0, "status": 200}]
+            (gateway / "usage.jsonl").write_text(
+                "".join(dump(r) + "\n" for r in gw), encoding="utf-8")
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            client = config["tokens"]["sources"][0]
+            client["exclude"] = ["MAGPIE-QODER"]          # different case on purpose
+            config["tokens"]["sources"].append({
+                "app": "magpie", "path": windows_path(gateway), "enabled": True,
+                "recursive": False, "timestampFormat": "iso",
+                "fields": {"input": "in", "output": "out", "cacheRead": "cache_read",
+                           "cacheWrite": "cache_write", "timestamp": "t",
+                           "model": "model"},
+                "providers": ["Qoder"]})              # different case on purpose
+            path.write_text(json.dumps(config), encoding="utf-8")
+            # qoder counted once (100+40+10) + zcode direct (30+10+5) = 195.
+            # A case-sensitive match would give 105 (gateway route dropped by
+            # the include list AND the client copy still excluded).
+            return verify(run_child(exe, profile),
+                          [(195, 2, 2, 2, False), (195, 2, 2, 2, True)])
+        check("gateway provider routing folds case on both lists",
+              lambda: gateway_casefold("gw-casefold"))
 
         # A file first scanned while the estimator was OFF has no transcript
         # total in its cursor. Switching the estimator on mid-run must repair

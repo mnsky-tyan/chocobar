@@ -508,7 +508,11 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
             if (v < ln + len && *v == '"') {
                 v++;
                 const char *e = v;
-                while (e < ln + len && *e != '"' && e - v < 32) e++;
+                // one cap for both sides of the match: a shorter cap here would
+                // truncate a long route to a prefix that compares equal to a
+                // config entry naming that prefix (a false positive), and a
+                // config entry longer than the cap could never match at all.
+                while (e < ln + len && *e != '"' && e - v < TOK_PROV_MAX) e++;
                 if (e > v) { out->prov = v; out->provLen = (int)(e - v); }
             }
             break;
@@ -542,17 +546,11 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
 // workbuddy-2 - so the substring match read a blind turn on the shorter
 // route as an aborted reporting one and dropped it instead of estimating it
 // (and the append side refused to record the shorter route at all).
+// One matcher for the whole program: tokProvIn (defined in chocobar.c, earlier
+// in the translation unit) already implements the exact-element, case-folded
+// comparison this needs.
 static int tokRealHas(const char *real, const char *pv) {
-    int n = (int)strlen(pv);
-    const char *p = real;
-    while (*p) {
-        const char *e = strchr(p, ',');
-        const char *segEnd = e ? e : p + strlen(p);
-        if (segEnd - p == n && memcmp(p, pv, (size_t)n) == 0) return 1;
-        if (!e) break;
-        p = e + 1;
-    }
-    return 0;
+    return tokProvIn(real, pv, (int)strlen(pv));
 }
 
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,

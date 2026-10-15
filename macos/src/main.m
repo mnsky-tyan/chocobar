@@ -76,6 +76,14 @@ static void resolveConfigPath(void) {
     // every core path used the real home whenever HOME was unset or empty
     // (a Finder launch), so the bar reported a config whose stores it could
     // never find.
+    // WIZBAR_CONFIG is the documented override on both front-ends (p_ui.c
+    // checks it between --config and home). Mirror it here, or a documented
+    // mac override silently resolves to the home config instead.
+    const char *envCfg = getenv("WIZBAR_CONFIG");
+    if (envCfg && *envCfg) {
+        snprintf(g_configPath, sizeof(g_configPath), "%s", envCfg);
+        return;
+    }
     const char *home = getenv("USERPROFILE");
     snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home && *home ? home : "/tmp");
 }

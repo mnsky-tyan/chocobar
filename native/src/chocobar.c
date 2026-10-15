@@ -93,6 +93,13 @@ typedef struct {
     char exclList[256];     // exclude: skip these providers (empty = none)
 } TokSource;
 
+// the longest provider/route name the matcher accepts, on BOTH sides: the
+// reader that pulls a provider out of a ledger line and the config list that
+// names it. A shorter cap on one side would truncate a long route to a prefix
+// that then compares equal to a config entry naming that prefix (false match),
+// or leave a long config entry unable to match anything at all.
+#define TOK_PROV_MAX 63
+
 #define MAX_TOK_SRC 8
 #define MAX_CUSTOM 16
 #define MAX_SUBS 6
@@ -217,8 +224,9 @@ static void tokFieldCopy(char *dst, int cch, const char *js, jsmntok_t *t, int o
 // absent or not a string). The jsmn token already delimits the value, so no
 // quote scan is needed here.
 static int jsmnStrCopy(const char *js, const jsmntok_t *tk, char *dst, int cch) {
+    if (cch < 2) return -1;
     dst[0] = 0;
-    if (!tk || tk->type != JSMN_STRING || cch < 2) return -1;
+    if (!tk || tk->type != JSMN_STRING) return -1;
     int n = tk->end - tk->start;
     if (n > cch - 1) n = cch - 1;
     memcpy(dst, js + tk->start, (size_t)n);
@@ -240,7 +248,7 @@ static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int ob
         int k = v + 1;
         for (int i = 0; i < cnt; i++) {
             if (t[k].type == JSMN_STRING) {
-                char one[64];
+                char one[TOK_PROV_MAX + 1];
                 int n = jsmnStrCopy(js, &t[k], one, sizeof(one));
                 if (n > 0) {
                     int need = (seen ? 1 : 0) + n;
@@ -257,21 +265,42 @@ static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int ob
     if (t[v].type == JSMN_STRING) {
         int n = jsmnStrCopy(js, &t[v], dst, cch);
         if (n < 0) dst[0] = 0;
+        return;
     }
+    // present but neither an array nor a string: the list stays empty, which
+    // for an include list silently means "every provider" and reintroduces the
+    // double-count the list exists to prevent. Say so instead of failing quiet.
+    writeLogA("[wizbar] tokens: a source's provider list is neither an array nor a string; ignoring it (an empty include list counts every provider)");
+}
+
+// case-insensitive compare of exactly n bytes, portable to both front-ends (no
+// _strnicmp on the macOS core, and adding a shim there would touch a file only
+// CI can compile). Matches the case-insensitive sibling matches in this
+// pipeline.
+static int tokNIeq(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+        if (ca != cb) return 0;
+    }
+    return 1;
 }
 
 // exact element test against a comma-joined provider list. A substring test is
 // wrong here for the same reason it was wrong in tokRealHas: route names nest
 // (mimo inside mimo-desktop, workbuddy inside workbuddy-2), so "mimo" would
 // swallow every mimo-desktop record. An empty list means "no opinion" - the
-// caller decides which side that is.
+// caller decides which side that is. Matching is case-insensitive to agree with
+// every sibling key match in the pipeline (the app allowlist, the label lookup,
+// the model key, timestampFormat itself).
 static int tokProvIn(const char *list, const char *pv, int pl) {
     if (!list || !*list || !pv || pl <= 0) return 0;
     const char *p = list;
     while (*p) {
         const char *e = strchr(p, ',');
         const char *segEnd = e ? e : p + strlen(p);
-        if ((int)(segEnd - p) == pl && memcmp(p, pv, (size_t)pl) == 0) return 1;
+        if ((int)(segEnd - p) == pl && tokNIeq(p, pv, pl)) return 1;
         if (!e) break;
         p = e + 1;
     }

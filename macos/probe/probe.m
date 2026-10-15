@@ -277,7 +277,7 @@ static int runParent(void) {
             NSString *s = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
             for (NSString *line in [s componentsSeparatedByString:@"\n"]) {
                 if ([line hasPrefix:@"CHILD_PID "])
-                    childPID = (pid_t)[[line substringFromIndex:9] intValue];
+                    childPID = (pid_t)[[line substringFromIndex:@"CHILD_PID ".length] intValue];
             }
             if (childPID) break;
             if (![task isRunning]) break;
@@ -292,6 +292,12 @@ static int runParent(void) {
 
         pid_t us = getpid();
         pid_t focusBefore = frontmostPID();
+        // A session where nothing is frontmost (a headless runner with only a
+        // virtual display) makes frontmostPID() return 0 for the whole run, so
+        // the focus test below could never fire and focusStolen == 0 would hold
+        // vacuously. Treat "no frontmost app" as not-measured, exactly like the
+        // NO_SCREEN early return above, instead of silently scoring it as a pass.
+        int focusMeasurable = (focusBefore != 0);
 
         Probe pr = {0};
         NSDate *start = [NSDate date];
@@ -331,7 +337,7 @@ static int runParent(void) {
 
             BOOL visible = [panel isVisible];
 
-            if (frontmostPID() != focusBefore && frontmostPID() != us) {
+            if (focusMeasurable && frontmostPID() != focusBefore && frontmostPID() != us) {
                 pr.focusStolen++;
                 printf("FOCUS_STOLEN t=%.2f frontmost=%d\n", t, (int)frontmostPID());
                 fflush(stdout);
@@ -374,6 +380,7 @@ static int runParent(void) {
         printf("HIDDEN_OK %d\n", pr.hiddenOk);
         printf("HIDDEN_BAD %d\n", pr.hiddenBad);
         printf("FOCUS_STOLEN %d\n", pr.focusStolen);
+        if (!focusMeasurable) printf("NO_FRONTMOST\n");
         printf("WORST_OFFSET %.1f\n", pr.worstOffset);
 
         // The verdict. Kept as explicit thresholds rather than "everything
@@ -386,18 +393,29 @@ static int runParent(void) {
         //   self-corrects on the next tick. A real failure is SUSTAINED drift.
         int firstSkew = pr.trackBad ? 1 : 0;
         int sustained = pr.trackBad - firstSkew;
+        // hiddenOk > 0 is required, not just hiddenBad == 0: a run where the
+        // child died before the minimize window (kChildT2) leaves both counters
+        // at 0, and requiring only hiddenBad == 0 would print PASS with the
+        // hide never once measured - the same vacuous-pass family the minimize
+        // hoist above was meant to close. The focus criterion is only required
+        // when a frontmost app existed to steal focus from.
         BOOL ok = pr.targetSeen > 3 && pr.trackedOk > 0 && sustained <= 1 &&
-                  pr.hiddenBad == 0 && pr.focusStolen == 0;
+                  pr.hiddenOk > 0 && pr.hiddenBad == 0 &&
+                  pr.focusStolen == 0 && focusMeasurable;
         printf("VERDICT %s\n", ok ? "PASS" : "FAIL");
         if (!ok) {
             if (pr.targetSeen <= 3)
                 printf("REASON CGWindowList rarely returned another process's window\n");
             else if (sustained > 1)
                 printf("REASON panel did not track the target window (%d sustained samples)\n", sustained);
+            else if (pr.hiddenOk == 0)
+                printf("REASON minimize phase was never observed (no hide was checked)\n");
             else if (pr.hiddenBad)
                 printf("REASON panel stayed visible over a minimized target\n");
             else if (pr.focusStolen)
                 printf("REASON panel stole focus from the foreground app\n");
+            else if (!focusMeasurable)
+                printf("REASON no frontmost application: the focus test could not be measured\n");
         }
         fflush(stdout);
         return ok ? 0 : 1;
