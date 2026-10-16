@@ -245,6 +245,12 @@ static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int ob
     int seen = 0;
     int dropped = 0;
     if (t[v].type == JSMN_ARRAY) {
+        if (t[v].size > 64) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "[wizbar] tokens: a source's '%s' list has more than 64 entries; later entries were dropped, so the routing is incomplete", key);
+            writeLogA(msg);
+        }
         int cnt = t[v].size; if (cnt > 64) cnt = 64;
         int k = v + 1;
         for (int i = 0; i < cnt; i++) {
@@ -271,8 +277,16 @@ static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int ob
         return;
     }
     if (t[v].type == JSMN_STRING) {
+        int raw = t[v].end - t[v].start;
         int n = jsmnStrCopy(js, &t[v], dst, cch);
         if (n < 0) dst[0] = 0;
+        if (raw > cch - 1) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "[wizbar] tokens: a source's '%s' list is longer than the %d-byte cap; later entries were dropped, so the routing is incomplete",
+                     key, cch - 1);
+            writeLogA(msg);
+        }
         return;
     }
     // present but neither an array nor a string: the list stays empty, which
