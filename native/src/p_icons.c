@@ -338,11 +338,13 @@ int iconUserFind(const wchar_t *name) {
         // the store holds names truncated to ICON_NAME_MATCH chars (see
         // iconUserAdd), so a longer config name registers a slot it could never
         // find with a full-string compare: match the stored prefix instead. A
-        // stored name that did NOT hit the cap must match exactly, so two
-        // distinct short names sharing a prefix stay distinct.
+        // stored name that did NOT hit the cap must match a name of the same
+        // length (case-insensitively), so two distinct short names sharing a
+        // prefix stay distinct.
         int stored = (int)wcslen(g_userName[i]);
         int hit = stored < ICON_NAME_MATCH
-                      ? (wcscmp(g_userName[i], name) == 0)
+                      ? (stored == (int)wcslen(name) &&
+                         _wcsnicmp(g_userName[i], name, ICON_NAME_MATCH) == 0)
                       : (_wcsnicmp(g_userName[i], name, ICON_NAME_MATCH) == 0);
         if (hit) return SVG_USER_BASE + i;
     }
@@ -707,13 +709,15 @@ int iconUserAdd(const wchar_t *name, const wchar_t *d, float w) {
     for (int i = 0; i < g_userCount; i++) {
         // redefine = replace, but only when it IS the same name. The store can
         // hold ICON_NAME_MATCH chars, so a stored name that is shorter than the
-        // cap must match the incoming name exactly; only a stored name that hit
-        // the cap is a truncated prefix that a longer incoming name may extend.
-        // Without this, two distinct names sharing ICON_NAME_MATCH chars would
-        // silently collapse into one slot and the first glyph would be lost.
+        // cap must match an incoming name of the same length (case-insensitively);
+        // only a stored name that hit the cap is a truncated prefix that a longer
+        // incoming name may extend. Without this, two distinct names sharing
+        // ICON_NAME_MATCH chars would silently collapse into one slot and the
+        // first glyph would be lost.
         int stored = (int)wcslen(g_userName[i]);
         if (stored < ICON_NAME_MATCH) {
-            if (wcscmp(g_userName[i], name) == 0) { slot = i; break; }
+            if (stored == (int)wcslen(name) &&
+                _wcsnicmp(g_userName[i], name, ICON_NAME_MATCH) == 0) { slot = i; break; }
         } else if (_wcsnicmp(g_userName[i], name, ICON_NAME_MATCH) == 0) {
             slot = i; break;
         }

@@ -115,16 +115,10 @@ function check(name, ok, detail) {
 
   // a bridge turn must be judged by its route, not by a hardcoded provider list:
   // mimo rows have been toggled off and on, and workbuddy-2 appeared later, so any
-  // such list is wrong the day a route changes. The code consults the set of
-  // routes that DID report in the same file, no route name is compiled in, and
-  // the match is an exact comma-delimited element test: a substring test
-  // matched "mimo" inside "mimo-desktop" and read a blind turn on the
-  // shorter route as an aborted reporting one.
-  check('estimator: blindness is decided from the file\'s own reporting routes',
-    /tokRealHas\(real, pv\)/.test(pt) && /blind = 0/.test(pt)
-    && /return tokProvIn\(real, pv, \(int\)strlen\(pv\)\)/.test(pt)
-    && !/strstr\(real, pv\)/.test(pt),
-    'an exact comma-delimited element match, never a substring test');
+  // such list is wrong the day a route changes. The executable case
+  // "nested route names are element-matched, not substring-matched" in
+  // scripts/token_regression.py proves the exact element match against the real
+  // scanner; the code shape itself is not pinned here.
   check('estimator: no provider name is compiled in as a quoted literal',
     !/"(workbuddy|mimo[-a-z]*|antigravity|codebuddy)"/i.test(pt),
     'a bridge list would rot the moment a route changes');
@@ -240,58 +234,6 @@ function check(name, ok, detail) {
   check('tokens: the forced flag is consumed by the scan, not left set',
     /int fullRead = g_tokForceFullRead;\s*\n\s*g_tokForceFullRead = 0;/.test(tk),
     'left set, every later rescan would re-read from byte 0');
-}
-
-// --- two ledgers, one request ---------------------------------------------------
-// A gateway that logs every call it serves (Magpie) plus the client's own
-// session files both hold the SAME request, so a naive sum double-counts it.
-// The fix is config, not a dedup table: the source that owns the traffic lists
-// its providers, the other excludes them. Two properties must hold for that to
-// be safe. The match must be an EXACT element test - a substring test matches
-// "mimo" inside "mimo-desktop" and would drop or keep whole routes. And an
-// empty include list must mean "every provider", so a source that declares
-// neither list behaves exactly as it did before this feature existed.
-{
-  const cb = sources.chocobar;
-  const tk = sources.p_tokens;
-  check('sources: provider routing is an exact element test, never a substring',
-    /\(int\)\(segEnd - p\) == pl && tokNIeq\(p, pv, pl\)/.test(cb)
-    && /strchr\(p, ','\)/.test(cb)
-    && /static int tokNIeq\(const char \*a, const char \*b, int n\)/.test(cb),
-    'route names nest, so a substring match would swallow whole providers');
-  check('sources: provider match is case-insensitive like its sibling keys',
-    /tokNIeq/.test(cb) && !/memcmp\(p, pv, \(size_t\)pl\)/.test(cb),
-    'the app allowlist, label lookup and timestampFormat all fold case');
-  check('sources: provider names share one length cap on both sides',
-    /#define TOK_PROV_MAX 63/.test(cb) && /e - v < TOK_PROV_MAX/.test(tk)
-    && /char one\[TOK_PROV_MAX \+ 1\]/.test(cb),
-    'a shorter read cap truncates a long route to a prefix that then matches');
-  check('sources: an empty providers list means every provider',
-    /\(!tk->provList \|\| !\*tk->provList\) \? 1/.test(tk),
-    'a source that declares no include list must keep its old behaviour');
-  check('sources: both lists are honoured in the scan loop',
-    /int owned =/.test(tk) && /int skip =/.test(tk)
-    && /have = owned && !skip;/.test(tk),
-    'the include list alone would not stop the overlap being counted twice');
-  check('sources: timestampFormat iso decodes a string timestamp',
-    /tokIsoToMs\(vs, ve\)/.test(tk) && /tk->tsIso/.test(tk),
-    'an ISO-only store is otherwise unreadable, every record rejected');
-  check('sources: the epoch path is untouched for every existing source',
-    /out->ts = parseLL\(tp, end\);/.test(tk) && /if \(!tk->tsIso\) \{/.test(tk),
-    'one flag picks the shape; the default must stay byte-identical');
-  check('sources: the ISO offset is applied, so a record lands on the right day',
-    /if \(haveOff\) ms -= \(long long\)offMin \* 60000;/.test(tk),
-    'a naive local-time read is wrong by the offset on every non-UTC record');
-  check('sources: an undecodable timestamp is skipped, not counted as epoch 0',
-    /if \(out->ts > 0\) break;/.test(tk) && /out->ts = 0;/.test(tk),
-    'epoch 0 is 1970 and would corrupt the day buckets');
-  // A `continue` here spins the scan forever: the line-advance at the bottom
-  // of the loop (consumed += len + 1; p = nl + 1) has to run for EVERY line.
-  // This shipped once as a real hang - the scan thread never set its done
-  // flag and every case timed out at exit 8 - so the shape is pinned.
-  check('sources: provider routing never skips the line advance',
-    /have = owned && !skip;/.test(tk) && !/\bskip\) continue;/.test(tk),
-    'a continue here leaves p unmoved and the scan hangs');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);

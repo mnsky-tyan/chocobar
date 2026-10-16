@@ -243,6 +243,7 @@ static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int ob
     int v = jobjGet(js, t, obj, key);
     if (v < 0) return;
     int seen = 0;
+    int dropped = 0;
     if (t[v].type == JSMN_ARRAY) {
         int cnt = t[v].size; if (cnt > 64) cnt = 64;
         int k = v + 1;
@@ -252,13 +253,20 @@ static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int ob
                 int n = jsmnStrCopy(js, &t[k], one, sizeof(one));
                 if (n > 0) {
                     int need = (seen ? 1 : 0) + n;
-                    if (seen + need > cch - 1) break;
+                    if (seen + need > cch - 1) { dropped = 1; break; }
                     if (seen) dst[seen++] = ',';
                     memcpy(dst + seen, one, (size_t)n);
                     seen += n; dst[seen] = 0;
                 }
             }
             k += jtokSpan(t, k);
+        }
+        if (dropped) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "[wizbar] tokens: a source's '%s' list is longer than the %d-byte cap; later entries were dropped, so the routing is incomplete",
+                     key, cch - 1);
+            writeLogA(msg);
         }
         return;
     }
