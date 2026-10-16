@@ -117,12 +117,15 @@ function check(name, ok, detail) {
   // mimo rows have been toggled off and on, and workbuddy-2 appeared later, so any
   // such list is wrong the day a route changes. The code consults the set of
   // routes that DID report in the same file, no route name is compiled in, and
-  // the match is an exact comma-delimited element test: a substring test
-  // matched "mimo" inside "mimo-desktop" and read a blind turn on the
-  // shorter route as an aborted reporting one.
+  // the match is an exact comma-delimited element test (a substring test matched
+  // "mimo" inside "mimo-desktop" and read a blind turn on the shorter route as
+  // an aborted reporting one). tokRealHas delegates that judgment to the shared
+  // tokProvIn matcher, which compares whole elements case-folded.
   check('estimator: blindness is decided from the file\'s own reporting routes',
     /tokRealHas\(real, pv\)/.test(pt) && /blind = 0/.test(pt)
-    && /segEnd - p == n && memcmp\(p, pv, \(size_t\)n\) == 0/.test(pt)
+    && /return tokProvIn\(real, pv, \(int\)strlen\(pv\)\)/.test(pt)
+    && /static int tokProvIn\(const char \*list, const char \*pv, int pl\)/.test(cb)
+    && /\(int\)\(segEnd - p\) == pl && tokNIeq\(p, pv, pl\)/.test(cb)
     && !/strstr\(real, pv\)/.test(pt),
     'an exact comma-delimited element match, never a substring test');
   check('estimator: no provider name is compiled in as a quoted literal',

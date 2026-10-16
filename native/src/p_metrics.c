@@ -153,12 +153,11 @@ static void pickCpuTemp(TempRec *list, int n, int *ok, double *outC, int *hot, i
 // encoding that section of the layout uses (wide UTF-16 or narrow latin-1);
 // every bounds decision for the HWiNFO string reads below lives here, once:
 // five call sites replacing eight hand-inlined wide/narrow copies
-static int hwinfoStr(const BYTE *p, DWORD off, DWORD total, int wide, wchar_t *out, int cap) {
+static void hwinfoStr(const BYTE *p, DWORD off, DWORD total, int wide, wchar_t *out, int cap) {
     int n = 0;
     if (wide) while (n < cap - 1 && off + (DWORD)(2*n + 1) < total && p[off + 2*n]) { out[n] = *(wchar_t *)(p + off + 2*n); n++; }
     else       while (n < cap - 1 && off + n < total && p[off + n]) { out[n] = (wchar_t)p[off + n]; n++; }
     out[n] = 0;
-    return n;
 }
 
 // committed bytes of the mapping behind p: both HWiNFO readers bound every

@@ -726,8 +726,16 @@ CB_BOOL SetFileTime(HANDLE h, const FILETIME *c, const FILETIME *a, const FILETI
     (void)h; (void)c; (void)a;
     if (!w) return FALSE;
     struct timespec ts[2];
-    ts[0].tv_sec = (time_t)(adapterFileTimeToUnixMs(w) / 1000);
-    ts[0].tv_nsec = 0;
+    long long ms = adapterFileTimeToUnixMs(w);
+    // floor-divide so a pre-1970 (negative) mtime still yields a non-negative
+    // tv_nsec; a raw % would hand futimens an invalid negative nanosecond field
+    long long sec = ms / 1000;
+    long long ns = ms % 1000;
+    if (ns < 0) { ns += 1000; sec -= 1; }
+    ts[0].tv_sec = (time_t)sec;
+    // carry the sub-second part the read side (statMtimeToFileTime) preserves,
+    // so a write-then-warm-skip round trip compares at the same granularity
+    ts[0].tv_nsec = (long)(ns * 1000000);
     ts[1] = ts[0];
     return futimens(HANDLE_TO_FD(h), ts) == 0;
 }
@@ -753,8 +761,8 @@ static FILETIME unixMsToFileTime(long long ms) {
 // ---- wide env for the core -----------------------------------------------------
 
 // Establish the locale the codecs assume, and export USERPROFILE for the core's
-// path logic. Constructors here run before main(); the order between this file's
-// two initialisers does not matter because both are in this one function.
+// path logic. The constructor here runs before main(); the order between the two
+// initialisations below does not matter because both are in this one function.
 //
 // Without this, a .app launched from Finder inherits the C locale, where
 // mbstowcs/wcstombs reject every byte >= 0x80: non-ASCII paths and env values

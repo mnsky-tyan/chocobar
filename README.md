@@ -179,8 +179,27 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 - `enabled`: per-source switch, honoured only when `tokens.enabled` is on. Defaults to **on** - adding an entry is the act of turning it on; the shipped template leaves its two examples off.
 - `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
 - `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
+- `timestampFormat`: `"epoch"` (default) reads a numeric millisecond timestamp; `"iso"` decodes an ISO-8601 string (`2026-10-14T23:05:06.62443192+08:00`, `Z` accepted) into epoch milliseconds, applying the offset so the record lands on the right day.
+- `providers` / `exclude`: comma-separated (or array) provider names, matched whole against the line's provider field, case-insensitively - never as a substring, because route names nest (`mimo` inside `mimo-desktop`; `Mimo` still routes to `mimo`). `providers` is an include list (empty = every provider), `exclude` a skip list (empty = none).
 
-Stores must contain newline-terminated `.jsonl` records with usage numbers and a **numeric Unix timestamp in milliseconds**. `fields` maps key names, not JSON paths; ISO-only timestamps and SQLite stores are not live readers. Set `tokens.enabled: true` as well as enabling your source. The declared `app` appears in the dashboard automatically; `tokens.labels` can rename its display row.
+Stores must contain newline-terminated `.jsonl` records with usage numbers. `fields` maps key names, not JSON paths; SQLite stores are not live readers. Set `tokens.enabled: true` as well as enabling your source. The declared `app` appears in the dashboard automatically; `tokens.labels` can rename its display row.
+
+**Two ledgers, one request.** When two stores both hold the same request - a gateway that logs every call it serves, plus the session file of the client that made it - counting both double-counts it. Give the store that owns the traffic a `providers` list, and the other an `exclude` list naming the same providers. The gateway's own numbers then win and the client's copy of those requests is skipped, with no dedup table and no id matching. A worked example, with Magpie as the gateway and pi as the client:
+
+```json
+"sources": [
+  { "app": "pi", "path": "~/.pi/agent/sessions", "enabled": true, "recursive": true,
+    "exclude": ["magpie-qoder", "magpie-cline", "magpie-workbuddy",
+                "magpie-workbuddy-cn", "magpie-agy", "magpie-opencode"] },
+  { "app": "magpie", "path": "~/.config/magpie-runtime/magpie", "enabled": true,
+    "recursive": false, "timestampFormat": "iso",
+    "fields": { "input": "in", "output": "out", "cacheRead": "cache_read", "cacheWrite": "cache_write", "timestamp": "t" },
+    "providers": ["qoder", "cline", "workbuddy-ai", "workbuddy", "opencode-zen",
+                  "antigravity", "kilo", "zcode"] }
+]
+```
+
+Why those two halves: a Magpie record carries no session file of its own, so a subagent run - which the harness never writes to disk - is invisible without it. On the pi side, every request that DID reach a session file is one Magpie also logged, and the two ledgers report identical numbers for it; the `exclude` list is what stops that overlap being counted twice. `tokens.estimateMissingUsage` is a session-file idea and should stay off for a gateway source, which reports exact usage for every request including the aborted ones. Note `path` names the DIRECTORY holding the store (Magpie's is `~/.config/magpie-runtime/magpie`, and its ledger file `usage.jsonl` is picked up by the extension filter), and the gateway's `fields` must map `timestamp` to its own key - Magpie calls it `t` - because a `timestampFormat: "iso"` value is decoded from the mapped key.
 
 The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later recover the eligible live history too. With a legacy seed, only files newer than the seed file and records beyond its latest timestamp contribute to that live half. A legacy seed file is optional; a fresh install reconstructs its totals without one.
 

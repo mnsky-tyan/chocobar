@@ -88,7 +88,17 @@ typedef struct {
     wchar_t *sessionsDir;   // ~ prefixed = profile relative, else absolute/UNC
     int recursive;          // descend into per-project subdirectories
     char kIn[24], kOut[24], kCr[24], kCw[24], kTs[24], kModel[24];
+    int tsIso;              // timestampFormat: "iso" - the ts value is a string
+    char provList[256];     // providers: include list (empty = all)
+    char exclList[256];     // exclude: skip these providers (empty = none)
 } TokSource;
+
+// the longest provider/route name the matcher accepts, on BOTH sides: the
+// reader that pulls a provider out of a ledger line and the config list that
+// names it. A shorter cap on one side would truncate a long route to a prefix
+// that then compares equal to a config entry naming that prefix (false match),
+// or leave a long config entry unable to match anything at all.
+#define TOK_PROV_MAX 63
 
 #define MAX_TOK_SRC 8
 #define MAX_CUSTOM 16
@@ -208,6 +218,115 @@ static void tokAppFromDir(const wchar_t *dir, char *out, int cch) {
 static void tokFieldCopy(char *dst, int cch, const char *js, jsmntok_t *t, int obj,
                          const char *key, const char *dflt) {
     jstrCopyA(dst, cch, js, t, jobjGet(js, t, obj, key), dflt);
+}
+
+// copy a JSON string value into a narrow buffer, returning its length (-1 when
+// absent or not a string). The jsmn token already delimits the value, so no
+// quote scan is needed here.
+static int jsmnStrCopy(const char *js, const jsmntok_t *tk, char *dst, int cch) {
+    if (cch < 2) return -1;
+    dst[0] = 0;
+    if (!tk || tk->type != JSMN_STRING) return -1;
+    int n = tk->end - tk->start;
+    if (n > cch - 1) n = cch - 1;
+    memcpy(dst, js + tk->start, (size_t)n);
+    dst[n] = 0;
+    return n;
+}
+
+// flatten a JSON array of strings (or one bare string) into a comma-joined
+// list for the exact-element match below. Two entries that concatenate without
+// a separator would otherwise read as one provider.
+static void tokListCopy(char *dst, int cch, const char *js, jsmntok_t *t, int obj,
+                        const char *key) {
+    dst[0] = 0;
+    int v = jobjGet(js, t, obj, key);
+    if (v < 0) return;
+    int seen = 0;
+    int dropped = 0;
+    if (t[v].type == JSMN_ARRAY) {
+        if (t[v].size > 64) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "[wizbar] tokens: a source's '%s' list has more than 64 entries; later entries were dropped, so the routing is incomplete", key);
+            writeLogA(msg);
+        }
+        int cnt = t[v].size; if (cnt > 64) cnt = 64;
+        int k = v + 1;
+        for (int i = 0; i < cnt; i++) {
+            if (t[k].type == JSMN_STRING) {
+                char one[TOK_PROV_MAX + 1];
+                int n = jsmnStrCopy(js, &t[k], one, sizeof(one));
+                if (n > 0) {
+                    int need = (seen ? 1 : 0) + n;
+                    if (seen + need > cch - 1) { dropped = 1; break; }
+                    if (seen) dst[seen++] = ',';
+                    memcpy(dst + seen, one, (size_t)n);
+                    seen += n; dst[seen] = 0;
+                }
+            }
+            k += jtokSpan(t, k);
+        }
+        if (dropped) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "[wizbar] tokens: a source's '%s' list is longer than the %d-byte cap; later entries were dropped, so the routing is incomplete",
+                     key, cch - 1);
+            writeLogA(msg);
+        }
+        return;
+    }
+    if (t[v].type == JSMN_STRING) {
+        int raw = t[v].end - t[v].start;
+        int n = jsmnStrCopy(js, &t[v], dst, cch);
+        if (n < 0) dst[0] = 0;
+        if (raw > cch - 1) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "[wizbar] tokens: a source's '%s' list is longer than the %d-byte cap; later entries were dropped, so the routing is incomplete",
+                     key, cch - 1);
+            writeLogA(msg);
+        }
+        return;
+    }
+    // present but neither an array nor a string: the list stays empty, which
+    // for an include list silently means "every provider" and reintroduces the
+    // double-count the list exists to prevent. Say so instead of failing quiet.
+    writeLogA("[wizbar] tokens: a source's provider list is neither an array nor a string; ignoring it (an empty include list counts every provider)");
+}
+
+// case-insensitive compare of exactly n bytes, portable to both front-ends (no
+// _strnicmp on the macOS core, and adding a shim there would touch a file only
+// CI can compile). Matches the case-insensitive sibling matches in this
+// pipeline.
+static int tokNIeq(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+        if (ca != cb) return 0;
+    }
+    return 1;
+}
+
+// exact element test against a comma-joined provider list. A substring test is
+// wrong here for the same reason it was wrong in tokRealHas: route names nest
+// (mimo inside mimo-desktop, workbuddy inside workbuddy-2), so "mimo" would
+// swallow every mimo-desktop record. An empty list means "no opinion" - the
+// caller decides which side that is. Matching is case-insensitive to agree with
+// every sibling key match in the pipeline (the app allowlist, the label lookup,
+// the model key, timestampFormat itself).
+static int tokProvIn(const char *list, const char *pv, int pl) {
+    if (!list || !*list || !pv || pl <= 0) return 0;
+    const char *p = list;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        const char *segEnd = e ? e : p + strlen(p);
+        if ((int)(segEnd - p) == pl && tokNIeq(p, pv, pl)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
 }
 
 // --------------------------------------------------------------- config ----
@@ -703,6 +822,23 @@ static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj)
         lstrcpyA(ts->kCr, "cacheRead"); lstrcpyA(ts->kCw, "cacheWrite");
         lstrcpyA(ts->kTs, "timestamp"); lstrcpyA(ts->kModel, "model");
     }
+    // timestampFormat: "iso" parses a string timestamp into epoch ms. The
+    // default "epoch" is what the pi/zai stores use.
+    ts->tsIso = 0;
+    int tf = jobjGet(js, t, obj, "timestampFormat");
+    if (tf >= 0 && t[tf].type == JSMN_STRING) {
+        char v[16];
+        int vl = jsmnStrCopy(js, &t[tf], v, sizeof(v));
+        if (vl > 0 && lstrcmpiA(v, "iso") == 0) ts->tsIso = 1;
+    }
+    // provider routing. `providers` is an include list, `exclude` a skip list;
+    // both are matched exactly (element test, never a substring - route names
+    // nest, mimo inside mimo-desktop). They are how one request is counted
+    // once when two ledgers both hold it: the source that owns the traffic
+    // lists it, the other excludes it.
+    ts->provList[0] = ts->exclList[0] = 0;
+    tokListCopy(ts->provList, sizeof(ts->provList), js, t, obj, "providers");
+    tokListCopy(ts->exclList, sizeof(ts->exclList), js, t, obj, "exclude");
     if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) return 1;
     wideFree(&ts->sessionsDir);
     return 0;

@@ -349,7 +349,7 @@ typedef struct {
 
 // the six field names a source uses, pre-quoted for the substring search. Built
 // once per scan (not per line) so the hot path stays a memcmp.
-typedef struct { char k[6][32]; int len[6]; } TokKeys;
+typedef struct { char k[6][32]; int len[6]; int tsIso; const char *provList, *exclList; } TokKeys;
 static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
     static const char *dflt[6] = { "input", "output", "cacheRead", "cacheWrite", "timestamp", "model" };
     const char *src[6];
@@ -359,6 +359,76 @@ static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
         const char *v = (src[i] && *src[i]) ? src[i] : dflt[i];
         tk->len[i] = sprintf(tk->k[i], "\"%s\":", v);
     }
+    tk->tsIso = s->tsIso;
+    tk->provList = s->provList;
+    tk->exclList = s->exclList;
+}
+
+// ISO-8601 to epoch ms, for a source whose timestamp is a string. The shape
+// comes from a real Magpie record: "2026-10-14T23:05:06.62443192+08:00".
+// Only the parts the day boundary and the aggregates need are decoded -
+// Y-M-D h:m:s, an optional fraction, and an optional Z or +HH:MM offset that
+// is applied to reach UTC. Anything that does not match the shape returns 0,
+// which the caller reads as "unparseable" and skips, exactly as a negative
+// epoch already is. A naive local-time reading would be wrong by the offset
+// on every record west or east of UTC.
+static long long tokIsoToMs(const char *s, const char *end) {
+    int Y = 0, Mo = 0, D = 0, h = 0, mi = 0, se = 0, frac = 0, fracN = 0;
+    int offMin = 0, haveOff = 0;
+    // digits with an explicit width, so a truncated field is rejected rather
+    // than silently read as a smaller number
+#define TOK_DIG(dst, w) do { \
+        for (int _i = 0; _i < (w); _i++) { \
+            if (s >= end || *s < '0' || *s > '9') return 0; \
+            (dst) = (dst) * 10 + (*s++ - '0'); \
+        } \
+    } while (0)
+    TOK_DIG(Y, 4); if (s < end && *s == '-') s++; else return 0;
+    TOK_DIG(Mo, 2); if (s < end && *s == '-') s++; else return 0;
+    TOK_DIG(D, 2);
+    if (s < end && (*s == 'T' || *s == ' ')) s++; else return 0;
+    TOK_DIG(h, 2); if (s < end && *s == ':') s++; else return 0;
+    TOK_DIG(mi, 2); if (s < end && *s == ':') s++; else return 0;
+    TOK_DIG(se, 2);
+#undef TOK_DIG
+    if (Mo < 1 || Mo > 12 || D < 1 || D > 31 || h > 23 || mi > 59 || se > 60) return 0;
+    if (s < end && *s == '.') {
+        s++;
+        // keep only the first three fraction digits: they are the
+        // milliseconds, and everything after them is precision the epoch-ms
+        // convention cannot represent. Scaling a 9-digit fraction afterwards
+        // (frac * 10^(3-fracN)) needs a negative power for fracN > 3, and a
+        // bounds guard that silently returns 1 turned "123456789" into
+        // 123456789 ms - a record landing ~34 hours in the future.
+        while (s < end && *s >= '0' && *s <= '9' && fracN < 3) {
+            frac = frac * 10 + (*s++ - '0'); fracN++;
+        }
+        while (s < end && *s >= '0' && *s <= '9') s++; // drop the rest
+        while (fracN++ < 3) frac *= 10;                 // .5 -> 500 ms
+    }
+    if (s < end && (*s == 'Z' || *s == 'z')) { haveOff = 1; offMin = 0; s++; }
+    else if (s < end && (*s == '+' || *s == '-')) {
+        int sign = (*s == '-') ? -1 : 1; s++;
+        int oh = 0, om = 0;
+        for (int i = 0; i < 2; i++) { if (s >= end || *s < '0' || *s > '9') return 0; oh = oh * 10 + (*s++ - '0'); }
+        if (s < end && *s == ':') s++;
+        for (int i = 0; i < 2; i++) { if (s >= end || *s < '0' || *s > '9') return 0; om = om * 10 + (*s++ - '0'); }
+        if (oh > 23 || om > 59) return 0;
+        haveOff = 1; offMin = sign * (oh * 60 + om);
+    }
+    // days since 1970-01-01, from the civil date (Howard Hinnant's algorithm:
+    // no table, no loop, and correct for every year the bar can see)
+    int y = Y; if (Mo <= 2) y--;
+    int era = (y >= 0 ? y : y - 399) / 400;
+    int yoe = y - era * 400;
+    int mp = (Mo + 9) % 12;
+    int doy = (153 * mp + 2) / 5 + D - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long long days = (long long)era * 146097 + doe - 719468;
+    long long ms = ((days * 24 + h) * 60 + mi) * 60000 + (long long)se * 1000;
+    ms += frac; // already milliseconds
+    if (haveOff) ms -= (long long)offMin * 60000;
+    return ms;
 }
 
 // pi: {"type":"message","message":{"role":"assistant","model":"...","usage":{...},"timestamp":123}}
@@ -380,20 +450,41 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     // timestamp: epoch-ms integer on the MESSAGE (verified against 1402 real
     // records). The line-level top-level "timestamp" is an ISO STRING and comes
     // first, so skip string-valued keys and take the first numeric one.
+    //
+    // A source with timestampFormat "iso" inverts that: the value IS a string
+    // and it is decoded instead. The two shapes are mutually exclusive by
+    // construction, so one flag on the keys struct picks between them and the
+    // epoch path stays byte-identical for every existing source.
     const char *tp = NULL;
     for (int i = 0; i + tk->len[4] <= len; ) {
         if (memcmp(ln + i, tk->k[4], tk->len[4]) == 0) {
             const char *v = ln + i + tk->len[4];
             while (v < end && (*v == ' ' || *v == '\t')) v++;
-            if (v < end && *v == '"') { i += tk->len[4]; continue; } // ISO string: not it
+            if (v < end && *v == '"') {
+                if (tk->tsIso) { // ISO string: decode it
+                    const char *vs = v + 1;
+                    const char *ve = vs;
+                    while (ve < end && *ve != '"' && ve - vs < 48) ve++;
+                    if (ve > vs) {
+                        out->ts = tokIsoToMs(vs, ve);
+                        if (out->ts > 0) break; // decoded: this is the timestamp
+                        out->ts = 0;
+                    }
+                }
+                i += tk->len[4]; continue; // string on an epoch source, or an
+                                           // undecodable ISO value: keep looking
+            }
+            if (tk->tsIso) { i += tk->len[4]; continue; } // ISO source, numeric value: not it
             tp = v;
             break;
         }
         i++;
     }
-    if (!tp) return 0;
-    out->ts = parseLL(tp, end);
-    if (out->ts <= 0) return 0;
+    if (!tp && !(tk->tsIso && out->ts > 0)) return 0;
+    if (!tk->tsIso) {
+        out->ts = parseLL(tp, end);
+        if (out->ts <= 0) return 0;
+    }
     // model: the marker stops at the colon, so the value's opening quote
     // has to be stepped over before the closing one is scanned for
     const char *mp = NULL;
@@ -417,7 +508,11 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
             if (v < ln + len && *v == '"') {
                 v++;
                 const char *e = v;
-                while (e < ln + len && *e != '"' && e - v < 32) e++;
+                // one cap for both sides of the match: a shorter cap here would
+                // truncate a long route to a prefix that compares equal to a
+                // config entry naming that prefix (a false positive), and a
+                // config entry longer than the cap could never match at all.
+                while (e < ln + len && *e != '"' && e - v < TOK_PROV_MAX) e++;
                 if (e > v) { out->prov = v; out->provLen = (int)(e - v); }
             }
             break;
@@ -451,17 +546,11 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
 // workbuddy-2 - so the substring match read a blind turn on the shorter
 // route as an aborted reporting one and dropped it instead of estimating it
 // (and the append side refused to record the shorter route at all).
+// One matcher for the whole program: tokProvIn (defined in chocobar.c, earlier
+// in the translation unit) already implements the exact-element, case-folded
+// comparison this needs.
 static int tokRealHas(const char *real, const char *pv) {
-    int n = (int)strlen(pv);
-    const char *p = real;
-    while (*p) {
-        const char *e = strchr(p, ',');
-        const char *segEnd = e ? e : p + strlen(p);
-        if (segEnd - p == n && memcmp(p, pv, (size_t)n) == 0) return 1;
-        if (!e) break;
-        p = e + 1;
-    }
-    return 0;
+    return tokProvIn(real, pv, (int)strlen(pv));
 }
 
 static long long tokScanFile(const wchar_t *path, long long from, const char *appName,
@@ -549,13 +638,33 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
             int replyChars = 0;
             int lineChars = estimating ? tokTextLen(p, len, &replyChars) : 0;
             TokRec r;
-            if (tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs) {
+            int have = tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs;
+            // provider routing: a source may declare which providers it owns
+            // (providers) and which it must not touch (exclude). This is how
+            // two ledgers that both hold the same request count it once -
+            // the one that owns the traffic lists it, the other excludes it.
+            // The test is an exact element match, never a substring, because
+            // route names nest (mimo inside mimo-desktop).
+            //
+            // This must NOT be a `continue`: the line-advance at the bottom of
+            // this loop (consumed += len + 1; p = nl + 1) has to run for every
+            // line, or the scan spins on one line forever and the totals never
+            // arrive. A flag guards the body instead, and an early skip still
+            // pays the transcript cost of the line below.
+            if (have) {
+                int owned = (!tk->provList || !*tk->provList) ? 1
+                           : tokProvIn(tk->provList, r.prov, r.provLen);
+                int skip = tk->exclList && *tk->exclList
+                           && tokProvIn(tk->exclList, r.prov, r.provLen);
+                have = owned && !skip;
+            }
+            if (have) {
                 long long fld[4] = { r.in, r.out, r.cr, r.cw };
                 long long sum = fld[0] + fld[1] + fld[2] + fld[3];
                 if (sum > 0) {
-                    // a real number: this route reports, so it has an API behind it.
-                    // Remember it, so a later blank turn from the SAME route is read
-                    // as an abort rather than as a bridged one.
+                    // a real number: this route reports, so it has an API behind
+                    // it. Remember it, so a later blank turn from the SAME route
+                    // is read as an abort rather than as a bridged one.
                     if (estimating && r.provLen > 0) {
                         char pv[40]; int pl = r.provLen < 39 ? r.provLen : 39;
                         memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
