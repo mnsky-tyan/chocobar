@@ -253,8 +253,34 @@ static int testRun(const wchar_t *profile, const wchar_t *mode, TestScan *scans,
     return 0;
 }
 
+/* Drive the production scan + UI drain, then report the day bucket the dashboard
+   renders, so a timestamp-offset bug that moves a record across midnight is
+   observable end to end. The console harness otherwise exposes no day split. */
+static int dayProbeMain(const wchar_t *profile) {
+    if (lstrlenW(profile) >= MAX_PATH - 50 || !SetEnvironmentVariableW(L"USERPROFILE", profile)) return 1;
+    InitializeCriticalSection(&g_cfgCustomLock);
+    InitializeCriticalSection(&g_cfgGenLock);
+    tokLiveInit();
+    int rc = testConfig(profile);
+    if (rc) return rc;
+    scanTokenCache();
+    DWORD start = GetTickCount();
+    while (g_cfg.tokensEnabled && InterlockedCompareExchange(&g_tokScanDone, 0, 0) != 1) {
+        if (GetTickCount() - start > 10000) return 8;
+        Sleep(5);
+    }
+    tokDrainPending();
+    /* g_dayTot runs oldest-first, so the last slot is today, exactly what the
+       dashboard's Today card shows (p_ui.c reads the same index). */
+    printf("TODAY=%lld\n", g_dayTot[DASH_MAX_DAYS - 1]);
+    printf("ALL=%lld\n", g_tokAll);
+    fflush(stdout);
+    return 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
     if (argc == 3 && wcscmp(argv[1], L"--agy-probe") == 0) return agyProbeMain(argv[2]);
+    if (argc == 3 && wcscmp(argv[1], L"--day-probe") == 0) return dayProbeMain(argv[2]);
     if (argc == 2 && wcscmp(argv[1], L"--defaults-probe") == 0) return defaultsProbeMain();
     if (argc != 4) return 64;
     FILE *out = _wfopen(argv[2], L"wb");

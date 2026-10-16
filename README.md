@@ -180,7 +180,7 @@ The poll runs on its own thread, so a command that takes a second never hitches 
 - `recursive`: descend into per-project subdirectories. Defaults to **on** - a flat store has no subdirectories to descend into, a nested one needs it, so the default is right for both.
 - `fields`: rename the usage keys for a harness that spells them differently, e.g. `{ "input": "prompt_tokens", "output": "completion_tokens" }`. The six keys are `input`, `output`, `cacheRead`, `cacheWrite`, `timestamp`, `model`; all default to the pi/zai spelling.
 - `timestampFormat`: `"epoch"` (default) reads a numeric millisecond timestamp; `"iso"` decodes an ISO-8601 string (`2026-10-14T23:05:06.62443192+08:00`, `Z` accepted) into epoch milliseconds, applying the offset so the record lands on the right day.
-- `providers` / `exclude`: comma-separated (or array) provider names, matched exactly against the line's provider field - never as a substring, because route names nest (`mimo` inside `mimo-desktop`). `providers` is an include list (empty = every provider), `exclude` a skip list (empty = none).
+- `providers` / `exclude`: comma-separated (or array) provider names, matched whole against the line's provider field, case-insensitively - never as a substring, because route names nest (`mimo` inside `mimo-desktop`; `Mimo` still routes to `mimo`). `providers` is an include list (empty = every provider), `exclude` a skip list (empty = none).
 
 Stores must contain newline-terminated `.jsonl` records with usage numbers. `fields` maps key names, not JSON paths; SQLite stores are not live readers. Set `tokens.enabled: true` as well as enabling your source. The declared `app` appears in the dashboard automatically; `tokens.labels` can rename its display row.
 
