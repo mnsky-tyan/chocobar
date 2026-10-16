@@ -153,9 +153,10 @@ jobs:
   probe:
     runs-on: macos-14
     timeout-minutes: 10
-    # Measurement, not a gate. See the header.
+    # Measurement, not a gate. See the header. Deliberately NOT `needs: build`:
+    # an independent measurement that is skipped exactly when the macOS build
+    # breaks cannot report the breakage this file exists to report.
     continue-on-error: true
-    needs: build
     steps:
       - uses: actions/checkout@v4
 

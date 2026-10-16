@@ -839,7 +839,7 @@ static void buildChips(void) {
         if (g_m.tempOk) {
             if ((int)(g_m.tempC * 10) % 10 == 0) swprintf(v, 48, L"%d\u00B0C", (int)g_m.tempC);
             else swprintf(v, 48, L"%.1f\u00B0C", g_m.tempC);
-            addChipI(CT_CPUTEMP, 0, v, g_m.tempHot, g_m.tempHot ? g_cfg.warn : NULL, 0xF05C3);
+            addChipI(CT_CPUTEMP, 0, v, g_m.tempHot, g_m.tempHot ? g_cfg.warn : NULL, 0);
         } else addChipI(CT_CPUTEMP, 0, L"\u2014", 0, g_cfg.divider, 0);
         g_chips[g_chipCount - 1].iconSvg = SVG_TEMP;
     }
@@ -3286,7 +3286,13 @@ static void autoStartHeal(void) {
 static int menuWidthPx(void) {
     static int cached = 0;
     static double cachedScale = 0;
-    if (cached && cachedScale == g_scale) return cached;
+    // the measured width is the labels' advance in dashFont(9), which resolves
+    // g_cfg.fontFamily: a reload that changes the family at the same DPI must
+    // re-measure, or WM_MEASUREITEM hands the menu the old font's widths
+    // forever. The family pointer is replaced on every parse, so comparing it
+    // is enough to invalidate
+    static const wchar_t *cachedFamily = NULL;
+    if (cached && cachedScale == g_scale && cachedFamily == g_cfg.fontFamily) return cached;
     HDC dc = GetDC(NULL);
     HFONT f = dashFont(9, FW_NORMAL);
     HGDIOBJ of = SelectObject(dc, f);
@@ -3302,6 +3308,7 @@ static int menuWidthPx(void) {
     cached = mx + DX(8) + DX(18) + DX(8); // label + gutter + check + right pad
     if (cached < DX(96)) cached = DX(96);
     cachedScale = g_scale;
+    cachedFamily = g_cfg.fontFamily;
     return cached;
 }
 
@@ -3512,7 +3519,11 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TIMER_METRICS) {
             pollCpu(); pollRam(); pollBattery(); pollVolume(); pollGpu();
-            pollHwinfoSm2(); pollHwinfoSm();
+            // SM2 first, SM as the fallback it is documented to be: both used
+            // to run unconditionally and pickCpuTemp's entry reset let the
+            // older reader's "no CPU reading" wipe a good SM2 temperature
+            pollHwinfoSm2();
+            if (!g_m.tempOk) pollHwinfoSm();
             g_m.petRunning = g_cfg.petEnabled && g_cfg.petExePath && *g_cfg.petExePath ? petRunning(g_cfg.petExePath) : 0;
             formatClock(clockFmt(), g_m.clockText, 80);
             buildChips();

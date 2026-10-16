@@ -100,7 +100,7 @@ Every `Default` in the tables below is that built-in fallback. The complete star
 | `heatmap` | 5 shades | The daily-heatmap ramp, light to dark. |
 | `icons` | `[]` | Your own SVG icons, see below. |
 
-**Own icons** - each entry in `theme.icons` defines a named icon in the same 24-unit viewBox the built-ins use, stroked with width `w`. Reference it from `modules.custom[].icon` by name; defining a name twice replaces it, so this is hot-reload friendly:
+**Own icons** - each entry in `theme.icons` defines a named icon in the same 24-unit viewBox the built-ins use, stroked with width `w`. Reference it from `modules.custom[].icon` by name; names match on their first 23 characters (the stored limit), and defining a name twice replaces it, so this is hot-reload friendly:
 
 ```json
 "icons": [ { "name": "moon", "d": "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z", "w": 2.2 } ]

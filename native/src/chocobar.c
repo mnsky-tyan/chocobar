@@ -338,17 +338,25 @@ static wchar_t *jdup(const char *js, const jsmntok_t *t) {
             case L't':  w[wr++] = L'\t'; break;
             case L'u': {
                 unsigned cp = 0;
+                int ok = 1;
                 for (int k = 1; k <= 4; k++) {
                     wchar_t c = w[r + k];
                     unsigned d;
                     if (c >= L'0' && c <= L'9') d = (unsigned)(c - L'0');
                     else if (c >= L'a' && c <= L'f') d = (unsigned)(c - L'a' + 10);
                     else if (c >= L'A' && c <= L'F') d = (unsigned)(c - L'A' + 10);
-                    else { d = 16; }
+                    else { ok = 0; break; }
+                    // w[r+1] being the terminator lands here too: a truncated
+                    // escape at the token's end must not read (or advance)
+                    // past the buffer, which is exactly n+1 wide chars wide
                     cp = cp * 16 + (d & 15);
                 }
-                r += 4;
-                if (cp) w[wr++] = (wchar_t)cp; // invalid 0000: drop
+                if (ok) {
+                    r += 4;
+                    if (cp) w[wr++] = (wchar_t)cp; // invalid 0000: drop
+                } else {
+                    w[wr++] = L'u'; // degraded to the literal, like default
+                }
                 break;
             }
             case 0: w[wr++] = L'\\'; break;
@@ -399,31 +407,33 @@ static int jNumOk(const char *js, const jsmntok_t *t, int i) {
     return 0;
 }
 
-static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
-    if (!jNumOk(js, t, i)) return def;
-    char b[32]; int len = t[i].end - t[i].start;
-    if (len <= 0 || len >= (int)sizeof(b)) return def;
+// the guard + bounded copy every numeric getter needs; only the final
+// conversion differs between them, and keeping that here means the 31-digit
+// cap and the failure semantics are decided in exactly one place
+static int jNumCopy(const char *js, const jsmntok_t *t, int i, char *b, int cch) {
+    if (!jNumOk(js, t, i)) return 0;
+    int len = t[i].end - t[i].start;
+    if (len <= 0 || len >= cch) return 0;
     memcpy(b, js + t[i].start, len); b[len] = 0;
-    return atoi(b);
+    return 1;
+}
+
+static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
+    char b[32];
+    return jNumCopy(js, t, i, b, (int)sizeof(b)) ? atoi(b) : def;
 }
 
 // a JSON number read as a double (theme.icons[].w); atof is locale-stable
 // enough for the plain decimals a config can carry
 static double jdoubleTok(const char *js, const jsmntok_t *t, int i, double def) {
-    if (!jNumOk(js, t, i)) return def;
-    char b[32]; int len = t[i].end - t[i].start;
-    if (len <= 0 || len >= (int)sizeof(b)) return def;
-    memcpy(b, js + t[i].start, len); b[len] = 0;
-    return atof(b);
+    char b[32];
+    return jNumCopy(js, t, i, b, (int)sizeof(b)) ? atof(b) : def;
 }
 
 // a JSON number read as a long long (cursor sizes/mtimes are beyond int range)
 static long long jllTok(const char *js, const jsmntok_t *t, int i, long long def) {
-    if (!jNumOk(js, t, i)) return def;
-    char b[32]; int len = t[i].end - t[i].start;
-    if (len <= 0 || len >= (int)sizeof(b)) return def;
-    memcpy(b, js + t[i].start, len); b[len] = 0;
-    return _atoi64(b);
+    char b[32];
+    return jNumCopy(js, t, i, b, (int)sizeof(b)) ? _atoi64(b) : def;
 }
 
 static wchar_t *jstrTok(const char *js, const jsmntok_t *t, int i, const wchar_t *def) {

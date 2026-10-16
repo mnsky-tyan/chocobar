@@ -151,7 +151,21 @@ APP="$OUT/Chocobar.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$OUT/chocobar-mac" "$APP/Contents/MacOS/Chocobar"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# The bundle's version comes from the same single source of truth the Windows
+# asset and every release tag use (release.yml refuses a tag that disagrees
+# with it), so a downloaded mac artifact can never report a version frozen at
+# 0.1.0.
+CB_VER=$(sed -n 's/^#define CB_VER_STR *"\([0-9.]*\)" */\1/p' native/src/version.h)
+# sed exits 0 with EMPTY output when the pattern misses (a tab separator, the
+# define moved off column 0), and a trailing comment on the define would
+# otherwise be captured verbatim. Either way the extracted value would be
+# written into both plist version keys as an empty or invalid version string -
+# the wrong-version artifact this extraction exists to prevent. Accept only a
+# plain digits-and-dots version and fail loudly on anything else.
+case "$CB_VER" in
+    ''|*[!0-9.]*) echo "FATAL: cannot read a plain CB_VER_STR from native/src/version.h (got [$CB_VER])" >&2; exit 1;;
+esac
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -161,8 +175,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>          <string>com.mnsky.chocobar</string>
     <key>CFBundleExecutable</key>          <string>Chocobar</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
-    <key>CFBundleShortVersionString</key>  <string>0.1.0</string>
-    <key>CFBundleVersion</key>             <string>1</string>
+    <key>CFBundleShortVersionString</key>  <string>${CB_VER}</string>
+    <key>CFBundleVersion</key>             <string>${CB_VER}</string>
     <key>LSMinimumSystemVersion</key>      <string>13.0</string>
     <!-- Accessory app: no Dock icon, no menu bar takeover. The bar is a
          floating panel, not an application the user manages. -->

@@ -69,8 +69,15 @@ static void resolveConfigPath(void) {
             return;
         }
     }
-    const char *home = getenv("HOME");
-    snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home ? home : "/tmp");
+    // The adapter's constructor exports USERPROFILE from the same
+    // profileDir() the core's "~" expansion reads (p_utils.c subsPathExpand),
+    // so the config file and the stores, cursors and log resolve under ONE
+    // home directory. Reading HOME here instead put the config in /tmp while
+    // every core path used the real home whenever HOME was unset or empty
+    // (a Finder launch), so the bar reported a config whose stores it could
+    // never find.
+    const char *home = getenv("USERPROFILE");
+    snprintf(g_configPath, sizeof(g_configPath), "%s/.wizbar/config.json", home && *home ? home : "/tmp");
 }
 
 // ---- headless self-test --------------------------------------------------------
@@ -339,6 +346,20 @@ static void refreshNumbers(void) {
 // The probe is evidence the mechanism works; only this code defines the bar's
 // rules.
 static void tick(void) {
+    // Rescan on the configured cadence, BEFORE any target-window early
+    // return: the scan must not stop while the frontmost app has no
+    // qualifying window (small, absent, or on another Space, whose windows
+    // the on-screen list never returns). That is when the numbers most need
+    // to stay current, and the Windows bar scans from an unconditional timer
+    // the same way (p_ui.c's TIMER_METRICS -> buildChips -> scanTokenCache).
+    static int tickCount = 0;
+    int period = cbCfgRescanSec() > 0 ? cbCfgRescanSec() : 60;
+    if (tickCount % (int)(period / kTickInterval) == 0) {
+        cbScanTokens();
+        refreshNumbers();
+    }
+    tickCount++;
+
     pid_t t = targetPID();
     if (!t) {
         [g_panel orderOut:nil];
@@ -375,17 +396,6 @@ static void tick(void) {
     if (![g_panel isVisible]) [g_panel orderFrontRegardless];
     [g_panel setFrame:want display:YES];
     [g_panel displayIfNeeded];
-
-    // Rescan on the configured cadence. macOS runs the scan inline (no worker
-    // thread): it reads JSONL session stores, which is milliseconds, and the
-    // numbers must be current when the panel repaints.
-    static int tickCount = 0;
-    int period = cbCfgRescanSec() > 0 ? cbCfgRescanSec() : 60;
-    if (tickCount % (int)(period / kTickInterval) == 0) {
-        cbScanTokens();
-        refreshNumbers();
-    }
-    tickCount++;
 }
 
 @implementation Chocobar

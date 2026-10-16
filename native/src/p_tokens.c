@@ -65,6 +65,7 @@ typedef struct {
 static TokCursor g_tokCursor[TOK_MAX_FILES];
 static int g_tokCursorN = 0;
 static int g_tokCursorFullLogged = 0;
+static int g_tokRealFullLogged = 0;   // the per-file route list saturated (see tokScanFile)
 static int g_tokCursorDirty = 0;
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def);
 
@@ -566,6 +567,13 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                                 if (realSeen) real[realSeen++] = ',';
                                 memcpy(real + realSeen, pv, (size_t)pl);
                                 realSeen += pl; real[realSeen] = 0;
+                            } else if (!g_tokRealFullLogged) {
+                                // a route dropped here reads as blind the next
+                                // time and its blank turns get estimated, so
+                                // the over-count is at least diagnosable - say
+                                // so once, the way the file-count cap does
+                                g_tokRealFullLogged = 1;
+                                writeLogA("[wizbar] token route list full for a session file; later routes read as blind");
                             }
                         }
                     }
@@ -701,7 +709,7 @@ static void tokCursorLoad(const Config *cfg) {
 
 // JSON number token -> long long (jsmn primitives are strings in the buffer).
 // The key lookup is jobjGet's job - it already walks the same key/value pairs.
-static long long jllTok(const char *js, const jsmntok_t *t, int i, long long def); // chocobar
+static long long jllTok(const char *js, const jsmntok_t *t, int i, long long def);
 
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def) {
     return jllTok(js, t, jobjGet(js, t, parent, key), def);
@@ -758,11 +766,12 @@ static TokCursor *tokCursorGet(const char *path) {
     TokCursor *c = tokCursorFind(path);
     if (!c) {
         if (g_tokCursorN >= TOK_MAX_FILES) {
-            // Past the cap a file gets no cursor, so it is re-read from byte 0
-            // on every rescan forever and never persists. Say so once.
+            // Past the cap a file gets no cursor, and tokScanDir SKIPS it for
+            // that reason: an uncursored read from byte 0 would restage the
+            // file's whole history on every rescan. Say so once.
             if (!g_tokCursorFullLogged) {
                 g_tokCursorFullLogged = 1;
-                writeLogA("[wizbar] token cursors: TOK_MAX_FILES reached; further session files re-read each scan");
+                writeLogA("[wizbar] token cursors: TOK_MAX_FILES reached; further session files are skipped (not counted)");
             }
             return NULL;
         }
@@ -837,9 +846,17 @@ static void tokScanDir(const wchar_t *dir, int recursive, const char *appName,
         }
         if (c) g_tokDbgHits++;
         g_tokDbgFiles++;
-        // the cursor must exist BEFORE the read so the count this scan just made
-        // (chars, real) lands in it instead of being lost to a fresh memset
-        long long neu = tokScanFile(full, from, appName, tk, cfg, tokCursorGet(pathA), stageFrom);
+        // The cursor must exist BEFORE the read so the count this scan just
+        // made (chars, real) lands in it instead of being lost to a fresh
+        // memset - and when the cursor table is full there is no cursor to
+        // get, so the file is skipped: an uncursored file would be read from
+        // byte 0 and staged in full on EVERY rescan, stacking its whole
+        // history onto the live aggregates once per scan period, forever.
+        // Skipping under-counts by a bounded amount; staging would over-count
+        // without bound. tokCursorGet has already logged the cap once.
+        TokCursor *cc = tokCursorGet(pathA);
+        if (!cc) continue;
+        long long neu = tokScanFile(full, from, appName, tk, cfg, cc, stageFrom);
         if (neu >= 0) { g_tokDbgRead += (neu - from); tokCursorSet(pathA, neu, mt); }
     } while (FindNextFileW(h, &fd));
     FindClose(h);

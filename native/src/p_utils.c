@@ -104,7 +104,10 @@ static wchar_t *wideDup(const wchar_t *s) {
 
 // "#RRGGBB" -> 0x00BBGGRR (COLORREF); -1 on parse failure
 static int hexToColorref(const wchar_t *s) {
-    if (!s || *s != L'#' || wcslen(s) < 7) return -1;
+    // exactly 7: an 8-digit "#RRGGBBAA" used to parse as if AA were extra
+    // leading zeros of red, painting the alpha byte as the red channel
+    // instead of falling back to black
+    if (!s || *s != L'#' || wcslen(s) != 7) return -1;
     wchar_t *end = NULL;
     long v = wcstol(s + 1, &end, 16);
     if (!end || *end) return -1;
