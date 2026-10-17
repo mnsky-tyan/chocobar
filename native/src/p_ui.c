@@ -2208,25 +2208,39 @@ static void paintDash(HWND hwnd) {
                 if (g_modelAgg[mdlOrder[i]].cw > 0) modelCacheW = 1;
             }
             int rows = appN > mdlN ? appN : mdlN;
-            // fit EVERY row: tighten the row pitch (17..19 CSS px) before
-            // dropping one, so the model table never loses a row silently.
-            // Zero rows is allowed: the section header alone still fits and
-            // draws, so the tables never vanish without a trace.
-            int budget = vh - DX(24) - y - secPad - th2 - secPad;
-            int fitMax = budget / DX(17);
-            if (rows > fitMax) rows = fitMax;
-            if (rows < 0) rows = 0;
+            // The model table ends with a "+N more models" line whenever it
+            // cannot show every model, and that line has to be charged to the
+            // card. With no room reserved it sat on the bottom border and the
+            // last row's zebra wash (sx+1 .. sx+colW2-1) painted the border
+            // out, so BY MODEL looked frameless while BY APP - which draws
+            // fewer rows than the shared height allows - kept its own.
+            // Reserving the line can cost a row, and losing a row can create
+            // the overflow, so settle the two together (converges in 2 passes).
+            int moreH = 0, budget = 0;
+            for (int pass = 0; pass < 2; pass++) {
+                budget = vh - DX(24) - y - secPad - th2 - moreH - secPad;
+                int fitMax = budget / DX(17);
+                if (rows > fitMax) rows = fitMax;
+                if (rows < 0) rows = 0;
+                int mdlRows = mdlN < rows ? mdlN : rows;
+                moreH = g_modelCount > mdlRows ? DX(14) : 0;
+            }
+            // Zero rows is allowed: the column head alone still fits and draws,
+            // so the tables never vanish without a trace.
             if (rows > 0) {
                 rowH = budget / rows;
                 if (rowH > DX(19)) rowH = DX(19);
                 if (rowH < DX(17)) rowH = DX(17);
             }
-            int tblH = secPad + th2 + rows * rowH + secPad;
+            // ONE header line: the redundant BY APP / BY MODEL card titles are
+            // gone (the APP / MODEL column head already names each table), so
+            // the rows end exactly secPad above the bottom border and neither a
+            // zebra wash nor the overflow line can overdraw it.
+            int tblH = secPad + th2 + rows * rowH + moreH + secPad;
             if (y + tblH <= vh - DX(24)) {
                 for (int side = 0; side < 2; side++) {
                     int sx = padL + side * (colW2 + DX(10));
                     dashCard(dc, sx, y, colW2, tblH, t.card, t.divider);
-                    dashHead(dc, sx + DX(12), y + secPad, side == 0 ? L"BY APP" : L"BY MODEL", t.dim, fHead);
                     int inner = colW2 - DX(24);
                     int xs[5];
                     int cacheR = side == 0 ? appCacheR : modelCacheR;
@@ -2239,7 +2253,7 @@ static void paintDash(HWND hwnd) {
                     }
                     dashTableHeadNeeds(dc, fS9, need);
                     dashTableCols(sx + DX(12) + inner, cacheR, cacheW, need, xs);
-                    int ry = y + secPad + th2;
+                    int ry = y + secPad;
                     dashTableHead(dc, sx + DX(12), ry, xs, &t, fS9,
                                   side == 0 ? L"APP" : L"MODEL");
                     ry += th2;

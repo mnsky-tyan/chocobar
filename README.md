@@ -190,7 +190,8 @@ Stores must contain newline-terminated `.jsonl` records with usage numbers. `fie
 "sources": [
   { "app": "pi", "path": "~/.pi/agent/sessions", "enabled": true, "recursive": true,
     "exclude": ["magpie-qoder", "magpie-cline", "magpie-workbuddy",
-                "magpie-workbuddy-cn", "magpie-agy", "magpie-opencode"] },
+                "magpie-workbuddy-cn", "magpie-agy", "magpie-opencode",
+                "magpie-zcode", "magpie-kilo"] },
   { "app": "magpie", "path": "~/.config/magpie-runtime/magpie", "enabled": true,
     "recursive": false, "timestampFormat": "iso",
     "fields": { "input": "in", "output": "out", "cacheRead": "cache_read", "cacheWrite": "cache_write", "timestamp": "t" },
@@ -199,7 +200,7 @@ Stores must contain newline-terminated `.jsonl` records with usage numbers. `fie
 ]
 ```
 
-Why those two halves: a Magpie record carries no session file of its own, so a subagent run - which the harness never writes to disk - is invisible without it. On the pi side, every request that DID reach a session file is one Magpie also logged, and the two ledgers report identical numbers for it; the `exclude` list is what stops that overlap being counted twice. `tokens.estimateMissingUsage` is a session-file idea and should stay off for a gateway source, which reports exact usage for every request including the aborted ones. Note `path` names the DIRECTORY holding the store (Magpie's is `~/.config/magpie-runtime/magpie`, and its ledger file `usage.jsonl` is picked up by the extension filter), and the gateway's `fields` must map `timestamp` to its own key - Magpie calls it `t` - because a `timestampFormat: "iso"` value is decoded from the mapped key.
+Why those two halves: a Magpie record carries no session file of its own, so a subagent run - which the harness never writes to disk - is invisible without it. On the pi side, every request that DID reach a session file is one Magpie also logged, and the two ledgers report identical numbers for it; the `exclude` list is what stops that overlap being counted twice. The two lists must name the SAME set of providers: check the `exclude` list against the routes your own session files actually carry, or a route missing from it is counted twice. `tokens.estimateMissingUsage` is a session-file idea and should stay off for a gateway source, which reports exact usage for every request including the aborted ones. Note `path` names the DIRECTORY holding the store (Magpie's is `~/.config/magpie-runtime/magpie`, and its ledger file `usage.jsonl` is picked up by the extension filter), and the gateway's `fields` must map `timestamp` to its own key - Magpie calls it `t` - because a `timestampFormat: "iso"` value is decoded from the mapped key.
 
 The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later recover the eligible live history too. With a legacy seed, only files newer than the seed file and records beyond its latest timestamp contribute to that live half. A legacy seed file is optional; a fresh install reconstructs its totals without one.
 
