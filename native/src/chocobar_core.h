@@ -207,6 +207,14 @@ int lstrcmpiW(const wchar_t *a, const wchar_t *b);
 int lstrcpyW(wchar_t *dst, const wchar_t *src);
 int lstrcpynW(wchar_t *dst, const wchar_t *src, int cch);
 int lstrcatW(wchar_t *dst, const wchar_t *src);
+
+// glibc declares wcsrchr as a macro whose expansion embeds a _Generic (a
+// type-selection expression), so this bare re-declaration fails to parse on
+// Linux ("expected identifier before '_Generic'"), where macOS's libc leaves
+// it a plain function. #undef is a no-op where no macro exists and restores
+// a plain declaration where one does; the prototype below matches glibc's
+// own, so nothing changes at the call sites.
+#undef wcsrchr
 wchar_t *wcsrchr(const wchar_t *s, wchar_t c);
 
 int lstrlenA(const char *s);

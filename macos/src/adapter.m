@@ -235,10 +235,16 @@ CB_BOOL SetFilePointerEx(HANDLE h, CB_LARGE_INTEGER dist, CB_LARGE_INTEGER *out,
 static FILETIME statMtimeToFileTime(const struct stat *st) {
     // Win32 FILETIME carries sub-second precision and the warm-skip compares
     // cursor mtime against exactly this field: keep the milliseconds the
-    // timespec member exposes (st_mtimespec is Darwin's own spelling, present
-    // on every SDK), or a store rewritten inside the same second as the
-    // stored cursor warm-skips until its size changes
+    // timespec member exposes, or a store rewritten inside the same second as
+    // the stored cursor warm-skips until its size changes. The timespec
+    // member's spelling is the one platform difference: st_mtimespec is
+    // Darwin's own; Linux/glibc spells it st_mtim (POSIX 2008) and its
+    // st_mtime is a plain time_t with no nanoseconds.
+#if defined(__APPLE__)
     return unixMsToFileTime((long long)st->st_mtimespec.tv_sec * 1000 + st->st_mtimespec.tv_nsec / 1000000);
+#else
+    return unixMsToFileTime((long long)st->st_mtim.tv_sec * 1000 + st->st_mtim.tv_nsec / 1000000);
+#endif
 }
 static void statSizeToWin32(const struct stat *st, DWORD *low, DWORD *high) {
     *low = (DWORD)((unsigned long long)st->st_size & 0xffffffffu);
