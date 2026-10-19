@@ -256,8 +256,8 @@ function check(name, ok, detail) {
       && /g_depth = 32;/.test(lx),
     'on the default 24-bit visual the alpha channel is dropped and the bar renders as a dark grey strip');
   check('linux: the window passes CWEventMask',
-    /CWOverrideRedirect \| CWBackPixel \| CWBorderPixel \|\s*\n?\s*CWColormap \| CWEventMask/.test(lx),
-    'without it the server drops every button and motion event: visible, correct and completely inert');
+    /CWBackPixel \| CWBorderPixel \|\s*\n?\s*CWColormap \| CWEventMask/.test(lx),
+    'without it the server drops every button event: visible, correct and completely inert');
   check('linux: each frame clears the surface and the text path',
     /CAIRO_OPERATOR_SOURCE/.test(lx) && /cairo_new_path\(g_cr\);\s*\n\s*cairo_set_operator\(g_cr, CAIRO_OPERATOR_OVER\);/.test(lx),
     'a bar repainted in place accumulates glyphs from earlier frames');
@@ -319,6 +319,62 @@ function check(name, ok, detail) {
     /static void tokScanFileSource/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'))
       || /tokScanDir\(parent, 0, s->app, &tk, cfg\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
     'magpie keeps ONE ledger file; the walk only enumerated directories, so that source contributed nothing');
+}
+
+// --- the Linux board, menu and font -------------------------------------------------
+// Each guard below is a bug that shipped in the first Linux cut and that a
+// screenshot could not catch: a dashboard that silently created no window, a menu
+// that closed itself, a font setting that was ignored, and an X resource leak.
+{
+  const lx = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  const menu = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.c'), 'utf8');
+  const dash = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
+  const icons = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'icons_cairo.c'), 'utf8');
+  check('linux: the cairo context is destroyed before its surface',
+    /if \(g_cr\) \{ cairo_destroy\(g_cr\); g_cr = NULL; \}\s*\n\s*if \(g_surf\) \{ cairo_surface_destroy\(g_surf\); g_surf = NULL; \}/.test(lx),
+    'a context outliving its surface raised thousands of RenderBadPicture errors');
+  check('linux: the dashboard uses the default visual, not the bar ARGB one',
+    /Visual \*dvis = DefaultVisual\(g_dpy, g_screen\)/.test(lx),
+    'an ARGB visual with depth 24 makes XCreateWindow fail silently: no window at all');
+  check('linux: the menu does not close on FocusOut',
+    /case FocusOut:[\s\S]{0,600}?break;/.test(menu) && !/case FocusOut:\s*\n\s*\/\/[^\n]*\n\s*done = 1;/.test(menu),
+    'an immediate FocusOut closed the menu a millisecond after it opened');
+  check('linux: the menu coalesces Expose instead of repainting per event',
+    /while \(XPending\(dpy\)\)/.test(menu),
+    'painting from inside an Expose handler spun an expose storm');
+  check('linux: the font goes through fontconfig, not a hand-parsed name',
+    /FcNameParse\(/.test(lx) && /FcFontMatch\(/.test(lx),
+    'cairo toy select_font_face ignores CSS stacks, aliases and generic families');
+  check('linux: the battery is drawn dynamically',
+    /void svgDrawBattery\(/.test(icons) && /svgDrawBattery\(g_cr, g_m\.battPct, g_m\.battAc/.test(lx),
+    'the static shell shows no charge level, no low-red and no charging bolt');
+  check('linux: the dashboard reads the SHARED aggregates',
+    /extern long long cbTokToday\(void\)/.test(dash) && /cbTokAll\(\)/.test(dash),
+    'a dashboard with its own totals would disagree with the Windows board');
+}
+
+// --- the bar's layer and its (absent) drag -------------------------------------------
+// KWin composites override-redirect windows in its TOP layer no matter which
+// _NET_WM_STATE hints they carry (measured on Plasma 6.6, 2026-10-19: every
+// override-redirect probe, with or without BELOW/DESKTOP/DOCK hints, painted over
+// a raised terminal). The bar belongs at the LOWER layer - it must sit under
+// normal windows - so it is a managed window with _NET_WM_STATE_BELOW, and the
+// two properties that make a managed window behave like an unmanaged one
+// (no decorations, no placement policy) must both stay set.
+{
+  const lx = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  check('linux: the bar is managed, not override-redirect',
+    !/swa\.override_redirect\s*=\s*True/.test(lx) && !/CWOverrideRedirect/.test(lx),
+    'override-redirect forces the top layer in KWin; a managed BELOW window is the only way under');
+  check('linux: the bar asks for the BELOW layer',
+    /_NET_WM_STATE_BELOW/.test(lx) && /_MOTIF_WM_HINTS/.test(lx),
+    'BELOW puts it under normal windows; MOTIF removes the frame a managed window would get');
+  check('linux: the bar never takes keyboard focus',
+    /hints\.input = False/.test(lx) && /_NET_WM_USER_TIME/.test(lx),
+    'a managed window that accepts focus would pull the keyboard off the terminal on map or click');
+  check('linux: the bar is not draggable',
+    !/g_dragging/.test(lx) && !/ButtonMotionMask/.test(lx),
+    'its position is derived from bar.align and bar.gap; a dragged bar breaks that contract');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);

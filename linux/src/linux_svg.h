@@ -18,4 +18,11 @@ void svgInitPaths(void);
 void svgDrawCairo(cairo_t *cr, int id, double x, double y, double box,
                   double r, double g, double b, double alpha);
 
+// The battery is dynamic (see icons_cairo.c): the shell plus a charge fill that
+// grows with `pct`, turns the warn colour under 10% while on battery, and gets a
+// bolt while `ac` (charging). Same geometry as the Windows renderer's svgDrawBatt.
+void svgDrawBattery(cairo_t *cr, int pct, int ac, double x, double y, double box,
+                    double r, double g, double b, double alpha,
+                    double wr, double wg, double wb);
+
 #endif

@@ -54,6 +54,8 @@
 #include "svg_geometry.h"   // the shared icon ids (SVG_CPU, ...)
 #include "linux_metrics.h"
 #include "geomdbus.h"
+#include "menu.h"
+#include "dash.h"
 #include "linux_svg.h"
 
 // ---- core seam (the CHOCOBAR_PORTABLE accessors in p_agg.c) --------------------
@@ -71,6 +73,13 @@ extern int cbCfgHeight(void);
 extern int cbCfgGap(void);
 extern int cbCfgFontSize(void);
 extern int cbCfgAlign(void);
+extern long long cbTokToday(void);
+extern long long cbTokWeek(void);
+extern long long cbTokMonth(void);
+extern int cbCfgDashW(void);
+extern int cbCfgDashH(void);
+extern const wchar_t *cbCfgPinkBg(void);
+extern const wchar_t *cbCfgHeat(int i);
 extern int cbCfgBarRadius(void);
 extern int cbCfgBgAlpha(void);
 extern int cbCfgIconOpacity(void);
@@ -138,12 +147,15 @@ static XRenderPictFormat *g_pictFmt;
 static Picture g_pic;
 static XserverRegion g_region;
 
-static int g_x, g_y;               // window position (pixels)
+static int g_x, g_y;               // window position (pixels, derived: never dragged)
 static int g_w, g_h;               // window size (pixels)
 static double g_scale = 1.0;       // DPI scale: config values are CSS px
-static int g_dragging = 0;
-static int g_dragDx = 0, g_dragDy = 0;
 static volatile sig_atomic_t g_quit = 0;
+// ---- right-click menu and dashboard state -----------------------------------------
+static int g_menuPending = 0;
+static int g_menuX = 0, g_menuY = 0;
+static int g_dashPending = 0;   // 1 = token dashboard, 2 = subscriptions
+
 
 static LinuxMetrics g_m;
 static time_t g_lastScan = 0;
@@ -187,26 +199,51 @@ static void wideToUtf8(const wchar_t *w, char *out, size_t cap) {
 }
 
 // ---- font ------------------------------------------------------------------------
-// A CSS-ish font stack ("'Segoe Print', cursive") is reduced to the first family;
-// Pango would parse the whole stack, cairo's toy API does not. That covers every
-// stack the config documents, and an empty stack falls back to the platform mono
-// font the bar ships with.
-static char g_fontFamily[128] = "DejaVu Sans Mono";
+// The config's fontFamily is a CSS font STACK ("'Segoe Print', cursive"). cairo's
+// toy API only takes one family name and knows nothing about fontconfig aliases,
+// so a Windows font that does not exist here silently fell back to a sans face -
+// which is why the bar ignored the setting. This asks fontconfig for the best face
+// for the WHOLE stack: it understands the comma list, the quoted names, the
+// generic families (cursive, monospace) and the user's own aliases (see
+// ~/.config/fontconfig/fonts.conf, which maps Segoe Print to a free face).
+#include <fontconfig/fontconfig.h>
+
+static char g_fontFamily[256] = "DejaVu Sans Mono";   // resolved family, for cairo
+static char g_fontFile[512] = "";                     // resolved file, when known
 
 static void resolveFontFamily(void) {
-    char buf[256];
+    char buf[512];
     wideToUtf8(cbCfgFontFamily(), buf, sizeof(buf));
-    if (!buf[0]) return;
-    char *p = buf;
-    while (*p == ' ' || *p == '\'' || *p == '"') p++;
-    char *end = p;
-    while (*end && *end != ',' && *end != '\'' && *end != '"') end++;
-    while (end > p && end[-1] == ' ') end--;
-    if (end == p) return;
-    size_t n = (size_t)(end - p);
-    if (n >= sizeof(g_fontFamily)) n = sizeof(g_fontFamily) - 1;
-    memcpy(g_fontFamily, p, n);
-    g_fontFamily[n] = 0;
+    if (!buf[0]) { snprintf(g_fontFamily, sizeof(g_fontFamily), "DejaVu Sans Mono"); return; }
+    // strip the quotes CSS allows around family names, keep the commas: fontconfig
+    // reads the comma list itself, in order of preference
+    char cleaned[512];
+    size_t o = 0;
+    for (const char *p = buf; *p && o + 1 < sizeof(cleaned); p++) {
+        if (*p != '\'' && *p != '"') cleaned[o++] = *p;
+    }
+    cleaned[o] = 0;
+    // trim leading spaces
+    char *start = cleaned;
+    while (*start == ' ') start++;
+
+    FcPattern *pat = FcNameParse((const FcChar8 *)start);
+    if (!pat) { snprintf(g_fontFamily, sizeof(g_fontFamily), "%s", start); return; }
+    // the size does not matter for choosing the face, but fontconfig wants one
+    FcPatternAddDouble(pat, FC_SIZE, 12.0);
+    FcConfigSubstitute(NULL, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+    FcResult res = FcResultNoMatch;
+    FcPattern *match = FcFontMatch(NULL, pat, &res);
+    if (match && res == FcResultMatch) {
+        FcChar8 *fam = NULL, *file = NULL;
+        if (FcPatternGetString(match, FC_FAMILY, 0, &fam) == FcResultMatch && fam)
+            snprintf(g_fontFamily, sizeof(g_fontFamily), "%s", (const char *)fam);
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch && file)
+            snprintf(g_fontFile, sizeof(g_fontFile), "%s", (const char *)file);
+    }
+    if (match) FcPatternDestroy(match);
+    FcPatternDestroy(pat);
 }
 
 static double fontSizePx(void) {
@@ -386,7 +423,13 @@ static void paint(void) {
     cairo_stroke(g_cr);
 
     // font
-    cairo_select_font_face(g_cr, g_fontFamily, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    // a scaled font pinned to the resolved family AND the configured size: the toy
+    // API's select_font_face ignores everything but the family name
+    cairo_font_face_t *ff = cairo_toy_font_face_create(g_fontFamily,
+                                                      CAIRO_FONT_SLANT_NORMAL,
+                                                      CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_face(g_cr, ff);
+    cairo_font_face_destroy(ff);
     cairo_set_font_size(g_cr, fontSizePx());
 
     Rgb icoCol = hexRgb(cbCfgIconColor() && *cbCfgIconColor() ? cbCfgIconColor() : cbCfgPinkDeep(),
@@ -420,7 +463,16 @@ static void paint(void) {
             double box = ICON_BOX * g_scale;
             // icons sit centred on the text's cap height, like the Windows bar
             double iy = baseline - box / 2.0 - 1.0 * g_scale;
-            svgDrawCairo(g_cr, c->icon, cx, iy, box, icoCol.r, icoCol.g, icoCol.b, icoAlpha);
+            if (c->icon == SVG_BAT) {
+                // dynamic: fill tracks the charge, warn red when low on battery,
+                // bolt while charging
+                Rgb warnC = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
+                svgDrawBattery(g_cr, g_m.battPct, g_m.battAc, cx, iy, box,
+                               icoCol.r, icoCol.g, icoCol.b, icoAlpha,
+                               warnC.r, warnC.g, warnC.b);
+            } else {
+                svgDrawCairo(g_cr, c->icon, cx, iy, box, icoCol.r, icoCol.g, icoCol.b, icoAlpha);
+            }
             cx += box + icoGap;
         }
         char buf[256];
@@ -435,11 +487,12 @@ static void paint(void) {
         cairo_new_path(g_cr);
     }
 
-    // hand the surface to X; the window's alpha does the blending
-    cairo_destroy(g_cr);            // flush the drawing into the surface
-    g_cr = cairo_create(g_surf);
-    XRenderComposite(g_dpy, PictOpSrc, g_pic, None, g_pic,
-                     0, 0, 0, 0, 0, 0, g_w, g_h);
+    // cairo draws straight into the window's surface; flushing the SURFACE is what
+    // hands the pixels to the server. (This used to destroy and recreate the
+    // context every frame - a per-repaint allocation - and before that, an explicit
+    // XRenderComposite copied the picture onto itself, which raised
+    // RenderBadPicture once a resize recreated it.)
+    cairo_surface_flush(g_surf);
     XFlush(g_dpy);
 }
 
@@ -498,20 +551,28 @@ static void applyShape(void) {
 
 // ---- window ----------------------------------------------------------------------------
 static void allocSurface(void) {
-    if (g_surf) cairo_surface_destroy(g_surf);
+    // Destroy the CONTEXT before the surface it draws into. This was the bug behind
+    // thousands of RenderBadPicture errors (XRender request 138): the old context
+    // survived its surface and every later paint on it referenced a freed drawable.
+    // cairo keeps a reference to the surface, so the order matters and the context
+    // must be destroyed explicitly - cairo_surface_destroy alone is not enough.
+    if (g_cr) { cairo_destroy(g_cr); g_cr = NULL; }
+    if (g_surf) { cairo_surface_destroy(g_surf); g_surf = NULL; }
     g_surf = cairo_xlib_surface_create(g_dpy, g_win, g_visual, g_w, g_h);
     cairo_xlib_surface_set_size(g_surf, g_w, g_h);
     g_cr = cairo_create(g_surf);
-    // the XRender picture the surface draws into, used for the shape composite
-    XRenderPictureAttributes pa = {0};
-    pa.subwindow_mode = IncludeInferiors;
-    g_pic = XRenderCreatePicture(g_dpy, g_win, g_pictFmt, CPSubwindowMode, &pa);
 }
 
 static int textWidthPx(const wchar_t *s) {
     char buf[256];
     wideToUtf8(s, buf, sizeof(buf));
-    cairo_select_font_face(g_cr, g_fontFamily, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    // a scaled font pinned to the resolved family AND the configured size: the toy
+    // API's select_font_face ignores everything but the family name
+    cairo_font_face_t *ff = cairo_toy_font_face_create(g_fontFamily,
+                                                      CAIRO_FONT_SLANT_NORMAL,
+                                                      CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_face(g_cr, ff);
+    cairo_font_face_destroy(ff);
     cairo_set_font_size(g_cr, fontSizePx());
     cairo_text_extents_t ext;
     cairo_text_extents(g_cr, buf, &ext);
@@ -609,38 +670,14 @@ static void moveWindow(int x, int y) {
     XMoveWindow(g_dpy, g_win, g_x, g_y);
 }
 
-// ---- position persistence -------------------------------------------------------------
-// The bar remembers where it was put, in ~/.wizbar/linux-bar.json. Missing file =
-// default position (top-centre of the screen, the Windows bar's home).
-static char g_posPath[512];
-
-static void posPathInit(void) {
-    const char *home = getenv("HOME");
-    if (!home) home = "/tmp";
-    snprintf(g_posPath, sizeof(g_posPath), "%s/.wizbar/linux-bar.json", home);
-}
-
-static void loadPos(void) {
-    g_x = g_y = -1;
-    FILE *f = fopen(g_posPath, "r");
-    if (!f) return;
-    char buf[256] = {0};
-    if (fread(buf, 1, sizeof(buf) - 1, f) > 0) {
-        int x, y;
-        if (sscanf(buf, "{ \"x\": %d, \"y\": %d", &x, &y) == 2) { g_x = x; g_y = y; }
-    }
-    fclose(f);
-}
-
-static void savePos(void) {
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s", g_posPath);
-    char *slash = strrchr(dir, '/');
-    if (slash) { *slash = 0; mkdir(dir, 0755); }
-    FILE *f = fopen(g_posPath, "w");
-    if (!f) return;
-    fprintf(f, "{ \"x\": %d, \"y\": %d }\n", g_x, g_y);
-    fclose(f);
+// ---- position -----------------------------------------------------------------------
+// The bar's position is DERIVED, never user-dragged: x and width come from the
+// terminal (bar.align), y is bar.gap below the screen's top edge. Nothing is
+// persisted: a dragged bar was the Windows bar's affordance, and on Linux the
+// alignment contract makes a manual position meaningless.
+static void positionInit(int screenW) {
+    g_x = (screenW - g_w) / 2;
+    g_y = (int)(cbCfgGap() * g_scale + 0.5);
 }
 
 // ---- events -------------------------------------------------------------------------------
@@ -661,28 +698,32 @@ static void dbg(const char *fmt, ...) {
     if (f) { fprintf(f, "%s\n", buf); fclose(f); }
 }
 
+// Which chip is under a point in the bar? -1 = none. Uses the same placement the
+// painter computed, so a click lands on what the user sees.
+static int chipAt(int px) {
+    for (int i = 0; i < g_chipCount; i++) {
+        double x0 = g_place[i].x, x1 = x0 + g_place[i].w;
+        if (px >= x0 && px <= x1) return i;
+    }
+    return -1;
+}
+
 static void onButton(XButtonEvent *e) {
     dbg("ButtonPress button=%u x_root=%d y_root=%d", e->button, e->x_root, e->y_root);
     if (e->button == 1) {
-        // drag by grabbing the bar; a click without movement is harmless
-        g_dragging = 1;
-        g_dragDx = e->x_root - g_x;
-        g_dragDy = e->y_root - g_y;
+        // a left click on the token chip opens the dashboard (the Windows bar's
+        // behaviour); anywhere else is inert - the bar is not draggable
+        int hit = chipAt(e->x);
+        if (hit >= 0 && g_chips[hit].icon == SVG_DIAMOND) {
+            g_dashPending = 1;
+        }
     } else if (e->button == 3) {
-        // right-click: quit. (The tray menu is a later step; a floating bar with
-        // no way to stop it would be a worse first version.)
-        g_quit = 1;
+        // right-click opens the menu - the same items the Windows tray menu has.
+        // It used to quit outright, which was a placeholder, not a design.
+        g_menuPending = 1;
+        g_menuX = e->x_root;
+        g_menuY = e->y_root;
     }
-}
-
-static void onMotion(XMotionEvent *e) {
-    dbg("Motion x_root=%d y_root=%d dragging=%d", e->x_root, e->y_root, g_dragging);
-    if (g_dragging) moveWindow(e->x_root - g_dragDx, e->y_root - g_dragDy);
-}
-
-static void onRelease(XButtonEvent *e) {
-    (void)e;
-    if (g_dragging) { g_dragging = 0; savePos(); }
 }
 
 static void onKey(XKeyEvent *e) {
@@ -714,46 +755,73 @@ static int onXIOError(Display *d) {
 static void createWindow(void) {
     XSetWindowAttributes swa;
     memset(&swa, 0, sizeof(swa));
-    swa.override_redirect = True;            // unmanaged: no decorations, no focus
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = g_cmap;
-    swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
-                     ButtonMotionMask | KeyPressMask | StructureNotifyMask;
+    swa.event_mask = ExposureMask | ButtonPressMask | KeyPressMask | StructureNotifyMask;
+    // MANAGED, not override-redirect: KWin composites override-redirect windows in
+    // its top layer no matter what hints they set (measured on Plasma 6.6), so an
+    // unmanaged bar is always on top of everything. The user wants the bar at the
+    // LOWER layer - below normal windows, so a maximised window covers it - and
+    // only a managed window can sit there (_NET_WM_STATE_BELOW). No decorations,
+    // no taskbar entry, and the geometry is set with USPosition so KWin honours
+    // the exact rectangle instead of running its placement policy.
     g_win = XCreateWindow(g_dpy, RootWindow(g_dpy, g_screen), 0, 0,
                           (unsigned)g_w, (unsigned)g_h, 0, g_depth, InputOutput,
-                          g_visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel |
+                          g_visual, CWBackPixel | CWBorderPixel |
                           CWColormap | CWEventMask, &swa);
     // CWEventMask is what makes swa.event_mask take effect. Without it the
     // window exists with an empty event mask (measured: XGetWindowAttributes
     // reported your_event_mask=0x0) and the server silently drops every button
     // and motion event - a bar that is visible, correct and completely inert.
-    // always on top, on every workspace, and never in the taskbar: the same
-    // three behaviours WS_EX_TOPMOST + WS_EX_TOOLWINDOW give on Windows
+    // below normal windows, on every workspace, never in the taskbar: the
+    // BELOW layer is the bar's home, not the top layer.
     Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
-    Atom above = XInternAtom(g_dpy, "_NET_WM_STATE_ABOVE", False);
+    Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
     Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
     Atom skipPager = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
     Atom sticky = XInternAtom(g_dpy, "_NET_WM_STATE_STICKY", False);
-    Atom states[4] = { above, skipTask, skipPager, sticky };
+    Atom states[4] = { below, skipTask, skipPager, sticky };
     XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
                     (unsigned char *)states, 4);
-    // InputHint must stay TRUE: it is what lets the window receive pointer
-    // events at all (drag, right-click). Setting it false made the bar visible
-    // and inert - measured: synthetic ButtonPress/Motion/Release were delivered
-    // and ignored, because the X server never routed real ones there either.
-    // Focus is still kept away by never calling XSetInputFocus and by the
-    // no-focus window type, so clicking the bar does not steal the keyboard.
+    // all desktops. Setting _NET_WM_DESKTOP=0xFFFFFFFF BEFORE the map does not
+    // survive it: KWin resolves the request to the current desktop and writes
+    // the concrete number back (measured: the property read 0 after map while
+    // STICKY stayed set, and the bar then did not appear on desktop 2). The
+    // request that works is the one made after the window is managed, so the
+    // sticky request lives in the post-map block below.
+    // InputHint FALSE: the bar must never take the keyboard. Pointer events are
+    // independent of this hint (the server routes them by stacking), so the
+    // right-click menu and chip clicks still land; clicking the bar simply never
+    // moves keyboard focus off the terminal. On an override-redirect window KWin
+    // went further and dropped pointer input entirely; managed clients keep it.
     XWMHints hints;
     memset(&hints, 0, sizeof(hints));
     hints.flags = InputHint;
-    hints.input = True;
+    hints.input = False;
     XSetWMHints(g_dpy, g_win, &hints);
-    // explicitly no-focus and no window-manager frame decoration hints
+    // no title bar, no frame: _MOTIF_WM_HINTS with only the decorations bit,
+    // value 0
+    typedef struct { unsigned long flags, functions, decorations; long inputMode;
+                     unsigned long status; } MotifHints;
+    MotifHints mh = { 2, 0, 0, 0, 0 };   // MWM_HINTS_DECORATIONS, none
+    XChangeProperty(g_dpy, g_win, XInternAtom(g_dpy, "_MOTIF_WM_HINTS", False),
+                    XInternAtom(g_dpy, "_MOTIF_WM_HINTS", False), 32, PropModeReplace,
+                    (unsigned char *)&mh, 5);
+    // normal window type: DOCK would put the bar back in the top layer (docks sit
+    // above normal windows), which is exactly what the user asked to move away from
     Atom wmType2 = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE", False);
-    Atom typeDock = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    Atom typeNormal = XInternAtom(g_dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
     XChangeProperty(g_dpy, g_win, wmType2, XA_ATOM, 32, PropModeReplace,
-                    (unsigned char *)&typeDock, 1);
+                    (unsigned char *)&typeNormal, 1);
+    // no focus stealing on map: user time 0 tells KWin this window never took
+    // user input, so mapping it does not yank focus from the terminal. The cost
+    // is that KWin flags the map as "attention" (a window appearing without
+    // user activity); it is invisible here (skip-taskbar, skip-pager) and the
+    // property is rewritten right after the map below.
+    unsigned long zeroTime = 0;
+    XChangeProperty(g_dpy, g_win, XInternAtom(g_dpy, "_NET_WM_USER_TIME", False),
+                    XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&zeroTime, 1);
     // KWin's blur-behind hint (the same property Konsole/Dolphin set): the
     // compositor blurs what is behind the window inside the region, which is what
     // makes a translucent bar readable over text. Harmless on other compositors.
@@ -763,7 +831,23 @@ static void createWindow(void) {
                     (unsigned char *)blurRegion, 4);
 
     XStoreName(g_dpy, g_win, "Chocobar");
-    XMapWindow(g_dpy, g_win);
+    XClassHint cls = { (char *)"chocobar", (char *)"Chocobar" };
+    XSetClassHint(g_dpy, g_win, &cls);
+    // NOT mapped here: the window is mapped in main() after the geometry is
+    // final, so KWin never sees a stray 10-px strip at the origin and never runs
+    // its placement policy over it.
+}
+
+// Size hints with USPosition: KWin honours a user-specified position instead of
+// running its own placement. Re-set before every map so a geometry that changed
+// while withdrawn is the one the window manager sees.
+static void setSizeHints(int x, int y) {
+    XSizeHints sh;
+    memset(&sh, 0, sizeof(sh));
+    sh.flags = USPosition | PPosition | USSize | PSize;
+    sh.x = x; sh.y = y;
+    sh.width = g_w; sh.height = g_h;
+    XSetWMNormalHints(g_dpy, g_win, &sh);
 }
 
 // ---- DPI ---------------------------------------------------------------------------------------
@@ -825,6 +909,95 @@ static void reloadConfig(void) {
     if (wl <= 0) return;
     cbLoadConfig(wide);
     resolveFontFamily();
+}
+
+// ---- the right-click menu and the dashboards --------------------------------------
+
+// A dashboard is a modal-ish second window: while it is open the bar stops
+// repainting itself, which keeps the two from fighting over the event queue.
+static void runDashboard(void) {
+    Rgb bgc = hexRgb(cbCfgPinkBg(), (Rgb){0.996, 0.969, 0.976});
+    Rgb cardc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
+    Rgb fgc = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
+    Rgb dimc = hexRgb(cbCfgFgDim(), (Rgb){0.35, 0.32, 0.27});
+    Rgb accc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
+    Rgb divc = hexRgb(cbCfgDivider(), (Rgb){0.85, 0.80, 0.70});
+    Rgb warnc = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
+    double ramp[5][3];
+    for (int i = 0; i < 5; i++) {
+        Rgb c = hexRgb(cbCfgHeat(i), (Rgb){0.9, 0.85, 0.8});
+        ramp[i][0] = c.r; ramp[i][1] = c.g; ramp[i][2] = c.b;
+    }
+    double page[3] = { bgc.r, bgc.g, bgc.b };
+    double card[3] = { cardc.r, cardc.g, cardc.b };
+    double fg[3] = { fgc.r, fgc.g, fgc.b };
+    double dim[3] = { dimc.r, dimc.g, dimc.b };
+    double acc[3] = { accc.r, accc.g, accc.b };
+    double div[3] = { divc.r, divc.g, divc.b };
+    double wrn[3] = { warnc.r, warnc.g, warnc.b };
+    int cw = cbCfgDashW() > 0 ? cbCfgDashW() : 900;
+    int chh = cbCfgDashH() > 0 ? cbCfgDashH() : 520;
+    Visual *dvis = DefaultVisual(g_dpy, g_screen);
+    Colormap dcmap = DefaultColormap(g_dpy, g_screen);
+    int ddepth = DefaultDepth(g_dpy, g_screen);
+    dashRun(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
+            (int)(fontSizePx()), g_fontFamily,
+            page, card, fg, dim, acc, div, wrn, ramp, 26);
+    // the bar's own surface is still valid; force a repaint when we come back
+    paint();
+}
+
+// Run an external program without blocking the bar's loop: a config editor or a
+// file manager must not freeze the strip.
+static void spawnDetached(const char *argv0, const char *argv1) {
+    pid_t pid = fork();
+    if (pid != 0) return;
+    setsid();
+    if (argv1) execlp(argv0, argv0, argv1, (char *)NULL);
+    else execlp(argv0, argv0, (char *)NULL);
+    _exit(127);
+}
+
+static void configDirOf(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    snprintf(out, cap, "%s/.wizbar", home ? home : "/tmp");
+}
+
+static void handleMenuChoice(int choice) {
+    dbg("menu choice = %d", choice);
+    switch (choice) {
+        case MENU_TOKEN_DASH: g_dashPending = 1; break;
+        case MENU_SUBS_DASH:
+            fprintf(stderr, "chocobar: the subscription board is not ported to Linux yet\n");
+            break;
+        case MENU_EDIT: {
+            char dir[512];
+            configDirOf(dir, sizeof(dir));
+            char file[600];
+            snprintf(file, sizeof(file), "%s/config.json", dir);
+            const char *ed = getenv("EDITOR");
+            if (ed && *ed) spawnDetached(ed, file);
+            else spawnDetached("xdg-open", file);
+            break;
+        }
+        case MENU_OPEN_DIR: {
+            char dir[512];
+            configDirOf(dir, sizeof(dir));
+            spawnDetached("xdg-open", dir);
+            break;
+        }
+        case MENU_RELOAD: {
+            reloadConfig();
+            time_t cur;
+            if (cfgStat(&cur)) g_cfgMtime = cur;
+            buildChips();
+            resizeToContent();
+            paint();
+            break;
+        }
+        case MENU_QUIT: g_quit = 1; break;
+        default: break;
+    }
 }
 
 // ---- the KWin geometry helper: install / remove ----------------------------------
@@ -917,7 +1090,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("chocobar-linux [--config PATH]\n"
                    "  floating status bar: cpu, ram, temp, volume, battery, clock, tokens\n"
-                   "  drag with the left mouse button, right-click to quit\n"
+                   "  right-click opens the menu; left-click on the tokens chip opens\n"
+                   "  the dashboard (the bar itself is not draggable)\n"
                    "  --install-geometry  load the KWin helper that makes bar.align 1\n"
                    "                      (match the active terminal's width) work\n"
                    "  --remove-geometry   unload and delete that helper\n");
@@ -925,7 +1099,6 @@ int main(int argc, char **argv) {
         }
     }
     if (!g_cfgPath[0]) resolveConfigPath();
-    posPathInit();
 
     signal(SIGINT, onSig);
     signal(SIGTERM, onSig);
@@ -997,15 +1170,52 @@ int main(int argc, char **argv) {
     createWindow();
     allocSurface();        // text measurement needs a cairo context, and
     resizeToContent();     // resizeToContent is what measures the chips
-    loadPos();
-    if (g_x < 0 || g_y < 0) {
-        // default home: top-centre, a gap below the screen edge (config bar.gap)
-        int sw = DisplayWidth(g_dpy, g_screen);
-        g_x = (sw - g_w) / 2;
-        g_y = (int)(cbCfgGap() * g_scale + 0.5);
-    }
+    positionInit(DisplayWidth(g_dpy, g_screen));
     moveWindow(g_x, g_y);
     applyShape();
+    // geometry is final: tell KWin the exact rectangle, then map. A managed
+    // window's map is the one chance the WM gets to place it - USPosition makes
+    // it honour ours instead of running its placement policy.
+    setSizeHints(g_x, g_y);
+    XMapWindow(g_dpy, g_win);
+    // KWin adds DEMANDS_ATTENTION to the state property when a window maps
+    // without user activity. Clear it: re-writing _NET_WM_STATE after the map
+    // is the client-side contract for "attention handled".
+    {
+        Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
+        Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
+        Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+        Atom skipPager = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
+        Atom sticky = XInternAtom(g_dpy, "_NET_WM_STATE_STICKY", False);
+        Atom states[4] = { below, skipTask, skipPager, sticky };
+        XEvent ev;
+        for (int i = 0; i < 200; i++) {   // bounded: never block startup
+            while (XPending(g_dpy)) {
+                XNextEvent(g_dpy, &ev);
+                if (ev.type == MapNotify && ev.xany.window == g_win) i = 200;
+            }
+            struct timespec ts = { 0, 10 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+        XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)states, 4);
+        // and the sticky request. Writing _NET_WM_DESKTOP as a property is NOT
+        // the EWMH request: KWin keeps the value but treats the window as
+        // single-desktop (measured: onAllDesktops=false with the property at
+        // 0xFFFFFFFF and STICKY set). The protocol is a ClientMessage to the
+        // root window, and it has to arrive after KWin has finished managing.
+        XEvent cm;
+        memset(&cm, 0, sizeof(cm));
+        cm.xclient.type = ClientMessage;
+        cm.xclient.window = g_win;
+        cm.xclient.message_type = XInternAtom(g_dpy, "_NET_WM_DESKTOP", False);
+        cm.xclient.format = 32;
+        cm.xclient.data.l[0] = 0xFFFFFFFF;   // all desktops
+        cm.xclient.data.l[1] = 1;            // source: normal application
+        XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
+                   SubstructureNotifyMask | SubstructureRedirectMask, &cm);
+        XFlush(g_dpy);
+    }
     paint();
 
     int xfd = ConnectionNumber(g_dpy);
@@ -1024,8 +1234,6 @@ int main(int argc, char **argv) {
             switch (ev.type) {
                 case Expose: if (ev.xexpose.count == 0) onExpose(); break;
                 case ButtonPress: onButton(&ev.xbutton); break;
-                case ButtonRelease: onRelease(&ev.xbutton); break;
-                case MotionNotify: onMotion(&ev.xmotion); break;
                 case KeyPress: onKey(&ev.xkey); break;
                 case ConfigureNotify:
                     if (ev.xconfigure.width != g_w || ev.xconfigure.height != g_h) {
@@ -1036,6 +1244,27 @@ int main(int argc, char **argv) {
                     break;
                 default: break;
             }
+        }
+        if (g_menuPending) {
+            g_menuPending = 0;
+            Rgb bgc = hexRgb(cbCfgTint(), (Rgb){0.91, 0.85, 0.76});
+            Rgb fgc = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
+            Rgb dimc = hexRgb(cbCfgFgDim(), (Rgb){0.35, 0.32, 0.27});
+            Rgb divc = hexRgb(cbCfgDivider(), (Rgb){0.85, 0.80, 0.70});
+            Rgb accc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
+            double bg3[3] = { bgc.r, bgc.g, bgc.b };
+            double fg3[3] = { fgc.r, fgc.g, fgc.b };
+            double dm3[3] = { dimc.r, dimc.g, dimc.b };
+            double dv3[3] = { divc.r, divc.g, divc.b };
+            double ac3[3] = { accc.r, accc.g, accc.b };
+            int choice = menuRun(g_dpy, g_screen, g_visual, g_cmap, 32,
+                                 g_menuX, g_menuY, g_scale, (int)fontSizePx(),
+                                 g_fontFamily, bg3, 0.97, fg3, dm3, dv3, ac3);
+            handleMenuChoice(choice);
+        }
+        if (g_dashPending) {
+            g_dashPending = 0;
+            runDashboard();
         }
         time_t now = time(NULL);
         geomPump(now);
@@ -1080,7 +1309,6 @@ int main(int argc, char **argv) {
             paint();
         }
     }
-    savePos();
     geomBusClose(&g_bus);
     if (g_region) XFixesDestroyRegion(g_dpy, g_region);
     if (g_pic) XRenderFreePicture(g_dpy, g_pic);

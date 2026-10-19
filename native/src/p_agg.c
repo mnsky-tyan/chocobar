@@ -408,6 +408,36 @@ long long cbTokAppSum(int i) { return (i >= 0 && i < g_appCount) ? tokAggSum(&g_
 
 int cbTokSourceCount(void) { return g_cfg.tokSrcCount; }
 
+// ---- dashboard data -----------------------------------------------------------------
+// The token dashboard is the same board on every platform, so its DATA is shared
+// even though its painting is not. These read the aggregates tokDeriveWindows and
+// aggRecord already build; a front-end that grew its own totals would disagree
+// with the Windows dashboard about the same store.
+long long cbTokToday(void) { return g_tokensToday; }
+long long cbTokWeek(void) { return g_tokWeek; }
+long long cbTokMonth(void) { return g_tokMonth; }
+
+int cbTokModelCount(void) { return g_modelCount; }
+// the display label is the raw model id first seen for this "app|model" key
+const char *cbTokModelLabel(int i) { return (i >= 0 && i < g_modelCount) ? g_modelLabel[i] : ""; }
+long long cbTokModelSum(int i) { return (i >= 0 && i < g_modelCount) ? tokAggSum(&g_modelAgg[i]) : 0; }
+int cbTokModelReqs(int i) { return (i >= 0 && i < g_modelCount) ? (int)g_modelAgg[i].req : 0; }
+
+int cbTokAppReqs(int i) { return (i >= 0 && i < g_appCount) ? (int)g_appAgg[i].req : 0; }
+long long cbTokAppIn(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].in : 0; }
+long long cbTokAppOut(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].out : 0; }
+long long cbTokAppCr(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].cr : 0; }
+long long cbTokAppCw(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].cw : 0; }
+
+// The heatmap is the per-day totals, oldest first. DASH_MAX_DAYS covers 190 days
+// (about 27 weeks); the caller draws the last `weeks * 7` of them.
+int cbTokDayCount(void) { return DASH_MAX_DAYS; }
+// index 0 = oldest; the last entry is today. Returns the day's total tokens.
+long long cbTokDayTotal(int i) {
+    if (i < 0 || i >= DASH_MAX_DAYS) return 0;
+    return g_dayTot[i];
+}
+
 int cbCfgTokensEnabled(void) { return g_cfg.tokensEnabled; }
 int cbCfgRescanSec(void) { return g_cfg.tokensRescanSec; }
 int cbCfgHeight(void) { return g_cfg.height; }
@@ -569,6 +599,11 @@ const wchar_t *cbCfgWarn(void) { return g_cfg.warn; }
 const wchar_t *cbCfgGood(void) { return g_cfg.good; }
 const wchar_t *cbCfgYellow(void) { return g_cfg.yellow; }
 const wchar_t *cbCfgDivider(void) { return g_cfg.divider; }
+int cbCfgDashW(void) { return g_cfg.dashW; }
+int cbCfgDashH(void) { return g_cfg.dashH; }
+const wchar_t *cbCfgPinkBg(void) { return g_cfg.pinkBg; }
+// theme.heatmap[5]: the daily-heatmap ramp, light to dark
+const wchar_t *cbCfgHeat(int i) { return (i >= 0 && i < 5) ? g_cfg.heatmap[i] : L""; }
 const wchar_t *cbCfgIconColor(void) { return g_cfg.iconColor; }
 // module switches: which chips the bar shows at all
 int cbCfgModCpu(void) { return g_cfg.mCpu; }

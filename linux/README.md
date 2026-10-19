@@ -60,7 +60,8 @@ the bar. A stale report (the script stopped, KWin restarted) is ignored after
 30 s and the bar falls back to centring rather than pinning itself to a window
 that no longer exists. The bar never becomes narrower than its chips.
 
-Drag it with the left mouse button. Right-click quits. `Esc`/`q` also quits when
+Left-click the tokens chip for the dashboard. Right-click opens the menu (the
+two dashboards, edit the config, reload, quit). `Esc`/`q` also quits when
 the bar has focus. The config is the SAME `~/.wizbar/config.json` the Windows bar
 reads, and it hot-reloads on save.
 
@@ -94,16 +95,31 @@ Per-OS parts, written fresh for Linux:
 |---|---|---|
 | metrics | `p_metrics.c` (PDH, Core Audio, HWiNFO) | `linux/src/p_metrics_linux.c` (`/proc`, `/sys`, `pactl`) |
 | icons | `p_icons.c` (GDI+) | `linux/src/icons_cairo.c` (cairo) - same geometry from `p_svg.c` |
-| window/paint | `p_ui.c` (layered GDI window) | `linux/src/main.c` (X11 override-redirect + cairo) |
+| window/paint | `p_ui.c` (layered GDI window) | `linux/src/main.c` (managed X11 window + cairo) |
 | subscriptions | `p_subs.c` (WinHTTP) | not ported: the config parses, nothing fetches |
 
-## Why an X11 window, and how it behaves on Wayland
+## Why a managed X11 window in the lower layer
 
-The bar is an override-redirect X11 window, which means the window manager does
-not manage it: no title bar, no taskbar entry, no focus, and it sits exactly
-where it is put. That is the direct equivalent of the Windows bar's
-`WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST` combination, and it is what
-makes "floating" a non-problem rather than a protocol negotiation.
+The bar is a MANAGED window carrying `_NET_WM_STATE_BELOW`, `_MOTIF_WM_HINTS`
+(no decorations), `InputHint = False` (it can never take the keyboard) and
+`USPosition` geometry (KWin honours our exact rectangle instead of placing the
+window itself). That combination is the direct equivalent of the Windows bar:
+on Windows the bar is pinned in z immediately above the terminal, so raising
+another window covers the bar too - it is a lower-layer resident, not an
+always-on-top overlay.
+
+It is NOT override-redirect, and that is a measured fact, not a style choice:
+KWin composites every override-redirect window in its top layer no matter which
+state atoms it carries (probed 2026-10-19 on Plasma 6.6: BELOW, DESKTOP and
+DOCK hint combinations all still painted over a raised terminal). The only X11
+shape that lands under normal windows is a managed BELOW window. The price of
+being managed - decorations, placement, focus - is exactly what those four
+properties neutralise.
+
+The bar is not draggable: its position is derived (x and width from the
+terminal via `bar.align`, y from `bar.gap`), and a dragged position would break
+that contract. Left-click the tokens chip for the dashboard, right-click for
+the menu.
 
 On a Wayland session the window is presented through XWayland, which is how most
 X11 applications still run on KDE. It is translucent for real: the window is on a
