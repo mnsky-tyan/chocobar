@@ -752,8 +752,14 @@ static void resizeToContent(void) {
     }
 }
 
+static void setSizeHints(int x, int y);   // defined below, with the other window hints
+
 static void moveWindow(int x, int y) {
     g_x = x; g_y = y;
+    // keep WM_NORMAL_HINTS truthful: it is what a window manager reads when it
+    // places the window again after a restart, so a stale value here would snap
+    // the bar back to an old position for a moment.
+    setSizeHints(x, y);
     XMoveWindow(g_dpy, g_win, g_x, g_y);
 }
 
