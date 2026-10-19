@@ -357,6 +357,14 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
 }
 ```
 
+## Linux
+
+A floating Linux bar (cpu, ram, temperature, volume, battery, clock and the token
+count) lives in `linux/` and is built with `bash linux/build.sh`. It shares the
+same core - the config parser, the session scanner and the aggregation are the
+same code - and does not follow a terminal window. See `linux/README.md` for the
+build, the measured cost, and what is per-OS.
+
 ## Token accounting
 
 Every total in the bar and dashboard follows the common usage-dashboard convention (ccusage & co):
@@ -466,12 +474,14 @@ The shipped bar is the native Win32 build in `native/`. The Electron app it repl
 native/src/chocobar.c   config parser
 native/src/p_metrics.c  cpu / ram / temp / volume / battery / gpu / pet polls
 native/src/p_subs.c     subscription quota fetchers (WinHTTP)
-native/src/p_icons.c    chip icons (flattened SVG paths)
+native/src/p_svg.c      chip icon path data + flattener (shared geometry, all platforms)
+native/src/p_icons.c    the Windows icon renderer (GDI+)
 native/src/p_tokens.c   live session-log scan and byte cursors
 native/src/p_agg.c      token aggregation: per-app / per-model / per-day totals
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
+linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons
 macos/                  macOS front-end (Win32 adapter + bar) over the shared core parts
 scripts/                the portable regression suite and the Windows token regression runner
 ```

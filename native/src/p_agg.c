@@ -542,4 +542,44 @@ void tokScanFinishedNotify(void) { }
 // EnterCriticalSection would lock an uninitialised mutex. Call once, at launch.
 void cbCoreInit(void) { InitializeCriticalSection(&g_cfgGenLock); }
 
+// ---- front-end accessors (Linux bar) --------------------------------------
+// The Linux bar paints the same strip from the same config, so it needs the
+// geometry, the palette and the module switches. These are reads of g_cfg
+// (the installed generation), like the cbCfg* block above; strings are the
+// config's own pointers, valid while that generation lives, and the bar copies
+// what it keeps.
+//
+// WHY A FLAT LIST OF GETTERS AND NOT THE STRUCT: Config's layout belongs to the
+// core and changes with it. A getter cannot drift out of step with a field
+// rename the way a mirrored struct would, and it keeps the front-ends from
+// reaching into the parser's types.
+int cbCfgFontSize(void) { return g_cfg.fontSize; }
+int cbCfgBarRadius(void) { return g_cfg.barRadius; }
+int cbCfgBgAlpha(void) { return g_cfg.backgroundAlpha; }
+int cbCfgIconOpacity(void) { return g_cfg.iconOpacity; }
+const wchar_t *cbCfgTint(void) { return g_cfg.tint; }
+const wchar_t *cbCfgFontFamily(void) { return g_cfg.fontFamily; }
+const wchar_t *cbCfgClockFormat(void) { return g_cfg.clockFormat; }
+const wchar_t *cbCfgFg(void) { return g_cfg.fg; }
+const wchar_t *cbCfgFgDim(void) { return g_cfg.fgDim; }
+const wchar_t *cbCfgPink(void) { return g_cfg.pink; }
+const wchar_t *cbCfgPinkDeep(void) { return g_cfg.pinkDeep; }
+const wchar_t *cbCfgWarn(void) { return g_cfg.warn; }
+const wchar_t *cbCfgGood(void) { return g_cfg.good; }
+const wchar_t *cbCfgYellow(void) { return g_cfg.yellow; }
+const wchar_t *cbCfgDivider(void) { return g_cfg.divider; }
+const wchar_t *cbCfgIconColor(void) { return g_cfg.iconColor; }
+// module switches: which chips the bar shows at all
+int cbCfgModCpu(void) { return g_cfg.mCpu; }
+int cbCfgModRam(void) { return g_cfg.mRam; }
+int cbCfgModTemp(void) { return g_cfg.mCpuTemp; }
+int cbCfgModVol(void) { return g_cfg.mVolume; }
+int cbCfgModBatt(void) { return g_cfg.mBattery; }
+int cbCfgModClock(void) { return g_cfg.mClock; }
+int cbCfgModGpu(void) { return g_cfg.mGpu; }
+// warn thresholds (0 or negative = the threshold is off, as on Windows)
+int cbCfgCpuWarnAt(void) { return g_cfg.cpuWarnAt; }
+int cbCfgRamWarnAt(void) { return g_cfg.ramWarnAt; }
+int cbCfgTempWarnAt(void) { return g_cfg.tempWarnAt; }
+
 #endif // CHOCOBAR_PORTABLE

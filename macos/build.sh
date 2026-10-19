@@ -11,6 +11,8 @@
 # Compiled here:
 #   native/src/chocobar.c   config struct, JSONC parsing, jsmn helpers
 #   native/src/p_utils.c    file slurp, encoding, colour helpers
+#   native/src/p_svg.c      chip icon path data + the flattener (shared geometry,
+#                           per-platform renderers)
 #   native/src/p_tokens.c   the live JSONL session-store scanner + cursors
 #   native/src/p_agg.c      the per-app/model/day aggregation (shared with Windows)
 #   macos/src/adapter.m     the POSIX implementations of chocobar_core.h
@@ -38,6 +40,7 @@ mkdir -p "$OUT"
 CORE_PARTS=(
   native/src/chocobar.c
   native/src/p_utils.c
+  native/src/p_svg.c
   native/src/p_tokens.c
   native/src/p_agg.c
 )

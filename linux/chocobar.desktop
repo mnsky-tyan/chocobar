@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Chocobar
+Comment=Floating status bar: cpu, ram, temp, volume, battery, clock, token usage
+Exec=chocobar-linux
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;Monitor;
+X-GNOME-Autostart-enabled=true

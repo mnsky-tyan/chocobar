@@ -15,3 +15,6 @@ docs/reviews/
 
 # macOS build output
 macos/build/
+
+# Linux build output
+linux/build/

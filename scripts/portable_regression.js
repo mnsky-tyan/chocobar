@@ -245,5 +245,47 @@ function check(name, ok, detail) {
     'left set, every later rescan would re-read from byte 0');
 }
 
+// --- Linux bar: the invariants a reviewer cannot see in a screenshot -------------
+// These are the three bugs found while bringing the bar up on this machine, each
+// of which produced a window that LOOKED right and did not work. They are cheap
+// text guards because each one is a single missing line whose absence is silent.
+{
+  const lx = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  check('linux: the window selects an ARGB visual',
+    /XMatchVisualInfo\(g_dpy, g_screen, 32, TrueColor, &vinfo\)/.test(lx)
+      && /g_depth = 32;/.test(lx),
+    'on the default 24-bit visual the alpha channel is dropped and the bar renders as a dark grey strip');
+  check('linux: the window passes CWEventMask',
+    /CWOverrideRedirect \| CWBackPixel \| CWBorderPixel \|\s*\n?\s*CWColormap \| CWEventMask/.test(lx),
+    'without it the server drops every button and motion event: visible, correct and completely inert');
+  check('linux: each frame clears the surface and the text path',
+    /CAIRO_OPERATOR_SOURCE/.test(lx) && /cairo_new_path\(g_cr\);\s*\n\s*cairo_set_operator\(g_cr, CAIRO_OPERATOR_OVER\);/.test(lx),
+    'a bar repainted in place accumulates glyphs from earlier frames');
+  check('linux: the shape comes from the rectangles it builds',
+    /XFixesCreateRegion\(g_dpy, rects, nr\)/.test(lx)
+      && /XFixesSetWindowShapeRegion\(g_dpy, g_win, ShapeBounding, 0, 0, g_region\)/.test(lx),
+    'building a rounded shape and then shaping to an empty region makes the bar unclickable');
+}
+
+// --- shared icon geometry ----------------------------------------------------------
+// The icon paths moved out of p_icons.c into p_svg.c so the Windows GDI+ renderer
+// and the Linux cairo renderer stroke the SAME geometry. A renderer that grew its
+// own copy would drift, and the icons are the product's look.
+{
+  const svg = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_svg.c'), 'utf8');
+  const icons = sources.p_ui.replace(/x/g, 'x'); // keep the snapshot usage explicit
+  check('svg: the path data lives in p_svg.c, not the Windows renderer',
+    /static const SvgPart SVG_P\[\]\[3\] = \{/.test(svg)
+      && !/static const SvgPart SVG_P\[\]\[3\] = \{/.test(icons));
+  check('svg: both renderers include the shared geometry header',
+    /#include "svg_geometry.h"/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_icons.c'), 'utf8'))
+      && /#include "svg_geometry.h"/.test(fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'icons_cairo.c'), 'utf8')),
+    'one shape definition, one flattener, two strokes');
+  check('svg: the flattener is what both builds call',
+    /static void svgFlattenAll\(void\)/.test(svg)
+      && /svgFlattenAll\(\);/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_icons.c'), 'utf8')),
+    'the Windows startup path must reach the shared flattener, not a local copy');
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);

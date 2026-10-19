@@ -10,6 +10,7 @@ cd "$(dirname "$0")"
 PARTS=(
   src/chocobar.c
   src/p_utils.c
+  src/p_svg.c
   src/p_metrics.c
   src/p_subs.c
   src/p_icons.c
