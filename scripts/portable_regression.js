@@ -287,5 +287,39 @@ function check(name, ok, detail) {
     'the Windows startup path must reach the shared flattener, not a local copy');
 }
 
+// --- bar.align and the geometry bridge ----------------------------------------------
+// "As long as the terminal" needs two halves that must agree on their contract:
+// the KWin helper publishes (class, width, x, y, screenWidth) in LOGICAL pixels,
+// and the bar scales them. A mismatch here is invisible (a bar of the wrong width)
+// rather than an error, so it is guarded.
+{
+  const lx = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  const js = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'geomwatch.js'), 'utf8');
+  const cf = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'chocobar.c'), 'utf8');
+  check('align: bar.align is parsed and clamped to 0..2',
+    /c->barAlign\s*=\s*jintTok\(js, t, jobjGet\(js, t, bar, "align"\)/.test(cf)
+      && /if \(c->barAlign > 2\) c->barAlign = 2;/.test(cf),
+    '0 = centre, 1 = match the active window, 2 = full screen');
+  check('align: the helper sends the five fields the bar decodes',
+    /callDBus\("org\.chocobar\.Geom", "\/ChocobarGeom", "org\.chocobar\.Geom", "Report",/.test(js)
+      && /DBUS_TYPE_STRING, &cls,[\s\S]{0,400}DBUS_TYPE_INT32, &width,[\s\S]{0,400}DBUS_TYPE_INT32, &x,[\s\S]{0,400}DBUS_TYPE_INT32, &y,[\s\S]{0,400}DBUS_TYPE_INT32, &screenW/.test(
+           fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'geomdbus.c'), 'utf8')),
+    'a field added on one side and not the other silently misaligns the width');
+  check('align: the bar scales logical geometry into device pixels',
+    /\*outW = \(int\)\(g_geom\.width \* g_scale \+ 0\.5\)/.test(lx)
+      && /\*outX = \(int\)\(g_geom\.x \* g_scale \+ 0\.5\)/.test(lx),
+    'KWin reports logical px; the X window is device px');
+  check('align: a stale geometry report is not trusted',
+    /time\(NULL\) - g_geomAt < 30/.test(lx),
+    'a KWin script that stopped must not pin the bar to a window that is gone');
+  check('align: the bar never gets narrower than its chips',
+    /if \(wantW < chipsW\) wantW = chipsW;/.test(lx),
+    'a terminal narrower than the readouts would clip them');
+  check('linux: a file source is scanned, not silently skipped',
+    /static void tokScanFileSource/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'))
+      || /tokScanDir\(parent, 0, s->app, &tk, cfg\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
+    'magpie keeps ONE ledger file; the walk only enumerated directories, so that source contributed nothing');
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);

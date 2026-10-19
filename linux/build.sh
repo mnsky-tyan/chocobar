@@ -115,7 +115,7 @@ APP_CFLAGS=(
   -DCHOCOBAR_PORTABLE=1
   -Inative/src -Inative/vendor -Ilinux/src
 )
-PKGS=(x11 xrender xfixes cairo)
+PKGS=(x11 xrender xfixes cairo dbus-1)
 
 echo "compiling the core + POSIX adapter..."
 gcc "${CORE_CFLAGS[@]}" -c "$CORE_TU" -o "$OUT/core.o"
@@ -126,10 +126,11 @@ echo "compiling the bar..."
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/main.c -o "$OUT/main.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/icons_cairo.c -o "$OUT/icons_cairo.o"
 gcc "${APP_CFLAGS[@]}" -c linux/src/p_metrics_linux.c -o "$OUT/p_metrics_linux.o"
+gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags dbus-1) -c linux/src/geomdbus.c -o "$OUT/geomdbus.o"
 
 echo "linking..."
 gcc -o "$OUT/chocobar-linux" \
-  "$OUT/main.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" \
+  "$OUT/main.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" \
   "$OUT/core.o" "$OUT/adapter.o" \
   $(pkg-config --libs "${PKGS[@]}") -lm -lpthread
 

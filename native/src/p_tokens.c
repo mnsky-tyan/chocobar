@@ -1040,7 +1040,33 @@ long long tokLiveScan(const Config *cfg) {
         int recursive = s->recursive;
         TokKeys tk;
         tokKeysBuild(s, &tk);
-        tokScanDir(dir, recursive, s->app, &tk, cfg);
+        // A source may name a FILE rather than a directory: a tool that writes
+        // one ledger instead of a tree of session files (magpie's usage.jsonl, a
+        // gateway's request log) has no directory to enumerate. The walk only
+        // ever enumerated directories, so such a source was silently empty - the
+        // store looked configured and contributed nothing. For a file, walk its
+        // PARENT with recursive off: the .jsonl filter then admits exactly that
+        // file, and its cursor key, resume offset and warm-skip are the ordinary
+        // per-file ones, so nothing about the cursor rules forks.
+        wchar_t parent[MAX_PATH];
+        int isFile = 0;
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            if (GetFileAttributesExW(dir, GetFileExInfoStandard, &fa)) {
+                if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    tokScanDir(dir, recursive, s->app, &tk, cfg);
+                } else {
+                    lstrcpynW(parent, dir, MAX_PATH);
+                    wchar_t *slash = wcsrchr(parent, L'/');
+                    if (!slash) slash = wcsrchr(parent, L'\\');
+                    if (slash && slash != parent) {
+                        *slash = 0;
+                        isFile = 1;
+                    }
+                }
+            }
+        }
+        if (isFile) tokScanDir(parent, 0, s->app, &tk, cfg);
     }
     g_tokFullReadNow = 0; // the walk is done; later rescans resume from cursors
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }

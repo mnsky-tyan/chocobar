@@ -41,6 +41,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <unistd.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -52,6 +53,7 @@
 #include "chocobar_core.h"
 #include "svg_geometry.h"   // the shared icon ids (SVG_CPU, ...)
 #include "linux_metrics.h"
+#include "geomdbus.h"
 #include "linux_svg.h"
 
 // ---- core seam (the CHOCOBAR_PORTABLE accessors in p_agg.c) --------------------
@@ -68,6 +70,7 @@ extern int cbCfgRescanSec(void);
 extern int cbCfgHeight(void);
 extern int cbCfgGap(void);
 extern int cbCfgFontSize(void);
+extern int cbCfgAlign(void);
 extern int cbCfgBarRadius(void);
 extern int cbCfgBgAlpha(void);
 extern int cbCfgIconOpacity(void);
@@ -515,6 +518,65 @@ static int textWidthPx(const wchar_t *s) {
     return (int)ceil(ext.x_advance);
 }
 
+// ---- terminal geometry, from the KWin helper ---------------------------------------
+// bar.align == 1 means "as long as the terminal". A Wayland compositor will not let
+// the bar ask another window for its size, so linux/src/geomwatch.js (a KWin script
+// the bar installs) publishes the active terminal's frame geometry as a D-Bus
+// signal and geomdbus.c decodes it. No report, a stale one, or a non-terminal class
+// means "no match" and the bar centres itself - never a wrong width.
+static void dbg(const char *fmt, ...);
+static GeomReport g_geom;             // last report received
+static time_t g_geomAt = 0;           // when it arrived
+static GeomBus g_bus = { -1, "" };   // -1 = not connected (a zero struct would read as fd 0)
+static time_t g_busRetryAt = 0;
+
+// Pull whatever the bus has. Reconnects with backoff: the session bus outlives the
+// bar, but KWin may be restarting, and a tight reconnect loop would spin.
+static void geomPump(time_t now) {
+    if (g_bus.fd != 1) {
+        if (now < g_busRetryAt) return;
+        g_busRetryAt = now + 5;
+        if (!geomBusConnect(&g_bus)) {
+            if (cbCfgAlign() == 1 && !g_geom.valid)
+                fprintf(stderr, "chocobar: no terminal geometry (%s); bar.align 1 needs "
+                                "chocobar-linux --install-geometry\n", geomBusLastError());
+            return;
+        }
+        g_bus.fd = 1;   // connected
+    }
+    GeomReport rep;
+    int n = geomBusPoll(&g_bus, &rep);
+    if (n > 0) {
+        g_geom = rep; g_geomAt = now;
+        dbg("geom report: cls=%s w=%d x=%d y=%d sw=%d", rep.cls, rep.width, rep.x, rep.y, rep.screenW);
+    }
+}
+
+// The width and x for the current align mode. Returns 1 when the width came from
+// a terminal or the screen (the caller then keeps the y it was given), 0 for a
+// content-sized bar.
+static int applyAlign(int *outW, int *outX) {
+    int align = cbCfgAlign();
+    static int logged = -1;
+    if (align != logged) {
+        logged = align;
+        dbg("applyAlign: align=%d geom.valid=%d w=%d x=%d age=%ld",
+            align, g_geom.valid, g_geom.width, g_geom.x, (long)(time(NULL) - g_geomAt));
+    }
+    if (align == 2) {
+        *outW = DisplayWidth(g_dpy, g_screen);
+        *outX = 0;
+        return 1;
+    }
+    if (align == 1 && g_geom.valid && time(NULL) - g_geomAt < 30) {
+        // KWin reports LOGICAL pixels; the X window is in device pixels
+        *outW = (int)(g_geom.width * g_scale + 0.5);
+        *outX = (int)(g_geom.x * g_scale + 0.5);
+        return 1;
+    }
+    return 0;
+}
+
 static void resizeToContent(void) {
     // width from the chips: pads + chips + the gaps between them
     int chipsW = 0;
@@ -525,6 +587,13 @@ static void resizeToContent(void) {
     }
     int w = (int)((PAD_L + PAD_R) * g_scale + 0.5) + chipsW;
     if (w < 80) w = 80;
+    int alignedX = 0;
+    int aw = 0;
+    if (applyAlign(&aw, &alignedX)) {
+        // never narrower than the chips: a terminal narrower than the readouts
+        // would clip them, so the chips win and the bar sticks out
+        if (aw > w) w = aw;
+    }
     int h = (int)(cbCfgHeight() * g_scale + 0.5);
     if (h < 8) h = 24;
     if (w != g_w || h != g_h) {
@@ -622,6 +691,25 @@ static void onKey(XKeyEvent *e) {
 }
 
 static void onSig(int sig) { (void)sig; g_quit = 1; }
+
+// Xlib's default error handler calls exit(). A BadWindow from a request that
+// raced a resize or an Xwayland restart therefore killed the bar outright - the
+// "it just disappeared" symptom. Log and carry on: a single failed request is
+// never a reason to lose the whole bar, and the next tick repaints.
+static int onXError(Display *d, XErrorEvent *e) {
+    char buf[200];
+    XGetErrorText(d, e->error_code, buf, sizeof(buf));
+    fprintf(stderr, "chocobar: X error ignored: %s (request %d)\n", buf, e->request_code);
+    return 0;
+}
+
+static int onXIOError(Display *d) {
+    (void)d;
+    // the display itself is gone: the only sane move is a clean exit, which the
+    // systemd unit then restarts into a fresh session
+    fprintf(stderr, "chocobar: X connection lost; exiting for a restart\n");
+    _exit(3);
+}
 
 static void createWindow(void) {
     XSetWindowAttributes swa;
@@ -739,6 +827,74 @@ static void reloadConfig(void) {
     resolveFontFamily();
 }
 
+// ---- the KWin geometry helper: install / remove ----------------------------------
+// KWin loads a script from ~/.local/share/kwin/scripts/<name>/contents/code/main.js
+// and needs to be told to load and start it over D-Bus. qdbus is used rather than
+// linking sd-bus: it is one call at install time, and a missing qdbus must fail
+// with a clear message rather than a silent no-op.
+#define KW_SCRIPT_NAME "chocobar-geometry"
+
+static int kwScriptPath(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home) return 0;
+    snprintf(out, cap, "%s/.local/share/kwin/scripts/%s/contents/code/main.js",
+             home, KW_SCRIPT_NAME);
+    return 1;
+}
+
+// the script's source, compiled in so the binary is self-contained
+static const char *g_geomScript =
+#include "geomwatch.js.inc"
+;
+
+static int installGeometry(void) {
+    char path[600], dir[600];
+    if (!kwScriptPath(path, sizeof(path))) { fprintf(stderr, "chocobar: no HOME\n"); return 1; }
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) { *slash = 0; }
+    // mkdir -p the whole chain
+    for (char *p = dir + 1; *p; p++) {
+        if (*p == '/') { *p = 0; mkdir(dir, 0755); *p = '/'; }
+    }
+    mkdir(dir, 0755);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "chocobar: cannot write %s: %s\n", path, strerror(errno)); return 1; }
+    fputs(g_geomScript, f);
+    fclose(f);
+    printf("installed %s\n", path);
+    // tell KWin to load and start it. -a (unload) first, so a reinstall replaces
+    // the running copy instead of stacking a second poller.
+    char cmd[1200];
+    snprintf(cmd, sizeof(cmd),
+        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript %s >/dev/null 2>&1; "
+        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript %s %s >/dev/null 2>&1; "
+        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start >/dev/null 2>&1",
+        KW_SCRIPT_NAME, path, KW_SCRIPT_NAME);
+    int rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "chocobar: could not talk to KWin over D-Bus (qdbus6).\n"
+                        "  The script is installed; enable it in System Settings > Window Management > KWin Scripts,\n"
+                        "  or log out and back in.\n");
+        return 1;
+    }
+    printf("KWin script '%s' loaded; the bar now matches the active terminal.\n", KW_SCRIPT_NAME);
+    return 0;
+}
+
+static int removeGeometry(void) {
+    char path[600];
+    if (!kwScriptPath(path, sizeof(path))) return 1;
+    char cmd[1200];
+    snprintf(cmd, sizeof(cmd),
+        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript %s >/dev/null 2>&1",
+        KW_SCRIPT_NAME);
+    system(cmd);
+    unlink(path);
+    printf("removed %s\n", path);
+    return 0;
+}
+
 // ---- main -----------------------------------------------------------------------------------------------
 static void resolveConfigPath(void) {
     const char *env = getenv("WIZBAR_CONFIG");
@@ -754,10 +910,17 @@ int main(int argc, char **argv) {
             snprintf(g_cfgPath, sizeof(g_cfgPath), "%s", argv[++i]);
         } else if (!strncmp(argv[i], "--config=", 9)) {
             snprintf(g_cfgPath, sizeof(g_cfgPath), "%s", argv[i] + 9);
+        } else if (!strcmp(argv[i], "--install-geometry")) {
+            return installGeometry();
+        } else if (!strcmp(argv[i], "--remove-geometry")) {
+            return removeGeometry();
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("chocobar-linux [--config PATH]\n"
                    "  floating status bar: cpu, ram, temp, volume, battery, clock, tokens\n"
-                   "  drag with the left mouse button, right-click to quit\n");
+                   "  drag with the left mouse button, right-click to quit\n"
+                   "  --install-geometry  load the KWin helper that makes bar.align 1\n"
+                   "                      (match the active terminal's width) work\n"
+                   "  --remove-geometry   unload and delete that helper\n");
             return 0;
         }
     }
@@ -774,6 +937,8 @@ int main(int argc, char **argv) {
     cfgStat(&g_cfgMtime);
     resolveFontFamily();
 
+    XSetErrorHandler(onXError);
+    XSetIOErrorHandler(onXIOError);
     g_dpy = XOpenDisplay(NULL);
     if (!g_dpy) {
         fprintf(stderr, "chocobar: cannot open display (is DISPLAY set?)\n");
@@ -817,6 +982,18 @@ int main(int argc, char **argv) {
     buildChips();
 
     g_w = 10; g_h = (int)(cbCfgHeight() * g_scale + 0.5);
+    // With bar.align 1 the width comes from the terminal, so give the KWin helper
+    // a moment to report before sizing: otherwise the window is born at the
+    // content width and visibly pops to the terminal width a second later.
+    // Bounded at 700 ms, and only when align asks for it.
+    if (cbCfgAlign() == 1) {
+        for (int i = 0; i < 70 && !g_geom.valid; i++) {
+            geomPump(time(NULL));
+            if (g_geom.valid) break;
+            struct timespec ts = { 0, 10 * 1000 * 1000 };  // 10 ms
+            nanosleep(&ts, NULL);
+        }
+    }
     createWindow();
     allocSurface();        // text measurement needs a cairo context, and
     resizeToContent();     // resizeToContent is what measures the chips
@@ -861,6 +1038,7 @@ int main(int argc, char **argv) {
             }
         }
         time_t now = time(NULL);
+        geomPump(now);
         if (sel == 0 && now != lastPaint) {
             lastPaint = now;
             // hot-reload the config on mtime change, then re-derive everything
@@ -873,10 +1051,37 @@ int main(int argc, char **argv) {
             scanIfDue(now);
             buildChips();
             resizeToContent();
+            {
+                int aw = 0, ax = 0;
+                if (applyAlign(&aw, &ax) && ax != g_x) moveWindow(ax, g_y);
+            }
+            // align modes drive x every tick: a terminal moved or resized must
+            // take the bar with it. The y stays where the user put it.
+            {
+                int aw = 0, ax = 0;
+                if (applyAlign(&aw, &ax)) {
+                    if (ax != g_x) moveWindow(ax, g_y);
+                    int wantW = aw;
+                    int chipsW = (int)((PAD_L + PAD_R) * g_scale + 0.5);
+                    for (int i = 0; i < g_chipCount; i++) {
+                        int iw = g_chips[i].icon >= 0 ? (int)(ICON_BOX * g_scale + 0.5) : 0;
+                        chipsW += iw + (iw ? (int)(ICO_GAP * g_scale + 0.5) : 0) + textWidthPx(g_chips[i].text);
+                        if (i) chipsW += (int)(SEG_GAP * g_scale + 0.5);
+                    }
+                    if (wantW < chipsW) wantW = chipsW;
+                    if (wantW != g_w) {
+                        g_w = wantW;
+                        XResizeWindow(g_dpy, g_win, (unsigned)g_w, (unsigned)g_h);
+                        allocSurface();
+                        applyShape();
+                    }
+                }
+            }
             paint();
         }
     }
     savePos();
+    geomBusClose(&g_bus);
     if (g_region) XFixesDestroyRegion(g_dpy, g_region);
     if (g_pic) XRenderFreePicture(g_dpy, g_pic);
     if (g_cr) cairo_destroy(g_cr);

@@ -366,6 +366,13 @@ typedef struct {
 
 typedef struct {
     int height, gap, fontSize, backgroundAlpha;
+    // bar.align: where the strip sits horizontally.
+    //   0 = centre (the Windows bar's behaviour, and the default)
+    //   1 = match the ACTIVE WINDOW's width and x (the "as long as the
+    //       terminal" look; a front-end that cannot read another window's
+    //       geometry falls back to centre)
+    //   2 = span the whole screen width
+    int barAlign;
     wchar_t *tint, *backdrop, *fontFamily;
 
     wchar_t *fg, *fgDim, *pink, *pinkDeep, *divider, *warn, *pinkBg, *yellow, *good;
@@ -853,6 +860,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
     c->iconColor = wideDup(L""); // empty = follow pinkDeep
     c->iconOpacity = 90; // Electron: .seg svg { opacity: 0.9 }
     c->barRadius = 8;
+    c->barAlign = 0;
     lstrcpynW(c->heatmap[0], L"#F1ECD8", 12); lstrcpynW(c->heatmap[1], L"#F6D8E0", 12);
     lstrcpynW(c->heatmap[2], L"#EFB7C7", 12); lstrcpynW(c->heatmap[3], L"#E28FB0", 12);
     lstrcpynW(c->heatmap[4], L"#C95E8F", 12);
@@ -889,6 +897,9 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
         c->barRadius  = jintTok(js, t, jobjGet(js, t, bar, "radius"), c->barRadius);
         if (c->barRadius < 0) c->barRadius = 0;
         if (c->barRadius > 26) c->barRadius = 26;
+        c->barAlign   = jintTok(js, t, jobjGet(js, t, bar, "align"), c->barAlign);
+        if (c->barAlign < 0) c->barAlign = 0;
+        if (c->barAlign > 2) c->barAlign = 2;
     }
     int theme = jobjGet(js, t, root, "theme");
     if (theme >= 0) {

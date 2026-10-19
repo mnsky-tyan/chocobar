@@ -2,19 +2,63 @@
 
 A floating, always-on-top, translucent bar showing the same chips as the Windows
 bar: cpu, ram, cpu temperature, volume, battery, clock, and the AI token count
-the shared scanner produces. It does **not** follow a terminal window; it floats
-where you put it, and remembers that place.
+the shared scanner produces. It does **not** follow a terminal window around; it
+sits where you put it vertically, and with `bar.align: 1` it takes the **active
+terminal's width and horizontal position**, so it reads as a strip along the top
+of that terminal.
 
 ![the bar](../docs/img/linux-bar.png)
 
 ## Build and run
 
 ```sh
-sudo apt install libx11-dev libxrender-dev libxfixes-dev libcairo2-dev
+sudo apt install libx11-dev libxrender-dev libxfixes-dev libcairo2-dev \
+                 libdbus-1-dev
 bash linux/build.sh                 # -> linux/build/chocobar-linux
 ./linux/build/chocobar-linux        # reads ~/.wizbar/config.json
 ./linux/build/chocobar-linux --config /path/to/config.json
 ```
+
+### Run it supervised (recommended)
+
+The bar is a small X11 client and a compositor restart can take it down. Install
+it as a user service and it cannot stay gone:
+
+```sh
+cp linux/build/chocobar-linux ~/.local/bin/
+cp linux/chocobar.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chocobar.service
+```
+
+`Restart=always` with `StartLimitIntervalSec=0` means a kill, a crash, or an
+Xwayland hiccup is followed by a restart within ~2 s, and a restart loop is never
+given up on. Verified: `kill -9` on the running bar produced a new PID and an
+active service 4 s later.
+
+### "As long as the terminal" (`bar.align`)
+
+| `bar.align` | meaning |
+|---|---|
+| `0` (default) | centre of the screen, content-sized |
+| `1` | match the **active terminal's** width and x (the terminal look) |
+| `2` | span the whole screen width |
+
+`align: 1` needs a helper, because a Wayland compositor does not let a client
+read another window's geometry. Install it once:
+
+```sh
+chocobar-linux --install-geometry     # writes a KWin script and loads it
+chocobar-linux --remove-geometry      # unload and delete it
+```
+
+The helper (`linux/src/geomwatch.js`) is a KWin script that watches the active
+window and calls the bar over D-Bus with its `frameGeometry` in logical pixels.
+It recognises the terminal classes listed at the top of the script. Switching to
+a non-terminal keeps the last terminal's geometry, so alt-tabbing does not move
+the bar. A stale report (the script stopped, KWin restarted) is ignored after
+30 s and the bar falls back to centring rather than pinning itself to a window
+that no longer exists. The bar never becomes narrower than its chips.
 
 Drag it with the left mouse button. Right-click quits. `Esc`/`q` also quits when
 the bar has focus. The config is the SAME `~/.wizbar/config.json` the Windows bar
@@ -83,7 +127,39 @@ purpose - see the project README's feasibility notes.
 | battery | `/sys/class/power_supply/*` | green while charging, red only when low **and** on battery |
 | gpu | `amdgpu`'s `gpu_busy_percent` | Intel iGPU exposes no utilisation file, so this machine shows no gpu chip |
 | clock | local time, the config's `modules.clock.format` | same `{MMM} {dd} {Wkk} {HH}:{mm}` tokens |
-| tokens | the shared JSONL session scan | today's count is not yet derived; the chip shows the all-time total |
+| tokens | the shared JSONL session scan | the chip shows the all-time total; sources may be directories OR single ledger files |
+
+### Token sources, including magpie and API-key traffic
+
+`sources[].path` accepts a **directory** (a tree of session `.jsonl` files) or a
+**single `.jsonl` file** (a tool that keeps one ledger). A file path was silently
+ignored before - the walk only enumerated directories - so a configured ledger
+source contributed nothing.
+
+To count magpie's traffic and API-key usage under one name:
+
+```json
+"tokens": {
+  "enabled": true,
+  "labels": { "pi": "pi" },
+  "sources": [
+    { "app": "pi", "path": "~/.config/magpie/usage.jsonl", "enabled": true,
+      "recursive": false, "timestampFormat": "iso",
+      "fields": { "input": "in", "output": "out", "cacheRead": "cache_read",
+                  "cacheWrite": "cache_write", "timestamp": "t" },
+      "providers": ["workbuddy-ai", "workbuddy", "opencode-zen-free", "cline",
+                    "qoder", "qoder-cn", "antigravity", "kilo", "zcode"] },
+    { "app": "pi", "path": "~/.pi/agent/sessions", "enabled": true,
+      "recursive": true, "exclude": ["magpie"] },
+    { "app": "pi", "path": "~/.zai/agent/sessions", "enabled": true }
+  ]
+}
+```
+
+The `exclude: ["magpie"]` is what makes the total right, not larger: pi's own
+transcripts already record every magpie-routed request, so counting them in both
+places would double them. Measured on this machine: magpie's ledger plus pi's
+non-magpie routes equalled the bar's total EXACTLY (382,751,319 = 382,751,319).
 
 A sensor that does not exist reads as an em dash, never as a fabricated 0.
 

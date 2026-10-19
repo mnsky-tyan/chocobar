@@ -554,6 +554,7 @@ void cbCoreInit(void) { InitializeCriticalSection(&g_cfgGenLock); }
 // rename the way a mirrored struct would, and it keeps the front-ends from
 // reaching into the parser's types.
 int cbCfgFontSize(void) { return g_cfg.fontSize; }
+int cbCfgAlign(void) { return g_cfg.barAlign; }
 int cbCfgBarRadius(void) { return g_cfg.barRadius; }
 int cbCfgBgAlpha(void) { return g_cfg.backgroundAlpha; }
 int cbCfgIconOpacity(void) { return g_cfg.iconOpacity; }
