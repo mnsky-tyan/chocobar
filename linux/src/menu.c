@@ -17,11 +17,7 @@
 #include <cairo/cairo-xlib.h>
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
-#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrender.h>
@@ -240,13 +236,17 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     menuPaint(&m);
 
     // grab the pointer so a click outside closes the menu (the Windows behaviour)
-    XGrabPointer(dpy, m.win, True, ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                 GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
-    XGrabKeyboard(dpy, m.win, True, GrabModeAsync, GrabModeAsync, CurrentTime);
+    // A failed grab is not fatal - the menu still closes on Escape or an item
+    // click - but it must not be silent, because the whole dismissal model rests
+    // on these two calls.
+    int pg = XGrabPointer(dpy, m.win, True, ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                          GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+    int kg = XGrabKeyboard(dpy, m.win, True, GrabModeAsync, GrabModeAsync, CurrentTime);
+    if (pg != GrabSuccess || kg != GrabSuccess)
+        fprintf(stderr, "chocobar: menu grab partial (pointer=%d keyboard=%d); "
+                        "Escape and a click on an item still close it\n", pg, kg);
 
     int done = 0;
-    int exposed = 0;
-    fprintf(stderr, "[dbg] loop enter win=0x%lx\n", (unsigned long)m.win);
     while (!done) {
         XEvent ev;
         XNextEvent(dpy, &ev);
@@ -261,8 +261,6 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                     if (nx.type != Expose) break;
                     XNextEvent(dpy, &nx);
                 }
-                exposed++;
-                if (exposed <= 3) fprintf(stderr, "[dbg] paint #%d\n", exposed);
                 menuPaint(&m);
                 break;
             case MotionNotify: {

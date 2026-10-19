@@ -27,7 +27,8 @@ typedef struct {
 int geomBusConnect(GeomBus *bus);
 
 // Read pending messages. Returns the number of reports decoded into *out (the
-// last one wins). A broken connection closes itself; call geomBusConnect again.
+// last one wins), or -1 if the connection is gone - in which case it has already
+// been released and the caller must call geomBusConnect again.
 int geomBusPoll(GeomBus *bus, GeomReport *out);
 
 void geomBusClose(GeomBus *bus);

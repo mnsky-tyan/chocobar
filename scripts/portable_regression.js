@@ -372,9 +372,50 @@ function check(name, ok, detail) {
   check('linux: the bar never takes keyboard focus',
     /hints\.input = False/.test(lx) && /_NET_WM_USER_TIME/.test(lx),
     'a managed window that accepts focus would pull the keyboard off the terminal on map or click');
+  const motion = /static void onMotion\(XMotionEvent \*e\) \{([\s\S]*?)\n\}/.exec(lx);
   check('linux: the bar is not draggable',
-    !/g_dragging/.test(lx) && !/ButtonMotionMask/.test(lx),
+    !/g_dragging/.test(lx) && !/\bsavePos\b/.test(lx) && !/linux-bar\.json/.test(lx) &&
+    !!motion && !/XMoveWindow|g_x\s*=|g_y\s*=/.test(motion[1]),
     'its position is derived from bar.align and bar.gap; a dragged bar breaks that contract');
+
+  // layout: the demo has TWO groups - left-pinned chips (tokens) and right-aligned
+  // metrics, with an empty run between them. A single right-aligned loop packs every
+  // chip against the right edge and reads as one block, which is the visual gap
+  // that was reported against docs/img/bar-terminal.png.
+  check('linux: the bar lays out both chip groups',
+    /CHIP_LEFT/.test(lx) && /CHIP_RIGHT/.test(lx) &&
+    /double xl = padL;/.test(lx) && /xr = g_w - padR;/.test(lx) &&
+    /align != CHIP_LEFT\) continue;/.test(lx) && /align != CHIP_RIGHT\) continue;/.test(lx),
+    'a single right-aligned loop ignores the pinned group and breaks demo parity');
+  check('linux: only the left group is clickable',
+    /chipClickable/.test(lx) && /c->align == CHIP_LEFT && c->icon == SVG_DIAMOND/.test(lx),
+    'a metric label must not look like a button; only the tokens chip opens the dashboard');
+
+  // the dashboard shares the bar's connection, so its close button MUST go through
+  // WM_DELETE_WINDOW: without the protocol the window manager falls back to
+  // XKillClient, which severs the shared connection and takes the bar with it.
+  const dash = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
+  check('linux: the dashboard registers WM_DELETE_WINDOW',
+    /XSetWMProtocols\(dpy, d\.win/.test(dash) && /WM_DELETE_WINDOW/.test(dash) &&
+    /ev\.xclient\.data\.l\[0\] == d\.wmDelete/.test(dash),
+    'a close button that kills the shared connection takes the whole bar down with it');
+
+  // a broken session-bus connection must be RELEASED, or the bar silently loses
+  // bar.align 1 for the rest of its life after any KWin/session restart.
+  const geom = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'geomdbus.c'), 'utf8');
+  check('linux: a dead bus connection is unrefed',
+    /closeConn\(/.test(geom) && /return -1;/.test(geom) &&
+    !/dbus_connection_unref\(g_conn\); g_conn = NULL;/.test(
+      geom.replace(/closeConn\(void\)[\s\S]*?\n\}/, '')),
+    'polling an unrefed connection forever is how bar.align 1 dies permanently');
+  check('linux: a failed add_match is fatal',
+    /dbus_bus_add_match\(g_conn, rule, &err\);\s*\n\s*if \(dbus_error_is_set\(&err\)\) \{[\s\S]*?closeConn\(\);\s*\n\s*return 0;/.test(geom),
+    'without the match rule no Report call is ever delivered, so success must not be a lie');
+
+  // the heatmap columns: (back + todayDow)/7 is only Monday-aligned on a Thursday.
+  check('linux: the heatmap aligns columns on Monday',
+    /weeksBack = \(back \+ 6 - todayDow\) \/ 7/.test(dash),
+    'the wrong offset makes the grid read as diagonal streaks on every day but Thursday');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);

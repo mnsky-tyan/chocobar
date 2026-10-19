@@ -43,6 +43,7 @@
 #include <unistd.h>
 #include <unistd.h>
 #include <X11/Xatom.h>
+#include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrender.h>
@@ -134,6 +135,23 @@ static Rgb hexRgb(const wchar_t *hex, Rgb fallback) {
 
 static void setSrc(cairo_t *cr, Rgb c, double a) { cairo_set_source_rgba(cr, c.r, c.g, c.b, a); }
 
+// The rounded rectangle, built once. It was written out as the same four
+// cairo_arc quarter-calls in five places across the front-end (the bar strip,
+// the hover pill, the menu background and pill, the battery fill and the
+// dashboard cards); one helper keeps them from drifting apart.
+void roundedPath(cairo_t *cr, double x, double y, double w, double h, double r) {
+    if (r < 0) r = 0;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    cairo_new_sub_path(cr);
+    if (r <= 0) { cairo_rectangle(cr, x, y, w, h); return; }
+    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+    cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+    cairo_close_path(cr);
+}
+
 // ---- global state ---------------------------------------------------------------
 static Display *g_dpy;
 static Window g_win;
@@ -150,6 +168,7 @@ static XserverRegion g_region;
 static int g_x, g_y;               // window position (pixels, derived: never dragged)
 static int g_w, g_h;               // window size (pixels)
 static double g_scale = 1.0;       // DPI scale: config values are CSS px
+static int g_hover = -1;            // chip under the pointer, -1 = none
 static volatile sig_atomic_t g_quit = 0;
 // ---- right-click menu and dashboard state -----------------------------------------
 static int g_menuPending = 0;
@@ -163,14 +182,31 @@ static long long g_tokToday = -1;
 static int g_tokReady = 0;
 
 #define MAX_CHIPS 16
+// hover pill geometry for a clickable left-group chip (CSS px, like the rest)
+#define HOVER_PAD_X 6.0
+#define HOVER_PAD_Y 3.0
+#define HOVER_RADIUS 7.0
+// align values are the WINDOWS spelling (p_ui.c:110): 1 = right group (metrics,
+// growing leftward from the right edge), 2 = left pinned group (tokens, subs,
+// custom buttons, growing rightward from the left edge). Same names, same
+// numbers, so the two renderers read the same way.
+#define CHIP_RIGHT 1
+#define CHIP_LEFT 2
+
 typedef struct {
     int icon;                 // SVG id, -1 = text only
     wchar_t text[64];
     Rgb color;                // value colour
-    int pinned;               // 1 = left group, 0 = right metric group
+    int align;                // CHIP_LEFT or CHIP_RIGHT
+    Rgb iconColor;            // icon colour, used only when hasIconColor
+    int hasIconColor;         // 0 = inherit the shared icon colour
 } Chip;
 static Chip g_chips[MAX_CHIPS];
 static int g_chipCount = 0;
+
+// defined with the event handlers below; used by the painter
+static int chipClickable(const Chip *c);
+static void paint(void);
 
 // geometry, in CSS px, matching the Windows bar's own numbers (p_ui.c paintBar)
 #define PAD_L 16.0
@@ -208,7 +244,7 @@ static void wideToUtf8(const wchar_t *w, char *out, size_t cap) {
 // ~/.config/fontconfig/fonts.conf, which maps Segoe Print to a free face).
 #include <fontconfig/fontconfig.h>
 
-static char g_fontFamily[256] = "DejaVu Sans Mono";   // resolved family, for cairo
+static char g_fontFamily[512] = "DejaVu Sans Mono";   // resolved family, for cairo
 static char g_fontFile[512] = "";                     // resolved file, when known
 
 static void resolveFontFamily(void) {
@@ -304,13 +340,22 @@ static void fmtTokens(long long n, wchar_t *out, size_t cap) {
 }
 
 // ---- chips ---------------------------------------------------------------------------
-static void addChip(int icon, const wchar_t *text, Rgb color, int pinned) {
+static void addChip(int icon, const wchar_t *text, Rgb color, int align) {
     if (g_chipCount >= MAX_CHIPS) return;
     Chip *c = &g_chips[g_chipCount++];
     c->icon = icon;
     swprintf(c->text, 64, L"%ls", text ? text : L"");
     c->color = color;
-    c->pinned = pinned;
+    c->align = align;
+    c->hasIconColor = 0;
+}
+
+// the tokens chip is the one icon Windows paints in its own colour
+// (bar.css: #seg-tokens .ico { color: var(--yellow) }), p_ui.c:741
+static void setChipIconColor(int index, Rgb col) {
+    if (index < 0 || index >= g_chipCount) return;
+    g_chips[index].iconColor = col;
+    g_chips[index].hasIconColor = 1;
 }
 
 static void buildChips(void) {
@@ -321,56 +366,58 @@ static void buildChips(void) {
     Rgb good = hexRgb(cbCfgGood(), (Rgb){0, 0.39, 0});
     Rgb yellow = hexRgb(cbCfgYellow(), (Rgb){0.72, 0.66, 0.42});
 
-    // left pinned group: tokens first (the Windows order puts it left of the
-    // metrics), then the metric group to its right
+    // LEFT pinned group: the tokens chip, then the subscription gauge when one
+    // exists (p_subs.c is not ported yet, so the gauge chip does not yet).
+    // These sit at the left edge with the empty run in the middle.
     if (cbCfgTokensEnabled()) {
         wchar_t txt[32];
         fmtTokens(g_tokReady ? g_tokToday : -1, txt, 32);
-        addChip(SVG_DIAMOND, txt, dim, 1);
+        addChip(SVG_DIAMOND, txt, dim, CHIP_LEFT);
+        setChipIconColor(g_chipCount - 1, yellow);
     }
+    // RIGHT metric group: everything else, growing leftward from the right edge.
     wchar_t v[48];
     if (cbCfgModGpu() && g_m.gpu >= 0) {
         swprintf(v, 48, L"%d%%", (int)(g_m.gpu + 0.5));
-        addChip(SVG_GPU, v, fg, 1);
+        addChip(SVG_GPU, v, fg, CHIP_RIGHT);
     }
     if (cbCfgModCpu()) {
         int hot = cbCfgCpuWarnAt() > 0 && g_m.cpu >= cbCfgCpuWarnAt();
-        if (g_m.cpu >= 0) { swprintf(v, 48, L"%d%%", (int)(g_m.cpu + 0.5)); addChip(SVG_CPU, v, hot ? warn : fg, 1); }
-        else addChip(SVG_CPU, L"\u2014", dim, 1);
+        if (g_m.cpu >= 0) { swprintf(v, 48, L"%d%%", (int)(g_m.cpu + 0.5)); addChip(SVG_CPU, v, hot ? warn : fg, CHIP_RIGHT); }
+        else addChip(SVG_CPU, L"\u2014", dim, CHIP_RIGHT);
     }
     if (cbCfgModTemp()) {
         if (g_m.tempC >= 0) {
             int hot = cbCfgTempWarnAt() > 0 && g_m.tempC >= cbCfgTempWarnAt();
             if ((int)(g_m.tempC * 10) % 10 == 0) swprintf(v, 48, L"%d\u00B0C", (int)g_m.tempC);
             else swprintf(v, 48, L"%.1f\u00B0C", g_m.tempC);
-            addChip(SVG_TEMP, v, hot ? warn : fg, 1);
-        } else addChip(SVG_TEMP, L"\u2014", dim, 1);
+            addChip(SVG_TEMP, v, hot ? warn : fg, CHIP_RIGHT);
+        } else addChip(SVG_TEMP, L"\u2014", dim, CHIP_RIGHT);
     }
     if (cbCfgModRam()) {
         int hot = cbCfgRamWarnAt() > 0 && g_m.ram >= cbCfgRamWarnAt();
-        if (g_m.ram >= 0) { swprintf(v, 48, L"%d%%", (int)(g_m.ram + 0.5)); addChip(SVG_RAM, v, hot ? warn : fg, 1); }
-        else addChip(SVG_RAM, L"\u2014", dim, 1);
+        if (g_m.ram >= 0) { swprintf(v, 48, L"%d%%", (int)(g_m.ram + 0.5)); addChip(SVG_RAM, v, hot ? warn : fg, CHIP_RIGHT); }
+        else addChip(SVG_RAM, L"\u2014", dim, CHIP_RIGHT);
     }
     if (cbCfgModVol()) {
         if (g_m.volume >= 0) {
             int muted = g_m.volume == 0;
             swprintf(v, 48, L"%d%%", g_m.volume);
-            addChip(muted ? SVG_MUTE : SVG_VOL, v, muted ? dim : fg, 1);
-        } else addChip(SVG_VOL, L"\u2014", dim, 1);
+            addChip(muted ? SVG_MUTE : SVG_VOL, v, muted ? dim : fg, CHIP_RIGHT);
+        } else addChip(SVG_VOL, L"\u2014", dim, CHIP_RIGHT);
     }
     if (cbCfgModBatt()) {
         if (g_m.battValid) {
             int low = g_m.battPct <= 20;
             swprintf(v, 48, L"%d%%", g_m.battPct);
-            addChip(SVG_BAT, v, g_m.battAc ? good : (low ? warn : fg), 1);
-        } else addChip(SVG_BAT, L"AC", dim, 1);
+            addChip(SVG_BAT, v, g_m.battAc ? good : (low ? warn : fg), CHIP_RIGHT);
+        } else addChip(SVG_BAT, L"AC", dim, CHIP_RIGHT);
     }
     if (cbCfgModClock()) {
         wchar_t txt[64];
         fmtClock(cbCfgClockFormat(), g_m.clockNow, txt, 64);
-        addChip(SVG_CLOCK, txt, fg, 1);
+        addChip(SVG_CLOCK, txt, fg, CHIP_RIGHT);
     }
-    (void)yellow; // reserved for the tokens chip's icon colour (Windows uses it)
 }
 
 // ---- layout + paint -------------------------------------------------------------------
@@ -406,12 +453,7 @@ static void paint(void) {
 
     // the strip: rounded rect filled with the tint at backgroundAlpha
     double x = 0, y = 0, w = g_w, h = g_h;
-    cairo_new_sub_path(g_cr);
-    cairo_arc(g_cr, x + w - radius, y + radius, radius, -M_PI / 2, 0);
-    cairo_arc(g_cr, x + w - radius, y + h - radius, radius, 0, M_PI / 2);
-    cairo_arc(g_cr, x + radius, y + h - radius, radius, M_PI / 2, M_PI);
-    cairo_arc(g_cr, x + radius, y + radius, radius, M_PI, 3 * M_PI / 2);
-    cairo_close_path(g_cr);
+    roundedPath(g_cr, x, y, w, h, radius);
     setSrc(g_cr, tint, alpha);
     cairo_fill_preserve(g_cr);
     // a hairline of the divider colour on the rim: it separates a light bar from a
@@ -437,8 +479,13 @@ static void paint(void) {
     double icoAlpha = cbCfgIconOpacity() / 100.0;
     if (icoAlpha <= 0.0 || icoAlpha > 1.0) icoAlpha = 0.9;
 
-    // measure all chips, then lay out: right-aligned metric group growing
-    // leftward from the right edge, exactly the Windows rule
+    // measure all chips, then lay out the SAME two groups the Windows bar
+    // uses (p_ui.c:1028-1049): the right metric group grows leftward from the
+    // right edge, the left pinned group grows rightward from the left edge, and
+    // the empty run between them is what makes the strip look like the demo.
+    // Laying every chip out in one right-aligned row is what made this bar read
+    // as a single block against the right edge.
+    double padL = PAD_L * g_scale;
     double padR = PAD_R * g_scale;
     double segGap = SEG_GAP * g_scale, icoGap = ICO_GAP * g_scale;
     for (int i = 0; i < g_chipCount; i++) {
@@ -446,11 +493,19 @@ static void paint(void) {
         measure(g_cr, &g_chips[i], &iw, &tw);
         g_place[i].w = iw + (iw > 0 ? icoGap : 0) + tw;
     }
-    // the bar's own width is the chips' width; the window is sized to it
+    // right group: grows leftward from the right edge
     double xr = g_w - padR;
     for (int i = g_chipCount - 1; i >= 0; i--) {
+        if (g_chips[i].align != CHIP_RIGHT) continue;
         g_place[i].x = xr - g_place[i].w;
         xr -= g_place[i].w + segGap;
+    }
+    // left pinned group: grows rightward from the left edge
+    double xl = padL;
+    for (int i = 0; i < g_chipCount; i++) {
+        if (g_chips[i].align != CHIP_LEFT) continue;
+        g_place[i].x = xl;
+        xl += g_place[i].w + segGap;
     }
 
     double baseline = g_h / 2.0;
@@ -459,19 +514,36 @@ static void paint(void) {
         double cx = g_place[i].x;
         double iw, tw;
         measure(g_cr, c, &iw, &tw);
+        // hover pill behind a clickable LEFT-group chip (p_ui.c:1069-1077):
+        // without it the tokens chip looks like a label, not something you can
+        // open. Right-group chips are not clickable, so they get no pill.
+        int hovered = (i == g_hover) && (c->align == CHIP_LEFT) && chipClickable(c);
+        if (hovered) {
+            double pl = cx - HOVER_PAD_X * g_scale;
+            double pt = HOVER_PAD_Y * g_scale;
+            double prr = cx + tw + (c->icon >= 0 ? ICON_BOX * g_scale + icoGap : 0) + HOVER_PAD_X * g_scale;
+            double pb = g_h - HOVER_PAD_Y * g_scale;
+            Rgb pink = hexRgb(cbCfgPink(), (Rgb){0.94, 0.87, 0.91});
+            roundedPath(g_cr, pl, pt, prr - pl, pb - pt, HOVER_RADIUS * g_scale);
+            setSrc(g_cr, pink, 0.5);
+            cairo_fill(g_cr);
+        }
         if (c->icon >= 0) {
             double box = ICON_BOX * g_scale;
             // icons sit centred on the text's cap height, like the Windows bar
             double iy = baseline - box / 2.0 - 1.0 * g_scale;
+            // a chip may override the shared icon colour (the tokens diamond is
+            // yellow on Windows, p_ui.c:741)
+            Rgb ic = c->hasIconColor ? c->iconColor : icoCol;
             if (c->icon == SVG_BAT) {
                 // dynamic: fill tracks the charge, warn red when low on battery,
                 // bolt while charging
                 Rgb warnC = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
                 svgDrawBattery(g_cr, g_m.battPct, g_m.battAc, cx, iy, box,
-                               icoCol.r, icoCol.g, icoCol.b, icoAlpha,
+                               ic.r, ic.g, ic.b, icoAlpha,
                                warnC.r, warnC.g, warnC.b);
             } else {
-                svgDrawCairo(g_cr, c->icon, cx, iy, box, icoCol.r, icoCol.g, icoCol.b, icoAlpha);
+                svgDrawCairo(g_cr, c->icon, cx, iy, box, ic.r, ic.g, ic.b, icoAlpha);
             }
             cx += box + icoGap;
         }
@@ -607,6 +679,13 @@ static void geomPump(time_t now) {
     }
     GeomReport rep;
     int n = geomBusPoll(&g_bus, &rep);
+    if (n < 0) {
+        // the connection died and geomdbus released it: clear the flag so the
+        // backoff above reconnects. Without this the bar silently loses
+        // bar.align 1 for the rest of its life after any bus restart.
+        g_bus.fd = -1;
+        return;
+    }
     if (n > 0) {
         g_geom = rep; g_geomAt = now;
         dbg("geom report: cls=%s w=%d x=%d y=%d sw=%d", rep.cls, rep.width, rep.x, rep.y, rep.screenW);
@@ -639,13 +718,21 @@ static int applyAlign(int *outW, int *outX) {
 }
 
 static void resizeToContent(void) {
-    // width from the chips: pads + chips + the gaps between them
-    int chipsW = 0;
+    // width from the chips: pads + chips + the gaps between them. The two groups
+    // are measured independently and then summed, because the gap between the
+    // last left chip and the first right chip is NOT a SEG_GAP - it is the empty
+    // run that makes the bar look like the demo. Counting it as one SEG_GAP would
+    // squeeze the groups together whenever align 0/2 is not stretching the bar.
+    int leftW = 0, leftN = 0, rightW = 0, rightN = 0;
+    int seg = (int)(SEG_GAP * g_scale + 0.5);
     for (int i = 0; i < g_chipCount; i++) {
         int iw = g_chips[i].icon >= 0 ? (int)(ICON_BOX * g_scale + 0.5) : 0;
-        chipsW += iw + (iw ? (int)(ICO_GAP * g_scale + 0.5) : 0) + textWidthPx(g_chips[i].text);
-        if (i) chipsW += (int)(SEG_GAP * g_scale + 0.5);
+        int cw = iw + (iw ? (int)(ICO_GAP * g_scale + 0.5) : 0) + textWidthPx(g_chips[i].text);
+        if (g_chips[i].align == CHIP_LEFT) { leftW += cw + (leftN ? seg : 0); leftN++; }
+        else { rightW += cw + (rightN ? seg : 0); rightN++; }
     }
+    int chipsW = leftW + rightW;
+    if (leftN && rightN) chipsW += seg;   // the minimum bridge between the groups
     int w = (int)((PAD_L + PAD_R) * g_scale + 0.5) + chipsW;
     if (w < 80) w = 80;
     int alignedX = 0;
@@ -698,7 +785,7 @@ static void dbg(const char *fmt, ...) {
     if (f) { fprintf(f, "%s\n", buf); fclose(f); }
 }
 
-// Which chip is under a point in the bar? -1 = none. Uses the same placement the
+// which chip is under a point in the bar? -1 = none. Uses the same placement the
 // painter computed, so a click lands on what the user sees.
 static int chipAt(int px) {
     for (int i = 0; i < g_chipCount; i++) {
@@ -706,6 +793,13 @@ static int chipAt(int px) {
         if (px >= x0 && px <= x1) return i;
     }
     return -1;
+}
+
+// A left-group chip does something on click (today: the tokens chip opens the
+// dashboard); a right-group metric is a label. Only clickable chips get a hover
+// pill, which is what tells the two groups apart visually.
+static int chipClickable(const Chip *c) {
+    return c->align == CHIP_LEFT && c->icon == SVG_DIAMOND;
 }
 
 static void onButton(XButtonEvent *e) {
@@ -724,6 +818,18 @@ static void onButton(XButtonEvent *e) {
         g_menuX = e->x_root;
         g_menuY = e->y_root;
     }
+}
+
+static void onMotion(XMotionEvent *e) {
+    // hover tracking only: the bar is not draggable, so motion never moves it.
+    // Only a chip that repaints differently needs a repaint.
+    int hit = chipAt(e->x);
+    if (hit >= 0 && !chipClickable(&g_chips[hit])) hit = -1;
+    if (hit != g_hover) { g_hover = hit; paint(); }
+}
+
+static void onLeave(void) {
+    if (g_hover != -1) { g_hover = -1; paint(); }
 }
 
 static void onKey(XKeyEvent *e) {
@@ -758,7 +864,8 @@ static void createWindow(void) {
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = g_cmap;
-    swa.event_mask = ExposureMask | ButtonPressMask | KeyPressMask | StructureNotifyMask;
+    swa.event_mask = ExposureMask | ButtonPressMask | ButtonMotionMask |
+                     LeaveWindowMask | KeyPressMask | StructureNotifyMask;
     // MANAGED, not override-redirect: KWin composites override-redirect windows in
     // its top layer no matter what hints they set (measured on Plasma 6.6), so an
     // unmanaged bar is always on top of everything. The user wants the bar at the
@@ -1062,7 +1169,8 @@ static int removeGeometry(void) {
     snprintf(cmd, sizeof(cmd),
         "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript %s >/dev/null 2>&1",
         KW_SCRIPT_NAME);
-    system(cmd);
+    int rc = system(cmd);
+    (void)rc;   // best-effort cleanup; the qdbus call is advisory
     unlink(path);
     printf("removed %s\n", path);
     return 0;
@@ -1234,6 +1342,8 @@ int main(int argc, char **argv) {
             switch (ev.type) {
                 case Expose: if (ev.xexpose.count == 0) onExpose(); break;
                 case ButtonPress: onButton(&ev.xbutton); break;
+                case MotionNotify: onMotion(&ev.xmotion); break;
+                case LeaveNotify: onLeave(); break;
                 case KeyPress: onKey(&ev.xkey); break;
                 case ConfigureNotify:
                     if (ev.xconfigure.width != g_w || ev.xconfigure.height != g_h) {

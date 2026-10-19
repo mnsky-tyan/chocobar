@@ -64,6 +64,7 @@ typedef struct {
     int heatWeeks;
     int hoverDay;      // index into the day array, -1 = none
     int running;
+    Atom wmDelete;             // WM_DELETE_WINDOW, registered on the window
 } Dash;
 
 // token counts abbreviate exactly as the bar and the Windows board do
@@ -197,7 +198,11 @@ static void paint(Dash *d) {
     for (int idx = first; idx < days; idx++) {
         int back = days - 1 - idx;
         int wd = ((todayDow - back) % 7 + 7) % 7;
-        int weeksBack = (back + todayDow) / 7;       // which column, counting back
+        // which column: the Monday-based week that contains this day, counted
+        // back from today's column. `(back + todayDow) / 7` only lands on
+        // Monday boundaries when today IS a Thursday; the correct offset puts
+        // the day's weekday at the START of its week.
+        int weeksBack = (back + 6 - todayDow) / 7;
         int col = weeks - 1 - weeksBack;
         if (col < 0 || col >= weeks) continue;
         long long v = cbTokDayTotal(idx);
@@ -320,6 +325,15 @@ void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                           (unsigned)d.w, (unsigned)d.h, 0, depth, InputOutput, visual,
                           CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
     XStoreName(dpy, d.win, "Chocobar - Token usage");
+    // WM_DELETE_WINDOW: without it a client message is never sent and KWin falls
+    // back to XKillClient, which severs the SHARED connection - the dashboard
+    // using the bar's Display means its close button would take the whole bar
+    // process down with it.
+    {
+        Atom wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+        XSetWMProtocols(dpy, d.win, &wmDelete, 1);
+        d.wmDelete = wmDelete;
+    }
     XSizeHints sh;
     memset(&sh, 0, sizeof(sh));
     sh.flags = PMinSize;
@@ -353,9 +367,12 @@ void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                     break;
                 }
                 case ButtonPress:
-                    // a click on the window manager's close button arrives as
-                    // DestroyNotify, not here; a middle/right click also closes
+                    // a middle/right click also closes the window
                     if (ev.xbutton.button != 1) d.running = 0;
+                    break;
+                case ClientMessage:
+                    // the window manager's close button (see WM_DELETE_WINDOW above)
+                    if ((Atom)ev.xclient.data.l[0] == d.wmDelete) d.running = 0;
                     break;
                 case DestroyNotify:
                     d.running = 0;

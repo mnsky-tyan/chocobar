@@ -33,11 +33,21 @@ static void recordError(const char *what) {
     snprintf(g_err, sizeof(g_err), "%s", what ? what : "unknown");
 }
 
+// close + unref the private connection, if any. libdbus requires close before
+// unref on a private connection, and forgetting it in one path is how a broken
+// connection used to be handed back to the next caller.
+static void closeConn(void) {
+    if (!g_conn) return;
+    dbus_connection_close(g_conn);
+    dbus_connection_unref(g_conn);
+    g_conn = NULL;
+}
+
 int geomBusConnect(GeomBus *bus) {
     (void)bus;
     DBusError err;
     dbus_error_init(&err);
-    if (g_conn) { dbus_connection_unref(g_conn); g_conn = NULL; }
+    closeConn();
 
     g_conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err);
     if (!g_conn) {
@@ -63,9 +73,7 @@ int geomBusConnect(GeomBus *bus) {
     if (rc != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER &&
         rc != DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER) {
         recordError("another process already owns org.chocobar.Geom");
-        dbus_connection_close(g_conn);
-        dbus_connection_unref(g_conn);
-        g_conn = NULL;
+        closeConn();
         return 0;
     }
 
@@ -74,19 +82,29 @@ int geomBusConnect(GeomBus *bus) {
     const char *rule = "type='method_call',interface='org.chocobar.Geom',member='Report'";
     dbus_bus_add_match(g_conn, rule, &err);
     if (dbus_error_is_set(&err)) {
+        // without the match rule NO Report call is ever delivered, so reporting
+        // success here would leave the feature silently dead - which is the one
+        // outcome this file exists to prevent.
         recordError(err.message);
         dbus_error_free(&err);
+        closeConn();
+        return 0;
     }
     return 1;
 }
 
-// Read and decode Report calls. Returns how many were decoded (the last wins).
+// Read and decode Report calls. Returns how many were decoded (the last wins),
+// or -1 if the connection died and the caller must call geomBusConnect again.
 int geomBusPoll(GeomBus *bus, GeomReport *out) {
     (void)bus;
     if (!g_conn) return 0;
     if (!dbus_connection_get_is_connected(g_conn)) {
         recordError("the session bus disconnected");
-        return 0;
+        // a dead connection must be RELEASED, not polled forever: geomdbus.h
+        // promises this, and without it the bar loses bar.align 1 permanently
+        // after any KWin or session-bus restart.
+        closeConn();
+        return -1;
     }
     // do not block: the bar has its own tick
     dbus_connection_read_write(g_conn, 0);
@@ -132,9 +150,7 @@ void geomBusClose(GeomBus *bus) {
     (void)bus;
     if (!g_conn) return;
     dbus_connection_flush(g_conn);
-    dbus_connection_close(g_conn);
-    dbus_connection_unref(g_conn);
-    g_conn = NULL;
+    closeConn();
 }
 
 const char *geomBusLastError(void) { return g_err; }

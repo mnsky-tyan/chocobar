@@ -54,16 +54,15 @@ void svgDrawBattery(cairo_t *cr, int pct, int ac, double x, double y, double box
     cairo_fill(cr);
 
     if (ac) {
-        // the charge bolt, over the fill (Electron batCharge, stroke 1.8/2.2)
-        cairo_move_to(cr, 13.0, 8.2);
-        cairo_line_to(cr, 10.2, 12.0);
-        cairo_line_to(cr, 12.2, 12.0);
-        cairo_line_to(cr, 11.0, 15.8);
-        cairo_line_to(cr, 13.8, 12.0);
-        cairo_line_to(cr, 11.8, 12.0);
-        cairo_close_path(cr);
+        // the charge bolt, over the fill (Electron batCharge, stroke 1.8)
+        // Same 4-point open polyline the Windows renderer draws (p_icons.c:509-512)
+        cairo_new_path(cr);
+        cairo_move_to(cr, 12.2, 8.9);
+        cairo_line_to(cr, 9.6, 12.4);
+        cairo_line_to(cr, 12.0, 12.4);
+        cairo_line_to(cr, 9.9, 15.7);
         cairo_set_source_rgba(cr, r, g, b, alpha);
-        cairo_set_line_width(cr, 1.8 / 2.2 * 1.1);
+        cairo_set_line_width(cr, 1.8);
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         cairo_stroke(cr);
