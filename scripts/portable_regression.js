@@ -378,6 +378,15 @@ function check(name, ok, detail) {
     !!motion && !/XMoveWindow|g_x\s*=|g_y\s*=/.test(motion[1]),
     'its position is derived from bar.align and bar.gap; a dragged bar breaks that contract');
 
+  // the shape's middle band must be built from integer steps, not a truncating
+  // float: (unsigned short)(g_h - 2*radius) floors 22.56 to 22, leaving one row
+  // uncovered between the band and the bottom loop - a 1 px horizontal hole
+  // through which raw wallpaper shows as a bright line across the bar.
+  check('linux: the shape covers every row of the bar',
+    !/\(unsigned short\)fmax\(1\.0, g_h - 2 \* radius\)/.test(lx) &&
+    /\(unsigned short\)fmax\(1, g_h - 2 \* steps\)/.test(lx),
+    'a truncating float leaves a 1 px gap the shape clips away; the line is wallpaper, not paint');
+
   // layout: the demo has TWO groups - left-pinned chips (tokens) and right-aligned
   // metrics, with an empty run between them. A single right-aligned loop packs every
   // chip against the right edge and reads as one block, which is the visual gap

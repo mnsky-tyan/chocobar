@@ -210,9 +210,12 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
         rects[nr].height = 1; nr++;
     }
     if (nr < 38) {
-        rects[nr].x = 0; rects[nr].y = (short)rr;
+        // middle band from the integer steps, like the bar: truncating the
+        // float height once left a 1 px hole between this band and the bottom
+        // loop (same bug as the bar's shape had).
+        rects[nr].x = 0; rects[nr].y = (short)steps;
         rects[nr].width = (unsigned short)m.w;
-        rects[nr].height = (unsigned short)fmax(1.0, m.h - 2 * rr); nr++;
+        rects[nr].height = (unsigned short)fmax(1, m.h - 2 * steps); nr++;
     }
     for (int i = 0; i < steps && nr < 38; i++) {
         double dy = rr - i;

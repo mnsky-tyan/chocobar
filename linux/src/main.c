@@ -598,11 +598,16 @@ static void applyShape(void) {
             rects[nr].height = 1;
             nr++;
         }
+        // the middle band is derived from steps, NOT from truncating the float
+        // radius: (unsigned short)(g_h - 2*radius) floors down (22.56 -> 22),
+        // which once left row 34 uncovered between this band and the bottom
+        // loop - a 1 px horizontal hole the shape clipped away, so raw wallpaper
+        // showed through the bar as a bright line.
         if (nr < 78) {
             rects[nr].x = 0;
-            rects[nr].y = (short)radius;
+            rects[nr].y = (short)steps;
             rects[nr].width = (unsigned short)g_w;
-            rects[nr].height = (unsigned short)fmax(1.0, g_h - 2 * radius);
+            rects[nr].height = (unsigned short)fmax(1, g_h - 2 * steps);
             nr++;
         }
         for (int i = 0; i < steps && nr < 78; i++) {
