@@ -23,6 +23,8 @@
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/shape.h>
 #include <X11/keysym.h>
+#include <X11/Xcursor/Xcursor.h>
+#include "linux_svg.h"
 
 #include "linux_shape.h"
 #include "menu.h"
@@ -212,9 +214,17 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     // grab the pointer so a click outside closes the menu (the Windows behaviour)
     // A failed grab is not fatal - the menu still closes on Escape or an item
     // click - but it must not be silent, because the whole dismissal model rests
-    // on these two calls.
+    // on these two calls. The grab carries the SAME cursor the bar defines: the
+    // theme arrow at the desktop's scaled size. Without it the pointer over the
+    // menu falls back to the root cursor at the raw XCURSOR_SIZE and shrinks
+    // against the desktop's scaled one - the same symptom the bar had.
+    XcursorImage *img = XcursorLibraryLoadImage("left_ptr", NULL,
+                                                (int)(cbCursorBaseSize() * cbCursorScale() + 0.5));
+    Cursor menuCur = img ? XcursorImageLoadCursor(dpy, img) : None;
+    if (img) XcursorImageDestroy(img);
     int pg = XGrabPointer(dpy, m.win, True, ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                          GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+                          GrabModeAsync, GrabModeAsync, None, menuCur, CurrentTime);
+    if (menuCur != None) XFreeCursor(dpy, menuCur);
     int kg = XGrabKeyboard(dpy, m.win, True, GrabModeAsync, GrabModeAsync, CurrentTime);
     if (pg != GrabSuccess || kg != GrabSuccess)
         fprintf(stderr, "chocobar: menu grab partial (pointer=%d keyboard=%d); "

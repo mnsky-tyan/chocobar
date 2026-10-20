@@ -388,6 +388,37 @@ function check(name, ok, detail) {
     /\(unsigned short\)fmax\(1, h - 2 \* steps\)/.test(shp),
     'a truncating float leaves a 1 px gap the shape clips away; the line is wallpaper, not paint');
 
+  // the CURSOR: a window with no cursor defined shows Xwayland's root cursor at
+  // the raw XCURSOR_SIZE, while the desktop renders the same theme cursor SCALED
+  // by the output factor - so the cursor visibly shrank whenever it crossed the
+  // bar (the same symptom an Electron app had before it got Wayland fractional
+  // scaling). The fix defines the theme cursor at base * scale, and the SIZE
+  // must come from ONE definition shared by the bar, the menu grab and the
+  // dashboard, or two of the three windows shrink while one does not.
+  const lx2 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  const menu2 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.c'), 'utf8');
+  const dash2 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
+  const svg2 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'linux_svg.h'), 'utf8');
+  const cursorSize = /cbCursorBaseSize\(\) \* cbCursorScale\(\)/;
+  const cursorBase = /cursorBaseSize\(\) \* g_scale/;
+  // Extract main()'s body so the assertion is about the CALL, not about a
+  // helper that exists but is never invoked - a guard that passes on code
+  // without the call is decoration, not a guard.
+  const mainBody = (/int main\(int argc, char \*\*argv\) \{([\s\S]*)$/.exec(lx2) || [, ''])[1];
+  check('linux: the bar defines its own cursor at the SCALED size',
+    /XcursorLibraryLoadImage/.test(lx2) && /cursorsInit\(\);/.test(mainBody) &&
+    cursorBase.test(lx2),
+    'no cursor defined means the raw XCURSOR_SIZE root cursor, which shrinks against the desktop');
+  check('linux: the cursor size comes from one shared definition',
+    cursorBase.test(lx2) && /int cbCursorBaseSize\(void\) \{ return cursorBaseSize\(\); \}/.test(lx2) &&
+    /double cbCursorScale\(void\) \{ return g_scale; \}/.test(lx2) &&
+    cursorSize.test(menu2) && cursorSize.test(dash2) &&
+    /cbCursorBaseSize/.test(svg2) && /cbCursorScale/.test(svg2),
+    'three windows each guessing the size is how two of them shrink while one does not');
+  check('linux: the hand cursor follows the clickable chip like Windows',
+    /loadCursor\("hand2"\)/.test(lx2) && /cursorUpdate\(hit >= 0\)/.test(lx2),
+    'p_ui.c switches IDC_HAND/IDC_ARROW on WM_MOUSEMOVE; the Linux bar must mean the same thing');
+
   // layout: the demo has TWO groups - left-pinned chips (tokens) and right-aligned
   // metrics, with an empty run between them. A single right-aligned loop packs every
   // chip against the right edge and reads as one block, which is the visual gap

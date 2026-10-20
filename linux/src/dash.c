@@ -22,6 +22,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include <X11/Xcursor/Xcursor.h>
+#include "linux_svg.h"
 
 #include "dash.h"
 #include "linux_shape.h"
@@ -322,6 +324,20 @@ void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
         Atom wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
         XSetWMProtocols(dpy, d.win, &wmDelete, 1);
         d.wmDelete = wmDelete;
+    }
+    // The dashboard's own cursor, at the desktop's scaled size: without it the
+    // pointer over the board shows Xwayland's root cursor at the raw
+    // XCURSOR_SIZE and shrinks against the desktop's scaled one (the bar fixed
+    // the same thing; one shared definition of the size, not two).
+    {
+        XcursorImage *img = XcursorLibraryLoadImage("left_ptr", NULL,
+                                                    (int)(cbCursorBaseSize() * cbCursorScale() + 0.5));
+        if (img) {
+            Cursor c = XcursorImageLoadCursor(dpy, img);
+            XDefineCursor(dpy, d.win, c);
+            XFreeCursor(dpy, c);
+            XcursorImageDestroy(img);
+        }
     }
     XSizeHints sh;
     memset(&sh, 0, sizeof(sh));

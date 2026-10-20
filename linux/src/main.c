@@ -43,6 +43,7 @@
 #include <unistd.h>
 #include <unistd.h>
 #include <X11/Xatom.h>
+#include <X11/Xcursor/Xcursor.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
 
@@ -208,6 +209,7 @@ static int g_chipCount = 0;
 
 // defined with the event handlers below; used by the painter
 static int chipClickable(const Chip *c);
+static void cursorUpdate(int clickable);
 static void paint(void);
 
 // geometry, in CSS px, matching the Windows bar's own numbers (p_ui.c paintBar)
@@ -856,10 +858,14 @@ static void onMotion(XMotionEvent *e) {
     int hit = chipAt(e->x);
     if (hit >= 0 && !chipClickable(&g_chips[hit])) hit = -1;
     if (hit != g_hover) { g_hover = hit; paint(); }
+    // the hand over the clickable chip, the arrow everywhere else (p_ui.c
+    // WM_MOUSEMOVE does the same with LoadCursor(IDC_HAND/IDC_ARROW))
+    cursorUpdate(hit >= 0);
 }
 
 static void onLeave(void) {
     if (g_hover != -1) { g_hover = -1; paint(); }
+    cursorUpdate(0);
 }
 
 static void onKey(XKeyEvent *e) {
@@ -1011,6 +1017,74 @@ static void detectScale(void) {
     }
     if (g_scale < 1.0) g_scale = 1.0;
     if (g_scale > 4.0) g_scale = 4.0;
+}
+
+// ---- cursors ------------------------------------------------------------------
+// The bar used to define NO cursor, so the pointer over it showed Xwayland's
+// ROOT cursor. That root cursor is loaded by Xwayland at the raw XCURSOR_SIZE
+// (60 here) while the desktop renders the same theme cursor SCALED by the
+// output factor (60 * 1.59 = ~96 px) - so the cursor visibly SHRANK whenever it
+// crossed the bar. Exactly the same symptom the Electron/ChatGPT app had before
+// it was given Wayland fractional scaling: the app drew its cursor unscaled in
+// a scaled world. The fix here is the X11 equivalent: load the theme cursor at
+// the SCALED size and define it on the window, so the pointer over the bar is
+// the cursor the desktop shows everywhere else.
+//
+// Windows does the same thing with LoadCursor(IDC_ARROW/IDC_HAND): the system
+// picks the theme cursor at the system size, and the hand appears over the
+// clickable chip. This mirrors that, with the hand switching on hover.
+static Cursor g_curArrow;
+static Cursor g_curHand;
+static int g_curOn = 0;   // 0 = arrow, 1 = hand (what is currently defined)
+
+// The desktop's cursor size: XCURSOR_SIZE from the environment (the same value
+// KWin reads) multiplied by the DPI scale KWin applies when rendering it. A
+// cursor theme carries fixed sizes, so libXcursor picks the closest one and the
+// exact rounding does not matter - 60 * 1.59 lands on the theme's 96.
+static int cursorBaseSize(void) {
+    const char *s = getenv("XCURSOR_SIZE");
+    if (s && *s) {
+        int v = atoi(s);
+        if (v > 0 && v < 512) return v;
+    }
+    return 24; // the X default; the theme is what matters, not this guess
+}
+
+// menu.c loads its own grab cursor from the same numbers: one definition of
+// "how big the desktop cursor is", not two chances to disagree with KWin.
+int cbCursorBaseSize(void) { return cursorBaseSize(); }
+double cbCursorScale(void) { return g_scale; }
+
+static Cursor loadCursor(const char *name) {
+    // theme = NULL: libXcursor resolves XCURSOR_THEME from the environment, so
+    // the bar shows the SAME theme the desktop shows.
+    int want = (int)(cursorBaseSize() * g_scale + 0.5);
+    XcursorImage *img = XcursorLibraryLoadImage(name, NULL, want);
+    if (!img) return None; // no such shape: leave the root cursor, do not invent one
+    Cursor c = XcursorImageLoadCursor(g_dpy, img);
+    XcursorImageDestroy(img);
+    return c;
+}
+
+static void cursorsInit(void) {
+    g_curArrow = loadCursor("left_ptr");
+    g_curHand = loadCursor("hand2");
+    if (g_curArrow == None) return; // nothing to define: keep the root cursor
+    XDefineCursor(g_dpy, g_win, g_curArrow);
+    g_curOn = 0;
+}
+
+// The cursor follows the hover state: a hand over the clickable chip, the arrow
+// everywhere else. Defining only on a CHANGE keeps this cheap (an X call per
+// crossing, not per motion event).
+static void cursorUpdate(int clickable) {
+    if (g_curArrow == None) return;
+    Cursor want = (clickable && g_curHand != None) ? g_curHand : g_curArrow;
+    if (want == None) return;
+    int on = (want == g_curHand) ? 1 : 0;
+    if (on == g_curOn) return;
+    XDefineCursor(g_dpy, g_win, want);
+    g_curOn = on;
 }
 
 // ---- tokens ---------------------------------------------------------------------------------------
@@ -1287,7 +1361,6 @@ int main(int argc, char **argv) {
 
     detectScale();
     svgInitPaths();            // p_svg.c's shared path data, flattened once
-
     // initial metrics so the very first paint has real numbers
     linuxMetricsPrime();
     linuxMetricsPoll(&g_m);
@@ -1317,6 +1390,11 @@ int main(int argc, char **argv) {
     // window's map is the one chance the WM gets to place it - USPosition makes
     // it honour ours instead of running its placement policy.
     setSizeHints(g_x, g_y);
+    // the bar's OWN cursor, at the desktop's scaled size: without this the
+    // pointer over the bar shows Xwayland's root cursor at the raw XCURSOR_SIZE
+    // and visibly shrinks against the desktop's scaled one (measured via the
+    // same symptom on an Electron app that lacked Wayland fractional scaling)
+    cursorsInit();
     XMapWindow(g_dpy, g_win);
     // KWin adds DEMANDS_ATTENTION to the state property when a window maps
     // without user activity. Clear it: re-writing _NET_WM_STATE after the map

@@ -26,3 +26,13 @@ void svgDrawBattery(cairo_t *cr, int pct, int ac, double x, double y, double box
                     double wr, double wg, double wb);
 
 #endif
+
+// The desktop's cursor, for windows that need to define one (the bar itself, the
+// menu's pointer grab). cursorBaseSize() is XCURSOR_SIZE from the environment -
+// the same value KWin reads - and cursorScale() is the DPI scale KWin applies
+// when rendering it, so base * scale is the size the desktop cursor really is.
+// Without the scale factor the cursor over these windows is the raw XCURSOR_SIZE
+// and visibly shrinks against the desktop's (measured; same symptom the Electron
+// app had before it got Wayland fractional scaling).
+int cbCursorBaseSize(void);
+double cbCursorScale(void);

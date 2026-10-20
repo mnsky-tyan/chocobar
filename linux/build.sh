@@ -122,7 +122,7 @@ APP_CFLAGS=(
   -DCHOCOBAR_PORTABLE=1
   -Inative/src -Inative/vendor -Ilinux/src
 )
-PKGS=(x11 xrender xfixes cairo dbus-1 fontconfig libcurl)
+PKGS=(x11 xrender xfixes xcursor cairo dbus-1 fontconfig libcurl)
 
 echo "compiling the core + POSIX adapter..."
 gcc "${CORE_CFLAGS[@]}" -c "$CORE_TU" -o "$OUT/core.o"
