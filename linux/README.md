@@ -1,11 +1,12 @@
 # Chocobar on Linux
 
-A floating, always-on-top, translucent bar showing the same chips as the Windows
-bar: cpu, ram, cpu temperature, volume, battery, clock, and the AI token count
-the shared scanner produces. It does **not** follow a terminal window around; it
-sits where you put it vertically, and with `bar.align: 1` it takes the **active
-terminal's width and horizontal position**, so it reads as a strip along the top
-of that terminal.
+A floating translucent bar in the LOWER layer (under normal windows, the same
+behaviour as the Windows bar) showing the same chips: pet, the AI token count
+the shared scanner produces, the subscription gauge, cpu, ram, cpu temperature,
+volume, battery, gpu and clock. It does **not** follow a terminal window around;
+it sits where you put it vertically, and with `bar.align: 1` it takes the
+**active terminal's width and horizontal position**, so it reads as a strip
+along the top of that terminal.
 
 ![the bar](../docs/img/linux-bar.png)
 
@@ -88,12 +89,13 @@ reads, and it hot-reloads on save.
 
 | what | value |
 |---|---|
-| memory (RSS) | 15.4 MB |
-| CPU, steady state | 0.17% of one core (5 ticks in 30 s), 1 Hz repaint |
-| threads / fds | 1 / 4 |
-| binary | 448 KB, no runtime |
-| token scan, cold | ~1.5 s for 2,100 session records (297 M tokens), then incremental |
+| memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
+| CPU, steady state | 0.2% of one core, 1 Hz repaint |
+| threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
+| binary | 808 KB, no runtime |
+| token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
+| subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
 
 For comparison the Windows bar quotes ~30 MB and under 1% of total CPU.
 
@@ -101,12 +103,12 @@ For comparison the Windows bar quotes ~30 MB and under 1% of total CPU.
 
 The port is not a rewrite. `linux/build.sh` assembles the same core translation
 unit the Windows and macOS builds do - `chocobar.c`, `p_utils.c`, `p_svg.c`,
-`p_tokens.c`, `p_agg.c` - and links it against `macos/src/adapter.m`, which is the
-POSIX implementation of the Win32 file/dir/string/time seam and contains no
-Objective-C (the build compiles it as C, with `-x c`, on every run). The scanner,
-the config parser and the aggregation are therefore literally the same code, and
-the token totals match the Windows bar's because they are computed by the same
-function.
+`p_subs.c`, `p_tokens.c`, `p_agg.c` - and links it against `macos/src/adapter.m`,
+which is the POSIX implementation of the Win32 file/dir/string/time/thread seam
+and contains no Objective-C (the build compiles it as C, with `-x c`, on every
+run). The scanner, the config parser, the subscription fetchers and the chip
+rotation are therefore literally the same code, and the totals match the Windows
+bar's because they are computed by the same function.
 
 Per-OS parts, written fresh for Linux:
 
@@ -115,7 +117,7 @@ Per-OS parts, written fresh for Linux:
 | metrics | `p_metrics.c` (PDH, Core Audio, HWiNFO) | `linux/src/p_metrics_linux.c` (`/proc`, `/sys`, `pactl`) |
 | icons | `p_icons.c` (GDI+) | `linux/src/icons_cairo.c` (cairo) - same geometry from `p_svg.c` |
 | window/paint | `p_ui.c` (layered GDI window) | `linux/src/main.c` (managed X11 window + cairo) |
-| subscriptions | `p_subs.c` (WinHTTP) | not ported: the config parses, nothing fetches |
+| subscriptions | `p_subs.c` (WinHTTP) | the SAME `p_subs.c`: its HTTP is a libcurl body under `CHOCOBAR_PORTABLE` |
 
 ## Why a managed X11 window in the lower layer
 
@@ -160,9 +162,10 @@ purpose - see the project README's feasibility notes.
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |
 | volume | `pactl get-sink-volume` | the only source that runs a process; once per second, only while enabled |
 | battery | `/sys/class/power_supply/*` | green while charging, red only when low **and** on battery |
-| gpu | `amdgpu`'s `gpu_busy_percent` | Intel iGPU exposes no utilisation file, so this machine shows no gpu chip |
+| gpu | `amdgpu`'s `gpu_busy_percent`, then the i915 PMU | Intel needs the PMU (see the capability note above); without the capability the chip hides |
 | clock | local time, the config's `modules.clock.format` | same `{MMM} {dd} {Wkk} {HH}:{mm}` tokens |
 | tokens | the shared JSONL session scan | the chip shows the all-time total; sources may be directories OR single ledger files |
+| subs gauge | the shared `p_subs.c` providers | one plan's weekly remaining %, rotating per `subs.rotateSec`; same fetchers as Windows |
 
 ### Token sources, including magpie and API-key traffic
 
@@ -197,6 +200,31 @@ places would double them. Measured on this machine: magpie's ledger plus pi's
 non-magpie routes equalled the bar's total EXACTLY (382,751,319 = 382,751,319).
 
 A sensor that does not exist reads as an em dash, never as a fabricated 0.
+
+### The subscription gauge
+
+The gauge chip fetches through `native/src/p_subs.c` - the SAME provider fetchers
+the Windows bar runs (ChatGPT, Z.ai, antigravity, and config-only generic REST
+endpoints). The Z.ai provider reads the API key out of the ZCode config the
+desktop app already maintains, so no credentials live in this config:
+
+```json
+"subs": {
+  "enabled": true,
+  "intervalMinutes": 2,
+  "rotateSec": 60,
+  "providers": [
+    { "type": "zai", "enabled": true, "label": "zai" }
+  ]
+}
+```
+
+The chip shows the selected plan's WEEKLY remaining percentage and advances to
+the next enabled provider every `rotateSec` seconds. `>70%` is green, `>30%`
+dim, below that red - the Windows thresholds. `stale` means every provider
+failed its last fetch; an em dash means nothing has ever succeeded. The board
+(Subscription dashboard in the right-click menu) is Windows/mac only for now -
+the menu item says so rather than pretending.
 
 ## Tests
 
