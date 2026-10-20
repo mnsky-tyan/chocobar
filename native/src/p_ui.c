@@ -81,11 +81,10 @@ static int g_trayAdded = 0;
 static int g_trayIconOwned = 0; // the icon is ours (not the shared fallback)
 static int g_barVisible = 0;
 static HWND g_owner = NULL; // the bar's owner window (the followed terminal)
-static int g_subsRotIdx = 0;    // rotating subs chip position
-static DWORD g_subsRotTick = 0; // last rotation (GetTickCount)
-static int g_subsRotSec = 60;   // subs.rotateSec, applied by loadConfig
-static wchar_t g_subsRotTip[96]; // tooltip for the rotating subs chip
-static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb);
+// The rotating subs chip's state (g_subsRotIdx/Tick/Sec/Tip) lives in p_subs.c
+// with the pick/format/rotate logic, because the Linux front-end renders the
+// same chip from the same functions. p_ui.c reads the tooltip through an
+// accessor instead of owning the buffer.
 static HWND g_term = NULL;
 static RECT g_lastTarget;
 static int g_haveTarget = 0;
@@ -650,13 +649,8 @@ static void fmtCalls(long long n, wchar_t *out, int cb) {
     else swprintf(out, cb, L"%lld", n);
 }
 
-// renderer/subs.js fmtNum: M and k tiers only (no B), values rounded
-static void fmtNum(long long n, wchar_t *out, int cb) {
-    if (n < 0) { lstrcpynW(out, L"\u2014", cb); return; }
-    if (n >= 1000000LL) swprintf(out, cb, L"%.1fM", n / 1e6);
-    else if (n >= 1000) swprintf(out, cb, L"%.1fk", n / 1e3);
-    else swprintf(out, cb, L"%lld", n);
-}
+// renderer/subs.js fmtNum lives in p_utils.c now: the shared subs chip
+// formatter (p_subs.c) needs the same M/k tiers, and two copies would drift.
 
 // uppercased window label, as the panel head shows it (subs.css text-transform)
 static void subsWinUpper(const SubsWin *w, wchar_t *up, int cb) {
@@ -3142,86 +3136,9 @@ static void chipClick(int idx) {
 // bar's palette and font (the same tokens the dashboards use).
 typedef struct { const wchar_t *label; int cmd; } MenuItem;
 
-// Build the chip's rotation list: one entry per enabled provider, that
-// provider's WEEKLY window when it reports one (the vendor's own headline
-// quota), else its lowest window. Advances one entry per subs.rotateSec.
-// Returns the entry's remaining % and writes "<plan> <window> N% left".
-// The selection half: fill pick[] with (provider << 8) | window entries, one
-// per enabled provider that currently has a window (its best window).
-// Returns the count; 0 means no provider has data right now.
-static int subsChipPick(int *pick, int maxPick) {
-    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
-    int n = 0;
-    for (int i = 0; i < pn; i++) {
-        if (!subsProvEnabled(i)) continue;
-        SubsWin w[MAX_GEN_WIN];
-        int wn = subsProvWins(i, w, MAX_GEN_WIN);
-        if (wn < 0) wn = -wn;
-        if (wn <= 0) continue;
-        int best = -1;
-        for (int k = 0; k < wn; k++) {
-            if (wcsstr(w[k].label, L"week") || wcsstr(w[k].label, L"WEEK")) { best = k; break; }
-            // prefer a row with a real fraction; rem -1 rows are reset-only
-            if (best < 0 || (w[k].rem >= 0 && w[k].rem < w[best].rem)) best = k;
-        }
-        if (best >= 0 && n < maxPick) pick[n++] = (i << 8) | best;
-    }
-    return n;
-}
-
-// The formatting half: render one (provider, window) pair as the rotating
-// chip's text and tooltip.
-static int subsChipFormat(int pi2, int k, wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
-    SubsWin w[MAX_GEN_WIN];
-    int wn = subsProvWins(pi2, w, MAX_GEN_WIN);
-    if (wn < 0) wn = -wn;
-    if (wn <= 0) {
-        if (tip) lstrcpynW(tip, L"\u2014", tipCb);
-        if (txt) lstrcpynW(txt, L"\u2014", cb);
-        return -1;
-    }
-    if (k >= wn) k = 0;
-    int rem = w[k].rem;
-    // The chip stays a percentage (it is a meter); the absolute credit
-    // count belongs on the board rows and in this tooltip, which is the
-    // requested home for it.
-    int hasNum = (w[k].used >= 0 && w[k].total > 0);
-    long long left = hasNum ? ((long long)w[k].total - w[k].used) : 0;
-    if (left < 0) left = 0;
-    if (tip) {
-        wchar_t plan[24]; subsProvPlan(pi2, plan, 24);
-        if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
-        if (hasNum) {
-            wchar_t lf[24], ts3[24];
-            fmtNum(left, lf, 24);
-            fmtNum(w[k].total, ts3, 24);
-            swprintf(tip, tipCb, L"%ls %ls: %d%% left (%ls of %ls credits)", plan, w[k].label, rem, lf, ts3);
-        } else {
-            swprintf(tip, tipCb, L"%ls %ls: %d%% left", plan, w[k].label, rem);
-        }
-    }
-    if (txt) {
-        if (rem < 0) lstrcpynW(txt, L"\u2014", cb); // pool between resets
-        else swprintf(txt, cb, L"%d%%", rem);
-    }
-    return rem;
-}
-
-static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
-    int pick[MAX_SUBS]; // (provider << 8) | window
-    int n = subsChipPick(pick, MAX_SUBS);
-    if (!n) { if (tip) lstrcpynW(tip, L"No subscription windows", tipCb); if (txt) lstrcpynW(txt, L"\u2014", cb); return -1; }
-    if (g_subsRotSec < 5) g_subsRotSec = 5;
-    // the set of providers with data shrinks between paints (one drops to no
-    // data), so the persistent index is clamped to what this call filled
-    if (g_subsRotIdx >= n) g_subsRotIdx %= n;
-    DWORD now = GetTickCount();
-    if (now - g_subsRotTick >= (DWORD)g_subsRotSec * 1000u) {
-        g_subsRotTick = now;
-        g_subsRotIdx = (g_subsRotIdx + 1) % n;
-    }
-    return subsChipFormat(pick[g_subsRotIdx] >> 8, pick[g_subsRotIdx] & 0xFF, txt, cb, tip, tipCb);
-}
+// The rotating subs chip's pick/format/rotate logic lives in p_subs.c: it is
+// provider-state logic, not rendering, and the Linux front-end renders the
+// same chip from the same functions.
 
 static const MenuItem kMenuItems[] = {
     { L"Token dashboard",        10 }, { L"Subscription dashboard", 11 }, { NULL, 0 },

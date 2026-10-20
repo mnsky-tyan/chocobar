@@ -114,3 +114,14 @@ static int hexToColorref(const wchar_t *s) {
     // v is raw 0xRRGGBB; COLORREF wants 0x00bbggrr (red in the low byte)
     return (int)(((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF));
 }
+
+// renderer/subs.js fmtNum: M and k tiers only (no B), values rounded.
+// Lives here (not p_ui.c) because the subs chip formatter - which the Linux
+// front-end renders too - needs the same tiers, and two copies would drift
+// exactly like the subs.js tiers drifted before this was unified.
+static void fmtNum(long long n, wchar_t *out, int cb) {
+    if (n < 0) { lstrcpynW(out, L"\u2014", cb); return; }
+    if (n >= 1000000LL) swprintf(out, cb, L"%.1fM", n / 1e6);
+    else if (n >= 1000) swprintf(out, cb, L"%.1fk", n / 1e3);
+    else swprintf(out, cb, L"%lld", n);
+}

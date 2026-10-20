@@ -13,14 +13,21 @@
 // that true on every pull request that touches them.
 //
 // NOT INCLUDED HERE, ON PURPOSE:
-// - p_metrics.c and p_subs.c. They are wholly Win32-coupled at the type level
-//   (PDH_*, IMMDeviceEnumerator, SYSTEM_POWER_STATUS, MEMORYSTATUSEX,
-//   PROCESSENTRY32W, COM/GUID, winhttp.h) and need real per-OS implementations,
-//   not declarations. A macOS front-end starts without them and grows them.
+// - p_metrics.c. Wholly Win32-coupled at the type level (PDH_*,
+//   IMMDeviceEnumerator, SYSTEM_POWER_STATUS, MEMORYSTATUSEX,
+//   PROCESSENTRY32W, COM/GUID) and needs a real per-OS implementation, not
+//   declarations. A front-end starts without it and grows it.
 // - p_ui.c. The bar's rendering and window management are the part being
-//   REWRITTEN for macOS, not shared.
+//   REWRITTEN per front-end, not shared.
 // - GDI/GDI+ types. p_icons.c parses SVG paths purely, but its renderer is
 //   GDI; the SVG parser is reused, the renderer is not.
+//
+// p_subs.c WAS on that list (its HTTP was winhttp.h). The WinHTTP surface
+// turned out to be one function - subsHttpRequest - and that function now
+// carries its own portable body (libcurl) behind CHOCOBAR_PORTABLE, while the
+// rest of the part is threads, file reads and jsmn, all already covered by
+// this header. So p_subs.c is compiled unchanged on Linux and the header
+// declares the thread/time seam it needs below.
 
 #ifndef CHOCOBAR_CORE_H
 #define CHOCOBAR_CORE_H
@@ -242,6 +249,7 @@ CB_BOOL SetEnvironmentVariableW(const wchar_t *name, const wchar_t *value);
 // interlocked clear with a plain store, which silently removed the release
 // barrier from the Windows binary too.
 long InterlockedExchange(long volatile *target, long value);
+long InterlockedCompareExchange(long volatile *target, long value, long compare);
 
 // ---- time ---------------------------------------------------------------------
 
@@ -252,6 +260,23 @@ CB_BOOL LocalFileTimeToFileTime(const FILETIME *lft, FILETIME *ft);
 DWORD GetTickCount(void);
 ULONGLONG GetTickCount64(void);
 void Sleep(DWORD ms);
+
+// ---- threads -----------------------------------------------------------------
+// p_subs.c fans its providers out over worker threads and joins them; the
+// Win32 surface it uses is this three-call subset. HANDLE stays void*, but
+// thread handles are heap objects (the adapter's), NOT the fd-cast handles
+// CreateFileW returns - CloseHandle in the adapter dispatches on the value.
+#define INFINITE 0xFFFFFFFF
+#define MOVEFILE_REPLACE_EXISTING 0x1
+#define WINAPI
+typedef long LONG;
+typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID);
+HANDLE CreateThread(void *sa, SIZE_T stack, LPTHREAD_START_ROUTINE fn,
+                    LPVOID arg, DWORD flags, DWORD *id);
+DWORD WaitForSingleObject(HANDLE h, DWORD ms);
+DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, int waitAll, DWORD ms);
+void GetSystemTimeAsFileTime(FILETIME *ft);
+CB_BOOL MoveFileExW(const wchar_t *src, const wchar_t *dst, DWORD flags);
 
 // ---- critical sections ---------------------------------------------------------
 
@@ -284,5 +309,27 @@ void writeLogA(const char *s);
 #ifdef __cplusplus
 }
 #endif
+
+// ---- subscription providers (p_subs.c) ----------------------------------------
+// These are the portable seam a front-end in its own translation unit uses to
+// paint the gauge chip and the subscription board. On Windows p_subs.c is part
+// of the amalgamated TU and the renderer calls the statics directly, so these
+// exist only under CHOCOBAR_PORTABLE (same rule as p_agg.c's cbTok* accessors).
+#ifdef CHOCOBAR_PORTABLE
+#include "subs_types.h"
+void cbSubsSetRotateSec(int sec);
+int cbSubsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb);
+int cbSubsChipRem(void);
+int cbSubsChipStale(void);
+int cbSubsEnabled(void);
+void cbSubsStart(void);
+int cbSubsProviderCount(void);
+int cbSubsProvEnabled(int i);
+void cbSubsProvLabel(int i, wchar_t *out, int cb);
+void cbSubsProvPlan(int i, wchar_t *out, int cb);
+int cbSubsProvWins(int i, SubsWin *out, int max);
+long long cbSubsFetchedEpochMs(void);
+void cbSubsRefetchNow(void);
+#endif // CHOCOBAR_PORTABLE
 
 #endif // CHOCOBAR_CORE_H

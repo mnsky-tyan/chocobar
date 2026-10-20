@@ -19,7 +19,15 @@
 #include <iphlpapi.h>
 #include <ws2tcpip.h>
 
+// writeLogA is defined by p_ui.c in the Windows single-TU build and by the
+// adapter in the portable one; the header declares it, so a second static
+// forward declaration here would conflict there.
+#ifndef CHOCOBAR_PORTABLE
 static void writeLogA(const char *s); // p_ui
+#endif
+#ifdef CHOCOBAR_PORTABLE
+#include <curl/curl.h>
+#endif
 
 #define CB_WSTR_(x) L##x
 #define CB_WSTR(x)  CB_WSTR_(x)
@@ -32,7 +40,7 @@ static int g_subsLockInit = 0;
 // label needs 24 wchars: "Claude/GPT week" is 15 but the group prefix is
 // truncated before the window is appended, which used to garble every row of
 // the antigravity panel ("CLAUDE AND GPT" lost its window suffix).
-typedef struct { wchar_t label[24]; int pct; int rem; int used; int total; long long resetAt; } SubsWin;
+#include "subs_types.h" // SubsWin: one definition shared with the front-ends
 static SubsWin g_subsWin[MAX_SUBS][MAX_GEN_WIN]; // last good windows per provider
 static int g_subsWinN[MAX_SUBS];
 static wchar_t g_subsPlan[MAX_SUBS][24]; // last good plan name per provider
@@ -159,7 +167,7 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
     if (deviceMid) {
         *deviceMid = NULL;
         wchar_t dir[MAX_PATH], tpath[MAX_PATH * 2];
-        wcsncpy_s(dir, MAX_PATH, path, _TRUNCATE);
+        lstrcpynW(dir, path, MAX_PATH);
         wchar_t *slash = wcsrchr(dir, L'\\');
         if (!slash) slash = wcsrchr(dir, L'/');
         if (slash) {
@@ -190,11 +198,134 @@ static wchar_t *subsZaiKey(const Config *cfg, int providerIdx, wchar_t **deviceM
 // jsmn token array, so a body that outgrows this can never be useful
 #define SUBS_BODY_MAX (4 * 1024 * 1024)
 
+#ifdef CHOCOBAR_PORTABLE
+// Grow-on-demand response buffer for the curl write callback: the same 4 MB
+// ceiling the WinHTTP loop below enforces, so neither build can be made to
+// allocate without bound by a hostile or broken server. A body that would
+// exceed the ceiling is DROPPED, not truncated mid-token - jsmn must never see
+// half a number, which would parse as a smaller, believable number.
+typedef struct { char *buf; int cap, len, overflow; } CurlBody;
+
+static size_t curlCollect(char *ptr, size_t size, size_t nmemb, void *ud) {
+    CurlBody *b = (CurlBody *)ud;
+    size_t n = size * nmemb;
+    if (b->len + (int)n + 1 > b->cap) {
+        if (b->cap >= SUBS_BODY_MAX) { b->overflow = 1; return n; } // discard, keep the transfer alive
+        int ncap = b->cap * 2;
+        if ((int)n + 1 > ncap - b->len) ncap = b->len + (int)n + 1;
+        if (ncap > SUBS_BODY_MAX) ncap = SUBS_BODY_MAX;
+        char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, b->buf, (size_t)ncap);
+        if (!nb) return 0; // let curl report a write error
+        b->buf = nb; b->cap = ncap;
+    }
+    if (b->len + (int)n + 1 > b->cap) { b->overflow = 1; return n; }
+    memcpy(b->buf + b->len, ptr, n);
+    b->len += (int)n;
+    return n;
+}
+#endif
+
 static char *subsHttpRequest(const wchar_t *verb, const char *tag, const wchar_t *ua,
                              const wchar_t *host, int port, const wchar_t *path,
                              const wchar_t *headers, const char *body, int bodyLen,
                              int insecure, int timeoutMs, int *outStatus, int *outLen) {
     *outStatus = 0; *outLen = 0;
+#ifdef CHOCOBAR_PORTABLE
+    // libcurl: one request per easy handle. The provider cycle runs every
+    // subsIntervalMin (default 2), so per-request setup cost is irrelevant;
+    // a pooled multi handle would add a global to no measurable end.
+    //
+    // Timeout mapping: WinHTTP's SetTimeouts(ses, 5000, timeoutMs, 5000,
+    // timeoutMs) sets 5 s resolve/connect and timeoutMs for send+receive.
+    // curl's CONNECTTIMEOUT_MS is the connect leg and TIMEOUT_MS is the WHOLE
+    // transfer, so a stalled body read dies at the same timeoutMs here - the
+    // shape matches, the exact split does not, and both are a ceiling on a
+    // slow server rather than a policy.
+    char url[600], verb8[16] = {0}, ua8[256] = {0}, host8[256] = {0}, path8[512] = {0};
+    if (!WideCharToMultiByte(CP_UTF8, 0, verb, -1, verb8, sizeof(verb8), NULL, NULL)
+        || !WideCharToMultiByte(CP_UTF8, 0, ua, -1, ua8, sizeof(ua8), NULL, NULL)
+        || !WideCharToMultiByte(CP_UTF8, 0, host, -1, host8, sizeof(host8), NULL, NULL)
+        || !WideCharToMultiByte(CP_UTF8, 0, path, -1, path8, sizeof(path8), NULL, NULL)) {
+        writeLogA("[wizbar] subs: wide->utf8 failed");
+        return NULL;
+    }
+    if (port) snprintf(url, sizeof(url), "%s://%s:%d%s", insecure ? "http" : "https", host8, port, path8);
+    else snprintf(url, sizeof(url), "%s://%s%s", insecure ? "http" : "https", host8, path8);
+
+    struct curl_slist *hlist = NULL;
+    if (headers && *headers) {
+        int hbytes = WideCharToMultiByte(CP_UTF8, 0, headers, -1, NULL, 0, NULL, NULL);
+        char *h8 = (char *)malloc(hbytes > 0 ? (size_t)hbytes : 1);
+        if (h8) {
+            WideCharToMultiByte(CP_UTF8, 0, headers, -1, h8, hbytes, NULL, NULL);
+            char *line = h8;
+            for (;;) {
+                char *nl = strstr(line, "\r\n");
+                if (nl) *nl = 0;
+                if (*line) hlist = curl_slist_append(hlist, line);
+                if (!nl) break;
+                line = nl + 2;
+            }
+            free(h8);
+        }
+    }
+
+    CURL *c = curl_easy_init();
+    if (!c) {
+        if (hlist) curl_slist_free_all(hlist);
+        writeLogA("[wizbar] subs: curl_easy_init failed");
+        return NULL;
+    }
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, ua8);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
+    if (insecure) {
+        curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+    if (body && bodyLen > 0) {
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)bodyLen);
+    }
+    curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, verb8);
+    if (hlist) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hlist);
+    CurlBody b;
+    b.buf = (char *)HeapAlloc(GetProcessHeap(), 0, 64 * 1024);
+    if (!b.buf) {
+        curl_slist_free_all(hlist);
+        curl_easy_cleanup(c);
+        return NULL;
+    }
+    b.cap = 64 * 1024; b.len = 0; b.overflow = 0;
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curlCollect);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
+
+    CURLcode rc = curl_easy_perform(c);
+    if (rc != CURLE_OK) {
+        char dbg[160];
+        snprintf(dbg, sizeof(dbg), "[wizbar] subs %s: curl err %d (%s)", tag, (int)rc, curl_easy_strerror(rc));
+        writeLogA(dbg);
+        HeapFree(GetProcessHeap(), 0, b.buf);
+        curl_slist_free_all(hlist);
+        curl_easy_cleanup(c);
+        return NULL;
+    }
+    long status = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
+    *outStatus = (int)status;
+    if (b.overflow) {
+        char dbg[96];
+        sprintf(dbg, "[wizbar] subs %s: body over %d MB, truncated", tag, SUBS_BODY_MAX >> 20);
+        writeLogA(dbg);
+    }
+    if (b.len >= b.cap) b.len = b.cap - 1;
+    b.buf[b.len] = 0;
+    *outLen = b.len;
+    curl_slist_free_all(hlist);
+    curl_easy_cleanup(c);
+    return b.buf;
+#else
     HINTERNET ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!ses) ses = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!ses) { writeLogA("[wizbar] subs: open failed"); return NULL; }
@@ -260,6 +391,7 @@ static char *subsHttpRequest(const wchar_t *verb, const char *tag, const wchar_t
     if (con) WinHttpCloseHandle(con);
     if (ses) WinHttpCloseHandle(ses);
     return result;
+#endif
 }
 
 static char *subsHttpGet(const char *tag, const wchar_t *ua, const wchar_t *host, int port,
@@ -1694,8 +1826,16 @@ static DWORD WINAPI subsThreadProc(LPVOID lp) {
                     if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
                     char line[400];
                     wchar_t lab[64]; subsViewLabel(view, i, lab, 64);
-                    int off = sprintf(line, "[wizbar] subs[%d] %ls plan=%ls wins=%d stale=%d ::", i,
-                                      lab, plan, wn, stale);
+                    // Bounded precisions: a provider label is USER text and can be
+                    // any length, while %ls expands to up to 4 UTF-8 bytes per
+                    // wchar under glibc - an unbounded conversion overflowed this
+                    // 400-byte debug line (gcc measured 1530 bytes into 383).
+                    // This is a diagnostic log, so truncating is the right answer.
+                    int off = snprintf(line, sizeof(line),
+                                       "[wizbar] subs[%d] %.40ls plan=%.16ls wins=%d stale=%d ::",
+                                       i, lab, plan, wn, stale);
+                    if (off < 0) off = 0;
+                    if (off > (int)sizeof(line) - 1) off = (int)sizeof(line) - 1;
                     for (int k = 0; k < wn && off < 360; k++)
                         off += snprintf(line + off, sizeof(line) - (size_t)off,
                                         " [%ls rem=%d pct=%d used=%d total=%d]",
@@ -1812,6 +1952,101 @@ static void subsStart(void) {
     if (h) CloseHandle(h);
 }
 
+// ---- the rotating subs chip ------------------------------------------------
+// The gauge chip shows one plan's weekly remaining % at a time and rotates
+// every subs.rotateSec, so "8% chatgpt" becomes "3% zcode" becomes
+// "100% gemini" without opening the board.
+//
+// These live here, not in the renderer: choosing WHICH provider/window to show
+// is provider-state logic, and the Linux front-end renders the same chip from
+// the same functions. The rotation clock is per-process display state, so it
+// belongs with the chip rather than in the fetch state.
+static int g_subsRotIdx = 0;    // rotating subs chip position
+static DWORD g_subsRotTick = 0; // last rotation (GetTickCount)
+static int g_subsRotSec = 60;   // subs.rotateSec, applied by loadConfig
+static wchar_t g_subsRotTip[96]; // tooltip for the rotating subs chip
+
+// Build the chip's rotation list: one entry per enabled provider, that
+// provider's WEEKLY window when it reports one (the vendor's own headline
+// quota), else its lowest window. Advances one entry per subs.rotateSec.
+// Returns the entry's remaining % and writes "<plan> <window> N% left".
+// The selection half: fill pick[] with (provider << 8) | window entries, one
+// per enabled provider that currently has a window (its best window).
+// Returns the count; 0 means no provider has data right now.
+static int subsChipPick(int *pick, int maxPick) {
+    int pn = g_cfg.subsProviderCount; if (pn > MAX_SUBS) pn = MAX_SUBS;
+    int n = 0;
+    for (int i = 0; i < pn; i++) {
+        if (!subsProvEnabled(i)) continue;
+        SubsWin w[MAX_GEN_WIN];
+        int wn = subsProvWins(i, w, MAX_GEN_WIN);
+        if (wn < 0) wn = -wn;
+        if (wn <= 0) continue;
+        int best = -1;
+        for (int k = 0; k < wn; k++) {
+            if (wcsstr(w[k].label, L"week") || wcsstr(w[k].label, L"WEEK")) { best = k; break; }
+            // prefer a row with a real fraction; rem -1 rows are reset-only
+            if (best < 0 || (w[k].rem >= 0 && w[k].rem < w[best].rem)) best = k;
+        }
+        if (best >= 0 && n < maxPick) pick[n++] = (i << 8) | best;
+    }
+    return n;
+}
+
+// The formatting half: render one (provider, window) pair as the rotating
+// chip's text and tooltip.
+static int subsChipFormat(int pi2, int k, wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
+    SubsWin w[MAX_GEN_WIN];
+    int wn = subsProvWins(pi2, w, MAX_GEN_WIN);
+    if (wn < 0) wn = -wn;
+    if (wn <= 0) {
+        if (tip) lstrcpynW(tip, L"\u2014", tipCb);
+        if (txt) lstrcpynW(txt, L"\u2014", cb);
+        return -1;
+    }
+    if (k >= wn) k = 0;
+    int rem = w[k].rem;
+    // The chip stays a percentage (it is a meter); the absolute credit
+    // count belongs on the board rows and in this tooltip, which is the
+    // requested home for it.
+    int hasNum = (w[k].used >= 0 && w[k].total > 0);
+    long long left = hasNum ? ((long long)w[k].total - w[k].used) : 0;
+    if (left < 0) left = 0;
+    if (tip) {
+        wchar_t plan[24]; subsProvPlan(pi2, plan, 24);
+        if (!plan[0]) lstrcpynW(plan, L"\u2014", 24);
+        if (hasNum) {
+            wchar_t lf[24], ts3[24];
+            fmtNum(left, lf, 24);
+            fmtNum(w[k].total, ts3, 24);
+            swprintf(tip, tipCb, L"%ls %ls: %d%% left (%ls of %ls credits)", plan, w[k].label, rem, lf, ts3);
+        } else {
+            swprintf(tip, tipCb, L"%ls %ls: %d%% left", plan, w[k].label, rem);
+        }
+    }
+    if (txt) {
+        if (rem < 0) lstrcpynW(txt, L"\u2014", cb); // pool between resets
+        else swprintf(txt, cb, L"%d%%", rem);
+    }
+    return rem;
+}
+
+static int subsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
+    int pick[MAX_SUBS]; // (provider << 8) | window
+    int n = subsChipPick(pick, MAX_SUBS);
+    if (!n) { if (tip) lstrcpynW(tip, L"No subscription windows", tipCb); if (txt) lstrcpynW(txt, L"\u2014", cb); return -1; }
+    if (g_subsRotSec < 5) g_subsRotSec = 5;
+    // the set of providers with data shrinks between paints (one drops to no
+    // data), so the persistent index is clamped to what this call filled
+    if (g_subsRotIdx >= n) g_subsRotIdx %= n;
+    DWORD now = GetTickCount();
+    if (now - g_subsRotTick >= (DWORD)g_subsRotSec * 1000u) {
+        g_subsRotTick = now;
+        g_subsRotIdx = (g_subsRotIdx + 1) % n;
+    }
+    return subsChipFormat(pick[g_subsRotIdx] >> 8, pick[g_subsRotIdx] & 0xFF, txt, cb, tip, tipCb);
+}
+
 // chip state readers (UI thread): lowest remaining across providers with data.
 //
 // "stale" here means the chip has NOTHING to show, not that some provider
@@ -1895,3 +2130,40 @@ static int subsProvWins(int i, SubsWin *out, int max) {
     LeaveCriticalSection(&g_subsLock);
     return stale ? -n : n; // negative = stale
 }
+
+// ---- portable exports (the Linux front-end's seam) --------------------------
+// The gauge chip is the same chip on every platform: same provider selection,
+// same rotation, same text. Only the painting differs, so the front-end in its
+// own translation unit reads it through these instead of growing a copy. The
+// Windows build compiles p_subs.c INSIDE the amalgamated TU and calls the
+// statics directly, so it gains no symbols here.
+#ifdef CHOCOBAR_PORTABLE
+
+// feed subs.rotateSec from the loaded config (p_ui.c does the same on Windows)
+void cbSubsSetRotateSec(int sec) { g_subsRotSec = sec; }
+
+// chip text: "<plan> <window> N% left" in tip, "N%" in txt; -1 = no data
+int cbSubsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb) {
+    return subsChipRotated(txt, cb, tip, tipCb);
+}
+// -1 = no provider has a number; 1 = the number is from a failed cycle
+int cbSubsChipRem(void) { return subsChipRem(); }
+int cbSubsChipStale(void) { return subsChipStale(); }
+int cbSubsEnabled(void) { return g_cfg.subsEnabled; }
+void cbSubsStart(void) { subsStart(); }
+
+// board data for the subscription dashboard
+int cbSubsProviderCount(void) {
+    int n = g_cfg.subsProviderCount;
+    return n > MAX_SUBS ? MAX_SUBS : n;
+}
+int cbSubsProvEnabled(int i) { return subsProvEnabled(i); }
+void cbSubsProvLabel(int i, wchar_t *out, int cb) { subsProvLabel(i, out, cb); }
+void cbSubsProvPlan(int i, wchar_t *out, int cb) { subsProvPlan(i, out, cb); }
+// returns window count, negative = stale (same convention as subsProvWins)
+int cbSubsProvWins(int i, SubsWin *out, int max) { return subsProvWins(i, out, max); }
+// seconds since the last completed fetch cycle, 0 = never
+long long cbSubsFetchedEpochMs(void) { return subsFetchedEpochMs(); }
+void cbSubsRefetchNow(void) { subsRefetchNow(); }
+
+#endif // CHOCOBAR_PORTABLE

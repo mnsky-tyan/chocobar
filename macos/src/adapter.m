@@ -61,6 +61,10 @@
 #include "chocobar_core.h"
 
 // ---- forward declarations -----------------------------------------------------
+// closeThreadHandle is defined with the thread seam near the bottom of this
+// file; CloseHandle needs it early so a thread handle is never mistaken for an
+// fd-cast handle.
+static int closeThreadHandle(HANDLE h);
 //
 // Several helpers call each other, and C requires a declaration before use.
 // Grouping them here lets the definitions below stay in dependency order.
@@ -209,6 +213,11 @@ CB_BOOL GetFileSizeEx(HANDLE h, CB_LARGE_INTEGER *sz) {
 
 CB_BOOL CloseHandle(HANDLE h) {
     if (h == INVALID_HANDLE_VALUE) return FALSE;
+    // Thread handles are heap objects this adapter created, NOT fds; they are
+    // joined and freed here. The test is a pointer COMPARISON against a registry
+    // (see the thread section), never a dereference, so an fd-cast handle can
+    // never be mistaken for a thread and crash the bar.
+    if (closeThreadHandle(h)) return TRUE;
     return close(HANDLE_TO_FD(h)) == 0;
 }
 
@@ -632,9 +641,30 @@ long InterlockedExchange(long volatile *target, long value) {
     return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
 }
 
+long InterlockedCompareExchange(long volatile *target, long value, long compare) {
+    // Same contract as the Windows intrinsic: store `value` only if *target ==
+    // compare, and return the ORIGINAL value either way. The subs worker relies
+    // on that return being the old value - it uses a test-and-clear
+    // (compare 0, set 0) as an acquire of a kick flag, so a version that
+    // returned whether it swapped would never see a pending kick at all.
+    __atomic_compare_exchange_n(target, &compare, value, 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return compare; // compare holds the value observed before the exchange
+}
+
 DWORD GetTickCount(void) { return (DWORD)((unsigned long long)(monotonic_ms() & 0xffffffffu)); }
 ULONGLONG GetTickCount64(void) { return (ULONGLONG)monotonic_ms(); }
 void Sleep(DWORD ms) { usleep((useconds_t)ms * 1000); }
+
+void GetSystemTimeAsFileTime(FILETIME *ft) {
+    // The wall clock as a FILETIME, which is what subs uses it for (a true
+    // epoch timestamp for the board footer and for OAuth token expiry).
+    // unixMsToFileTime already handles the 1601 epoch shift, so this cannot
+    // drift from the reverse conversion the core already uses.
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    *ft = unixMsToFileTime((long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
 
 // ---- logging -----------------------------------------------------------------
 //
@@ -726,6 +756,214 @@ CB_BOOL GetFileTime(HANDLE h, FILETIME *c, FILETIME *a, FILETIME *w) {
     if (a) *a = ft;
     if (w) *w = ft;
     return TRUE;
+}
+
+CB_BOOL MoveFileExW(const wchar_t *src, const wchar_t *dst, DWORD flags) {
+    const char *a = pathArg(src), *b = pathArg(dst);
+    // p_subs writes a token cache to a temp file and renames it into place so a
+    // reader never sees a half-written file. rename(2) is atomic on POSIX and
+    // already replaces the target, which IS MOVEFILE_REPLACE_EXISTING; without
+    // that flag Windows would fail on an existing destination, so honour it
+    // rather than silently succeeding with different semantics.
+    if (!(flags & MOVEFILE_REPLACE_EXISTING)) {
+        struct stat st;
+        if (stat(b, &st) == 0) return FALSE; // destination exists: Windows would fail
+    }
+    return (CB_BOOL)(rename(a, b) == 0);
+}
+
+// ---- threads ------------------------------------------------------------------
+//
+// p_subs fans its enabled providers out over worker threads and joins them, so
+// a cycle costs the slowest provider instead of the sum. The Win32 surface that
+// needs is exactly three calls (CreateThread, WaitForSingleObject,
+// WaitForMultipleObjects) plus CloseHandle to dispose the handle.
+//
+// HANDLE is void* here, and the file functions use fd-cast handles, so a thread
+// handle must be distinguishable to CloseHandle WITHOUT dereferencing anything
+// (dereferencing an fd-cast handle would segfault the bar). Every thread handle
+// this file creates is registered below; CloseHandle compares the pointer
+// against that registry and only then touches its fields.
+typedef struct {
+    pthread_t tid;
+    int joined;
+    int done;
+    int refs;          // the handle owner + the thread itself
+    pthread_mutex_t m;
+    pthread_cond_t cv;
+} AdapterThread;
+
+// The registry is bounded, and a full registry is NOT an error: CreateThread
+// returns NULL and the core's own fallback runs that fetch inline. The size
+// still has to cover the real worst case or the fallback becomes the normal
+// path. p_subs.c can have, at once: the cycle thread (1), one thread per
+// enabled provider (MAX_SUBS = 6), each antigravity provider fanning out over
+// two model hosts (6*2) plus one quota thread (6), and the update probe (1).
+// That is 1 + 6 + 12 + 6 + 1 = 26; 32 leaves headroom for a future caller.
+#define ADAPTER_THREADS_MAX 32
+static AdapterThread *g_threads[ADAPTER_THREADS_MAX];
+static pthread_mutex_t g_threadsLock = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct { LPTHREAD_START_ROUTINE fn; void *arg; AdapterThread *slot; } ThreadStart;
+
+// Drop one owner of the thread record and free it when the last one goes. Two
+// owners exist: the HANDLE (closed by the core) and the running thread (which
+// releases its own when it finishes). Without the count, closing a handle to a
+// thread that is still running would free the record out from under it.
+static void dropThreadRef(AdapterThread *t) {
+    pthread_mutex_lock(&g_threadsLock);
+    int last = (--t->refs == 0);
+    pthread_mutex_unlock(&g_threadsLock);
+    if (last) {
+        pthread_cond_destroy(&t->cv);
+        pthread_mutex_destroy(&t->m);
+        free(t);
+    }
+}
+
+static void *threadTrampoline(void *p) {
+    ThreadStart s = *(ThreadStart *)p;
+    free(p);
+    // The Windows thread proc returns a DWORD exit code; nothing in the core
+    // reads it (the subs providers report through their own locked setters),
+    // so the value is dropped rather than invented.
+    if (s.fn) s.fn(s.arg);
+    // Signal completion BEFORE the thread exits, so a bounded wait can observe
+    // it without racing the join. Pairing this with a real condition variable
+    // (rather than polling a join) keeps the wait portable: pthread_tryjoin_np
+    // is a Linux extension and the macOS build compiles this same file.
+    AdapterThread *t = s.slot;
+    pthread_mutex_lock(&t->m);
+    t->done = 1;
+    pthread_cond_signal(&t->cv);
+    pthread_mutex_unlock(&t->m);
+    dropThreadRef(t); // the thread's own reference
+    return NULL;
+}
+
+HANDLE CreateThread(void *sa, SIZE_T stack, LPTHREAD_START_ROUTINE fn,
+                    LPVOID arg, DWORD flags, DWORD *id) {
+    (void)sa; (void)stack; (void)flags; (void)id;
+    AdapterThread *t = (AdapterThread *)calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    if (pthread_mutex_init(&t->m, NULL) != 0) { free(t); return NULL; }
+    if (pthread_cond_init(&t->cv, NULL) != 0) { pthread_mutex_destroy(&t->m); free(t); return NULL; }
+    t->refs = 2; // the handle and the thread
+    ThreadStart *s = (ThreadStart *)malloc(sizeof(*s));
+    if (!s) { pthread_cond_destroy(&t->cv); pthread_mutex_destroy(&t->m); free(t); return NULL; }
+    s->fn = fn; s->arg = arg; s->slot = t;
+    if (pthread_create(&t->tid, NULL, threadTrampoline, s) != 0) {
+        free(s);
+        pthread_cond_destroy(&t->cv); pthread_mutex_destroy(&t->m);
+        free(t);
+        return NULL; // the caller falls back to running the fetch inline
+    }
+    pthread_mutex_lock(&g_threadsLock);
+    int placed = 0;
+    for (int i = 0; i < ADAPTER_THREADS_MAX; i++) {
+        if (!g_threads[i]) { g_threads[i] = t; placed = 1; break; }
+    }
+    pthread_mutex_unlock(&g_threadsLock);
+    if (!placed) {
+        // No registry slot: detach so the thread's stack is reclaimed when it
+        // ends, and drop ONLY the handle's reference - the running thread still
+        // holds its own and frees the record itself. Destroying the mutex or
+        // freeing here would pull the record out from under a live thread.
+        pthread_detach(t->tid);
+        dropThreadRef(t);
+        return NULL;
+    }
+    return (HANDLE)t;
+}
+
+// Join one thread, waiting at most `ms` (INFINITE joins outright). Returns 1
+// when the thread has finished, 0 on timeout.
+static int joinThread(AdapterThread *t, DWORD ms) {
+    if (t->joined) return 1;
+    if (ms == INFINITE) {
+        void *ret = NULL;
+        if (pthread_join(t->tid, &ret) != 0) return 1; // already gone: treat as done
+        t->joined = 1;
+        return 1;
+    }
+    // Bounded wait on the completion flag. The core only ever passes INFINITE,
+    // so this is the safety net, not the hot path.
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += (time_t)(ms / 1000);
+    deadline.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000L; }
+    pthread_mutex_lock(&t->m);
+    while (!t->done) {
+        if (pthread_cond_timedwait(&t->cv, &t->m, &deadline) != 0) break; // timeout or error
+    }
+    int done = t->done;
+    pthread_mutex_unlock(&t->m);
+    if (!done) return 0;
+    void *ret = NULL;
+    if (pthread_join(t->tid, &ret) == 0) t->joined = 1;
+    return 1;
+}
+
+DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
+    if (!h) return 0xFFFFFFFFu; // WAIT_FAILED
+    AdapterThread *t = (AdapterThread *)h;
+    int done = 0;
+    pthread_mutex_lock(&g_threadsLock);
+    for (int i = 0; i < ADAPTER_THREADS_MAX; i++)
+        if (g_threads[i] == t) { done = 1; break; }
+    pthread_mutex_unlock(&g_threadsLock);
+    if (!done) return 0xFFFFFFFFu; // not one of ours: do not dereference
+    return joinThread(t, ms) ? 0 /* WAIT_OBJECT_0 */ : 0x102u /* WAIT_TIMEOUT */;
+}
+
+DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, int waitAll, DWORD ms) {
+    // The core only uses waitAll = TRUE (join every provider before the cycle
+    // is reported complete). waitAll = FALSE would need first-one-wins
+    // semantics that nothing calls, so it joins all and reports the first
+    // index - refusing silently would be worse than doing the work.
+    (void)waitAll;
+    for (DWORD i = 0; i < n; i++) {
+        if (WaitForSingleObject(hs[i], ms) != 0) return 0xFFFFFFFFu;
+    }
+    return 0;
+}
+
+// Registered thread handles are released here; anything else is not a thread
+// and is left for the fd path in CloseHandle.
+//
+// WINDOWS SEMANTICS, EXACTLY: closing a thread handle does NOT wait for the
+// thread. The core relies on that - subsStart() closes the handle of a worker
+// that runs FOREVER, and a CloseHandle that joined would block the bar's
+// startup until the heat death of the universe (measured: the bar hung in
+// pthread_join before it ever opened its X display, so no window appeared at
+// all). So a live thread is DETACHED here and its record is freed by the
+// thread itself when it finally ends; a finished one is reaped.
+static int closeThreadHandle(HANDLE h) {
+    if (!h) return 0;
+    pthread_mutex_lock(&g_threadsLock);
+    int idx = -1;
+    for (int i = 0; i < ADAPTER_THREADS_MAX; i++)
+        if (g_threads[i] == (AdapterThread *)h) { idx = i; break; }
+    if (idx >= 0) g_threads[idx] = NULL;
+    pthread_mutex_unlock(&g_threadsLock);
+    if (idx < 0) return 0; // not a thread handle
+    AdapterThread *t = (AdapterThread *)h;
+    int done;
+    pthread_mutex_lock(&t->m);
+    done = t->done;
+    pthread_mutex_unlock(&t->m);
+    if (!done) {
+        // Still running: detach so the thread's resources are reclaimed when it
+        // ends, and let the thread free the record (it holds its own ref).
+        pthread_detach(t->tid);
+    } else {
+        void *ret = NULL;
+        if (!t->joined) pthread_join(t->tid, &ret);
+        t->joined = 1;
+    }
+    dropThreadRef(t); // the handle's reference
+    return 1;
 }
 
 CB_BOOL SetFileTime(HANDLE h, const FILETIME *c, const FILETIME *a, const FILETIME *w) {

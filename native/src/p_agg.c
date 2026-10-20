@@ -621,5 +621,9 @@ const wchar_t *cbCfgPetPath(void) { return g_cfg.petExePath; }
 int cbCfgCpuWarnAt(void) { return g_cfg.cpuWarnAt; }
 int cbCfgRamWarnAt(void) { return g_cfg.ramWarnAt; }
 int cbCfgTempWarnAt(void) { return g_cfg.tempWarnAt; }
+// subs.rotateSec: how long each plan stays on the gauge chip before the chip
+// advances to the next provider. p_subs.c owns the rotation; the front-end
+// pushes this in after every config load.
+int cbCfgSubsRotateSec(void) { return g_cfg.subsRotateSec; }
 
 #endif // CHOCOBAR_PORTABLE

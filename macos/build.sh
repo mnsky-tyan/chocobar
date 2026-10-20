@@ -91,7 +91,8 @@ if full == base:
 full += '\n' + '\n'.join(texts[p] for p in paths[1:] if p in texts)
 for h in ('<initguid.h>', '<windows.h>', '<windowsx.h>', '<dwmapi.h>', '<pdh.h>',
           '<shellapi.h>', '<mmdeviceapi.h>', '<endpointvolume.h>',
-          '<tlhelp32.h>', '<winhttp.h>'):
+          '<tlhelp32.h>', '<winhttp.h>', '<winsock2.h>',
+          '<iphlpapi.h>', '<ws2tcpip.h>'):
     full = full.replace('#include ' + h, '#include "chocobar_core.h"')
 full = full.replace('#include <stdio.h>',
                     '#include "chocobar_core.h"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>', 1)

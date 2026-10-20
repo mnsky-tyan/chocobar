@@ -20,11 +20,16 @@
 # it rather than forking a copy. Two adapters would be two chances for the
 # scanner to see a different file than the other platform.
 #
+# p_subs.c IS compiled here: the subscription gauge and board were Windows/mac
+# only while their HTTP went through winhttp.h. That one function
+# (subsHttpRequest) now carries a libcurl body under CHOCOBAR_PORTABLE and the
+# rest of the part is threads + file reads + jsmn, all of which the adapter
+# above provides. No forks, no copies: the same provider fetchers run on all
+# three platforms.
+#
 # NOT compiled here, deliberately:
 #   p_metrics.c  wholly Win32 (PDH_*, Core Audio, Win32 battery). linux/src/
 #                p_metrics_linux.c is the real per-OS implementation.
-#   p_subs.c     WinHTTP + WinINet credential reads; the subscription board is
-#                Windows/mac-only for now (the config parses, nothing fetches).
 #   p_icons.c    its RENDERER is GDI/GDI+. The geometry it used to own is now
 #                p_svg.c (shared); linux/src/icons_cairo.c strokes that geometry
 #                with cairo.
@@ -39,6 +44,7 @@ CORE_PARTS=(
   native/src/chocobar.c
   native/src/p_utils.c
   native/src/p_svg.c
+  native/src/p_subs.c
   native/src/p_tokens.c
   native/src/p_agg.c
 )
@@ -88,7 +94,8 @@ if full == base:
 full += '\n' + '\n'.join(texts[p] for p in paths[1:] if p in texts)
 for h in ('<initguid.h>', '<windows.h>', '<windowsx.h>', '<dwmapi.h>', '<pdh.h>',
           '<shellapi.h>', '<mmdeviceapi.h>', '<endpointvolume.h>',
-          '<tlhelp32.h>', '<winhttp.h>'):
+          '<tlhelp32.h>', '<winhttp.h>', '<winsock2.h>',
+          '<iphlpapi.h>', '<ws2tcpip.h>'):
     full = full.replace('#include ' + h, '#include "chocobar_core.h"')
 full = full.replace('#include <stdio.h>',
                     '#include "chocobar_core.h"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>', 1)
@@ -115,7 +122,7 @@ APP_CFLAGS=(
   -DCHOCOBAR_PORTABLE=1
   -Inative/src -Inative/vendor -Ilinux/src
 )
-PKGS=(x11 xrender xfixes cairo dbus-1 fontconfig)
+PKGS=(x11 xrender xfixes cairo dbus-1 fontconfig libcurl)
 
 echo "compiling the core + POSIX adapter..."
 gcc "${CORE_CFLAGS[@]}" -c "$CORE_TU" -o "$OUT/core.o"

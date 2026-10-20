@@ -428,6 +428,38 @@ function check(name, ok, detail) {
     'the wrong offset makes the grid read as diagonal streaks on every day but Thursday');
 }
 
+// --- the subs port: one definition, one thread, one fetch ------------------------
+// The subscription gauge came to Linux through the shared p_subs.c rather than
+// a Linux-only copy. Four things could silently undo that: a front-end
+// reimplementing the chip (drift), a second SubsWin definition (wrong bytes,
+// believable numbers), a CloseHandle that waits for a thread (hang), and a
+// label log line that overflows. Each is one line whose absence is invisible.
+{
+  const lsubs = fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_subs.c'), 'utf8');
+  const lbuild = fs.readFileSync(path.join(__dirname, '..', 'linux', 'build.sh'), 'utf8');
+  const lmain = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  check('subs: the Linux build compiles the SHARED p_subs.c',
+    /native\/src\/p_subs\.c/.test(lbuild),
+    'a Linux-only provider fetcher would drift from the Windows one');
+  check('subs: the front-end does NOT copy the chip logic',
+    !/subsChipPick|g_subsRotIdx/.test(lmain) && /cbSubsChipRotated/.test(lmain),
+    'the pick/format/rotate logic lives once, in p_subs.c, behind cbSubs*');
+  check('subs: SubsWin has ONE definition, shared through a header',
+    /#include "subs_types.h"/.test(lsubs) &&
+    !/^typedef struct \{ wchar_t label\[/m.test(lsubs),
+    'a second struct definition reads the right field at the wrong offset');
+  check('subs: the debug label line is bounded',
+    /"\[wizbar\] subs\[%d\] %\.40ls plan=%\.16ls wins=%d stale=%d ::"/.test(lsubs),
+    'an unbounded %ls of user text overflowed a 400-byte buffer (measured: 1530 bytes)');
+  const ad = fs.readFileSync(path.join(__dirname, '..', 'macos', 'src', 'adapter.m'), 'utf8');
+  // Extract the real body so the assertion is about THAT function, not about
+  // whether some pthread_join appears elsewhere in the file.
+  const chFn = (/static int closeThreadHandle\(HANDLE h\) \{([\s\S]*?)\n\}/.exec(ad) || [, ''])[1];
+  check('subs: closing a thread handle does NOT join a running thread',
+    /pthread_detach\(t->tid\)/.test(chFn) && !/\bfree\(t\)/.test(chFn),
+    'CloseHandle must not wait: subsStart() closes the handle of a thread that runs forever, so a join deadlocked the bar before it opened its X display (measured: no window at all, process alive)');
+}
+
 // --- the gpu chip: a measured source, never a fabricated one -----------------------
 // modules.gpu on an Intel iGPU needs the i915 PMU (perf_event_open on the
 // *-busy counters). Three properties must hold: the chip hides rather than

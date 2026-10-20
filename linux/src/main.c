@@ -112,6 +112,15 @@ extern const wchar_t *cbCfgPetPath(void);
 extern int cbCfgCpuWarnAt(void);
 extern int cbCfgRamWarnAt(void);
 extern int cbCfgTempWarnAt(void);
+// the subscription gauge: fetched by the shared p_subs.c providers
+// (see chocobar_core.h's cbSubs* seam)
+extern int cbCfgSubsRotateSec(void);
+extern int cbSubsEnabled(void);
+extern void cbSubsStart(void);
+extern void cbSubsSetRotateSec(int sec);
+extern int cbSubsChipRem(void);
+extern int cbSubsChipStale(void);
+extern int cbSubsChipRotated(wchar_t *txt, int cb, wchar_t *tip, int tipCb);
 
 // ---- colours ------------------------------------------------------------------
 typedef struct { double r, g, b; } Rgb;
@@ -376,6 +385,33 @@ static void buildChips(void) {
         fmtTokens(g_tokReady ? g_tokToday : -1, txt, 32);
         addChip(SVG_DIAMOND, txt, dim, CHIP_LEFT);
         setChipIconColor(g_chipCount - 1, yellow);
+    }
+    // subscription gauge: the PLAN WEEK LIMITS meter, in the Windows order
+    // (p_ui.c: the tokens chip, then the gauge, then user-defined buttons).
+    // It rotates one provider's remaining % every subs.rotateSec. The colour
+    // thresholds and the "stale"/em-dash fallbacks are the Windows ones, so a
+    // failed fetch reads the same on both bars.
+    if (cbSubsEnabled()) {
+        wchar_t txt[16];
+        Rgb col;
+        int stale = cbSubsChipStale();
+        int rem = cbSubsChipRem();
+        if (rem == -1) {
+            lstrcpynW(txt, L"\u2014", 16);
+            col = dim;
+        } else if (stale) {
+            lstrcpynW(txt, L"stale", 16);
+            col = dim;
+        } else {
+            // the tooltip text ("<plan> <window> N% left") is produced by the
+            // shared formatter but there is no tooltip surface on the Linux bar
+            // yet - the chip shows the same percentage the Windows bar shows.
+            wchar_t tip[96];
+            rem = cbSubsChipRotated(&txt[0], 16, tip, 96);
+            // the Windows thresholds: >70 good, >30 dim, else warn
+            col = rem > 70 ? good : rem > 30 ? dim : warn;
+        }
+        addChip(SVG_GAUGE, txt, col, CHIP_LEFT);
     }
     // RIGHT metric group: everything else, growing leftward from the right edge.
     wchar_t v[48];
@@ -1009,6 +1045,9 @@ static void reloadConfig(void) {
     int wl = MultiByteToWideChar(CP_UTF8, 0, g_cfgPath, -1, wide, 1024);
     if (wl <= 0) return;
     cbLoadConfig(wide);
+    // subs.rotateSec: how long each plan stays on the gauge chip (p_ui.c does
+    // the same on Windows, right after loadConfig)
+    cbSubsSetRotateSec(cbCfgSubsRotateSec());
     resolveFontFamily();
 }
 
@@ -1206,6 +1245,10 @@ int main(int argc, char **argv) {
     reloadConfig();
     cfgStat(&g_cfgMtime);
     resolveFontFamily();
+    // the provider fetch loop: it does nothing until a provider is enabled, and
+    // its first cycle lands a few seconds in, so starting it before the window
+    // exists costs nothing and the gauge chip already has data by first paint
+    cbSubsStart();
 
     XSetErrorHandler(onXError);
     XSetIOErrorHandler(onXIOError);
