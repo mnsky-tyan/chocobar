@@ -506,9 +506,16 @@ static void paint(void) {
 
     // font
     // a scaled font pinned to the resolved family AND the configured size: the toy
-    // API's select_font_face ignores everything but the family name
+    // API's select_font_face ignores everything but the family name.
+    //
+    // The slant is ITALIC, not NORMAL. Segoe Print on Windows is a hand-
+    // written face whose letters already lean; the closest installed family
+    // (Comic Neue) offers the same lean as its Italic face, and the config's
+    // "fontFamily" names that face by intent. Rendered upright the bar reads
+    // as a different font than the reference screenshot, even though every
+    // metric matches.
     cairo_font_face_t *ff = cairo_toy_font_face_create(g_fontFamily,
-                                                      CAIRO_FONT_SLANT_NORMAL,
+                                                      CAIRO_FONT_SLANT_ITALIC,
                                                       CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_face(g_cr, ff);
     cairo_font_face_destroy(ff);
@@ -644,10 +651,10 @@ static void allocSurface(void) {
 static int textWidthPx(const wchar_t *s) {
     char buf[256];
     wideToUtf8(s, buf, sizeof(buf));
-    // a scaled font pinned to the resolved family AND the configured size: the toy
-    // API's select_font_face ignores everything but the family name
+    // the SAME face paint() uses, slant included: measuring with a different
+    // slant gives a different advance width, and the chips then overlap
     cairo_font_face_t *ff = cairo_toy_font_face_create(g_fontFamily,
-                                                      CAIRO_FONT_SLANT_NORMAL,
+                                                      CAIRO_FONT_SLANT_ITALIC,
                                                       CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_face(g_cr, ff);
     cairo_font_face_destroy(ff);

@@ -419,6 +419,20 @@ function check(name, ok, detail) {
     /loadCursor\("hand2"\)/.test(lx2) && /cursorUpdate\(hit >= 0\)/.test(lx2),
     'p_ui.c switches IDC_HAND/IDC_ARROW on WM_MOUSEMOVE; the Linux bar must mean the same thing');
 
+  // the FONT SLANT: Segoe Print on Windows is a hand-written face whose letters
+  // already lean, and the closest installed family (Comic Neue) carries the
+  // same lean as its Italic face. Rendered upright the bar read as a different
+  // font than the reference even though every metric matched.
+  // The DRAW and the MEASURE must use the same face: a different slant gives
+  // a different advance width, and the chips then overlap.
+  check('linux: the bar text leans, like the Windows font',
+    /CAIRO_FONT_SLANT_ITALIC/.test(lx2),
+    'upright text does not look like the Segoe Print the config asks for');
+  check('linux: the text is measured with the face it is painted with',
+    (lx2.match(/CAIRO_FONT_SLANT_ITALIC/g) || []).length === 2 &&
+    (lx2.match(/CAIRO_FONT_SLANT_NORMAL/g) || []).length === 0,
+    'painting italic but measuring upright makes the chip widths wrong');
+
   // layout: the demo has TWO groups - left-pinned chips (tokens) and right-aligned
   // metrics, with an empty run between them. A single right-aligned loop packs every
   // chip against the right edge and reads as one block, which is the visual gap
