@@ -540,7 +540,34 @@ function check(name, ok, detail) {
     'the Windows bar sums PDH per-engine utilisation and clamps at 100; the Linux chip must mean the same thing');
   check('linux: gpu counters stay open across ticks',
     /static GpuCounter g_gpuCtr\[GPU_ENGINES_MAX\]/.test(pm) && /g_gpuCtrN < 0\) g_gpuCtrN = gpuProbeI915\(\)/.test(pm),
-    're-opening seven PMU events every second would pay the open cost seven times per tick');
+    're-opening seven PMU events every second would cost the open price seven times per tick');
+}
+
+// The DESKTOP-SIDE BORDER. The bar is not draggable and takes no WM chrome, so
+// part of its appearance is decided by the compositor. KDE's Rounded Corners
+// effect (kwin4_effect_shapecorners) strokes a 1px black outline on every
+// window it manages, INCLUDING inactive ones, painted OVER the client pixels.
+// The bar paints its own hairline border in the theme divider colour, so that
+// outline rides the border and shows as a continuous black line - the
+// "broken border" report. Measured 2026-10-20: window row 0 composited
+// (0,0,0) while the window's own pixel was alpha 154 border; unloading the
+// effect restored (239,229,216). The effect's own exclusion list, keyed on
+// window class, is the fix, and the bar must apply it itself at startup or
+// every fresh install shows the defect until the user edits kwinrc by hand.
+{
+  const lx2 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  const sh = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'selfheal.c'), 'utf8');
+  const shh = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'selfheal.h'), 'utf8');
+  const selfMainBody = (/int main\(int argc, char \*\*argv\) \{([\s\S]*)$/.exec(lx2) || [, ''])[1];
+  check('linux: the bar excludes itself from the KDE rounded-corners effect',
+    /cbKwinSelfHeal\(void\);/.test(shh) && /int cbKwinSelfHeal\(void\)/.test(sh) &&
+    /\[Round-Corners\]/.test(sh) && /"chocobar"/.test(sh) &&
+    /cbKwinSelfHeal\(\);/.test(selfMainBody),
+    'without the exclusion the effect strokes black over the bar border on every start');
+  check('linux: the self-heal appends its class instead of rewriting kwinrc',
+    /hasClass\(tmp\)/.test(sh) && /out\[head\+\+\] = ',';/.test(sh) &&
+    /st\.st_uid != getuid\(\)/.test(sh),
+    'rewriting kwinrc wholesale would drop the user other keys; appending one class keeps them');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);

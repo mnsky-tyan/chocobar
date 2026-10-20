@@ -85,6 +85,25 @@ two dashboards, edit the config, reload, quit). `Esc`/`q` also quits when
 the bar has focus. The config is the SAME `~/.wizbar/config.json` the Windows bar
 reads, and it hot-reloads on save.
 
+### The bar heals its own KWin outline exclusion
+
+The bar paints its own hairline border in the theme divider colour, but one KDE
+effect (`kwin4_effect_shapecorners`, the package `kwin-effect-roundcorners`)
+strokes a 1px black outline over every managed window's edges - including
+inactive ones, painted OVER the client's pixels. On the bar that outline rides
+its border and shows as a continuous black line (the "broken border" defect).
+Measured 2026-10-20: the bar's first row composited as (0,0,0) while the
+window's own pixel there was a light alpha-154 border; unloading the effect
+restored (239,229,216).
+
+The fix is the effect's OWN exclusion list: `[Round-Corners] Exclusions` in
+`~/.config/kwinrc`, keyed on window class (case-insensitive substring; the
+bar's class is `chocobar Chocobar`). The bar appends `chocobar` to that key at
+every startup (`linux/src/selfheal.c`) and asks KWin to reconfigure, so a fresh
+install needs no manual step. It edits exactly that one key - appending to the
+value when other exclusions exist, leaving the rest of the file byte-for-byte -
+and does nothing when the exclusion is already in place.
+
 ## Measured on this machine (Ubuntu 25.10, KDE Plasma 6.6 on Wayland, 2880x1800)
 
 | what | value |

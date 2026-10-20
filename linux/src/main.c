@@ -61,6 +61,7 @@
 #include "menu.h"
 #include "dash.h"
 #include "linux_svg.h"
+#include "selfheal.h"
 
 // ---- core seam (the CHOCOBAR_PORTABLE accessors in p_agg.c) --------------------
 extern void cbCoreInit(void);
@@ -1331,6 +1332,10 @@ int main(int argc, char **argv) {
     // its first cycle lands a few seconds in, so starting it before the window
     // exists costs nothing and the gauge chip already has data by first paint
     cbSubsStart();
+    // The KDE Rounded Corners effect draws its own 1px black outline over the
+    // client's pixels, which rides the bar's border. Exclude the bar by window
+    // class so the border the bar paints is the border the user sees.
+    cbKwinSelfHeal();
 
     XSetErrorHandler(onXError);
     XSetIOErrorHandler(onXIOError);
