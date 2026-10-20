@@ -15,7 +15,6 @@
 #define _GNU_SOURCE
 #include <cairo/cairo.h>
 #include <cairo/cairo-xlib.h>
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <X11/Xlib.h>
@@ -25,12 +24,14 @@
 #include <X11/extensions/shape.h>
 #include <X11/keysym.h>
 
+#include "linux_shape.h"
 #include "menu.h"
 
 #define MENU_W 236.0        // CSS px
 #define MENU_ROW 30.0
 #define MENU_PAD 6.0
 #define MENU_SEP 9.0
+#define MENU_RADIUS 8.0     // corner radius, CSS px (one name, one place)
 
 typedef struct {
     const char *label;
@@ -54,7 +55,6 @@ static const MenuItem g_items[] = {
 typedef struct {
     Display *dpy;
     Window win;
-    int screen;
     Visual *visual;
     Colormap cmap;
     int w, h;
@@ -64,26 +64,26 @@ typedef struct {
     int fontPx;
     char fontFamily[128];
     /* palette, resolved by the caller from the config */
-    double bg[3], fg[3], dim[3], divider[3], accent[3];
+    double bg[3], fg[3], divider[3], accent[3];
     double bgAlpha;
+    /* persistent paint state: the bar keeps one too, and building a surface
+       plus a toy font face on every hover move was an allocation per mouse
+       pixel. The menu is static, so there is nothing to resize. */
+    cairo_surface_t *surf;
+    cairo_t *cr;
+    cairo_font_face_t *ff;
 } Menu;
 
 static void menuPaint(Menu *m) {
-    cairo_surface_t *surf = cairo_xlib_surface_create(m->dpy, m->win, m->visual, m->w, m->h);
-    cairo_t *cr = cairo_create(surf);
-    double r = 8 * m->scale;
+    cairo_t *cr = m->cr;
+    double r = MENU_RADIUS * m->scale;
 
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-    cairo_new_sub_path(cr);
-    cairo_arc(cr, m->w - r, r, r, -M_PI / 2, 0);
-    cairo_arc(cr, m->w - r, m->h - r, r, 0, M_PI / 2);
-    cairo_arc(cr, r, m->h - r, r, M_PI / 2, M_PI);
-    cairo_arc(cr, r, r, r, M_PI, 3 * M_PI / 2);
-    cairo_close_path(cr);
+    roundedPath(cr, 0, 0, m->w, m->h, r);
     // the menu is more opaque than the bar: a menu must be readable over anything
     cairo_set_source_rgba(cr, m->bg[0], m->bg[1], m->bg[2], m->bgAlpha);
     cairo_fill_preserve(cr);
@@ -91,11 +91,7 @@ static void menuPaint(Menu *m) {
     cairo_set_line_width(cr, 1.0);
     cairo_stroke(cr);
 
-    cairo_font_face_t *ff = cairo_toy_font_face_create(m->fontFamily,
-                                                      CAIRO_FONT_SLANT_NORMAL,
-                                                      CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_face(cr, ff);
-    cairo_font_face_destroy(ff);
+    cairo_set_font_face(cr, m->ff);
     cairo_set_font_size(cr, m->fontPx);
 
     double y = MENU_PAD * m->scale;
@@ -115,12 +111,7 @@ static void menuPaint(Menu *m) {
             // hover pill: the accent at 18%, rounded, inset like the Windows menu
             double inset = 3 * m->scale, rr = 5 * m->scale;
             double x0 = inset, y0 = y + 1, w0 = m->w - 2 * inset, h0 = rh - 2;
-            cairo_new_sub_path(cr);
-            cairo_arc(cr, x0 + w0 - rr, y0 + rr, rr, -M_PI / 2, 0);
-            cairo_arc(cr, x0 + w0 - rr, y0 + h0 - rr, rr, 0, M_PI / 2);
-            cairo_arc(cr, x0 + rr, y0 + h0 - rr, rr, M_PI / 2, M_PI);
-            cairo_arc(cr, x0 + rr, y0 + rr, rr, M_PI, 3 * M_PI / 2);
-            cairo_close_path(cr);
+            roundedPath(cr, x0, y0, w0, h0, rr);
             cairo_set_source_rgba(cr, m->accent[0], m->accent[1], m->accent[2], 0.18);
             cairo_fill(cr);
         }
@@ -132,9 +123,7 @@ static void menuPaint(Menu *m) {
         cairo_new_path(cr);
         y += rh;
     }
-    cairo_surface_flush(surf);
-    cairo_destroy(cr);
-    cairo_surface_destroy(surf);
+    cairo_surface_flush(m->surf);
     XFlush(m->dpy);
 }
 
@@ -154,15 +143,14 @@ static int menuHit(Menu *m, int px, int py) {
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
             int atX, int atY, double scale, int fontPx, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double dim[3], const double divider[3], const double accent[3]) {
+            const double divider[3], const double accent[3]) {
     Menu m;
     memset(&m, 0, sizeof(m));
-    m.dpy = dpy; m.screen = screen; m.visual = visual; m.cmap = cmap;
+    m.dpy = dpy; m.visual = visual; m.cmap = cmap;
     m.scale = scale; m.fontPx = fontPx;
     snprintf(m.fontFamily, sizeof(m.fontFamily), "%s", fontFamily ? fontFamily : "sans");
     memcpy(m.bg, bg, sizeof(m.bg)); m.bgAlpha = bgAlpha;
     memcpy(m.fg, fg, sizeof(m.fg));
-    memcpy(m.dim, dim, sizeof(m.dim));
     memcpy(m.divider, divider, sizeof(m.divider));
     memcpy(m.accent, accent, sizeof(m.accent));
     m.hover = -1;
@@ -196,34 +184,10 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                           0, depth, InputOutput, visual,
                           CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap |
                           CWEventMask, &swa);
-    // shape it to the rounded rect, like the bar
+    // shape it to the rounded rect: ONE scanline builder shared with the bar,
+    // so a geometry fix lands on both (the 1 px hole needed fixing twice).
     XRectangle rects[40];
-    int nr = 0;
-    double rr = 8 * scale;
-    int steps = (int)(rr + 0.5);
-    if (steps > 14) steps = 14;
-    for (int i = 0; i < steps && nr < 38; i++) {
-        double dy = rr - i;
-        double inset = rr - sqrt(fmax(0.0, rr * rr - dy * dy));
-        rects[nr].x = (short)inset; rects[nr].y = (short)i;
-        rects[nr].width = (unsigned short)fmax(1.0, m.w - 2 * inset);
-        rects[nr].height = 1; nr++;
-    }
-    if (nr < 38) {
-        // middle band from the integer steps, like the bar: truncating the
-        // float height once left a 1 px hole between this band and the bottom
-        // loop (same bug as the bar's shape had).
-        rects[nr].x = 0; rects[nr].y = (short)steps;
-        rects[nr].width = (unsigned short)m.w;
-        rects[nr].height = (unsigned short)fmax(1, m.h - 2 * steps); nr++;
-    }
-    for (int i = 0; i < steps && nr < 38; i++) {
-        double dy = rr - i;
-        double inset = rr - sqrt(fmax(0.0, rr * rr - dy * dy));
-        rects[nr].x = (short)inset; rects[nr].y = (short)(m.h - 1 - i);
-        rects[nr].width = (unsigned short)fmax(1.0, m.w - 2 * inset);
-        rects[nr].height = 1; nr++;
-    }
+    int nr = roundedRectScanlines(rects, 40, m.w, m.h, MENU_RADIUS * scale);
     XserverRegion reg = XFixesCreateRegion(dpy, rects, nr);
     XFixesSetWindowShapeRegion(dpy, m.win, ShapeBounding, 0, 0, reg);
     XFixesDestroyRegion(dpy, reg);
@@ -236,6 +200,13 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     XSetWMHints(dpy, m.win, &hints);
     XMapRaised(dpy, m.win);
     XSetInputFocus(dpy, m.win, RevertToParent, CurrentTime);
+    // persistent paint state, created once: the menu is static, so there is
+    // nothing to resize and nothing to rebuild. Building a surface plus a toy
+    // font face on every hover move was an allocation per mouse pixel.
+    m.surf = cairo_xlib_surface_create(dpy, m.win, visual, m.w, m.h);
+    m.cr = cairo_create(m.surf);
+    m.ff = cairo_toy_font_face_create(m.fontFamily, CAIRO_FONT_SLANT_NORMAL,
+                                      CAIRO_FONT_WEIGHT_NORMAL);
     menuPaint(&m);
 
     // grab the pointer so a click outside closes the menu (the Windows behaviour)
@@ -318,6 +289,9 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     }
     XUngrabKeyboard(dpy, CurrentTime);
     XUngrabPointer(dpy, CurrentTime);
+    cairo_destroy(m.cr);
+    cairo_font_face_destroy(m.ff);
+    cairo_surface_destroy(m.surf);
     XDestroyWindow(dpy, m.win);
     XFlush(dpy);
     return m.result;

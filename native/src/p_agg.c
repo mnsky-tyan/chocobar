@@ -613,6 +613,10 @@ int cbCfgModVol(void) { return g_cfg.mVolume; }
 int cbCfgModBatt(void) { return g_cfg.mBattery; }
 int cbCfgModClock(void) { return g_cfg.mClock; }
 int cbCfgModGpu(void) { return g_cfg.mGpu; }
+// the pet chip: modules.pet.{enabled,label,exePath}, parsed in chocobar.c
+int cbCfgPetEnabled(void) { return g_cfg.petEnabled; }
+const wchar_t *cbCfgPetLabel(void) { return g_cfg.petLabel; }
+const wchar_t *cbCfgPetPath(void) { return g_cfg.petExePath; }
 // warn thresholds (0 or negative = the threshold is off, as on Windows)
 int cbCfgCpuWarnAt(void) { return g_cfg.cpuWarnAt; }
 int cbCfgRamWarnAt(void) { return g_cfg.ramWarnAt; }

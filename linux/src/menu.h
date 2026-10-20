@@ -20,10 +20,12 @@ enum {
 
 // Run the menu modally at screen position (atX, atY) and return the chosen id
 // (MENU_NONE when dismissed). scale/fontPx/fontFamily come from the config so the
-// menu matches the bar; the colours are already resolved 0..1 triples.
+// menu matches the bar; the colours are already resolved 0..1 triples. There is
+// no dim colour: the menu has no dim text, and passing one invited a parameter
+// the painter never read.
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
             int atX, int atY, double scale, int fontPx, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double dim[3], const double divider[3], const double accent[3]);
+            const double divider[3], const double accent[3]);
 
 #endif

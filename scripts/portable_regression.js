@@ -379,12 +379,13 @@ function check(name, ok, detail) {
     'its position is derived from bar.align and bar.gap; a dragged bar breaks that contract');
 
   // the shape's middle band must be built from integer steps, not a truncating
-  // float: (unsigned short)(g_h - 2*radius) floors 22.56 to 22, leaving one row
+  // float: (unsigned short)(h - 2*radius) floors 22.56 to 22, leaving one row
   // uncovered between the band and the bottom loop - a 1 px horizontal hole
   // through which raw wallpaper shows as a bright line across the bar.
+  const shp = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'linux_shape.c'), 'utf8');
   check('linux: the shape covers every row of the bar',
-    !/\(unsigned short\)fmax\(1\.0, g_h - 2 \* radius\)/.test(lx) &&
-    /\(unsigned short\)fmax\(1, g_h - 2 \* steps\)/.test(lx),
+    !/\(unsigned short\)fmax\(1\.0, [wh] - 2 \* radius\)/.test(shp) &&
+    /\(unsigned short\)fmax\(1, h - 2 \* steps\)/.test(shp),
     'a truncating float leaves a 1 px gap the shape clips away; the line is wallpaper, not paint');
 
   // layout: the demo has TWO groups - left-pinned chips (tokens) and right-aligned

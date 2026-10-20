@@ -1,10 +1,14 @@
-// geomdbus.h - the bar's side of the KWin geometry signal.
+// geomdbus.h - the bar's side of the KWin geometry REPORT.
 //
 // The KWin helper (linux/src/geomwatch.js) cannot write files inside its sandbox,
 // so it calls the bar over D-Bus. This is the listener. It uses libdbus-1: the
 // shared library is already loaded by kwin_wayland on any KDE desktop, and a
 // hand-rolled wire decoder was tried first and abandoned (three alignment bugs,
 // each of which the daemon punished with a silent disconnect).
+//
+// A METHOD CALL, not a signal: KWin's callDBus has no way to emit a signal at an
+// arbitrary service, so the helper calls org.chocobar.Geom.Report and the bar
+// answers. That is why this is a listener with a match rule, not a subscriber.
 #ifndef GEOMDBUS_H
 #define GEOMDBUS_H
 
@@ -16,14 +20,16 @@ typedef struct {
     int screenW;       // logical px
 } GeomReport;
 
+// The bus state. fd is not a file descriptor: libdbus's connection is opaque and
+// main.c only needs a boolean, so it is -1 (down) or >= 0 (up). The error reason
+// lives in the implementation's own static, read back through geomBusLastError.
 typedef struct {
-    int fd;            // unused; kept so callers can test "is it up" uniformly
-    char err[160];
+    int fd;
 } GeomBus;
 
-// Connect to the session bus, send Hello and subscribe to the geometry signal.
-// Returns 1 on success. On failure bus->err says why (never fatal: the bar simply
-// centres itself).
+// Connect to the session bus, own org.chocobar.Geom and add the match rule that
+// delivers Report calls. Returns 1 on success. On failure the reason is in
+// geomBusLastError() (never fatal: the bar simply centres itself).
 int geomBusConnect(GeomBus *bus);
 
 // Read pending messages. Returns the number of reports decoded into *out (the
@@ -35,5 +41,14 @@ void geomBusClose(GeomBus *bus);
 
 // The last failure reason, for the log line when geometry is unavailable.
 const char *geomBusLastError(void);
+
+// The KWin script's load state, read over the bus: 1 loaded, 0 NOT loaded,
+// -1 the question could not be asked. A 0 is the cue for geomBusReloadScript.
+int geomBusScriptLoaded(const char *pluginName);
+
+// Re-load the KWin helper over the bus - what --install-geometry does, but
+// callable from inside the bar when the script has been unloaded out from
+// under it (a KWin restart, or anything else calling unloadScript).
+void geomBusReloadScript(const char *scriptPath, const char *pluginName);
 
 #endif

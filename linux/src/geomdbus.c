@@ -154,3 +154,67 @@ void geomBusClose(GeomBus *bus) {
 }
 
 const char *geomBusLastError(void) { return g_err; }
+
+// Re-load the KWin script, for when it has been unloaded out from under the bar.
+//
+// A KWin restart (and anything else that calls unloadScript) drops the helper
+// WITHOUT telling the bar, and the bar then silently loses bar.align 1 for the
+// rest of its life - measured on this machine, three times. Loading it back is
+// the same call --install-geometry makes, sent over the session bus so the bar
+// can heal the loss itself. The caller supplies the script path and plugin name
+// because the install path is the bar's business, not the bus's.
+void geomBusReloadScript(const char *scriptPath, const char *pluginName) {
+    if (!g_conn || !dbus_connection_get_is_connected(g_conn)) return;
+    if (!scriptPath || !*scriptPath || !pluginName || !*pluginName) return;
+    DBusMessage *msg = dbus_message_new_method_call("org.kde.KWin", "/Scripting",
+                                                    "org.kde.kwin.Scripting",
+                                                    "loadScript");
+    if (!msg) return;
+    if (!dbus_message_append_args(msg, DBUS_TYPE_STRING, &scriptPath,
+                                     DBUS_TYPE_STRING, &pluginName, DBUS_TYPE_INVALID)) {
+        dbus_message_unref(msg);
+        return;
+    }
+    dbus_message_set_auto_start(msg, FALSE);
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage *reply = dbus_connection_send_with_reply_and_block(g_conn, msg, 2000, &err);
+    dbus_message_unref(msg);
+    if (!reply) {
+        if (dbus_error_is_set(&err)) recordError(err.message);
+        dbus_error_free(&err);
+        return;
+    }
+    dbus_message_unref(reply);
+}
+
+// TRUE when the KWin script of that name is loaded. Read through the same
+// connection; a false here is the bar's cue to reload it.
+int geomBusScriptLoaded(const char *pluginName) {
+    if (!g_conn || !dbus_connection_get_is_connected(g_conn)) return -1;
+    DBusMessage *msg = dbus_message_new_method_call("org.kde.KWin", "/Scripting",
+                                                    "org.kde.kwin.Scripting",
+                                                    "isScriptLoaded");
+    if (!msg) return -1;
+    const char *n = pluginName ? pluginName : "";
+    if (!dbus_message_append_args(msg, DBUS_TYPE_STRING, &n, DBUS_TYPE_INVALID)) {
+        dbus_message_unref(msg);
+        return -1;
+    }
+    dbus_message_set_auto_start(msg, FALSE);
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage *reply = dbus_connection_send_with_reply_and_block(g_conn, msg, 2000, &err);
+    dbus_message_unref(msg);
+    if (!reply) {
+        if (dbus_error_is_set(&err)) recordError(err.message);
+        dbus_error_free(&err);
+        return -1;
+    }
+    int loaded = 0;
+    if (!dbus_message_get_args(reply, &err, DBUS_TYPE_BOOLEAN, &loaded, DBUS_TYPE_INVALID))
+        loaded = -1;
+    dbus_message_unref(reply);
+    dbus_error_free(&err);
+    return loaded;
+}

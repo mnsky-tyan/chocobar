@@ -9,9 +9,8 @@
 #include <X11/Xlib.h>
 
 void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
-             int cssW, int cssH, double scale, int fontPx, const char *fontFamily,
+             int cssW, int cssH, double scale, const char *fontFamily,
              const double page[3], const double card[3], const double fg[3],
-             const double dim[3], const double accent[3], const double divider[3],
-             const double warn[3], const double ramp[5][3], int heatWeeks);
+             const double dim[3], const double divider[3], const double ramp[5][3]);
 
 #endif

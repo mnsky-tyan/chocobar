@@ -45,6 +45,8 @@
 #include <X11/Xatom.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
+
+#include "linux_shape.h"
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrender.h>
 #include <X11/extensions/Xfixes.h>
@@ -103,6 +105,10 @@ extern int cbCfgModVol(void);
 extern int cbCfgModBatt(void);
 extern int cbCfgModClock(void);
 extern int cbCfgModGpu(void);
+// the pet chip: parsed in the core's config, read here
+extern int cbCfgPetEnabled(void);
+extern const wchar_t *cbCfgPetLabel(void);
+extern const wchar_t *cbCfgPetPath(void);
 extern int cbCfgCpuWarnAt(void);
 extern int cbCfgRamWarnAt(void);
 extern int cbCfgTempWarnAt(void);
@@ -135,22 +141,9 @@ static Rgb hexRgb(const wchar_t *hex, Rgb fallback) {
 
 static void setSrc(cairo_t *cr, Rgb c, double a) { cairo_set_source_rgba(cr, c.r, c.g, c.b, a); }
 
-// The rounded rectangle, built once. It was written out as the same four
-// cairo_arc quarter-calls in five places across the front-end (the bar strip,
-// the hover pill, the menu background and pill, the battery fill and the
-// dashboard cards); one helper keeps them from drifting apart.
-void roundedPath(cairo_t *cr, double x, double y, double w, double h, double r) {
-    if (r < 0) r = 0;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    cairo_new_sub_path(cr);
-    if (r <= 0) { cairo_rectangle(cr, x, y, w, h); return; }
-    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
-    cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
-    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
-    cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
-    cairo_close_path(cr);
-}
+// the rounded rectangle and the scanline staircase are defined ONCE in
+// linux_shape.c: three copies with divergent caps is how a truncating float in
+// one of them left a 1 px hole across the bar.
 
 // ---- global state ---------------------------------------------------------------
 static Display *g_dpy;
@@ -366,9 +359,18 @@ static void buildChips(void) {
     Rgb good = hexRgb(cbCfgGood(), (Rgb){0, 0.39, 0});
     Rgb yellow = hexRgb(cbCfgYellow(), (Rgb){0.72, 0.66, 0.42});
 
-    // LEFT pinned group: the tokens chip, then the subscription gauge when one
-    // exists (p_subs.c is not ported yet, so the gauge chip does not yet).
-    // These sit at the left edge with the empty run in the middle.
+    // LEFT pinned group, in the Windows order (p_ui.c:715-770): the shortcut
+    // chip (SVG_BOLT, disabled on Linux - there is no global hotkey), then the
+    // pet ("is this process alive"), then the tokens chip, then the
+    // subscription gauge when one exists.
+    if (cbCfgPetEnabled()) {
+        wchar_t txt[80];
+        int running = g_m.petRunning;
+        if (cbCfgPetLabel() && *cbCfgPetLabel())
+            swprintf(txt, 80, L"%ls %ls", cbCfgPetLabel(), running ? L"on" : L"off");
+        else swprintf(txt, 80, L"%ls", running ? L"on" : L"off");
+        addChip(SVG_BOW, txt, running ? good : dim, CHIP_LEFT);
+    }
     if (cbCfgTokensEnabled()) {
         wchar_t txt[32];
         fmtTokens(g_tokReady ? g_tokToday : -1, txt, 32);
@@ -580,46 +582,7 @@ static void applyShape(void) {
     if (radius > g_h / 2.0) radius = g_h / 2.0;
 
     XRectangle rects[80];
-    int nr = 0;
-    if (radius < 0.5) {
-        rects[nr].x = 0; rects[nr].y = 0;
-        rects[nr].width = (unsigned short)g_w;
-        rects[nr].height = (unsigned short)g_h;
-        nr++;
-    } else {
-        int steps = (int)(radius + 0.5);
-        if (steps > 36) steps = 36;
-        for (int i = 0; i < steps && nr < 78; i++) {
-            double dy = radius - i;
-            double inset = radius - sqrt(fmax(0.0, radius * radius - dy * dy));
-            rects[nr].x = (short)inset;
-            rects[nr].y = (short)i;
-            rects[nr].width = (unsigned short)fmax(1.0, g_w - 2 * inset);
-            rects[nr].height = 1;
-            nr++;
-        }
-        // the middle band is derived from steps, NOT from truncating the float
-        // radius: (unsigned short)(g_h - 2*radius) floors down (22.56 -> 22),
-        // which once left row 34 uncovered between this band and the bottom
-        // loop - a 1 px horizontal hole the shape clipped away, so raw wallpaper
-        // showed through the bar as a bright line.
-        if (nr < 78) {
-            rects[nr].x = 0;
-            rects[nr].y = (short)steps;
-            rects[nr].width = (unsigned short)g_w;
-            rects[nr].height = (unsigned short)fmax(1, g_h - 2 * steps);
-            nr++;
-        }
-        for (int i = 0; i < steps && nr < 78; i++) {
-            double dy = radius - i;
-            double inset = radius - sqrt(fmax(0.0, radius * radius - dy * dy));
-            rects[nr].x = (short)inset;
-            rects[nr].y = (short)(g_h - 1 - i);
-            rects[nr].width = (unsigned short)fmax(1.0, g_w - 2 * inset);
-            rects[nr].height = 1;
-            nr++;
-        }
-    }
+    int nr = roundedRectScanlines(rects, 80, g_w, g_h, radius);
     if (g_region) XFixesDestroyRegion(g_dpy, g_region);
     g_region = XFixesCreateRegion(g_dpy, rects, nr);
     XFixesSetWindowShapeRegion(g_dpy, g_win, ShapeBounding, 0, 0, g_region);
@@ -663,10 +626,13 @@ static int textWidthPx(const wchar_t *s) {
 // signal and geomdbus.c decodes it. No report, a stale one, or a non-terminal class
 // means "no match" and the bar centres itself - never a wrong width.
 static void dbg(const char *fmt, ...);
+#define KW_SCRIPT_NAME "chocobar-geometry"   // defined here: geomPump needs it
+static int kwScriptPath(char *out, size_t cap);   // defined below, with the installer
 static GeomReport g_geom;             // last report received
 static time_t g_geomAt = 0;           // when it arrived
-static GeomBus g_bus = { -1, "" };   // -1 = not connected (a zero struct would read as fd 0)
+static GeomBus g_bus = { -1 };       // -1 = not connected (a zero struct would read as fd 0)
 static time_t g_busRetryAt = 0;
+static time_t g_scriptCheckAt = 0;    // last isScriptLoaded probe
 
 // Pull whatever the bus has. Reconnects with backoff: the session bus outlives the
 // bar, but KWin may be restarting, and a tight reconnect loop would spin.
@@ -681,6 +647,23 @@ static void geomPump(time_t now) {
             return;
         }
         g_bus.fd = 1;   // connected
+        g_scriptCheckAt = 0;   // probe the script state on the fresh connection
+    }
+    // SELF-HEAL: anything that unloads the KWin helper (a KWin restart, another
+    // tool calling unloadScript) drops bar.align 1 WITHOUT telling the bar, and
+    // it used to stay lost for the rest of the bar's life - measured three times
+    // on this machine. Probe occasionally and reload when it is gone. The probe
+    // is one small D-Bus call every 30 s, not a hot loop.
+    if (now >= g_scriptCheckAt) {
+        g_scriptCheckAt = now + 30;
+        int loaded = geomBusScriptLoaded(KW_SCRIPT_NAME);
+        if (loaded == 0) {
+            char sp[600];
+            if (kwScriptPath(sp, sizeof(sp))) {
+                geomBusReloadScript(sp, KW_SCRIPT_NAME);
+                dbg("kwin script was unloaded; reloaded it");
+            }
+        }
     }
     GeomReport rep;
     int n = geomBusPoll(&g_bus, &rep);
@@ -1038,9 +1021,7 @@ static void runDashboard(void) {
     Rgb cardc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
     Rgb fgc = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
     Rgb dimc = hexRgb(cbCfgFgDim(), (Rgb){0.35, 0.32, 0.27});
-    Rgb accc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
     Rgb divc = hexRgb(cbCfgDivider(), (Rgb){0.85, 0.80, 0.70});
-    Rgb warnc = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
     double ramp[5][3];
     for (int i = 0; i < 5; i++) {
         Rgb c = hexRgb(cbCfgHeat(i), (Rgb){0.9, 0.85, 0.8});
@@ -1050,17 +1031,14 @@ static void runDashboard(void) {
     double card[3] = { cardc.r, cardc.g, cardc.b };
     double fg[3] = { fgc.r, fgc.g, fgc.b };
     double dim[3] = { dimc.r, dimc.g, dimc.b };
-    double acc[3] = { accc.r, accc.g, accc.b };
     double div[3] = { divc.r, divc.g, divc.b };
-    double wrn[3] = { warnc.r, warnc.g, warnc.b };
     int cw = cbCfgDashW() > 0 ? cbCfgDashW() : 900;
     int chh = cbCfgDashH() > 0 ? cbCfgDashH() : 520;
     Visual *dvis = DefaultVisual(g_dpy, g_screen);
     Colormap dcmap = DefaultColormap(g_dpy, g_screen);
     int ddepth = DefaultDepth(g_dpy, g_screen);
     dashRun(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
-            (int)(fontSizePx()), g_fontFamily,
-            page, card, fg, dim, acc, div, wrn, ramp, 26);
+            g_fontFamily, page, card, fg, dim, div, ramp);
     // the bar's own surface is still valid; force a repaint when we come back
     paint();
 }
@@ -1123,7 +1101,7 @@ static void handleMenuChoice(int choice) {
 // and needs to be told to load and start it over D-Bus. qdbus is used rather than
 // linking sd-bus: it is one call at install time, and a missing qdbus must fail
 // with a clear message rather than a silent no-op.
-#define KW_SCRIPT_NAME "chocobar-geometry"
+// KW_SCRIPT_NAME is defined above with the geometry state; the install path uses it too.
 
 static int kwScriptPath(char *out, size_t cap) {
     const char *home = getenv("HOME");
@@ -1370,17 +1348,16 @@ int main(int argc, char **argv) {
             g_menuPending = 0;
             Rgb bgc = hexRgb(cbCfgTint(), (Rgb){0.91, 0.85, 0.76});
             Rgb fgc = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
-            Rgb dimc = hexRgb(cbCfgFgDim(), (Rgb){0.35, 0.32, 0.27});
             Rgb divc = hexRgb(cbCfgDivider(), (Rgb){0.85, 0.80, 0.70});
             Rgb accc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
             double bg3[3] = { bgc.r, bgc.g, bgc.b };
             double fg3[3] = { fgc.r, fgc.g, fgc.b };
-            double dm3[3] = { dimc.r, dimc.g, dimc.b };
             double dv3[3] = { divc.r, divc.g, divc.b };
             double ac3[3] = { accc.r, accc.g, accc.b };
+            // no dim colour: the menu has no dim text (menu.h)
             int choice = menuRun(g_dpy, g_screen, g_visual, g_cmap, 32,
                                  g_menuX, g_menuY, g_scale, (int)fontSizePx(),
-                                 g_fontFamily, bg3, 0.97, fg3, dm3, dv3, ac3);
+                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3);
             handleMenuChoice(choice);
         }
         if (g_dashPending) {

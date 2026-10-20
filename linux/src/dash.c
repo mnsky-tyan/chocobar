@@ -24,6 +24,7 @@
 #include <X11/keysym.h>
 
 #include "dash.h"
+#include "linux_shape.h"
 
 // ---- the shared aggregation (p_agg.c's portable accessors) ---------------------
 extern long long cbTokAll(void);
@@ -98,15 +99,12 @@ static double textW(cairo_t *cr, const char *s) {
     return e.x_advance;
 }
 
-// a rounded card, the board's unit of layout
+// a rounded card, the board's unit of layout. The path itself is the shared
+// roundedPath() - the board's four-arc copy was the third one and the reason a
+// geometry fix had to be made three times.
 static void card(cairo_t *cr, double x, double y, double w, double h, double r,
                  Rgb3 fill, double fillA, Rgb3 edge) {
-    cairo_new_sub_path(cr);
-    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
-    cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
-    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
-    cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
-    cairo_close_path(cr);
+    roundedPath(cr, x, y, w, h, r);
     cairo_set_source_rgba(cr, fill.r, fill.g, fill.b, fillA);
     cairo_fill_preserve(cr);
     cairo_set_source_rgba(cr, edge.r, edge.g, edge.b, 0.55);
@@ -178,7 +176,10 @@ static void paint(Dash *d) {
     y += 18 * S;
 
     int days = cbTokDayCount();
-    int weeks = d->heatWeeks > 0 ? d->heatWeeks : 26;
+    // 26 weeks, matching the Windows board. This was a `heatWeeks` parameter the
+    // caller passed as a literal 26 and nothing else read, so it is now the
+    // number it always was.
+    int weeks = 26;
     if (weeks * 7 > days) weeks = days / 7;
     int first = days - weeks * 7;
     double cell = 11 * S, cgap = 2 * S;
@@ -218,14 +219,7 @@ static void paint(Dash *d) {
         cairo_set_source_rgba(cr, c.r, c.g, c.b, 1.0);
         cairo_rectangle(cr, cx, cy, cell, cell);
         cairo_fill(cr);
-        if (idx == d->hoverDay) {
-            cairo_set_source_rgba(cr, d->fg.r, d->fg.g, d->fg.b, 0.9);
-            cairo_set_line_width(cr, 1.2);
-            cairo_rectangle(cr, cx + 0.5, cy + 0.5, cell - 1, cell - 1);
-            cairo_stroke(cr);
-        }
     }
-    double heatW = weeks * (cell + cgap);
     y += 7 * (cell + cgap) + 12 * S;
 
     // ---- the two tables, side by side: BY APP and BY MODEL
@@ -289,28 +283,23 @@ static void paint(Dash *d) {
     cairo_destroy(cr);
     cairo_surface_destroy(surf);
     XFlush(d->dpy);
-    (void)heatW;
 }
 
 void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
-             int cssW, int cssH, double scale, int fontPx, const char *fontFamily,
+             int cssW, int cssH, double scale, const char *fontFamily,
              const double page[3], const double card[3], const double fg[3],
-             const double dim[3], const double accent[3], const double divider[3],
-             const double warn[3], const double ramp[5][3], int heatWeeks) {
+             const double dim[3], const double divider[3], const double ramp[5][3]) {
     Dash d;
     memset(&d, 0, sizeof(d));
-    d.dpy = dpy; d.screen = screen; d.visual = visual; d.cmap = cmap;
-    d.scale = scale; d.fontPx = fontPx; d.heatWeeks = heatWeeks;
+    d.dpy = dpy; d.visual = visual;
+    d.scale = scale;
     snprintf(d.fontFamily, sizeof(d.fontFamily), "%s", fontFamily ? fontFamily : "sans");
     memcpy(d.page, page, sizeof(d.page));
     d.card = (Rgb3){ card[0], card[1], card[2] };
     d.fg = (Rgb3){ fg[0], fg[1], fg[2] };
     d.dim = (Rgb3){ dim[0], dim[1], dim[2] };
-    d.accent = (Rgb3){ accent[0], accent[1], accent[2] };
     d.divider = (Rgb3){ divider[0], divider[1], divider[2] };
-    d.warn = (Rgb3){ warn[0], warn[1], warn[2] };
     for (int i = 0; i < 5; i++) d.ramp[i] = (Rgb3){ ramp[i][0], ramp[i][1], ramp[i][2] };
-    d.hoverDay = -1;
     d.w = (int)(cssW * scale + 0.5);
     d.h = (int)(cssH * scale + 0.5);
 
