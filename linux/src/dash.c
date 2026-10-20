@@ -66,7 +66,6 @@ typedef struct {
     Rgb3 ramp[5];
     int heatWeeks;
     int hoverDay;      // index into the day array, -1 = none
-    int running;
     Atom wmDelete;             // WM_DELETE_WINDOW, registered on the window
 } Dash;
 
@@ -287,23 +286,29 @@ static void paint(Dash *d) {
     XFlush(d->dpy);
 }
 
-void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
-             int cssW, int cssH, double scale, const char *fontFamily,
-             const double page[3], const double card[3], const double fg[3],
-             const double dim[3], const double divider[3], const double ramp[5][3]) {
-    Dash d;
-    memset(&d, 0, sizeof(d));
-    d.dpy = dpy; d.visual = visual;
-    d.scale = scale;
-    snprintf(d.fontFamily, sizeof(d.fontFamily), "%s", fontFamily ? fontFamily : "sans");
-    memcpy(d.page, page, sizeof(d.page));
-    d.card = (Rgb3){ card[0], card[1], card[2] };
-    d.fg = (Rgb3){ fg[0], fg[1], fg[2] };
-    d.dim = (Rgb3){ dim[0], dim[1], dim[2] };
-    d.divider = (Rgb3){ divider[0], divider[1], divider[2] };
-    for (int i = 0; i < 5; i++) d.ramp[i] = (Rgb3){ ramp[i][0], ramp[i][1], ramp[i][2] };
-    d.w = (int)(cssW * scale + 0.5);
-    d.h = (int)(cssH * scale + 0.5);
+// The board's state, created by dashOpen and driven by the bar's loop. One
+// board at a time: it is opened from the menu and closed by Esc, a click or
+// the WM's close button.
+static Dash g_dashBoard;
+static int g_boardOpen = 0;
+
+Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
+                int cssW, int cssH, double scale, const char *fontFamily,
+                const double page[3], const double card[3], const double fg[3],
+                const double dim[3], const double divider[3], const double ramp[5][3]) {
+    Dash *d = &g_dashBoard;
+    memset(d, 0, sizeof(*d));
+    d->dpy = dpy; d->visual = visual;
+    d->scale = scale;
+    snprintf(d->fontFamily, sizeof(d->fontFamily), "%s", fontFamily ? fontFamily : "sans");
+    memcpy(d->page, page, sizeof(d->page));
+    d->card = (Rgb3){ card[0], card[1], card[2] };
+    d->fg = (Rgb3){ fg[0], fg[1], fg[2] };
+    d->dim = (Rgb3){ dim[0], dim[1], dim[2] };
+    d->divider = (Rgb3){ divider[0], divider[1], divider[2] };
+    for (int i = 0; i < 5; i++) d->ramp[i] = (Rgb3){ ramp[i][0], ramp[i][1], ramp[i][2] };
+    d->w = (int)(cssW * scale + 0.5);
+    d->h = (int)(cssH * scale + 0.5);
 
     XSetWindowAttributes swa;
     memset(&swa, 0, sizeof(swa));
@@ -312,18 +317,19 @@ void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     swa.colormap = cmap;
     swa.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
                      PointerMotionMask | StructureNotifyMask;
-    d.win = XCreateWindow(dpy, RootWindow(dpy, screen), 60, 60,
-                          (unsigned)d.w, (unsigned)d.h, 0, depth, InputOutput, visual,
+    d->win = XCreateWindow(dpy, RootWindow(dpy, screen), 60, 60,
+                          (unsigned)d->w, (unsigned)d->h, 0, depth, InputOutput, visual,
                           CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
-    XStoreName(dpy, d.win, "Chocobar - Token usage");
+    if (!d->win) return None;
+    XStoreName(dpy, d->win, "Chocobar - Token usage");
     // WM_DELETE_WINDOW: without it a client message is never sent and KWin falls
     // back to XKillClient, which severs the SHARED connection - the dashboard
     // using the bar's Display means its close button would take the whole bar
     // process down with it.
     {
         Atom wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
-        XSetWMProtocols(dpy, d.win, &wmDelete, 1);
-        d.wmDelete = wmDelete;
+        XSetWMProtocols(dpy, d->win, &wmDelete, 1);
+        d->wmDelete = wmDelete;
     }
     // The dashboard's own cursor, at the desktop's scaled size: without it the
     // pointer over the board shows Xwayland's root cursor at the raw
@@ -334,7 +340,7 @@ void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                                                     (int)(cbCursorBaseSize() * cbCursorScale() + 0.5));
         if (img) {
             Cursor c = XcursorImageLoadCursor(dpy, img);
-            XDefineCursor(dpy, d.win, c);
+            XDefineCursor(dpy, d->win, c);
             XFreeCursor(dpy, c);
             XcursorImageDestroy(img);
         }
@@ -344,52 +350,67 @@ void dashRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     sh.flags = PMinSize;
     sh.min_width = (int)(520 * scale);
     sh.min_height = (int)(380 * scale);
-    XSetWMNormalHints(dpy, d.win, &sh);
-    XMapWindow(dpy, d.win);
-    paint(&d);
+    XSetWMNormalHints(dpy, d->win, &sh);
+    XMapWindow(dpy, d->win);
+    paint(d);
 
-    d.running = 1;
-    time_t last = time(NULL);
-    while (d.running) {
-        // repaint on the scan period so an open board keeps up with new usage
-        while (XPending(dpy)) {
-            XEvent ev;
-            XNextEvent(dpy, &ev);
-            switch (ev.type) {
-                case Expose:
-                    if (ev.xexpose.count == 0) paint(&d);
-                    break;
-                case ConfigureNotify:
-                    if (ev.xconfigure.width != d.w || ev.xconfigure.height != d.h) {
-                        d.w = ev.xconfigure.width;
-                        d.h = ev.xconfigure.height;
-                        paint(&d);
-                    }
-                    break;
-                case KeyPress: {
-                    KeySym ks = XLookupKeysym(&ev.xkey, 0);
-                    if (ks == XK_Escape || ks == XK_q) d.running = 0;
-                    break;
-                }
-                case ButtonPress:
-                    // a middle/right click also closes the window
-                    if (ev.xbutton.button != 1) d.running = 0;
-                    break;
-                case ClientMessage:
-                    // the window manager's close button (see WM_DELETE_WINDOW above)
-                    if ((Atom)ev.xclient.data.l[0] == d.wmDelete) d.running = 0;
-                    break;
-                case DestroyNotify:
-                    d.running = 0;
-                    return;      // the window is already gone; do not touch it
-                default: break;
-            }
+    g_boardOpen = 1;
+    return d->win;
+}
+
+Window dashWin(void) {
+    return g_boardOpen ? g_dashBoard.win : None;
+}
+
+// The board wants to close: Esc, q, a non-left click, the WM's close button, or
+// the window already being gone. Returns 1 and lets the caller call dashClose().
+static int boardClose(XEvent *ev) {
+    Dash *d = &g_dashBoard;
+    switch (ev->type) {
+        case KeyPress: {
+            KeySym ks = XLookupKeysym(&ev->xkey, 0);
+            return ks == XK_Escape || ks == XK_q;
         }
-        time_t now = time(NULL);
-        if (now != last) { last = now; paint(&d); }
-        struct timespec ts = { 0, 60 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
+        case ButtonPress:
+            // a middle/right click also closes the window
+            return ev->xbutton.button != 1;
+        case ClientMessage:
+            // the window manager's close button (see WM_DELETE_WINDOW above)
+            return (Atom)ev->xclient.data.l[0] == d->wmDelete;
+        case DestroyNotify:
+            g_boardOpen = 0;   // the window is already gone; do not touch it
+            return 1;
+        default: return 0;
     }
-    XDestroyWindow(dpy, d.win);
-    XFlush(dpy);
+}
+
+int dashEvent(XEvent *ev) {
+    if (!g_boardOpen) return 0;
+    Dash *d = &g_dashBoard;
+    if (boardClose(ev)) return 1;
+    switch (ev->type) {
+        case Expose:
+            if (ev->xexpose.count == 0) paint(d);
+            break;
+        case ConfigureNotify:
+            if (ev->xconfigure.width != d->w || ev->xconfigure.height != d->h) {
+                d->w = ev->xconfigure.width;
+                d->h = ev->xconfigure.height;
+                paint(d);
+            }
+            break;
+        default: break;
+    }
+    return 0;
+}
+
+void dashClose(void) {
+    if (!g_boardOpen) return;
+    Dash *d = &g_dashBoard;
+    g_boardOpen = 0;
+    // DestroyNotify may have already taken the window; XDestroyWindow on a dead
+    // window only raises BadWindow, which the error handler ignores.
+    XDestroyWindow(d->dpy, d->win);
+    XFlush(d->dpy);
+    // the bar's own surface is still valid; the caller repaints it
 }

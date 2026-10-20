@@ -1134,8 +1134,11 @@ static void reloadConfig(void) {
 
 // ---- the right-click menu and the dashboards --------------------------------------
 
-// A dashboard is a modal-ish second window: while it is open the bar stops
-// repainting itself, which keeps the two from fighting over the event queue.
+// A dashboard is a second window driven by the bar's own loop: one connection,
+// two windows, one pump, exactly the Windows shape (one GetMessage loop
+// dispatching the bar and the board while the bar's WM_TIMER keeps ticking).
+// A nested event loop here would freeze the bar's clock for as long as the
+// board stays open.
 static void runDashboard(void) {
     Rgb bgc = hexRgb(cbCfgPinkBg(), (Rgb){0.996, 0.969, 0.976});
     Rgb cardc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
@@ -1157,10 +1160,8 @@ static void runDashboard(void) {
     Visual *dvis = DefaultVisual(g_dpy, g_screen);
     Colormap dcmap = DefaultColormap(g_dpy, g_screen);
     int ddepth = DefaultDepth(g_dpy, g_screen);
-    dashRun(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
-            g_fontFamily, page, card, fg, dim, div, ramp);
-    // the bar's own surface is still valid; force a repaint when we come back
-    paint();
+    dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
+             g_fontFamily, page, card, fg, dim, div, ramp);
 }
 
 // Run an external program without blocking the bar's loop: a config editor or a
@@ -1456,6 +1457,13 @@ int main(int argc, char **argv) {
         while (XPending(g_dpy)) {
             XEvent ev;
             XNextEvent(g_dpy, &ev);
+            // the board's events go to the board, everything else to the bar:
+            // two windows, one queue, one pump (Windows dispatches both the same
+            // way through its single GetMessage loop)
+            if (dashWin() != None && ev.xany.window == dashWin()) {
+                if (dashEvent(&ev)) { dashClose(); paint(); }
+                continue;
+            }
             switch (ev.type) {
                 case Expose: if (ev.xexpose.count == 0) onExpose(); break;
                 case ButtonPress: onButton(&ev.xbutton); break;

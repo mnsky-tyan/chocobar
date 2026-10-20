@@ -450,10 +450,20 @@ function check(name, ok, detail) {
   // WM_DELETE_WINDOW: without the protocol the window manager falls back to
   // XKillClient, which severs the shared connection and takes the bar with it.
   const dash = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
   check('linux: the dashboard registers WM_DELETE_WINDOW',
-    /XSetWMProtocols\(dpy, d\.win/.test(dash) && /WM_DELETE_WINDOW/.test(dash) &&
-    /ev\.xclient\.data\.l\[0\] == d\.wmDelete/.test(dash),
+    /XSetWMProtocols\(dpy, d->win/.test(dash) && /WM_DELETE_WINDOW/.test(dash) &&
+    /ev->xclient\.data\.l\[0\] == d->wmDelete/.test(dash),
     'a close button that kills the shared connection takes the whole bar down with it');
+  // the board is driven by the bar's loop: one pump, two windows. A nested
+  // event loop (dashRun's own while/XPending) froze the bar's clock for as
+  // long as the board stayed open - Windows dispatches both windows from one
+  // GetMessage loop and its WM_TIMER keeps ticking.
+  check('linux: the dashboard is driven by the bar\'s loop, not a nested one',
+    !/while \(XPending/.test(dash) && !/nanosleep/.test(dash) &&
+    /int dashEvent\(XEvent \*ev\)/.test(dash) &&
+    /ev\.xany\.window == dashWin\(\)/.test(main),
+    'a dashboard with its own event loop stops the bar\'s clock while it is open');
 
   // a broken session-bus connection must be RELEASED, or the bar silently loses
   // bar.align 1 for the rest of its life after any KWin/session restart.
