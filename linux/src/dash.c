@@ -54,18 +54,13 @@ typedef struct { double r, g, b; } Rgb3;
 typedef struct {
     Display *dpy;
     Window win;
-    int screen;
     Visual *visual;
-    Colormap cmap;
     int w, h;
     double scale;
-    int fontPx;
     char fontFamily[128];
-    Rgb3 fg, dim, accent, card, divider, warn;
+    Rgb3 fg, dim, card, divider;
     double page[3];
     Rgb3 ramp[5];
-    int heatWeeks;
-    int hoverDay;      // index into the day array, -1 = none
     Atom wmDelete;             // WM_DELETE_WINDOW, registered on the window
 } Dash;
 
