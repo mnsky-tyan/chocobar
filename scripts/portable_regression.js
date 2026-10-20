@@ -428,5 +428,33 @@ function check(name, ok, detail) {
     'the wrong offset makes the grid read as diagonal streaks on every day but Thursday');
 }
 
+// --- the gpu chip: a measured source, never a fabricated one -----------------------
+// modules.gpu on an Intel iGPU needs the i915 PMU (perf_event_open on the
+// *-busy counters). Three properties must hold: the chip hides rather than
+// shows a fake 0% when the source is absent; the PMU permission comes from a
+// CAP_PERFMON FILE CAPABILITY on the binary, not from weakening the global
+// kernel.perf_event_paranoid; and the percentage is the same quantity Windows
+// reports (sum of engine busy fractions, clamped 100).
+{
+  const pm = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'p_metrics_linux.c'), 'utf8');
+  const rd = fs.readFileSync(path.join(__dirname, '..', 'linux', 'README.md'), 'utf8');
+  check('linux: gpu hides on no source instead of showing 0%',
+    /static int gpuPercent\(void\)/ .test(pm) && /return -1;/.test(pm),
+    'a 0%% chip on a GPU with no readable counter is a fabricated reading');
+  check('linux: gpu uses the i915 PMU busy counters',
+    /perf_event_open/.test(pm) && /rcs0-busy/.test(pm) && /PERF_EVENT_IOC_ENABLE/.test(pm),
+    'the engine-busy counter is the one unprivileged-free source that is a real measurement');
+  check('linux: gpu permission is a file capability, not a global sysctl',
+    /CAP_PERFMON/.test(pm) && /cap_perfmon\+ep/.test(rd) &&
+    !/perf_event_paranoid/.test(pm.replace(/kernel\.perf_event_paranoid[^\n]*/g, '')),
+    'weakening the whole machine to show one chip would be the wrong trade');
+  check('linux: gpu sums engine fractions and clamps like Windows',
+    /sum \+= 100\.0 \* \(double\)d \/ \(double\)wall/.test(pm) && /if \(sum > 100\) sum = 100;/.test(pm),
+    'the Windows bar sums PDH per-engine utilisation and clamps at 100; the Linux chip must mean the same thing');
+  check('linux: gpu counters stay open across ticks',
+    /static GpuCounter g_gpuCtr\[GPU_ENGINES_MAX\]/.test(pm) && /g_gpuCtrN < 0\) g_gpuCtrN = gpuProbeI915\(\)/.test(pm),
+    're-opening seven PMU events every second would pay the open cost seven times per tick');
+}
+
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);

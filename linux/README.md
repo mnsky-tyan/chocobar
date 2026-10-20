@@ -36,6 +36,25 @@ Xwayland hiccup is followed by a restart within ~2 s, and a restart loop is neve
 given up on. Verified: `kill -9` on the running bar produced a new PID and an
 active service 4 s later.
 
+### The gpu chip needs one capability
+
+The gpu chip on Intel hardware reads the i915 PMU's engine-busy counters
+(`rcs0-busy` and friends), which the kernel gates behind
+`kernel.perf_event_paranoid` (4 on this machine: unprivileged opens are denied).
+Rather than weaken that global setting, grant the permission to exactly this
+binary with a file capability:
+
+```sh
+sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
+```
+
+Re-run it after every `cp` install - a fresh copy carries no capabilities. If
+the capability is missing the gpu chip stays hidden and the bar logs the exact
+command to run (in `~/.wizbar/native.log`). Nothing else in the bar needs any
+privilege, and the capability cannot be used to read other processes' memory: it
+only allows opening PMU counters. AMD GPUs need none of this - they publish
+`gpu_busy_percent` as a plain sysfs file the bar reads unprivileged.
+
 ### "As long as the terminal" (`bar.align`)
 
 | `bar.align` | meaning |

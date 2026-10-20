@@ -7,11 +7,13 @@
 // starts without them and grows them"). The chip VALUES it produces are the same
 // quantities, so the bar renders identical text.
 //
-// Every source is read from the kernel's own files, so the cost is a few small
-// reads per second (measured: ~0.3 ms for a full metrics tick on this machine,
-// against a 1 Hz timer). Nothing here shells out except the audio mixer, which
-// has no file interface: `pactl get-sink-volume` runs at most once a second and
-// only while the volume chip is enabled.
+// Every source is read from the kernel's own files or PMU counters, so the cost
+// is a few small reads per second (measured: ~0.3 ms for a full metrics tick on
+// this machine, against a 1 Hz timer). Nothing here shells out except the audio
+// mixer, which has no file interface: `pactl get-sink-volume` runs at most once
+// a second and only while the volume chip is enabled. The i915 gpu path keeps
+// its PMU counters open across ticks; the only per-tick cost there is one
+// read(2) per engine.
 //
 // A source that is absent reads as "no value" (the bar shows an em dash, as the
 // Windows bar does for a missing sensor) - never as a fabricated 0.
@@ -33,9 +35,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <linux/perf_event.h>
 
 #include "linux_metrics.h"
 
@@ -127,6 +133,18 @@ static int readTempFile(const char *path) {
     fclose(f);
     if (v < TEMP_NONE || v > 200000) return TEMP_NONE;  // nonsense (some drivers report 0)
     return (int)v;                                  // millidegrees C
+}
+
+// Read one plain non-negative integer from a file (sysfs "type" files, counters).
+// Separate from readTempFile above, whose range check is about millidegrees C and
+// would silently mangle any other kind of number. Returns -1 when unreadable.
+static long readIntFile(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    long v = -1;
+    if (fscanf(f, "%ld", &v) != 1) v = -1;
+    fclose(f);
+    return v;
 }
 
 static int tempFromHwmon(const char *nameMatch) {
@@ -323,12 +341,157 @@ static int volumePercent(void) {
 }
 
 // ---- gpu ---------------------------------------------------------------------
-// Intel integrated graphics do not expose a utilisation file on this kernel
-// (checked: no gpu_busy_percent, no gt_busy_percent, i915's freq file reports
-// frequency, not load), so the honest answer is "no value" and the chip stays
-// hidden behind modules.gpu. The AMD path (amdgpu's gpu_busy_percent) is
-// implemented because it is a plain file read and costs nothing to support.
-static int gpuPercent(void) {
+// Two sources, tried in order, because "GPU load" is reported differently by
+// each driver:
+//
+//   1. amdgpu publishes a ready-made percentage in sysfs
+//      (/sys/class/drm/cardN/device/gpu_busy_percent). Unprivileged, one read,
+//      no state. Used when present.
+//   2. i915 publishes no such file - only per-engine BUSY COUNTERS on its PMU
+//      (perf type at /sys/bus/event_source/devices/i915/type, events named
+//      rcs0-busy, vcs0-busy, ...). A counter is cumulative nanoseconds of engine
+//      activity, so a percentage needs two reads and the wall time between them.
+//
+// The i915 route is the one thing here that is not a plain file read: opening a
+// PMU event is gated by kernel.perf_event_paranoid, which is 4 on this machine
+// and denies unprivileged access outright. It is NOT worked around by weakening
+// that global setting - instead the binary carries a CAP_PERFMON file capability
+// (see linux/README.md), so exactly this program and no other process gets the
+// permission. Without the capability the open() fails with EACCES and the chip
+// reports "no value" exactly as it did before: a missing capability degrades to
+// an honest em dash, never to a fabricated 0.
+//
+// The quantity matches Windows: p_metrics.c sums PDH's per-engine
+// \GPU Engine(*)\Utilization Percentage and clamps the total at 100, so summing
+// every i915 engine's busy fraction and clamping is the same measurement, not an
+// analogy. Engines that are not present on the chip are simply absent from
+// /sys/bus/event_source/devices/i915/events and are skipped.
+//
+// Cost: a full tick with both sources present is two sysfs reads plus, per
+// sample, read(2) on each open counter. The counters stay OPEN across ticks (a
+// 1 Hz poll re-opening 7 PMU events every second would pay the open cost 7 times
+// a second for no reason) and only the deltas are computed here.
+#define GPU_ENGINES_MAX 16
+#define GPU_ENGINE_NAMES { "rcs0-busy", "bcs0-busy", "vcs0-busy", "vcs1-busy", \
+                           "vecs0-busy", "ccs0-busy", "ccs1-busy", "ccs2-busy", \
+                           "ccs3-busy", "rcs1-busy", "bcs1-busy", "vcs2-busy", \
+                           "vcs3-busy", "vcs4-busy", "vcs5-busy", "vcs6-busy" }
+
+typedef struct {
+    int fd;              // perf event fd, -1 = not open
+    unsigned long long prev; // cumulative busy ns at the previous sample
+    int primed;          // 0 until the first successful read
+} GpuCounter;
+
+static GpuCounter g_gpuCtr[GPU_ENGINES_MAX];
+static int g_gpuCtrN = -1;        // -1 = not probed yet, 0 = no PMU source
+static unsigned long long g_gpuPrevNs; // monotonic clock at the previous sample
+
+static unsigned long long monoNs(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (unsigned long long)t.tv_sec * 1000000000ULL + (unsigned long long)t.tv_nsec;
+}
+
+// One PMU event open. attr configuration is what the kernel's events/ files
+// spell out: type from the i915 PMU directory, config from the event's own file.
+static int gpuOpenEvent(unsigned type, unsigned long long config) {
+    struct perf_event_attr a;
+    memset(&a, 0, sizeof(a));
+    a.type = type;
+    a.size = sizeof(a);
+    a.config = config;
+    a.disabled = 1;          // enabled explicitly once, then left running
+    a.exclude_kernel = 1;    // utilisation is about what user work drove
+    a.exclude_hv = 1;
+    // pid = -1, cpu = 0 asks for the whole GPU, not one process's share. Engines
+    // are not per-CPU on an iGPU, so any single CPU id is equivalent here.
+    return (int)syscall(__NR_perf_event_open, &a, -1, 0, -1, 0);
+}
+
+// Probe the i915 PMU once. Returns the number of engines opened (0 = no usable
+// source, in which case the sysfs path is used or the chip stays hidden).
+static int gpuProbeI915(void) {
+    static const char *names[] = GPU_ENGINE_NAMES;
+    extern void writeLogA(const char *s); // the core's log (chocobar_core.h)
+    long nt = readIntFile("/sys/bus/event_source/devices/i915/type");
+    if (nt <= 0) return 0;
+    unsigned type = (unsigned)nt;
+    int n = 0;
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]) && n < GPU_ENGINES_MAX; i++) {
+        char p[256];
+        snprintf(p, sizeof(p), "/sys/bus/event_source/devices/i915/events/%s", names[i]);
+        // the file holds "config=0x1234"; read it as hex
+        FILE *f = fopen(p, "r");
+        if (!f) continue;               // engine absent on this chip
+        char line[64] = {0};
+        int ok = fgets(line, sizeof(line), f) != NULL;
+        fclose(f);
+        if (!ok) continue;
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        unsigned long long cfg = strtoull(eq + 1, NULL, 0);
+        int fd = gpuOpenEvent(type, cfg);
+        if (fd < 0) {
+            // EACCES = no CAP_PERFMON (the common, unprivileged case). Stop
+            // probing: every further engine would fail identically. Say so once
+            // in the log - a permanently absent chip with no explanation is the
+            // kind of silence that reads as a bug in the bar.
+            if (errno == EACCES || errno == EPERM) {
+                if (n == 0)
+                    writeLogA("[wizbar] gpu: i915 PMU needs CAP_PERFMON "
+                              "(sudo setcap cap_perfmon+ep $(command -v chocobar-linux)) - "
+                              "the gpu chip stays hidden until then");
+                break;
+            }
+            continue;                    // engine present but unusable
+        }
+        g_gpuCtr[n].fd = fd;
+        g_gpuCtr[n].prev = 0;
+        g_gpuCtr[n].primed = 0;
+        n++;
+    }
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            ioctl(g_gpuCtr[i].fd, PERF_EVENT_IOC_RESET, 0);
+            ioctl(g_gpuCtr[i].fd, PERF_EVENT_IOC_ENABLE, 0);
+        }
+        g_gpuPrevNs = monoNs();
+    }
+    return n;
+}
+
+// Cumulative-busy-counter -> percentage. The first call only primes (a counter
+// delta needs a previous sample, exactly like cpuPercent above). Each engine
+// contributes its busy fraction; the sum is clamped at 100 to match Windows.
+static int gpuI915Percent(void) {
+    if (g_gpuCtrN < 0) g_gpuCtrN = gpuProbeI915();
+    if (g_gpuCtrN <= 0) return -1;
+    unsigned long long now = monoNs();
+    unsigned long long wall = now - g_gpuPrevNs;
+    if (wall == 0) return -1;
+    double sum = 0;
+    int got = 0;
+    for (int i = 0; i < g_gpuCtrN; i++) {
+        unsigned long long v = 0;
+        if (read(g_gpuCtr[i].fd, &v, sizeof(v)) != (ssize_t)sizeof(v)) continue;
+        if (g_gpuCtr[i].primed) {
+            unsigned long long d = v - g_gpuCtr[i].prev; // counters only grow
+            sum += 100.0 * (double)d / (double)wall;
+            got = 1;
+        }
+        g_gpuCtr[i].prev = v;
+        g_gpuCtr[i].primed = 1;
+    }
+    g_gpuPrevNs = now;
+    if (!got) return -1;   // first sample: no delta yet, show nothing
+    if (sum < 0) sum = 0;
+    if (sum > 100) sum = 100;
+    return (int)(sum + 0.5);
+}
+
+// amdgpu's ready-made percentage, and the ordered attempt at both sources.
+static int gpuSysfsPercent(void) {
     DIR *d = opendir("/sys/class/drm");
     if (!d) return -1;
     int best = -1;
@@ -342,6 +505,12 @@ static int gpuPercent(void) {
     }
     closedir(d);
     return best;
+}
+
+static int gpuPercent(void) {
+    int v = gpuSysfsPercent();
+    if (v >= 0) return v;
+    return gpuI915Percent();
 }
 
 // ---- pet presence ------------------------------------------------------------

@@ -18,7 +18,7 @@ typedef struct {
     int battPct;       // percent when battValid
     int battAc;        // 1 = on mains / charging / full
     int battValid;     // 0 = no battery (desktop)
-    double gpu;        // percent, -1 no source (Intel iGPU here)
+    double gpu;        // percent, -1 no source (i915 PMU needs CAP_PERFMON)
     int petRunning;    // 1 = the pet process is alive (modules.pet.exePath)
     time_t clockNow;   // local wall clock for the clock chip
 } LinuxMetrics;
