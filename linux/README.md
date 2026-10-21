@@ -199,7 +199,7 @@ right-click bounced the menu straight back open.
 
 | chip | source | note |
 |---|---|---|
-| pet | `/proc/<pid>/cmdline` | a process whose cmdline carries `modules.pet.exePath` as an exact token (or its `realpath`); the chip shows `on`/`off` and a click starts or stops it. The configured value must be ONE executable path - a bare name, or a command line carrying arguments, cannot identify one process and is refused, for starting and for matching alike |
+| pet | `/proc/<pid>/cmdline` | a process whose cmdline carries `modules.pet.exePath` as an exact token (or its `realpath`); the chip shows `on`/`off` and a click starts or stops it. The configured value must be one ABSOLUTE path to a regular executable file - a bare name, a relative path, a directory, or a command line carrying arguments, cannot identify one process and is refused, for starting and for matching alike |
 | cpu | `/proc/stat` delta | same arithmetic as `top` |
 | ram | `/proc/meminfo` | used = 100 - MemAvailable/MemTotal |
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |

@@ -851,8 +851,12 @@ static int barYFor(void) {
 }
 
 static void positionInit(int screenW) {
-    g_x = (screenW - g_w) / 2;
-    g_y = (int)(cbCfgGap() * g_scale + 0.5);
+    int aw = 0, ax = 0;
+    if (applyAlign(&aw, &ax)) g_x = ax;
+    else g_x = (screenW - g_w) / 2;
+    int wantY = barYFor();
+    g_y = wantY < 0 ? (int)(cbCfgGap() * g_scale + 0.5) : wantY;
+    if (wantY < 0) g_hidden = 1;
 }
 
 // ---- events -------------------------------------------------------------------------------
@@ -933,12 +937,15 @@ static void onButtonRelease(XButtonEvent *e) {
         return;
     }
     if (e->button != 3) return;
-    // the release must still be over the bar: the bar never grabs the pointer,
-    // so an off-bar drag delivers its release to whatever window the pointer is
-    // over and the bar is never asked - the same rule as Windows, which sends
-    // WM_RBUTTONUP only over the window, and the menu's position is the release
-    // point. The bounds check below is belt-and-braces: it can only fire when
-    // the bar itself moved or was resized between the press and the release.
+    // The release must still be over the bar. The X implicit grab delivers
+    // every pointer event from the press until the last release to the window
+    // that got the press, wherever the pointer wanders (measured: the press
+    // window receives the release at coordinates outside its own bounds and
+    // the window under the pointer receives nothing), so an off-bar drag's
+    // release arrives HERE. The bounds check below is the rule's enforcement,
+    // exactly as on Windows, which sends WM_RBUTTONUP only over the window -
+    // it is not belt-and-braces: deleting it would let an off-bar release
+    // open the menu.
     if (e->x < 0 || e->x >= g_w || e->y < 0 || e->y >= g_h) return;
     g_menuPending = 1;
     g_menuX = e->x_root;
@@ -1257,8 +1264,9 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 // The pet chip's click: start or stop the modules.pet.exePath process, the same
 // toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). The configured
 // value is ONE path token and both halves agree on that: petPathUsable refuses
-// a value that is not an executable path (a bare name, or a command line that
-// carries arguments), and the start execs that path directly - no shell - so
+// a value that is not an absolute path to a regular executable file (a bare
+// name, a relative path, a directory, or a command line that carries
+// arguments), and the start execs that path directly - no shell - so
 // the process the bar starts carries the configured path as an exact cmdline
 // token (the binary's own argv[0], or the script argument the kernel hands a
 // shebang interpreter), and the matcher (the chip's own state source) sees the
@@ -1737,6 +1745,7 @@ int main(int argc, char **argv) {
         cm.xclient.data.l[1] = 1;            // source: normal application
         XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
                    SubstructureNotifyMask | SubstructureRedirectMask, &cm);
+        if (g_hidden) XUnmapWindow(g_dpy, g_win);
         XFlush(g_dpy);
     }
     paint();

@@ -30,8 +30,9 @@ void linuxMetricsPrime(void);
 // in p_metrics_linux.c because the /proc walk lives there; the bar's click
 // handler calls both. The pet is identified by an exact cmdline token equal to
 // the configured path (or its realpath), and the configured value must be ONE
-// executable path - a bare name, or a command line carrying arguments, is
-// refused for both matching and starting.
+// ABSOLUTE path to a regular executable file - a bare name, a relative path,
+// a directory, or a command line carrying arguments, is refused for both
+// matching and starting.
 int petProcessRunning(const char *exePath);
 int petProcessStop(const char *exePath);
 int petPathUsable(const char *exePath);

@@ -38,11 +38,11 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <linux/perf_event.h>
 
@@ -526,25 +526,29 @@ static int gpuPercent(void) {
 // process carrying that name, and the stop path signals whatever it matched.
 //
 // The configured value is ONE path token - the same thing the start path
-// execs, so the pet the bar starts is the pet the matcher sees. It must
-// contain a '/' and name an executable file: a bare name cannot identify one
-// process, and a command line that carries arguments ("/path/pet.sh --flag")
-// is not a path. Both are refused for matching and starting alike.
+// execs, so the pet the bar starts is the pet the matcher sees. It must be an
+// ABSOLUTE path to a REGULAR executable file: a bare name cannot identify one
+// process, a relative path depends on each process's own cwd, a directory
+// passes access(X_OK) through its search bit and would match every process
+// that merely carries it as an argument, and a command line that carries
+// arguments ("/path/pet.sh --flag") is not a path. All are refused for
+// matching and starting alike.
 
-// 0 = the configured value cannot name a target: empty, a bare name, or a
-// command line carrying arguments rather than one executable path. Logged
-// once per distinct value, not once per tick.
+// 0 = the configured value cannot name a target: empty, a bare name, a
+// relative path, a directory, or a command line carrying arguments rather
+// than one absolute executable path. Logged once per distinct value, not
+// once per tick.
 int petPathUsable(const char *exePath) {
     if (!exePath || !*exePath) return 0;
-    if (strchr(exePath, '/') && access(exePath, X_OK) == 0) return 1;
+    struct stat st;
+    if (exePath[0] == '/' && stat(exePath, &st) == 0 && S_ISREG(st.st_mode) &&
+        access(exePath, X_OK) == 0)
+        return 1;
     static char refused[512];
     if (strcmp(refused, exePath) != 0) {
         snprintf(refused, sizeof(refused), "%s", exePath);
-        if (strchr(exePath, '/'))
-            fprintf(stderr, "chocobar: pet path is not an executable file "
-                            "(a path with arguments is not a path): %s\n", exePath);
-        else
-            fprintf(stderr, "chocobar: pet path is not a path: %s\n", exePath);
+        fprintf(stderr, "chocobar: pet path is not an absolute path to a "
+                        "regular executable file: %s\n", exePath);
     }
     return 0;
 }

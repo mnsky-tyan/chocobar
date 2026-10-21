@@ -62,6 +62,7 @@ cleanup() {
     if [ -s "$WORK/pet.pid" ]; then kill "$(cat "$WORK/pet.pid")" 2>/dev/null; fi
     [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
     [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
+    rm -f /tmp/chocobar-events.log
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -106,7 +107,10 @@ chmod +x "$WORK/home/pet"
 # exact-token match must leave alone
 printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/sleeper.c"
 # a systemctl that always fails, so the autostart path is exercised honestly,
-# and logs one line per call so the test can count reads
+# and logs one line per call so the test can count reads. The stateful twin
+# (systemctl-good) answers is-enabled from a state file and records
+# enable/disable; the checks swap the two by renaming so the bar's own PATH
+# resolves whichever mode a check needs.
 cat > "$WORK/fakebin/systemctl" <<SH
 #!/bin/sh
 echo "call: \$*" >> "$CALLS"
@@ -114,6 +118,17 @@ echo "Failed to get unit file state for chocobar.service: No such file or direct
 exit 4
 SH
 chmod +x "$WORK/fakebin/systemctl"
+cat > "$WORK/fakebin/systemctl-good" <<SH
+#!/bin/sh
+echo "call: \$*" >> "$CALLS"
+case "\$2" in
+  is-enabled) [ -f "$WORK/autostart.enabled" ] && exit 0 || exit 1 ;;
+  enable) : > "$WORK/autostart.enabled"; exit 0 ;;
+  disable) rm -f "$WORK/autostart.enabled"; exit 0 ;;
+  *) exit 4 ;;
+esac
+SH
+chmod +x "$WORK/fakebin/systemctl-good"
 
 gcc -O1 -o "$XCLICK" "$HERE/xclick.c" -lX11 -lXtst 2>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the XTEST driver"; cat "$WORK/cc.log"; exit 1; }
@@ -136,7 +151,7 @@ DPID=$!
 for _ in $(seq 1 50); do [ -S "$WORK/bus" ] && break; sleep 0.2; done
 [ -S "$WORK/bus" ] || { echo "FAIL: the private bus did not come up"; exit 1; }
 
-HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" CHOCOBAR_DEBUG=1 \
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
     "$BIN" >"$WORK/bar.log" 2>&1 &
 BAR_PID=$!
 for _ in $(seq 1 60); do
@@ -175,6 +190,9 @@ menu_wh() {
 # observable in the bar's own log without changing anything on disk; its centre
 # is MENU_PAD + MENU_ROW + MENU_ROW/2 from the menu's top edge.
 ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+30+15)*s}')
+# the "Start on login" row centre, in logical px from the menu's top edge
+# (menu.c: MENU_PAD, two rows, MENU_SEP, then half of this row)
+ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+2*30+9+15)*s}')
 
 # 1. the bar must not ask for a compositor blur
 xprop -id "$BARWIN" _KDE_NET_WM_BLUR_BEHIND_REGION >"$WORK/prop.txt" 2>&1
@@ -251,10 +269,13 @@ sleep 0.8
 ! menu_open
 check "the menu closes again when the bar is clicked outside it" $?
 
-# 5c. a right-press whose release lands OFF the bar opens nothing: the bar never
-#     grabs the pointer, so the X server delivers the off-bar release to the
-#     window under the pointer and the bar never sees it - the same rule as
-#     Windows, which sends WM_RBUTTONUP only when the release is over the window.
+# 5c. a right-press whose release lands OFF the bar opens nothing. The X
+#     implicit grab delivers the off-bar release to the BAR at out-of-bounds
+#     coordinates (the press window gets every pointer event until the last
+#     release), so the bar's bounds check is what enforces the rule, exactly
+#     like Windows sending WM_RBUTTONUP only over the window. This check IS
+#     the deletion detector for that bounds check: without it the release far
+#     below the bar would open the menu.
 "$XCLICK" $((X+40)) $((Y+10)) 3 drag $((X+40)) $((Y+HEIGHT+60))
 sleep 0.8
 ! menu_open
@@ -333,7 +354,38 @@ check "the second click stops the pet with a SIGTERM, not a duplicate, not a SIG
 #     token, never a process name, and the decoy's comm IS the pet's basename
 kill -0 "$DECOY_PID" 2>/dev/null
 check "the name-twin decoy survives the pet's stop (exact token, never a name)" $?
+
+# 6f. a DIRECTORY as the pet path is refused: access(X_OK) on a directory
+#     tests search permission, so a directory used to pass as "the pet" and
+#     every process carrying it as an argument became stopable. The bar
+#     hot-reloads its config (the 2 s mtime check), so swap in the throwaway
+#     HOME (a 0755 directory) and click the chip: nothing may start, nothing
+#     may stop, and the decoy must survive.
+cat > "$WORK/home/.wizbar/config.json" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": true, "label": "pet",
+                          "exePath": "$WORK/home" } }
+}
+JSON
+sleep 3
+grep -q "pet path is not an absolute path to a regular executable file" "$WORK/bar.log"
+REFUSED=$?
+STARTED_N=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STOPPED_N=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+[ "$REFUSED" -eq 0 ] &&
+    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq "$STARTED_N" ] &&
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$STOPPED_N" ] &&
+    kill -0 "$DECOY_PID" 2>/dev/null
+check "a directory pet path is refused and the chip is inert (decoy survives)" $?
 kill "$DECOY_PID" 2>/dev/null
+DECOY_PID=""
 
 # 7. the bar rides above the terminal: a geometry report moves it.
 #    The move happens on the bar's own tick (at most once a second), so the
@@ -382,6 +434,70 @@ WANT_Y2=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (350-30-12)*s}')
 [ "$Y" -ge $((WANT_Y2-8)) ] && [ "$Y" -le $((WANT_Y2+8)) ]
 check "the clock still ticks after the child (the bar followed a fresh report to y=$Y want~$WANT_Y2)" $?
 
+# 7e. the autostart row acts through the stateful fake: is-enabled answers
+#     disabled, enable records its call and succeeds. The fake is swapped in
+#     by renaming so the bar's own PATH resolves it; the failing fake stays
+#     for the unknown-state checks on either side of this pair.
+mv "$WORK/fakebin/systemctl" "$WORK/fakebin/systemctl-fail"
+mv "$WORK/fakebin/systemctl-good" "$WORK/fakebin/systemctl"
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+MENU_WIN=""
+read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
+$(menu_wh)
+EOF
+if [ -n "$MENU_WIN" ]; then
+    MGEO=$(xdotool getwindowgeometry --shell "$MENU_WIN")
+    MENU_X=$(echo "$MGEO" | awk -F= '/^X=/{print $2}')
+    MENU_Y=$(echo "$MGEO" | awk -F= '/^Y=/{print $2}')
+    "$XCLICK" $((MENU_X + MENU_W_DEV / 2)) $((MENU_Y + ROW_AUTO_Y)) 1 full
+fi
+sleep 0.8
+[ -n "$MENU_WIN" ] && ! menu_open && grep -q "call: --user enable chocobar" "$CALLS"
+check "clicking Start on login enables the unit" $?
+
+# 7f. the enabled state round-trips: the next menu open reads enabled (the
+#     stateful fake exits 0 - the same value that draws the tick) and the next
+#     click on the row disables again
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+MENU_WIN=""
+read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
+$(menu_wh)
+EOF
+if [ -n "$MENU_WIN" ]; then
+    MGEO=$(xdotool getwindowgeometry --shell "$MENU_WIN")
+    MENU_X=$(echo "$MGEO" | awk -F= '/^X=/{print $2}')
+    MENU_Y=$(echo "$MGEO" | awk -F= '/^Y=/{print $2}')
+    "$XCLICK" $((MENU_X + MENU_W_DEV / 2)) $((MENU_Y + ROW_AUTO_Y)) 1 full
+fi
+sleep 0.8
+[ -n "$MENU_WIN" ] && ! menu_open && grep -q "call: --user disable chocobar" "$CALLS"
+check "the enabled state round-trips (the next click disables)" $?
+
+# 7g. with the always-failing fake back, clicking the row must add NO
+#     enable/disable call: the tri-state guard suppresses the toggle when the
+#     read failed
+mv "$WORK/fakebin/systemctl" "$WORK/fakebin/systemctl-good"
+mv "$WORK/fakebin/systemctl-fail" "$WORK/fakebin/systemctl"
+ED_BEFORE=$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+MENU_WIN=""
+read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
+$(menu_wh)
+EOF
+if [ -n "$MENU_WIN" ]; then
+    MGEO=$(xdotool getwindowgeometry --shell "$MENU_WIN")
+    MENU_X=$(echo "$MGEO" | awk -F= '/^X=/{print $2}')
+    MENU_Y=$(echo "$MGEO" | awk -F= '/^Y=/{print $2}')
+    "$XCLICK" $((MENU_X + MENU_W_DEV / 2)) $((MENU_Y + ROW_AUTO_Y)) 1 full
+fi
+sleep 0.8
+[ -n "$MENU_WIN" ] && ! menu_open &&
+    [ "$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)" -eq "$ED_BEFORE" ]
+check "an unreadable state suppresses the enable/disable call" $?
+
 # 8. a terminal too high to fit the strip above it hides the bar
 report kitty 900 100 5 1600
 sleep 2
@@ -421,6 +537,47 @@ sleep 31
 eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
 [ "$STALE_FROM" -ge $((WANT_Y-8)) ] && [ "$Y" -ge $((WANT_TOP-4)) ] && [ "$Y" -le $((WANT_TOP+4)) ]
 check "a stale geometry report falls back to the screen top (y=$Y want~$WANT_TOP)" $?
+
+# 11. a terminal reported BEFORE the first map makes the bar BORN at its final
+#     position: start a fresh bar, report the terminal while it is still inside
+#     its startup geometry wait, and read the window geometry at the first
+#     moment it exists. The bar must already sit at the reported terminal - not
+#     first at the screen-top centre and then jump one tick later.
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+for _ in $(seq 1 50); do
+    report kitty 900 100 300 1600 && sleep 0.05 || break
+done
+for _ in $(seq 1 50); do
+    [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
+    sleep 0.05
+done
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar2.log" 2>&1 &
+BAR_PID=$!
+for _ in $(seq 1 30); do
+    report kitty 900 100 300 1600 && break
+    sleep 0.05
+done
+BARWIN2=""
+for _ in $(seq 1 60); do
+    BARWIN2=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    if [ -n "$BARWIN2" ]; then
+        eval "$(xdotool getwindowgeometry --shell "$BARWIN2")"
+        [ "${WIDTH:-0}" -gt 100 ] && [ "${X:-0}" -gt 0 ] && break
+    fi
+    sleep 0.05
+done
+[ -n "$BARWIN2" ] && [ "${WIDTH:-0}" -gt 100 ] ||
+    { echo "FAIL: the fresh bar never opened a window"; cat "$WORK/bar2.log"; exit 1; }
+WANT_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (300-30-12)*s}')
+WANT_X=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 100*s}')
+WANT_W=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 900*s}')
+[ "$Y" -ge $((WANT_Y-8)) ] && [ "$Y" -le $((WANT_Y+8)) ] &&
+    [ "$X" -ge $((WANT_X-8)) ] && [ "$X" -le $((WANT_X+8)) ] &&
+    [ "$WIDTH" -ge $((WANT_W-8)) ] && [ "$WIDTH" -le $((WANT_W+8)) ]
+check "a report before the first map makes the bar BORN at the terminal (x=$X y=$Y w=$WIDTH, want x~$WANT_X y~$WANT_Y w~$WANT_W)" $?
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"
