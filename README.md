@@ -362,8 +362,22 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
 A floating Linux bar (cpu, ram, temperature, volume, battery, clock and the token
 count) lives in `linux/` and is built with `bash linux/build.sh`. It shares the
 same core - the config parser, the session scanner and the aggregation are the
-same code - and does not follow a terminal window. See `linux/README.md` for the
-build, the measured cost, and what is per-OS.
+same code - and with `bar.align: 1` it rides just above the active terminal.
+See `linux/README.md` for the build, the measured cost, and what is per-OS.
+
+**The released asset is the bar to run.** Every release carries
+`chocobar-linux` next to `chocobar.exe`, built from the tag by the same
+workflow that builds the Windows exe:
+
+```sh
+gh release download <tag> --pattern chocobar-linux
+install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
+# the GPU chip needs the perf counters capability, and only that capability:
+sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
+```
+
+A build made by hand is fine for development, but the bar the user runs should
+be the released one: that is the only way to know which code is running.
 
 ## Token accounting
 

@@ -34,6 +34,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
 
+      # The LINUX bar needs its own toolchain: the bar the user actually runs
+      # is a release artifact, so the release has to build it. Without this the
+      # Linux bar could only ever exist as a hand-made local build.
+      - name: Install the Linux build dependencies
+        run: |
+          sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
+                               libxcursor-dev libcairo2-dev libdbus-1-dev \
+                               libfontconfig1-dev libcurl4-openssl-dev
+
       - name: Verify the tag matches version.h
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -49,6 +58,11 @@ jobs:
           bash native/build.sh --no-nix
           ls -la native/chocobar.exe
 
+      - name: Build the Linux bar
+        run: |
+          bash linux/build.sh
+          ls -la linux/build/chocobar-linux
+
       - name: Verify the built exe reports the tagged version
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -57,10 +71,17 @@ jobs:
           strings -el native/chocobar.exe | grep -qx "$tag" \
             || { echo "::error::built exe does not contain version string $tag"; exit 1; }
 
-      - name: Attach the exe to the release
+      - name: Verify the built Linux bar reports the tagged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          linux/build/chocobar-linux --version | grep -qx "$tag" \
+            || { echo "::error::the built Linux bar does not report version $tag"; exit 1; }
+
+      - name: Attach the exe and the Linux bar to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" native/chocobar.exe --clobber
+          gh release upload "$GITHUB_REF_NAME" linux/build/chocobar-linux --clobber

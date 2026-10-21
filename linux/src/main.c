@@ -56,6 +56,7 @@
 #include <X11/keysym.h>
 
 #include "chocobar_core.h"
+#include "version.h"      // CB_VER_STR: the one version the release tags
 #include "svg_geometry.h"   // the shared icon ids (SVG_CPU, ...)
 #include "linux_metrics.h"
 #include "geomdbus.h"
@@ -1563,6 +1564,11 @@ int main(int argc, char **argv) {
             return installGeometry();
         } else if (!strcmp(argv[i], "--remove-geometry")) {
             return removeGeometry();
+        } else if (!strcmp(argv[i], "--version")) {
+            // the release workflow verifies the built asset the same way it
+            // verifies the Windows exe: the binary itself must carry the tag
+            printf("%s\n", CB_VER_STR);
+            return 0;
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("chocobar-linux [--config PATH]\n"
                    "  floating status bar: cpu, ram, temp, volume, battery, clock, tokens\n"
@@ -1570,7 +1576,8 @@ int main(int argc, char **argv) {
                    "  the dashboard (the bar itself is not draggable)\n"
                    "  --install-geometry  load the KWin helper that makes bar.align 1\n"
                    "                      (match the active terminal's width) work\n"
-                   "  --remove-geometry   unload and delete that helper\n");
+                   "  --remove-geometry   unload and delete that helper\n"
+                   "  --version           print the version and exit\n");
             return 0;
         }
     }
