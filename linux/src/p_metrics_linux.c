@@ -519,8 +519,12 @@ static int gpuPercent(void) {
 // ---- pet presence ------------------------------------------------------------
 // The pet chip is "is this process alive" (p_ui.c builds it from
 // modules.pet.exePath; Windows reads a Toolhelp32 snapshot). On Linux the pet is
-// identified by ONE thing: an exact token of /proc/<pid>/cmdline equal to the
-// configured path, or to its realpath() so a symlinked launcher still matches.
+// identified by the process's EXECUTED file, never by a process that merely
+// mentions the path: argv[0] is the configured path (or its realpath), or - for
+// a shebang script, where the kernel runs the interpreter - argv[0] names an
+// interpreter and argv[1] is the configured path. No other token position
+// counts, so `tail -f <path>`, `sh -c <path>` and an editor with the file open
+// are not the pet, and the stop path cannot SIGTERM them.
 // Never comm, never a basename, never a substring - comm is the kernel's
 // truncated basename, so matching it makes a bare configured name hit every
 // process carrying that name, and the stop path signals whatever it matched.
@@ -530,14 +534,14 @@ static int gpuPercent(void) {
 // ABSOLUTE path to a REGULAR executable file: a bare name cannot identify one
 // process, a relative path depends on each process's own cwd, a directory
 // passes access(X_OK) through its search bit and would match every process
-// that merely carries it as an argument, and a command line that carries
-// arguments ("/path/pet.sh --flag") is not a path. All are refused for
-// matching and starting alike.
+// that merely carries it as an argument, and a command line carrying arguments
+// ("/path/pet.sh --flag") is not a path. All are refused for matching and
+// starting alike.
 
 // 0 = the configured value cannot name a target: empty, a bare name, a
-// relative path, a directory, or a command line carrying arguments rather
-// than one absolute executable path. Logged once per distinct value, not
-// once per tick.
+// relative path, a directory, or a command line carrying arguments rather than
+// one absolute executable path. Logged once per distinct value, not once per
+// tick.
 int petPathUsable(const char *exePath) {
     if (!exePath || !*exePath) return 0;
     struct stat st;
@@ -562,7 +566,27 @@ static void petResolved(const char *exePath, char *out, size_t cap) {
     free(rp);
 }
 
-// 1 = one of this pid's cmdline tokens is exactly path or its realpath.
+// The interpreters a shebang line can hand a script to. ONE list: it is what
+// decides whether argv[1] is the executed file. A script exec'd by the bar is
+// run by the kernel as `<interpreter> <script>`, so its argv[1] is the path the
+// config names; any other program carrying the path as an argument is not.
+static const char *const kInterpreters[] = {
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
+    "python", "python2", "python3", "perl", "ruby", "node", "nodejs",
+    "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript",
+    NULL
+};
+
+static int isInterpreter(const char *argv0) {
+    const char *base = strrchr(argv0, '/');
+    base = base ? base + 1 : argv0;
+    for (int i = 0; kInterpreters[i]; i++)
+        if (!strcmp(base, kInterpreters[i])) return 1;
+    return 0;
+}
+
+// 1 = argv[0] is path or its realpath, or argv[0] is an interpreter and argv[1]
+// is. Any other token position is an argument, not the executed file.
 static int petPidMatches(const char *pidName, const char *path, const char *real) {
     char p[300];
     snprintf(p, sizeof(p), "/proc/%s/cmdline", pidName);
@@ -572,12 +596,16 @@ static int petPidMatches(const char *pidName, const char *path, const char *real
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
-    for (size_t i = 0; i < n; ) {
-        const char *tok = buf + i;
-        size_t len = strlen(tok);
-        if (len && (!strcmp(tok, path) || (real[0] && !strcmp(tok, real)))) return 1;
-        i += len + 1;
+    char *argv[2] = { NULL, NULL };
+    for (size_t i = 0, a = 0; i < n && a < 2; a++) {
+        argv[a] = buf + i;
+        i += strlen(buf + i) + 1;
     }
+    if (!argv[0] || !*argv[0]) return 0;
+    if (!strcmp(argv[0], path) || (real[0] && !strcmp(argv[0], real))) return 1;
+    if (argv[1] && *argv[1] && isInterpreter(argv[0]) &&
+        (!strcmp(argv[1], path) || (real[0] && !strcmp(argv[1], real))))
+        return 1;
     return 0;
 }
 

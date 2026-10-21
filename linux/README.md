@@ -199,7 +199,7 @@ right-click bounced the menu straight back open.
 
 | chip | source | note |
 |---|---|---|
-| pet | `/proc/<pid>/cmdline` | a process whose cmdline carries `modules.pet.exePath` as an exact token (or its `realpath`); the chip shows `on`/`off` and a click starts or stops it. The configured value must be one ABSOLUTE path to a regular executable file - a bare name, a relative path, a directory, or a command line carrying arguments, cannot identify one process and is refused, for starting and for matching alike |
+| pet | `/proc/<pid>/cmdline` | the process whose EXECUTED file is `modules.pet.exePath`: `argv[0]` equal to the path (or its `realpath`), or an interpreter `argv[0]` (`python3`, `sh`, `node`, ...) with the path as `argv[1]`, which is what the kernel hands a shebang script. A process that merely carries the path as an argument - `tail -f <path>`, `sh -c <path>`, an editor with the file open - is NOT the pet, so the chip cannot read `on` for it and a click cannot stop it. The chip shows `on`/`off` and a click starts or stops the pet. The configured value must be one ABSOLUTE path to a regular executable file - a bare name, a relative path, or a directory cannot identify one process and is refused, for starting and for matching alike |
 | cpu | `/proc/stat` delta | same arithmetic as `top` |
 | ram | `/proc/meminfo` | used = 100 - MemAvailable/MemTotal |
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |

@@ -12,8 +12,13 @@
 #   - only a click INSIDE the menu may pick a row
 #   - the bar must NOT ask the compositor for a blur (it flattens the strip)
 #   - the bar must ride above the terminal, and hide when there is no room
-#   - the pet chip starts and stops the configured process, by exact cmdline
-#     token - never a process name, which would stop a name twin too
+#   - every map of the bar - the startup one and the tick's after a born-hidden
+#     start - must make the EWMH all-desktops request, or that bar lives on one
+#     desktop with DEMANDS_ATTENTION set
+#   - the pet chip starts and stops the configured process, by the process's
+#     EXECUTED file - never a process name, and never a process that merely
+#     carries the path as an argument - and the children it leaves behind are
+#     reaped, not zombies
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -55,11 +60,15 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/chocobar-behave.XXXXXX") || exit 1
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$WORK/bus"
 XCLICK="$WORK/xclick"
+XMON="$WORK/xmonitor"
+CLIENTMSG="$WORK/clientmsg.log"   # one line per root-window ClientMessage
 CALLS="$WORK/systemctl-calls"   # the fake systemctl appends one line per call
 
 cleanup() {
     [ -n "${BAR_PID:-}" ] && kill "$BAR_PID" 2>/dev/null
     [ -n "${DECOY_PID:-}" ] && kill "$DECOY_PID" 2>/dev/null
+    [ -n "${ARGDECOY_PID:-}" ] && kill "$ARGDECOY_PID" 2>/dev/null
+    [ -n "${MON_PID:-}" ] && kill "$MON_PID" 2>/dev/null
     if [ -s "$WORK/pet.pid" ]; then kill "$(cat "$WORK/pet.pid")" 2>/dev/null; fi
     [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
     [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
@@ -105,8 +114,12 @@ chmod +x "$WORK/home/pet"
 # the decoy: a sleeper whose executable is NAMED like the pet's basename
 # ("pet", so its comm is the pet's basename) but whose cmdline carries a
 # DIFFERENT path - exactly the process a name-based match would kill and an
-# exact-token match must leave alone
+# exact-executed-file match must leave alone
 printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/sleeper.c"
+# the argument decoy: a sleeper that carries the CONFIGURED PET PATH as argv[1]
+# and nothing else - the shape `tail -f <path>` has, and the one a matcher that
+# accepts any cmdline token would mistake for the pet
+printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/argdecoy.c"
 # a systemctl that always fails, so the autostart path is exercised honestly,
 # and logs one line per call so the test can count reads. The stateful twin
 # (systemctl-good) answers is-enabled from a state file and records
@@ -133,8 +146,12 @@ chmod +x "$WORK/fakebin/systemctl-good"
 
 gcc -O1 -o "$XCLICK" "$HERE/xclick.c" -lX11 -lXtst 2>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the XTEST driver"; cat "$WORK/cc.log"; exit 1; }
+gcc -O1 -o "$XMON" "$HERE/xmonitor.c" -lX11 2>>"$WORK/cc.log" \
+    || { echo "FAIL: cannot build the ClientMessage monitor"; cat "$WORK/cc.log"; exit 1; }
 gcc -O1 -o "$WORK/decoy/pet" "$WORK/decoy/sleeper.c" 2>>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the decoy sleeper"; cat "$WORK/cc.log"; exit 1; }
+gcc -O1 -o "$WORK/decoy/argdecoy" "$WORK/decoy/argdecoy.c" 2>>"$WORK/cc.log" \
+    || { echo "FAIL: cannot build the argument decoy"; cat "$WORK/cc.log"; exit 1; }
 calls_n() { if [ -f "$CALLS" ]; then wc -l < "$CALLS"; else echo 0; fi; }
 
 # ---- the private display and bus -----------------------------------------
@@ -152,6 +169,23 @@ DPID=$!
 for _ in $(seq 1 50); do [ -S "$WORK/bus" ] && break; sleep 0.2; done
 [ -S "$WORK/bus" ] || { echo "FAIL: the private bus did not come up"; exit 1; }
 
+# the ClientMessage watcher: the all-desktops request is an X message to the
+# window manager, so this is the only trace of it on a bare Xvfb
+: > "$CLIENTMSG"
+"$XMON" "$CLIENTMSG" &
+MON_PID=$!
+sleep 0.3
+kill -0 "$MON_PID" 2>/dev/null || { echo "FAIL: the ClientMessage monitor did not start"; exit 1; }
+# how many EWMH all-desktops requests did the bar send for that window? The
+# window id alone is not enough: Xvfb recycles a client's id range, so a bar
+# restarted in the same suite can be handed a previous bar's window id.
+all_desktops_n() { # all_desktops_n <window id>
+    awk -v w="$1" '$1 == w && $2 == "_NET_WM_DESKTOP" && $3 == "4294967295" { n++ } END { print n+0 }' "$CLIENTMSG"
+}
+want_all_desktops() { # want_all_desktops <window id>
+    [ "$(all_desktops_n "$1")" -ge 1 ]
+}
+
 HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
     "$BIN" >"$WORK/bar.log" 2>&1 &
 BAR_PID=$!
@@ -165,6 +199,10 @@ sleep 0.5
 # the bar's own window geometry
 eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
 echo "--- bar window $BARWIN at ${X},${Y} ${WIDTH}x${HEIGHT}"
+# the startup map is where the all-desktops request must have been made: the
+# bar lives on every desktop, not just the one it happened to map on
+want_all_desktops "$BARWIN"
+check "the bar requests all desktops when it maps" $?
 # the report and the config are in LOGICAL pixels and the bar scales them. The
 # scale is read off the bar's own height (height = bar.height logical px *
 # scale), so every expected pixel value below is derived, not assumed.
@@ -340,23 +378,70 @@ check "a click on the pet chip starts the pet (chip found at x offset $PET_X)" $
     [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
 check "the started pet is alive and recorded itself" $?
 
-# 6d. click the pet chip again: the chip's state source (the exact-token
-#     matcher over /proc/<pid>/cmdline) saw the started pet, so the toggle must
-#     STOP it - one start, one stop, and the pet's own record shows a SIGTERM
-#     (a SIGKILL would leave the pid file in place with the state "running";
-#     a blind duplicate start would log a second "pet: started" line)
+# 6d. click the pet chip again: the chip's state source (the matcher over
+#     /proc/<pid>/cmdline) saw the started pet, so the toggle must STOP it -
+#     one start, one stop, and the pet's own record shows a SIGTERM (a SIGKILL
+#     would leave the pid file in place with the state "running"; a blind
+#     duplicate start would log a second "pet: started" line)
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.2
 grep -q "pet: stopped" "$WORK/bar.log" && [ "$(grep -c "pet: started" "$WORK/bar.log")" -eq 1 ] &&
     [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
 check "the second click stops the pet with a SIGTERM, not a duplicate, not a SIGKILL" $?
 
-# 6e. the decoy must survive the pet's stop: the match is an exact cmdline
-#     token, never a process name, and the decoy's comm IS the pet's basename
+# 6e. the decoy must survive the pet's stop: the match is the executed file,
+#     never a process name, and the decoy's comm IS the pet's basename
 kill -0 "$DECOY_PID" 2>/dev/null
-check "the name-twin decoy survives the pet's stop (exact token, never a name)" $?
+check "the name-twin decoy survives the pet's stop (never a process name)" $?
 
-# 6f. a DIRECTORY as the pet path is refused: access(X_OK) on a directory
+# 6f. a process that merely CARRIES the configured path as an argument is not
+#     the pet: with the pet stopped and an argdecoy whose argv[1] is exactly
+#     the configured path alive (the shape `tail -f <path>` has), a click must
+#     START the pet - not stop the decoy - and the decoy must survive. A
+#     matcher that accepts any cmdline token fails all three: it reads the
+#     chip as "on", takes the stop path, SIGTERMs the decoy and logs a stop.
+"$WORK/decoy/argdecoy" "$WORK/home/pet" >/dev/null 2>&1 &
+ARGDECOY_PID=$!
+sleep 0.3
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$STOPPED_BEFORE" ] &&
+    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+    kill -0 "$ARGDECOY_PID" 2>/dev/null &&
+    [ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null
+check "an argument decoy is not the pet: the click starts the pet and spares the decoy" $?
+# stop the real pet again so the checks below start from a stopped one
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+kill "$ARGDECOY_PID" 2>/dev/null
+ARGDECOY_PID=""
+
+# 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
+#     so a bar that never waits keeps one defunct entry per invocation for as
+#     long as the service runs. One start/stop cycle above and a second one here
+#     must leave the bar's child table with no Z state at all.
+zombies() {
+    local n=0 pid st
+    for pid in $(cat "/proc/$BAR_PID/task/$BAR_PID/children" 2>/dev/null); do
+        st=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+        [ "$st" = "Z" ] && n=$((n+1))
+    done
+    echo "$n"
+}
+STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 2
+[ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(zombies)" -eq 0 ]
+check "a pet start/stop cycle leaves no zombie child of the bar" $?
+
+# 6h. a DIRECTORY as the pet path is refused: access(X_OK) on a directory
 #     tests search permission, so a directory used to pass as "the pet" and
 #     every process carrying it as an argument became stopable. The bar
 #     hot-reloads its config (the 2 s mtime check), so swap in the throwaway
@@ -621,6 +706,9 @@ done
 report_fast() { dbus-send --session --dest=org.chocobar.Geom --type=method_call \
     --print-reply /ChocobarGeom org.chocobar.Geom.Report \
     "string:$1" "int32:$2" "int32:$3" "int32:$4" "int32:$5" >/dev/null 2>&1; }
+# every all-desktops request so far belongs to a bar started earlier: this bar
+# must add one of its own when the tick maps it
+ALLDESK_BEFORE=$(grep -c '_NET_WM_DESKTOP 4294967295' "$CLIENTMSG" || true)
 HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
     "$BIN" >"$WORK/bar3.log" 2>&1 &
 BAR_PID=$!
@@ -651,6 +739,12 @@ report_fast kitty 900 100 300 1600
 sleep 2
 xwininfo -id "$BARWIN3" | grep -q "Map State: IsViewable"
 check "the bar appears once a roomy terminal is reported" $?
+# the tick's map must run the SAME post-map work the startup map does: the
+# all-desktops request is what puts the bar on every workspace, and a bar born
+# hidden is mapped only here, so without it that bar lives on one desktop
+want_all_desktops "$BARWIN3" &&
+    [ "$(grep -c '_NET_WM_DESKTOP 4294967295' "$CLIENTMSG" || true)" -gt "$ALLDESK_BEFORE" ]
+check "the bar mapped by the tick asks for all desktops like a startup map" $?
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"

@@ -28,11 +28,13 @@ void linuxMetricsPrime(void);
 
 // the pet process (modules.pet.exePath): is it alive, and stop it. Implemented
 // in p_metrics_linux.c because the /proc walk lives there; the bar's click
-// handler calls both. The pet is identified by an exact cmdline token equal to
-// the configured path (or its realpath), and the configured value must be ONE
-// ABSOLUTE path to a regular executable file - a bare name, a relative path,
-// a directory, or a command line carrying arguments, is refused for both
-// matching and starting.
+// handler calls both. The pet is the process whose EXECUTED file is the
+// configured path: argv[0] equal to the path (or its realpath), or an
+// interpreter argv[0] with the path as argv[1] for a shebang script. A process
+// that merely carries the path as an argument is not the pet. The configured
+// value must be ONE ABSOLUTE path to a regular executable file - a bare name,
+// a relative path, a directory, or a command line carrying arguments is
+// refused for both matching and starting.
 int petProcessRunning(const char *exePath);
 int petProcessStop(const char *exePath);
 int petPathUsable(const char *exePath);

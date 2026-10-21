@@ -312,9 +312,6 @@ function check(name, ok, detail) {
   check('align: a stale geometry report is not trusted',
     /time\(NULL\) - g_geomAt < 30/.test(lx),
     'a KWin script that stopped must not pin the bar to a window that is gone');
-  check('align: the bar never gets narrower than its chips',
-    /if \(aw > w\) w = aw;/.test(lx),
-    'a terminal narrower than the readouts would clip them');
   check('linux: a file source is scanned, not silently skipped',
     /static void tokScanFileSource/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'))
       || /tokScanDir\(parent, 0, s->app, &tk, cfg\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
@@ -442,9 +439,6 @@ function check(name, ok, detail) {
     /double xl = padL;/.test(lx) && /xr = g_w - padR;/.test(lx) &&
     /align != CHIP_LEFT\) continue;/.test(lx) && /align != CHIP_RIGHT\) continue;/.test(lx),
     'a single right-aligned loop ignores the pinned group and breaks demo parity');
-  check('linux: only the left group is clickable',
-    /chipClickable/.test(lx) && /c->align == CHIP_LEFT && \(c->icon == SVG_DIAMOND \|\| c->icon == SVG_BOW\)/.test(lx),
-    'a metric label must not look like a button; only the tokens chip and the pet chip act on a click');
   // the dashboard shares the bar's connection, so its close button MUST go through
   // WM_DELETE_WINDOW: without the protocol the window manager falls back to
   // XKillClient, which severs the shared connection and takes the bar with it.

@@ -1033,7 +1033,7 @@ static void createWindow(void) {
     // the concrete number back (measured: the property read 0 after map while
     // STICKY stayed set, and the bar then did not appear on desktop 2). The
     // request that works is the one made after the window is managed, so the
-    // sticky request lives in the post-map block below.
+    // sticky request lives in afterMap(), which every map of this window runs.
     // InputHint FALSE: the bar must never take the keyboard. Pointer events are
     // independent of this hint (the server routes them by stacking), so the
     // right-click menu and chip clicks still land; clicking the bar simply never
@@ -1084,6 +1084,44 @@ static void setSizeHints(int x, int y) {
     sh.x = x; sh.y = y;
     sh.width = g_w; sh.height = g_h;
     XSetWMNormalHints(g_dpy, g_win, &sh);
+}
+
+// The work every map of the bar must do, the startup map and a later one alike:
+// wait (bounded) for the window manager to finish managing the window, then
+// rewrite _NET_WM_STATE - KWin adds DEMANDS_ATTENTION to it when a window maps
+// without user activity, and re-writing the property after the map is the
+// client-side contract for "attention handled" - and send the EWMH all-desktops
+// request. That request is a ClientMessage to the root window, not a property
+// write, and it only works once the window is managed, which is why both live
+// here instead of in createWindow(). A map that skips this work (the tick's,
+// after a born-hidden start) leaves the bar on one desktop with attention set.
+static void afterMap(void) {
+    XEvent ev;
+    XFlush(g_dpy);
+    for (int i = 0; i < 200; i++) {   // bounded: never block the loop
+        if (XCheckTypedWindowEvent(g_dpy, g_win, MapNotify, &ev)) break;
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
+    Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
+    Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+    Atom skipPager = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
+    Atom sticky = XInternAtom(g_dpy, "_NET_WM_STATE_STICKY", False);
+    Atom states[4] = { below, skipTask, skipPager, sticky };
+    XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)states, 4);
+    XEvent cm;
+    memset(&cm, 0, sizeof(cm));
+    cm.xclient.type = ClientMessage;
+    cm.xclient.window = g_win;
+    cm.xclient.message_type = XInternAtom(g_dpy, "_NET_WM_DESKTOP", False);
+    cm.xclient.format = 32;
+    cm.xclient.data.l[0] = 0xFFFFFFFF;   // all desktops
+    cm.xclient.data.l[1] = 1;            // source: normal application
+    XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
+               SubstructureNotifyMask | SubstructureRedirectMask, &cm);
+    XFlush(g_dpy);
 }
 
 // ---- DPI ---------------------------------------------------------------------------------------
@@ -1250,6 +1288,15 @@ static void runDashboard(void) {
              g_fontFamily, page, card, fg, dim, div, ramp);
 }
 
+// Reap every child of the bar that has exited. The pet and the detached spawns
+// are fire-and-forget, and a long-lived service that never waits keeps one
+// defunct entry per invocation for as long as it runs. runTimed's child is
+// spawned and waited inside one call and this runs from the same single event
+// loop, so it never takes a child that call still owns.
+static void reapChildren(void) {
+    while (waitpid(-1, NULL, WNOHANG) > 0) { }
+}
+
 // Run an external program without blocking the bar's loop: a config editor or a
 // file manager must not freeze the strip.
 static void spawnDetached(const char *argv0, const char *argv1) {
@@ -1266,11 +1313,11 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 // value is ONE path token and both halves agree on that: petPathUsable refuses
 // a value that is not an absolute path to a regular executable file (a bare
 // name, a relative path, a directory, or a command line that carries
-// arguments), and the start execs that path directly - no shell - so
-// the process the bar starts carries the configured path as an exact cmdline
-// token (the binary's own argv[0], or the script argument the kernel hands a
-// shebang interpreter), and the matcher (the chip's own state source) sees the
-// pet it started. Stop is a verified SIGTERM per matching pid (petProcessStop
+// arguments), and the start execs that path directly - no shell - so the
+// process the bar starts has the configured path as its EXECUTED file: argv[0]
+// for a binary, argv[1] for a script (the kernel hands it to the shebang
+// interpreter), and the matcher (the chip's own state source) sees the pet it
+// started. Stop is a verified SIGTERM per matching pid (petProcessStop
 // re-checks each cmdline).
 //
 // Known consequence, deliberate: a child cannot escape its parent's cgroup, so
@@ -1715,46 +1762,12 @@ int main(int argc, char **argv) {
     // property a window manager needs to manage the first map it sees - the
     // _NET_WM_STATE layer and desktop hints (createWindow) and the USPosition
     // rectangle in WM_NORMAL_HINTS (setSizeHints above) - is already on the
-    // window: the tick that later finds room maps it exactly like the block
-    // below would have, position and hints first.
+    // window: the tick that later finds room moves and maps it the same way and
+    // then runs the same afterMap() work, so a bar mapped later is managed
+    // exactly like one mapped here.
     if (!g_hidden) {
         XMapWindow(g_dpy, g_win);
-        // KWin adds DEMANDS_ATTENTION to the state property when a window maps
-        // without user activity. Clear it: re-writing _NET_WM_STATE after the map
-        // is the client-side contract for "attention handled".
-        Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
-        Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
-        Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
-        Atom skipPager = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
-        Atom sticky = XInternAtom(g_dpy, "_NET_WM_STATE_STICKY", False);
-        Atom states[4] = { below, skipTask, skipPager, sticky };
-        XEvent ev;
-        for (int i = 0; i < 200; i++) {   // bounded: never block startup
-            while (XPending(g_dpy)) {
-                XNextEvent(g_dpy, &ev);
-                if (ev.type == MapNotify && ev.xany.window == g_win) i = 200;
-            }
-            struct timespec ts = { 0, 10 * 1000 * 1000 };
-            nanosleep(&ts, NULL);
-        }
-        XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
-                        (unsigned char *)states, 4);
-        // and the sticky request. Writing _NET_WM_DESKTOP as a property is NOT
-        // the EWMH request: KWin keeps the value but treats the window as
-        // single-desktop (measured: onAllDesktops=false with the property at
-        // 0xFFFFFFFF and STICKY set). The protocol is a ClientMessage to the
-        // root window, and it has to arrive after KWin has finished managing.
-        XEvent cm;
-        memset(&cm, 0, sizeof(cm));
-        cm.xclient.type = ClientMessage;
-        cm.xclient.window = g_win;
-        cm.xclient.message_type = XInternAtom(g_dpy, "_NET_WM_DESKTOP", False);
-        cm.xclient.format = 32;
-        cm.xclient.data.l[0] = 0xFFFFFFFF;   // all desktops
-        cm.xclient.data.l[1] = 1;            // source: normal application
-        XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
-                   SubstructureNotifyMask | SubstructureRedirectMask, &cm);
-        XFlush(g_dpy);
+        afterMap();
     }
     paint();
 
@@ -1825,6 +1838,7 @@ int main(int argc, char **argv) {
             g_dashPending = 0;
             runDashboard();
         }
+        reapChildren();
         time_t now = time(NULL);
         geomPump(now);
         if (sel == 0 && now != lastPaint) {
@@ -1860,7 +1874,7 @@ int main(int argc, char **argv) {
                     // frame
                     int wantX = aligned ? ax : g_x;
                     if (wantX != g_x || wantY != g_y) moveWindow(wantX, wantY);
-                    if (g_hidden) { g_hidden = 0; XMapWindow(g_dpy, g_win); }
+                    if (g_hidden) { g_hidden = 0; XMapWindow(g_dpy, g_win); afterMap(); }
                 }
             }
             paint();
