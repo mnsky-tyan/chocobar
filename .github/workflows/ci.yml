@@ -28,9 +28,27 @@ jobs:
           sudo apt-get install -y gcc-mingw-w64-x86-64
           bash native/build.sh --check
 
+      # The LINUX bar was never compiled by CI: a Linux-only compile error
+      # (a missing include, a changed libdbus signature) merged green and only
+      # surfaced on the user's machine. It is also the bar the user runs, so it
+      # gets the same gate as the Windows one - plus a BEHAVIOUR test, because
+      # the source guards in portable_regression.js only read text.
+      - name: Linux build
+        run: |
+          sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
+                               libxcursor-dev libcairo2-dev libdbus-1-dev \
+                               libfontconfig1-dev libcurl4-openssl-dev
+          bash linux/build.sh
+
       - name: Test
         run: |
           node scripts/portable_regression.js
+
+      - name: Linux behaviour test
+        run: |
+          sudo apt-get install -y xvfb x11-utils xdotool libxtst-dev \
+                               libglib2.0-bin dbus
+          bash linux/tests/behaviour.sh
 
       - name: Build console token harness
         run: bash scripts/build_token_regression.sh native/token-regression.exe

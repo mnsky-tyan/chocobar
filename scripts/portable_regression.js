@@ -391,7 +391,7 @@ function check(name, ok, detail) {
   const menuSwitch = fnBody(menu3, 'switch (ev.type) {');
   check('linux: the menu closes and stays closed on the dismissing right-click',
     /MENU_DISMISSED_BY_PRESS = -2/.test(menuh) &&
-    (menuSwitch.match(/MENU_DISMISSED_BY_PRESS/g) || []).length === 2 &&
+    (menuSwitch.match(/MENU_DISMISSED_BY_PRESS/g) || []).length >= 2 &&
     /if \(choice == MENU_DISMISSED_BY_PRESS\)/.test(lx3) &&
     /g_swallowRelease = 1;/.test(lx3) &&
     /if \(g_swallowRelease\) \{\s*\n\s*g_swallowRelease = 0;/.test(relBody) &&
@@ -452,6 +452,34 @@ function check(name, ok, detail) {
     /XUnmapWindow\(g_dpy, g_win\)/.test(lx3) &&
     /XMapWindow\(g_dpy, g_win\)/.test(lx3),
     'the bar followed the screen top, not the terminal: it floated away from the strip it belongs to when the terminal moved down');
+  // The menu's pointer GRAB redirects every pointer event on the screen to the
+  // menu window, so a click anywhere arrives with coordinates outside the
+  // window. The row pick used the y coordinate alone: a click far below the
+  // menu landed on the LAST row and quit the bar (measured), a click to the
+  // left of it could have reloaded the bar or opened a folder. Only a click
+  // inside the menu may choose an item.
+  check('linux: only a click INSIDE the menu can choose an item',
+    /static int menuInside\(const Menu \*m, int px, int py\) \{/.test(menu3) &&
+    /px >= 0 && px < m->w && py >= 0 && py < m->h/.test(menu3) &&
+    (menu3.match(/menuInside\(&m, ev\.xbutton\.x, ev\.xbutton\.y\)/g) || []).length === 2 &&
+    /menuInside\(&m, ev\.xmotion\.x, ev\.xmotion\.y\)/.test(menu3),
+    'a click anywhere on the screen picked a random menu row through the grab: measured, a click below the menu quit the bar');
+  // A child's stderr pipe must lose its WRITE end in the parent right after
+  // the spawn. While the parent holds it, the pipe never reaches EOF, so the
+  // drain blocks for ever and takes the bar's single event loop with it: the
+  // menu simply never opened, and nothing logged an error.
+  check('linux: the subprocess pipe cannot block the event loop',
+    /close\(errfds\[1\]\); errfds\[1\] = -1;/.test(lx3) &&
+    /O_NONBLOCK/.test(lx3),
+    'an open write end means the pipe never ends and the drain blocks for ever: the menu stopped opening, silently');
+  // The autostart state is a TRI-STATE: "unknown" is not "disabled". A failed
+  // read used to draw an unchecked tick and toggle the unit blind.
+  check('linux: an unreadable autostart state is unknown, not disabled',
+    /int autoStartEnabled\(void\)/.test(lx3) &&
+    /return -1;/.test(lx3) &&
+    /autostart state unknown/.test(lx3) &&
+    /int st = autoStartEnabled\(\);\s*\n\s*if \(st < 0\) break;/.test(lx3),
+    'a failed systemctl read must not look like "not enabled": the tick lied and the toggle flipped the unit blind');
 }
 
 // --- the bar's layer and its (absent) drag -------------------------------------------

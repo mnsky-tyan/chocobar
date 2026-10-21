@@ -165,6 +165,17 @@ static int menuHit(Menu *m, int px, int py) {
     return -1;
 }
 
+// Is (px, py) inside the menu window? The pointer grab redirects EVERY pointer
+// event to the menu window, so a click anywhere on the screen arrives here with
+// coordinates that are outside the window (negative, or past the edge). Without
+// this check the y coordinate alone picked a row: a click far below the menu
+// landed on the last row and QUIT the bar (measured), and a click to the left
+// of it could have reloaded the bar or opened a folder. Only a click that
+// really is inside the menu may choose an item.
+static int menuInside(const Menu *m, int px, int py) {
+    return px >= 0 && px < m->w && py >= 0 && py < m->h;
+}
+
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
             int atX, int atY, double scale, int fontPx, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
@@ -272,7 +283,10 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 menuPaint(&m);
                 break;
             case MotionNotify: {
-                int hit = menuHit(&m, ev.xmotion.x, ev.xmotion.y);
+                // the grab delivers motion from the whole screen: only motion
+                // inside the menu may highlight a row
+                int hit = menuInside(&m, ev.xmotion.x, ev.xmotion.y)
+                              ? menuHit(&m, ev.xmotion.x, ev.xmotion.y) : -1;
                 if (hit != m.hover) { m.hover = hit; menuPaint(&m); }
                 break;
             }
@@ -287,9 +301,16 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 // with the button that opened it
                 if (ev.xbutton.window != m.win) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
                 if (ev.xbutton.button == 3) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
+                if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
+                    m.result = MENU_DISMISSED_BY_PRESS; done = 1; break;
+                }
                 break;
             case ButtonRelease: {
                 if (ev.xbutton.window != m.win) { done = 1; break; }
+                if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
+                    // released outside the menu: dismiss it, never act on a row
+                    m.result = MENU_DISMISSED_BY_PRESS; done = 1; break;
+                }
                 int hit = menuHit(&m, ev.xbutton.x, ev.xbutton.y);
                 if (hit >= 0 && !g_items[hit].separator) { m.result = g_items[hit].id; done = 1; }
                 else if (hit < 0) done = 1;   // released outside a row
