@@ -313,7 +313,7 @@ function check(name, ok, detail) {
     /time\(NULL\) - g_geomAt < 30/.test(lx),
     'a KWin script that stopped must not pin the bar to a window that is gone');
   check('align: the bar never gets narrower than its chips',
-    /if \(wantW < chipsW\) wantW = chipsW;/.test(lx),
+    /if \(aw > w\) w = aw;/.test(lx),
     'a terminal narrower than the readouts would clip them');
   check('linux: a file source is scanned, not silently skipped',
     /static void tokScanFileSource/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'))

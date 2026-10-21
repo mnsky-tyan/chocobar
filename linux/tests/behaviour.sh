@@ -42,6 +42,7 @@ command -v xwininfo  >/dev/null || skip "xwininfo (x11-utils) is not installed"
 command -v xprop     >/dev/null || skip "xprop (x11-utils) is not installed"
 command -v xdotool   >/dev/null || skip "xdotool is not installed"
 command -v gdbus     >/dev/null || skip "gdbus (libglib2.0-bin) is not installed"
+command -v dbus-send >/dev/null || skip "dbus-send is not installed"
 command -v gcc      >/dev/null || skip "gcc is not installed"
 
 BIN="$ROOT/linux/build/chocobar-linux"
@@ -403,6 +404,18 @@ WANT_W=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 900*s}')
 [ "$Y" -ge $((WANT_Y-8)) ] && [ "$Y" -le $((WANT_Y+8)) ] && [ "$WIDTH" -ge $((WANT_W-8)) ] && [ "$WIDTH" -le $((WANT_W+8)) ]
 check "the bar rides just above the reported terminal (y=$Y want~$WANT_Y, w=$WIDTH want~$WANT_W)" $?
 
+# 7a. a terminal NARROWER than the bar's own content must not shrink it: the
+#     width is resizeToContent()'s decision alone - the chips win over a narrow
+#     report and the bar sticks out over the terminal - so a 60-logical report
+#     leaves the bar wider than the report and above the 80-px floor, instead
+#     of clipping the chips down to the terminal.
+WANT_NARROW=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 60*s+8}')
+report kitty 60 100 300 1600
+sleep 2
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+[ "$WIDTH" -ge 80 ] && [ "$WIDTH" -gt "$WANT_NARROW" ]
+check "a terminal narrower than the bar does not shrink it (w=$WIDTH, the report said 60 logical)" $?
+
 # 7b. a menu open spawns the autostart child whose stderr pipe is the one that
 #     used to hang the bar (the fake systemctl writes to stderr and exits): the
 #     menu must open anyway - the spawn, the stderr drain and the wait all
@@ -578,6 +591,66 @@ WANT_W=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 900*s}')
     [ "$X" -ge $((WANT_X-8)) ] && [ "$X" -le $((WANT_X+8)) ] &&
     [ "$WIDTH" -ge $((WANT_W-8)) ] && [ "$WIDTH" -le $((WANT_W+8)) ]
 check "a report before the first map makes the bar BORN at the terminal (x=$X y=$Y w=$WIDTH, want x~$WANT_X y~$WANT_Y w~$WANT_W)" $?
+
+# 12. a terminal reported TOO HIGH before the bar starts must leave the bar
+#     BORN hidden: positionInit() hides it before any map, so the window exists
+#     (findable by class) but must never become viewable while the too-high
+#     report is the fresh one - not even for the one or two frames a
+#     map-then-unmap startup would have composited at the top. The visibility
+#     watch below starts before the window exists and runs continuously, so ANY
+#     map is caught; a roomy terminal must then bring the bar back through the
+#     ordinary tick map, which for this window is the FIRST map of its life
+#     (position and size hints set before it, the same way the startup map
+#     would have set them).
+#     The reports here go through dbus-send, NOT gdbus: gdbus introspects its
+#     destination before calling and the bar never answers Introspect (its bus
+#     loop replies to Report alone), so a gdbus call stalls for seconds and
+#     lands only after the bar's 700 ms startup geometry wait - too late to be
+#     the report the bar is BORN with. dbus-send delivers the method call
+#     directly and the bar's 10 ms startup pump answers it inside the wait.
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+for _ in $(seq 1 50); do
+    [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
+    sleep 0.05
+done
+# the too-high report has to land INSIDE the bar's startup geometry wait, so
+# the sender is retried in the background while the visibility watch runs in
+# the foreground without a gap
+report_fast() { dbus-send --session --dest=org.chocobar.Geom --type=method_call \
+    --print-reply /ChocobarGeom org.chocobar.Geom.Report \
+    "string:$1" "int32:$2" "int32:$3" "int32:$4" "int32:$5" >/dev/null 2>&1; }
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar3.log" 2>&1 &
+BAR_PID=$!
+( for _ in $(seq 1 60); do report_fast kitty 900 100 5 1600 && break; sleep 0.05; done ) &
+SEED_PID=$!
+FLASHED=0
+for _ in $(seq 1 250); do
+    if [ -n "$(xdotool search --onlyvisible --class chocobar 2>/dev/null)" ]; then
+        FLASHED=1
+        break
+    fi
+    sleep 0.01
+done
+kill "$SEED_PID" 2>/dev/null
+wait "$SEED_PID" 2>/dev/null
+[ "$FLASHED" -eq 0 ]
+check "a too-high terminal at startup leaves the bar NEVER viewable" $?
+BARWIN3=""
+for _ in $(seq 1 60); do
+    BARWIN3=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "$BARWIN3" ] && break
+    sleep 0.05
+done
+[ -n "$BARWIN3" ] || { echo "FAIL: the hidden bar never opened a window"; cat "$WORK/bar3.log"; exit 1; }
+xwininfo -id "$BARWIN3" | grep -q "Map State: IsUnMapped"
+check "the hidden startup left the window unmapped (it exists, it is just not mapped)" $?
+report_fast kitty 900 100 300 1600
+sleep 2
+xwininfo -id "$BARWIN3" | grep -q "Map State: IsViewable"
+check "the bar appears once a roomy terminal is reported" $?
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"

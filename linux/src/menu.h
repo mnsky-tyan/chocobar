@@ -27,8 +27,12 @@ enum {
     MENU_UPDATES = 6,
 };
 
-// Run the menu modally at screen position (atX, atY) and return the chosen id
-// (MENU_NONE when dismissed). scale/fontPx/fontFamily come from the config so the
+// Run the menu modally at screen position (atX, atY) and return the chosen id.
+// Dismissal is two-valued: MENU_NONE (Esc, or a release that picked no row),
+// and MENU_DISMISSED_BY_PRESS - the dismissing press is still holding the
+// button, its release is still in flight, and the caller MUST swallow that
+// release or its own release handler re-opens the menu with it.
+// scale/fontPx/fontFamily come from the config so the
 // menu matches the bar; the colours are already resolved 0..1 triples. There is
 // no dim colour: the menu has no dim text, and passing one invited a parameter
 // the painter never read. startChecked is the autostart state read by the CALLER

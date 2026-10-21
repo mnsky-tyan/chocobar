@@ -1708,11 +1708,20 @@ int main(int argc, char **argv) {
     // and visibly shrinks against the desktop's scaled one (measured via the
     // same symptom on an Electron app that lacked Wayland fractional scaling)
     cursorsInit();
-    XMapWindow(g_dpy, g_win);
-    // KWin adds DEMANDS_ATTENTION to the state property when a window maps
-    // without user activity. Clear it: re-writing _NET_WM_STATE after the map
-    // is the client-side contract for "attention handled".
-    {
+    // g_hidden is positionInit()'s verdict that there is no room above the
+    // terminal: the window must not be mapped AT ALL while it holds - mapping
+    // here would composite the strip at the top for a frame or two before an
+    // unmap could take it away. Skipping the first map is safe because every
+    // property a window manager needs to manage the first map it sees - the
+    // _NET_WM_STATE layer and desktop hints (createWindow) and the USPosition
+    // rectangle in WM_NORMAL_HINTS (setSizeHints above) - is already on the
+    // window: the tick that later finds room maps it exactly like the block
+    // below would have, position and hints first.
+    if (!g_hidden) {
+        XMapWindow(g_dpy, g_win);
+        // KWin adds DEMANDS_ATTENTION to the state property when a window maps
+        // without user activity. Clear it: re-writing _NET_WM_STATE after the map
+        // is the client-side contract for "attention handled".
         Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
         Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
         Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
@@ -1745,7 +1754,6 @@ int main(int argc, char **argv) {
         cm.xclient.data.l[1] = 1;            // source: normal application
         XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
                    SubstructureNotifyMask | SubstructureRedirectMask, &cm);
-        if (g_hidden) XUnmapWindow(g_dpy, g_win);
         XFlush(g_dpy);
     }
     paint();
@@ -1834,21 +1842,12 @@ int main(int argc, char **argv) {
             // the position is derived every tick, in every align mode: x and
             // width come from the terminal when it reports (and stay put when
             // it does not), y always comes from barYFor - the terminal's top
-            // edge, or the screen top when align 1 has no usable report.
+            // edge, or the screen top when align 1 has no usable report. The
+            // width is resizeToContent()'s decision, made just above from the
+            // same applyAlign() numbers: it is the ONE owner of the width.
             {
                 int aw = 0, ax = 0;
                 int aligned = applyAlign(&aw, &ax);
-                if (aligned) {
-                    int wantW = aw;
-                    int chipsW = (int)((PAD_L + PAD_R) * g_scale + 0.5);
-                    for (int i = 0; i < g_chipCount; i++) {
-                        int iw = g_chips[i].icon >= 0 ? (int)(ICON_BOX * g_scale + 0.5) : 0;
-                        chipsW += iw + (iw ? (int)(ICO_GAP * g_scale + 0.5) : 0) + textWidthPx(g_chips[i].text);
-                        if (i) chipsW += (int)(SEG_GAP * g_scale + 0.5);
-                    }
-                    if (wantW < chipsW) wantW = chipsW;
-                    resizeWindow(wantW, g_h);
-                }
                 int wantY = barYFor();
                 if (wantY < 0) {
                     // no room above the terminal: Windows hides the bar
