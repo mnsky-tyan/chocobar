@@ -70,6 +70,15 @@ static int g_tokCursorDirty = 0;
 static long long tokJll(const char *js, const jsmntok_t *t, int parent, const char *key, long long def);
 
 static wchar_t g_tokCursorPath[MAX_PATH]; // ~/.wizbar/token-cursors.json
+
+// One chunk of a session file held in memory at a time (16 KB). The scan
+// streams instead of slurping a file-sized buffer, so this is the standing RSS
+// cost per scanned file rather than the size of the biggest one: a 225-file
+// store now costs 16 KB at a time instead of a 45 MB allocation that stayed
+// peak for the whole scan. It grows per file when a single LINE exceeds it
+// (see the HeapReAlloc in tokScanFile); 16 KB is ordinary for a pi turn.
+#define TOK_SCAN_CHUNK 16384
+
 static long long g_cacheMaxTs = 0;     // newest ts the Electron cache holds
 static int g_tokForceFullRead = 1;     // startup must rebuild memory-only aggregates
 static int g_tokFullReadNow = 0;       // this walk is the forced full re-read
@@ -598,18 +607,25 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
     }
     toRead = size - start;
     if (toRead <= 0) { CloseHandle(h); return size; }
-    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)toRead + 1);
-    if (!buf) { CloseHandle(h); return -1; }
     LARGE_INTEGER li; li.QuadPart = start;
     SetFilePointerEx(h, li, NULL, FILE_BEGIN);
-    DWORD got = 0;
-    BOOL ok = ReadFile(h, buf, (DWORD)toRead, &got, NULL);
-    CloseHandle(h);
-    if (!ok || got != (DWORD)toRead) { HeapFree(GetProcessHeap(), 0, buf); return -1; }
-    buf[got] = 0;
-    // split on newlines; a trailing partial line is left for the next rescan
-    // (its bytes stay uncounted because the cursor is not advanced past it)
-    char *p = buf, *e = buf + got;
+    // The tail is STREAMED, one fixed chunk at a time, with the trailing partial
+    // line carried to the front of the buffer for the next read. It used to be
+    // slurped whole into one file-sized HeapAlloc, which put a buffer the size
+    // of the largest session file on the bar's heap: measured on this machine,
+    // peak RSS (VmHWM) tracked that file one-for-one - 32.4 MB for a 16 MB
+    // store, 81.6 MB for a 64 MB one, and 85.7 MB on the real store whose
+    // biggest session file is 44.7 MB, against a 48 MB steady-state bar. That
+    // peak returns on EVERY start, because the aggregates are in memory only
+    // and a restart rebuilds them with a full re-read. Streaming bounds it at
+    // one chunk plus the longest single LINE (4.5 MB here: a JSONL line is a
+    // whole tool result), which the grow below pays for only when a file
+    // actually holds one.
+    long long left = toRead;            // bytes still to read from the file
+    size_t cap = TOK_SCAN_CHUNK;        // buffer capacity (grows for long lines)
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, cap + 1);
+    if (!buf) { CloseHandle(h); return -1; }
+    size_t bufLen = 0;                  // bytes currently held in buf
     long long consumed = 0;
     const int estimating = cfg->tokEstimate ? 1 : 0;
     // transcript text counted so far in this file: an appended read continues
@@ -618,112 +634,154 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
     char real[80] = "";                  // providers here that DID report
     if (from > 0 && cur && cur->real[0]) lstrcpynA(real, cur->real, 80);
     int realSeen = (int)strlen(real);
-    while (p < e) {
-        char *nl = (char *)memchr(p, '\n', (size_t)(e - p));
-        if (!nl) break; // partial tail: do not advance the cursor past it
-        int len = (int)(nl - p);
-        if (len > 0) {
-            // stage only lines ENDING past stageFrom. It equals `from` on every
-            // normal read, so behaviour is unchanged; a cursor-repair re-read
-            // (below) passes 0 and the OLD cursor size instead, so it can
-            // establish the transcript total over the whole file without
-            // re-staging rows the aggregates already hold. The END bound (not
-            // the start) also catches a line that straddled the old cursor: it
-            // was a partial tail then, uncounted, and completes now.
-            int stage = (start + consumed + len) > stageFrom;
-            // The transcript size is the text of EVERY line so far, not only the
-            // ones carrying usage - a user turn and a tool result both go into
-            // the prompt. One scan per line, which is why it sits behind the
-            // config flag; the file is already being read end to end.
-            int replyChars = 0;
-            int lineChars = estimating ? tokTextLen(p, len, &replyChars) : 0;
-            TokRec r;
-            int have = tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs;
-            // provider routing: a source may declare which providers it owns
-            // (providers) and which it must not touch (exclude). This is how
-            // two ledgers that both hold the same request count it once -
-            // the one that owns the traffic lists it, the other excludes it.
-            // The test is an exact element match, never a substring, because
-            // route names nest (mimo inside mimo-desktop).
-            //
-            // This must NOT be a `continue`: the line-advance at the bottom of
-            // this loop (consumed += len + 1; p = nl + 1) has to run for every
-            // line, or the scan spins on one line forever and the totals never
-            // arrive. A flag guards the body instead, and an early skip still
-            // pays the transcript cost of the line below.
-            if (have) {
-                int owned = (!tk->provList || !*tk->provList) ? 1
-                           : tokProvIn(tk->provList, r.prov, r.provLen);
-                int skip = tk->exclList && *tk->exclList
-                           && tokProvIn(tk->exclList, r.prov, r.provLen);
-                have = owned && !skip;
-            }
-            if (have) {
-                long long fld[4] = { r.in, r.out, r.cr, r.cw };
-                long long sum = fld[0] + fld[1] + fld[2] + fld[3];
-                if (sum > 0) {
-                    // a real number: this route reports, so it has an API behind
-                    // it. Remember it, so a later blank turn from the SAME route
-                    // is read as an abort rather than as a bridged one.
-                    if (estimating && r.provLen > 0) {
-                        char pv[40]; int pl = r.provLen < 39 ? r.provLen : 39;
-                        memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
-                        // already listed? an exact element test - a substring
-                        // test would refuse to record mimo after mimo-desktop
-                        if (!tokRealHas(real, pv)) {
-                            int need = (realSeen ? 1 : 0) + pl;
-                            if (realSeen + need < (int)sizeof(real) - 1) {
-                                if (realSeen) real[realSeen++] = ',';
-                                memcpy(real + realSeen, pv, (size_t)pl);
-                                realSeen += pl; real[realSeen] = 0;
-                            } else if (!g_tokRealFullLogged) {
-                                // a route dropped here reads as blind the next
-                                // time and its blank turns get estimated, so
-                                // the over-count is at least diagnosable - say
-                                // so once, the way the file-count cap does
-                                g_tokRealFullLogged = 1;
-                                writeLogA("[wizbar] token route list full for a session file; later routes read as blind");
+    int readErr = 0;
+    for (;;) {
+        // fill the tail of the buffer
+        if (left > 0) {
+            size_t room = cap - bufLen;
+            DWORD want = (DWORD)((left < (long long)room) ? left : (long long)room);
+            DWORD got = 0;
+            BOOL ok = ReadFile(h, buf + bufLen, want, &got, NULL);
+            if (!ok) { readErr = 1; break; }
+            bufLen += got;
+            // got == 0 is EOF (the file shrank under us, or reached its end).
+            // A short read on a regular file is EOF too, and costs one extra
+            // read() that returns 0 rather than a special case.
+            if (got == 0) left = 0;
+            else left -= got;
+        }
+        buf[bufLen] = 0;
+        // split on newlines; a trailing partial line stays in the buffer for
+        // the next chunk (its bytes stay uncounted because the cursor is not
+        // advanced past it)
+        char *p = buf, *e = buf + bufLen;
+        size_t used = 0;
+        while (p < e) {
+            char *nl = (char *)memchr(p, '\n', (size_t)(e - p));
+            if (!nl) break; // partial tail: do not advance the cursor past it
+            int len = (int)(nl - p);
+            if (len > 0) {
+                // stage only lines ENDING past stageFrom. It equals `from` on every
+                // normal read, so behaviour is unchanged; a cursor-repair re-read
+                // (below) passes 0 and the OLD cursor size instead, so it can
+                // establish the transcript total over the whole file without
+                // re-staging rows the aggregates already hold. The END bound (not
+                // the start) also catches a line that straddled the old cursor: it
+                // was a partial tail then, uncounted, and completes now.
+                int stage = (start + consumed + len) > stageFrom;
+                // The transcript size is the text of EVERY line so far, not only the
+                // ones carrying usage - a user turn and a tool result both go into
+                // the prompt. One scan per line, which is why it sits behind the
+                // config flag; the file is already being read end to end.
+                int replyChars = 0;
+                int lineChars = estimating ? tokTextLen(p, len, &replyChars) : 0;
+                TokRec r;
+                int have = tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs;
+                // provider routing: a source may declare which providers it owns
+                // (providers) and which it must not touch (exclude). This is how
+                // two ledgers that both hold the same request count it once -
+                // the one that owns the traffic lists it, the other excludes it.
+                // The test is an exact element match, never a substring, because
+                // route names nest (mimo inside mimo-desktop).
+                //
+                // This must NOT be a `continue`: the line-advance at the bottom of
+                // this loop (consumed += len + 1; p = nl + 1) has to run for every
+                // line, or the scan spins on one line forever and the totals never
+                // arrive. A flag guards the body instead, and an early skip still
+                // pays the transcript cost of the line below.
+                if (have) {
+                    int owned = (!tk->provList || !*tk->provList) ? 1
+                               : tokProvIn(tk->provList, r.prov, r.provLen);
+                    int skip = tk->exclList && *tk->exclList
+                               && tokProvIn(tk->exclList, r.prov, r.provLen);
+                    have = owned && !skip;
+                }
+                if (have) {
+                    long long fld[4] = { r.in, r.out, r.cr, r.cw };
+                    long long sum = fld[0] + fld[1] + fld[2] + fld[3];
+                    if (sum > 0) {
+                        // a real number: this route reports, so it has an API behind
+                        // it. Remember it, so a later blank turn from the SAME route
+                        // is read as an abort rather than as a bridged one.
+                        if (estimating && r.provLen > 0) {
+                            char pv[40]; int pl = r.provLen < 39 ? r.provLen : 39;
+                            memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
+                            // already listed? an exact element test - a substring
+                            // test would refuse to record mimo after mimo-desktop
+                            if (!tokRealHas(real, pv)) {
+                                int need = (realSeen ? 1 : 0) + pl;
+                                if (realSeen + need < (int)sizeof(real) - 1) {
+                                    if (realSeen) real[realSeen++] = ',';
+                                    memcpy(real + realSeen, pv, (size_t)pl);
+                                    realSeen += pl; real[realSeen] = 0;
+                                } else if (!g_tokRealFullLogged) {
+                                    // a route dropped here reads as blind the next
+                                    // time and its blank turns get estimated, so
+                                    // the over-count is at least diagnosable - say
+                                    // so once, the way the file-count cap does
+                                    g_tokRealFullLogged = 1;
+                                    writeLogA("[wizbar] token route list full for a session file; later routes read as blind");
+                                }
+                            }
+                        }
+                        // staged, not aggregated: the aggregates are UI-thread-affine
+                        // and this runs on the scan worker (the drain applies them)
+                        if (stage) {
+                            tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
+                                        r.model, r.modelLen, 0);
+                            g_tokAllLive += sum;
+                        }
+                    } else if (estimating) {
+                        // No usage at all. Estimate it unless this route reports
+                        // elsewhere in the file, in which case the turn was aborted
+                        // before anything was billed and inventing tokens for it
+                        // would over-count.
+                        char pv[40] = "";
+                        int blind = 1;
+                        if (r.provLen > 0) {
+                            int pl = r.provLen < 39 ? r.provLen : 39;
+                            memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
+                            if (realSeen && tokRealHas(real, pv)) blind = 0;
+                        }
+                        if (blind) {
+                            long long oout = 0;
+                            long long pin = tokEstimate(chars + lineChars, replyChars,
+                                                        cfg->tokEstIn, cfg->tokEstSat,
+                                                        cfg->tokEstOut, &oout);
+                            if (pin > 0 && stage) {
+                                tokPendPush(appName, (int)strlen(appName), r.ts,
+                                            pin, oout, 0, 0, r.model, r.modelLen, 1);
+                                g_tokAllLive += pin + oout;
                             }
                         }
                     }
-                    // staged, not aggregated: the aggregates are UI-thread-affine
-                    // and this runs on the scan worker (the drain applies them)
-                    if (stage) {
-                        tokPendPush(appName, (int)strlen(appName), r.ts, fld[0], fld[1], fld[2], fld[3],
-                                    r.model, r.modelLen, 0);
-                        g_tokAllLive += sum;
-                    }
-                } else if (estimating) {
-                    // No usage at all. Estimate it unless this route reports
-                    // elsewhere in the file, in which case the turn was aborted
-                    // before anything was billed and inventing tokens for it
-                    // would over-count.
-                    char pv[40] = "";
-                    int blind = 1;
-                    if (r.provLen > 0) {
-                        int pl = r.provLen < 39 ? r.provLen : 39;
-                        memcpy(pv, r.prov, (size_t)pl); pv[pl] = 0;
-                        if (realSeen && tokRealHas(real, pv)) blind = 0;
-                    }
-                    if (blind) {
-                        long long oout = 0;
-                        long long pin = tokEstimate(chars + lineChars, replyChars,
-                                                    cfg->tokEstIn, cfg->tokEstSat,
-                                                    cfg->tokEstOut, &oout);
-                        if (pin > 0 && stage) {
-                            tokPendPush(appName, (int)strlen(appName), r.ts,
-                                        pin, oout, 0, 0, r.model, r.modelLen, 1);
-                            g_tokAllLive += pin + oout;
-                        }
-                    }
                 }
+                // this line's text is now part of the transcript the NEXT turn sends
+                if (estimating) chars += lineChars;
             }
-            // this line's text is now part of the transcript the NEXT turn sends
-            if (estimating) chars += lineChars;
+            consumed += len + 1;
+            p = nl + 1;
+            used = (size_t)(p - buf);
         }
-        consumed += len + 1;
-        p = nl + 1;
+        // carry the partial tail to the front of the buffer for the next read
+        size_t tail = bufLen - used;
+        if (tail) memmove(buf, buf + used, tail);
+        bufLen = tail;
+        if (left <= 0) break;            // EOF: a trailing partial line stays
+        if (bufLen == cap) {             // one line longer than the chunk: grow
+            size_t ncap = cap * 2;
+            char *nb = (char *)HeapReAlloc(GetProcessHeap(), 0, buf, ncap + 1);
+            if (!nb) { readErr = 1; break; }
+            buf = nb; cap = ncap;
+        }
     }
+    CloseHandle(h);
+    // A read error before anything was counted is the old behaviour: no cursor,
+    // so the next scan tries the file again. An error MID-stream is treated as
+    // EOF instead, because records already staged for this file are in the
+    // pending queue and returning -1 would leave the cursor behind them - the
+    // next scan would stage them a second time and double-count.
+    if (readErr && consumed == 0) { HeapFree(GetProcessHeap(), 0, buf); return -1; }
     // persist what the estimator learned about this file, so an appended read
     // next rescan continues the count and keeps the same answer
     if (estimating && cur) { cur->chars = chars; lstrcpynA(cur->real, real, 80); }
