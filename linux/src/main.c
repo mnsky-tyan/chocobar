@@ -878,11 +878,16 @@ static int chipAt(int px) {
     return -1;
 }
 
+// The pet chip's click handler (defined next to spawnDetached, below): start or
+// stop the modules.pet.exePath process.
+static void petToggle(void);
+
 // A left-group chip does something on click (today: the tokens chip opens the
-// dashboard); a right-group metric is a label. Only clickable chips get a hover
-// pill, which is what tells the two groups apart visually.
+// dashboard and the pet chip toggles the pet process); a right-group metric is
+// a label. Only clickable chips get a hover pill, which is what tells the two
+// groups apart visually.
 static int chipClickable(const Chip *c) {
-    return c->align == CHIP_LEFT && c->icon == SVG_DIAMOND;
+    return c->align == CHIP_LEFT && (c->icon == SVG_DIAMOND || c->icon == SVG_BOW);
 }
 
 static void onButton(XButtonEvent *e) {
@@ -892,10 +897,13 @@ static void onButton(XButtonEvent *e) {
     g_swallowRelease = 0;
     if (e->button == 1) {
         // a left click on the token chip opens the dashboard (the Windows bar's
-        // behaviour); anywhere else is inert - the bar is not draggable
+        // behaviour); a left click on the pet chip toggles the pet process
+        // (p_ui.c's CT_PET click); anywhere else is inert - the bar is not
+        // draggable
         int hit = chipAt(e->x);
-        if (hit >= 0 && g_chips[hit].icon == SVG_DIAMOND) {
-            g_dashPending = 1;
+        if (hit >= 0) {
+            if (g_chips[hit].icon == SVG_DIAMOND) g_dashPending = 1;
+            else if (g_chips[hit].icon == SVG_BOW) petToggle();
         }
     }
     // A button-3 PRESS does nothing here: the menu opens on the RELEASE, the
@@ -1238,6 +1246,45 @@ static void spawnDetached(const char *argv0, const char *argv1) {
     setsid();
     if (argv1) execlp(argv0, argv0, argv1, (char *)NULL);
     else execlp(argv0, argv0, (char *)NULL);
+    _exit(127);
+}
+
+// The pet chip's click: start or stop the modules.pet.exePath process, the same
+// toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). Stop is a verified
+// SIGTERM per matching pid (petProcessStop re-checks each cmdline), start is a
+// detached /bin/sh -c so a script target (python3 pet.py) runs through its
+// shebang and inherits the bar's environment - DISPLAY above all, since the pet
+// opens its own window on the bar's session.
+//
+// Known consequence, deliberate: the spawned pet stays in the bar's systemd
+// cgroup, so restarting chocobar.service stops it (KillMode=control-group). The
+// pet is a companion to the bar, and dying with a bar restart beats outliving
+// one with no way to toggle it off.
+static void petToggle(void) {
+    char petPath[512] = {0};
+    const wchar_t *wp = cbCfgPetPath();
+    if (!wp || !*wp) return;
+    // the config string is wchar_t (UTF-32 here), so it MUST be converted rather
+    // than cast - the same rule the metrics poll follows
+    WideCharToMultiByte(65001 /*CP_UTF8*/, 0, wp, -1, petPath, sizeof(petPath), NULL, NULL);
+    if (!petPath[0]) return;
+
+    if (petProcessRunning(petPath)) {
+        petProcessStop(petPath);
+        return;
+    }
+    pid_t pid = fork();
+    if (pid != 0) return;
+    setsid();
+    // the pet is a GUI app: nothing it prints belongs on the bar's stderr
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, 0);
+        dup2(devnull, 1);
+        dup2(devnull, 2);
+        if (devnull > 2) close(devnull);
+    }
+    execl("/bin/sh", "sh", "-c", petPath, (char *)NULL);
     _exit(127);
 }
 

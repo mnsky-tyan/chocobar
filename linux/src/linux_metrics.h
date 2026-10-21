@@ -26,4 +26,10 @@ typedef struct {
 void linuxMetricsPoll(LinuxMetrics *m);
 void linuxMetricsPrime(void);
 
+// the pet process (modules.pet.exePath): is it alive, and stop it. Implemented
+// in p_metrics_linux.c because the /proc walk lives there; the bar's click
+// handler calls both.
+int petProcessRunning(const char *exePath);
+int petProcessStop(const char *exePath);
+
 #endif

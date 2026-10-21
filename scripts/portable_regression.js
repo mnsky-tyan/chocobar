@@ -572,8 +572,24 @@ function check(name, ok, detail) {
     /align != CHIP_LEFT\) continue;/.test(lx) && /align != CHIP_RIGHT\) continue;/.test(lx),
     'a single right-aligned loop ignores the pinned group and breaks demo parity');
   check('linux: only the left group is clickable',
-    /chipClickable/.test(lx) && /c->align == CHIP_LEFT && c->icon == SVG_DIAMOND/.test(lx),
-    'a metric label must not look like a button; only the tokens chip opens the dashboard');
+    /chipClickable/.test(lx) && /c->align == CHIP_LEFT && \(c->icon == SVG_DIAMOND \|\| c->icon == SVG_BOW\)/.test(lx),
+    'a metric label must not look like a button; only the tokens chip and the pet chip act on a click');
+  // The pet chip: the Windows bar's CT_PET chip starts and stops the pet
+  // (p_ui.c petToggle). The Linux chip does the same, and the process is
+  // matched by argv[0] EQUALITY - never by a name pattern, and never killed
+  // by one either: a name pattern can hit an unrelated process, so the pid is
+  // re-verified against its own cmdline right before the SIGTERM.
+  const pmet = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'p_metrics_linux.c'), 'utf8');
+  check('linux: the pet chip toggles the pet process, like the Windows bar',
+    /static void petToggle\(void\)/.test(lx) && /cbCfgPetPath\(\)/.test(lx) &&
+    /petProcessRunning\(petPath\)/.test(lx) && /petProcessStop\(petPath\)/.test(lx) &&
+    /petProcessRunning/.test(pmet) && /petProcessStop/.test(pmet),
+    'the Windows bar starts and stops the pet from its chip; the Linux chip must do the same');
+  check('linux: stopping the pet never kills by a name pattern',
+    !/\bpkill\b/.test(pmet) && !/\bkillall\b/.test(pmet) &&
+    /SIGTERM/.test(pmet) && /cmdline/.test(pmet) &&
+    !/kill\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*SIGKILL/.test(pmet),
+    'a bare name pattern can hit an unrelated process; the pid is re-verified against its own cmdline before the signal, and the pet gets the chance to save itself');
 
   // the dashboard shares the bar's connection, so its close button MUST go through
   // WM_DELETE_WINDOW: without the protocol the window manager falls back to
