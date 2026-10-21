@@ -384,6 +384,19 @@ function check(name, ok, detail) {
     relBody.includes('e->x < 0') && relBody.includes('e->x >= g_w') &&
     relBody.includes('e->y < 0') && relBody.includes('e->y >= g_h'),
     'the press grabs the pointer, so a drag off-window delivers the release to the bar anyway; Windows sends WM_RBUTTONUP only over the window');
+  // The dismissing right-click must not bounce the menu back open: Win32's
+  // TrackPopupMenu consumes the click that dismisses it, so the Windows bar
+  // never receives a WM_RBUTTONUP for that gesture. The menu returns
+  // MENU_DISMISSED_BY_PRESS for such closes and the bar swallows the release.
+  const menuSwitch = fnBody(menu3, 'switch (ev.type) {');
+  check('linux: the menu closes and stays closed on the dismissing right-click',
+    /MENU_DISMISSED_BY_PRESS = -2/.test(menuh) &&
+    (menuSwitch.match(/MENU_DISMISSED_BY_PRESS/g) || []).length === 2 &&
+    /if \(choice == MENU_DISMISSED_BY_PRESS\)/.test(lx3) &&
+    /g_swallowRelease = 1;/.test(lx3) &&
+    /if \(g_swallowRelease\) \{\s*\n\s*g_swallowRelease = 0;/.test(relBody) &&
+    pressBody.includes('g_swallowRelease = 0;'),
+    'with release-open, the dismissing right-click re-opened the menu at the release point: an open/close loop that Win32 menus do not have');
   // the Windows tray menu's item set, in the Windows order (p_ui.c kMenuItems)
   const itemsSrc = (/static const MenuItem g_items\[\] = \{([\s\S]*?)\n\};/.exec(menu3) || [, ''])[1];
   const seq = ['Token dashboard', 'Subscription dashboard', 'Start on login',
@@ -401,21 +414,44 @@ function check(name, ok, detail) {
     /MENU_AUTO_START = 5/.test(menuh) && /MENU_UPDATES = 6/.test(menuh) &&
     itemsSrc.includes('MENU_AUTO_START') && itemsSrc.includes('MENU_UPDATES'),
     'the two missing items (autostart toggle, releases page) were what made the menus read differently');
-  // The blur region is a REGION in window coordinates: written once at creation
-  // it stays at the creation size, and the bar is created at its first content
-  // width before being resized to the terminal width (measured: the property
-  // still read 0,0,10,48 on a 2714px bar), so nearly the whole strip went
-  // unblurred - the acrylic backdrop the config asks for simply was not there.
-  check('linux: the blur region tracks the window size',
-    /static void applyBlurRegion\(void\)/.test(lx3) &&
-    /applyBlurRegion\(\);\s*\n\s*\}/.test(lx3) &&
-    /XResizeWindow\(g_dpy, g_win, \(unsigned\)g_w, \(unsigned\)g_h\);\s*\n\s*allocSurface\(\);\s*\n\s*applyShape\(\);\s*\n\s*applyBlurRegion\(\);/.test(lx3),
-    'a region written once freezes at the creation width, so the resized bar is unblurred behind everything past it');
+  // THE BAR MUST NOT SET THE BLUR-BEHIND HINT. The hint made this desktop's
+  // blur effect (a third-party one with brightness/saturation post-processing)
+  // smear the backdrop into a flat washed-out strip: measured, the bar's empty
+  // middle read std=8.4 with the hint and std=25.0 without it, while the README
+  // reference screenshot measures std=34 - the raw backdrop is the look the
+  // bar is built for, and the config's "acrylic" is honored as the translucent
+  // tint itself. A stray re-introduction regresses the user's aesthetic.
+  check('linux: the bar does not set the KWin blur-behind hint',
+    !/_KDE_NET_WM_BLUR_BEHIND_REGION/.test(lx3) &&
+    !/applyBlurRegion/.test(lx3),
+    'the blur hint flattened the backdrop into a gray wash (measured std 8.4 vs the README look at 34); the acrylic look is the raw backdrop through the tint');
+  // Every size change must resize, reallocate the surface AND re-apply the
+  // rounded shape: the shape region is in window coordinates, so a resize that
+  // skips it leaves the window clipped to the old rounded rect (the same class
+  // of stale-region bug the old blur property had). The invariant lives in one
+  // helper that all three size-change sites go through.
+  const notifyBody = fnBody(lx3, 'case ConfigureNotify:');
+  check('linux: every size change goes through the one resize helper',
+    (lx3.match(/XResizeWindow\(/g) || []).length === 1 &&
+    /static void resizeWindow\(int w, int h\) \{[\s\S]*?XResizeWindow\(g_dpy, g_win, \(unsigned\)g_w, \(unsigned\)g_h\);\s*\n\s*allocSurface\(\);\s*\n\s*applyShape\(\);/.test(lx3) &&
+    /resizeWindow\(w, h\);/.test(lx3) &&
+    /resizeWindow\(wantW, g_h\);/.test(lx3) &&
+    /case ConfigureNotify:[\s\S]{0,400}?resizeWindow\(ev\.xconfigure\.width, ev\.xconfigure\.height\);/.test(lx3),
+    'a resize that skips the surface or the rounded shape clips the window to the old rect; the three size-change sites share one helper');
   check('linux: the autostart mark is read once per open, not per paint',
-    /menuRun\([\s\S]*?autoStartEnabled\(\)\);/.test(lx3) &&
+    /menuRun\([\s\S]*?startChecked\);/.test(lx3) &&
     /m\.startChecked = startChecked;/.test(menu3) &&
     /g_items\[i\]\.id == MENU_AUTO_START && m->startChecked/.test(menu3),
     'a systemctl subprocess per hover repaint would stall the menu; the state is read at open and painted from the cache');
+  // Windows anchors the bar to the terminal's top edge (p_ui.c: y =
+  // terminal.top - barHeight - gap, hideBar when there is no room above). The
+  // Linux port used to pin the bar to the screen top, which left it floating
+  // above wherever the terminal actually is.
+  check('linux: the bar rides above the terminal, the Windows anchor',
+    /int yLog = g_geom\.y - cbCfgHeight\(\) - cbCfgGap\(\);/.test(lx3) &&
+    /XUnmapWindow\(g_dpy, g_win\)/.test(lx3) &&
+    /XMapWindow\(g_dpy, g_win\)/.test(lx3),
+    'the bar followed the screen top, not the terminal: it floated away from the strip it belongs to when the terminal moved down');
 }
 
 // --- the bar's layer and its (absent) drag -------------------------------------------

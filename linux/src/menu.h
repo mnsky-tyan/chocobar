@@ -10,6 +10,11 @@
 
 enum {
     MENU_NONE = 0,
+    // returned when the menu was dismissed by a PRESS still holding the button:
+    // the gesture's release is still in flight, and the bar must swallow it
+    // (Win32's TrackPopupMenu eats the dismissing click the same way, so the
+    // Windows bar never sees a WM_RBUTTONUP for it - parity, not invention)
+    MENU_DISMISSED_BY_PRESS = -2,
     MENU_TOKEN_DASH = 10,
     MENU_SUBS_DASH = 11,
     MENU_EDIT = 1,

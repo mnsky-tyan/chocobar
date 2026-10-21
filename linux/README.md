@@ -77,8 +77,9 @@ window and calls the bar over D-Bus with its `frameGeometry` in logical pixels.
 It recognises the terminal classes listed at the top of the script. Switching to
 a non-terminal keeps the last terminal's geometry, so alt-tabbing does not move
 the bar. A stale report (the script stopped, KWin restarted) is ignored after
-30 s and the bar falls back to centring rather than pinning itself to a window
-that no longer exists. The bar never becomes narrower than its chips.
+30 s and the bar falls back to the screen-top position (`bar.gap` below the top
+edge) rather than pinning itself to a window that no longer exists. The bar
+never becomes narrower than its chips.
 
 Left-click the tokens chip for the dashboard. Right-click opens the menu (the
 two dashboards, the autostart toggle, edit the config, open its folder, the
@@ -169,23 +170,35 @@ being managed - decorations, placement, focus - is exactly what those four
 properties neutralise.
 
 The bar is not draggable: its position is derived (x and width from the
-terminal via `bar.align`, y from `bar.gap`), and a dragged position would break
-that contract. Left-click the tokens chip for the dashboard, right-click for
-the menu.
+terminal via `bar.align`, y from the terminal's top edge), and a dragged
+position would break that contract. Left-click the tokens chip for the
+dashboard, right-click for the menu.
 
 On a Wayland session the window is presented through XWayland, which is how most
 X11 applications still run on KDE. It is translucent for real: the window is on a
 32-bit ARGB visual and its pixels carry an alpha channel, so the compositor
-blends it. `_KDE_NET_WM_BLUR_BEHIND_REGION` is set so KWin blurs what is behind
-the strip, which is what keeps the text readable over a busy terminal. That
-region is in window coordinates, so it is re-declared on every resize: written
-once at creation it froze at the bar's first content width (the property still
-read `0,0,10,48` on a 2714 px bar) and left nearly the whole strip unblurred.
+blends it.
 
-The one thing this design cannot do is follow a terminal window: a Wayland
-compositor does not let a client position itself relative to another window, and
-an X11 client cannot see Wayland-native windows at all. Following was left out on
-purpose - see the project README's feasibility notes.
+**The bar asks the compositor for NO blur.** The config's `backdrop: "acrylic"`
+is honoured as the translucent tint itself - the warm glass of the reference
+screenshots IS the wallpaper showing through 47% of cream - and the backdrop
+behind it is left raw. A blur-behind hint (`_KDE_NET_WM_BLUR_BEHIND_REGION`)
+was tried and measured: on this desktop the compositor's blur effect flattened
+the strip into a grey wash (the bar's empty middle measured std 8.4 with the
+hint and 25.0 without it, while the reference screenshot measures 34 - the raw
+backdrop). Readability never needed it: the strip sits above the terminal, not
+over its text.
+
+The bar is not draggable: its position is derived (x and width from the
+terminal via `bar.align`, y from the terminal's top edge and `bar.gap`), and a
+dragged position would break that contract. Left-click the tokens chip for the
+dashboard, right-click for the menu.
+
+Right-click opens the menu on the button **release** (the Windows parity:
+`WM_RBUTTONUP`), and the button that dismisses the menu is consumed by the
+menu, not by the bar - Win32's `TrackPopupMenu` eats the dismissing click the
+same way, so the bar never sees a release for it. Without that, the dismissing
+right-click bounced the menu straight back open.
 
 ## What each chip reads
 

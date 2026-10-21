@@ -280,9 +280,13 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 if (m.hover != -1) { m.hover = -1; menuPaint(&m); }
                 break;
             case ButtonPress:
-                // a press outside the window (the grab delivers it) closes
-                if (ev.xbutton.window != m.win) { done = 1; break; }
-                if (ev.xbutton.button == 3) { done = 1; break; }
+                // a press outside the window (the grab delivers it) closes; the
+                // closing gesture's release is still coming, so mark it for the
+                // bar to swallow - otherwise its own onButtonRelease re-opens
+                // the menu at the release point and the menu cannot be closed
+                // with the button that opened it
+                if (ev.xbutton.window != m.win) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
+                if (ev.xbutton.button == 3) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
                 break;
             case ButtonRelease: {
                 if (ev.xbutton.window != m.win) { done = 1; break; }
