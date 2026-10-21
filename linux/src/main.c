@@ -39,8 +39,9 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <spawn.h>
 #include <time.h>
-#include <unistd.h>
 #include <unistd.h>
 #include <X11/Xatom.h>
 #include <X11/Xcursor/Xcursor.h>
@@ -751,6 +752,21 @@ static int applyAlign(int *outW, int *outX) {
     return 0;
 }
 
+// KWin's blur-behind hint (the property Konsole/Dolphin set): the compositor
+// blurs what sits behind the window inside this region, which is what makes a
+// translucent bar readable over text. It is a REGION in window coordinates, so a
+// value written once at creation freezes at the creation size - the bar is
+// created at its first content width and then resized to the terminal width, so
+// a stale region left most of the strip unblurred (readback after a resize was
+// still 0,0,10,48 on a 2714px bar). Re-declared on every size change instead.
+// Harmless on compositors that do not know the hint.
+static void applyBlurRegion(void) {
+    Atom blurAtom = XInternAtom(g_dpy, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
+    long region[4] = { 0, 0, g_w, g_h };
+    XChangeProperty(g_dpy, g_win, blurAtom, XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char *)region, 4);
+}
+
 static void resizeToContent(void) {
     // width from the chips: pads + chips + the gaps between them. The two groups
     // are measured independently and then summed, because the gap between the
@@ -783,6 +799,7 @@ static void resizeToContent(void) {
         XResizeWindow(g_dpy, g_win, (unsigned)g_w, (unsigned)g_h);
         allocSurface();
         applyShape();
+        applyBlurRegion();
     }
 }
 
@@ -851,13 +868,29 @@ static void onButton(XButtonEvent *e) {
         if (hit >= 0 && g_chips[hit].icon == SVG_DIAMOND) {
             g_dashPending = 1;
         }
-    } else if (e->button == 3) {
-        // right-click opens the menu - the same items the Windows tray menu has.
-        // It used to quit outright, which was a placeholder, not a design.
-        g_menuPending = 1;
-        g_menuX = e->x_root;
-        g_menuY = e->y_root;
     }
+    // A button-3 PRESS does nothing here: the menu opens on the RELEASE, the
+    // Windows parity (p_ui.c WM_RBUTTONUP -> showTrayMenu). Opening on the
+    // press made the menu eat its own opening release - the press opened the
+    // menu at the cursor, the menu's pointer grab then received the release,
+    // which landed in the padding corner (menuHit -> -1) and closed the menu
+    // a few milliseconds after it appeared: "pops out and immediately pops
+    // back down".
+}
+
+static void onButtonRelease(XButtonEvent *e) {
+    dbg("ButtonRelease button=%u x=%d y=%d", e->button, e->x, e->y);
+    if (e->button != 3) return;
+    // the release must still be over the bar: a press on the bar grabs the
+    // pointer, so a drag that ends off-window delivers the release HERE
+    // anyway. Windows sends WM_RBUTTONUP only when the release is over the
+    // window (the off-bar release goes to whatever is under the pointer), and
+    // the menu's position is the release point - opening it at an off-bar
+    // spot would draw it where the user did not click.
+    if (e->x < 0 || e->x >= g_w || e->y < 0 || e->y >= g_h) return;
+    g_menuPending = 1;
+    g_menuX = e->x_root;
+    g_menuY = e->y_root;
 }
 
 static void onMotion(XMotionEvent *e) {
@@ -908,7 +941,8 @@ static void createWindow(void) {
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = g_cmap;
-    swa.event_mask = ExposureMask | ButtonPressMask | ButtonMotionMask |
+    swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                     ButtonMotionMask |
                      LeaveWindowMask | KeyPressMask | StructureNotifyMask;
     // MANAGED, not override-redirect: KWin composites override-redirect windows in
     // its top layer no matter what hints they set (measured on Plasma 6.6), so an
@@ -973,13 +1007,10 @@ static void createWindow(void) {
     unsigned long zeroTime = 0;
     XChangeProperty(g_dpy, g_win, XInternAtom(g_dpy, "_NET_WM_USER_TIME", False),
                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&zeroTime, 1);
-    // KWin's blur-behind hint (the same property Konsole/Dolphin set): the
-    // compositor blurs what is behind the window inside the region, which is what
-    // makes a translucent bar readable over text. Harmless on other compositors.
-    Atom blurAtom = XInternAtom(g_dpy, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
-    long blurRegion[4] = { 0, 0, g_w, g_h };
-    XChangeProperty(g_dpy, g_win, blurAtom, XA_CARDINAL, 32, PropModeReplace,
-                    (unsigned char *)blurRegion, 4);
+    // KWin's blur-behind hint, through the one helper that keeps it in step with
+    // the window's real size (see applyBlurRegion: a region written once froze at
+    // the creation size and left the resized bar unblurred)
+    applyBlurRegion();
 
     XStoreName(g_dpy, g_win, "Chocobar");
     XClassHint cls = { (char *)"chocobar", (char *)"Chocobar" };
@@ -1181,12 +1212,80 @@ static void configDirOf(char *out, size_t cap) {
     snprintf(out, cap, "%s/.wizbar", home ? home : "/tmp");
 }
 
+// Run a short-lived helper to completion under a hard time budget. Returns the
+// child's exit status (0..255), or -1 when the spawn failed or the budget ran
+// out. systemctl --user is a local, fast operation (measured: under 10 ms), but a
+// wedged one must not stall the bar's loop: the budget kills it and the caller
+// reports the failure.
+//
+// The child's stdout/stderr go to /dev/null: "systemctl is-enabled" prints
+// "enabled" on a normal run, and the bar's own output is a log line per real
+// event, not a copy of another tool's chatter.
+static int runTimed(const char *const argv[], long budgetMs) {
+    extern char **environ;
+    pid_t pid = -1;
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa)) return -1;
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    int spawned = posix_spawnp(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (spawned != 0 || pid < 0) return -1;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        int status;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+        if (r < 0) return -1;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+        if (elapsed >= budgetMs) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            return -1;
+        }
+        struct timespec w = { 0, 2 * 1000 * 1000 };
+        nanosleep(&w, NULL);
+    }
+}
+
+// The autostart state is the systemd user unit (the Linux Run key): the menu
+// item "Start on login" toggles it, the same control the Windows tray's "Start
+// with Windows" has over its own mechanism. is-enabled's exit code IS the
+// answer (0 = enabled, non-zero = disabled or unit file missing).
+static int autoStartEnabled(void) {
+    const char *argv[] = { "systemctl", "--user", "is-enabled", "chocobar", NULL };
+    return runTimed(argv, 500) == 0;
+}
+
+static void autoStartSet(int on) {
+    const char *argv[] = { "systemctl", "--user", on ? "enable" : "disable", "chocobar", NULL };
+    int rc = runTimed(argv, 500);
+    if (rc != 0)
+        fprintf(stderr, "chocobar: autostart %s failed (systemctl exit %d)\n",
+                on ? "enable" : "disable", rc);
+}
+
 static void handleMenuChoice(int choice) {
     dbg("menu choice = %d", choice);
     switch (choice) {
         case MENU_TOKEN_DASH: g_dashPending = 1; break;
         case MENU_SUBS_DASH:
             fprintf(stderr, "chocobar: the subscription board is not ported to Linux yet\n");
+            break;
+        case MENU_AUTO_START:
+            // the menu IS the control, like the Windows Run value: the config
+            // file is never rewritten, so an edited file wins until toggled
+            autoStartSet(!autoStartEnabled());
+            break;
+        case MENU_UPDATES:
+            // Opens the releases page rather than self-updating, exactly the
+            // Windows item's behaviour (p_ui.c id 6): no download, no file
+            // swap, no unsigned-binary trust question.
+            spawnDetached("xdg-open",
+                "https://github.com/mnsky-tyan/chocobar/releases/latest");
             break;
         case MENU_EDIT: {
             char dir[512];
@@ -1472,6 +1571,7 @@ int main(int argc, char **argv) {
             switch (ev.type) {
                 case Expose: if (ev.xexpose.count == 0) onExpose(); break;
                 case ButtonPress: onButton(&ev.xbutton); break;
+                case ButtonRelease: onButtonRelease(&ev.xbutton); break;
                 case MotionNotify: onMotion(&ev.xmotion); break;
                 case LeaveNotify: onLeave(); break;
                 case KeyPress: onKey(&ev.xkey); break;
@@ -1495,10 +1595,13 @@ int main(int argc, char **argv) {
             double fg3[3] = { fgc.r, fgc.g, fgc.b };
             double dv3[3] = { divc.r, divc.g, divc.b };
             double ac3[3] = { accc.r, accc.g, accc.b };
-            // no dim colour: the menu has no dim text (menu.h)
+            // no dim colour: the menu has no dim text (menu.h). The autostart
+            // mark is read per open (not per paint): a subprocess per hover move
+            // would be absurd, and the state cannot change while the menu is up.
             int choice = menuRun(g_dpy, g_screen, g_visual, g_cmap, 32,
                                  g_menuX, g_menuY, g_scale, (int)fontSizePx(),
-                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3);
+                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3,
+                                 autoStartEnabled());
             handleMenuChoice(choice);
         }
         if (g_dashPending) {

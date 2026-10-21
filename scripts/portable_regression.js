@@ -353,6 +353,71 @@ function check(name, ok, detail) {
     'a dashboard with its own totals would disagree with the Windows board');
 }
 
+// --- the menu that ate its own opening click ------------------------------------------
+// The Linux menu opened on the button PRESS while the Windows menu opens on the
+// RELEASE (WM_RBUTTONUP). The opening release then arrived at the freshly-opened
+// menu's pointer grab, landed in its top-left padding corner (menuHit -> -1) and
+// closed the menu milliseconds after it appeared: "pops out and immediately pops
+// back down". These guards pin the release-open, the event mask that delivers it,
+// the Windows item set/order, and the once-per-open autostart read.
+{
+  const lx3 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
+  const menu3 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.c'), 'utf8');
+  const menuh = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.h'), 'utf8');
+  // a helper that extracts one function's body, so a guard can assert "this
+  // function does X" without matching into the function that follows it
+  const fnBody = (src, sig) => {
+    const at = src.indexOf(sig);
+    if (at < 0) return '';
+    const end = src.indexOf('\n}', at);
+    return end < 0 ? '' : src.slice(at, end);
+  };
+  const pressBody = fnBody(lx3, 'static void onButton(XButtonEvent *e) {');
+  const relBody = fnBody(lx3, 'static void onButtonRelease(XButtonEvent *e) {');
+  check('linux: the menu opens on the right-button RELEASE, not the press',
+    /ButtonReleaseMask/.test(lx3) &&
+    /case ButtonRelease: onButtonRelease\(&ev\.xbutton\); break;/.test(lx3) &&
+    relBody.includes('g_menuPending = 1;') &&
+    !pressBody.includes('g_menuPending = 1;'),
+    'a press-opened menu ate its own opening release: it landed in the padding corner and closed the menu instantly');
+  check('linux: a release that ends off the bar opens nothing',
+    relBody.includes('e->x < 0') && relBody.includes('e->x >= g_w') &&
+    relBody.includes('e->y < 0') && relBody.includes('e->y >= g_h'),
+    'the press grabs the pointer, so a drag off-window delivers the release to the bar anyway; Windows sends WM_RBUTTONUP only over the window');
+  // the Windows tray menu's item set, in the Windows order (p_ui.c kMenuItems)
+  const itemsSrc = (/static const MenuItem g_items\[\] = \{([\s\S]*?)\n\};/.exec(menu3) || [, ''])[1];
+  const seq = ['Token dashboard', 'Subscription dashboard', 'Start on login',
+               'Edit config', 'Open config folder', 'Check for updates',
+               'Reload chocobar', 'Quit chocobar'];
+  let pos = 0, orderOk = true;
+  for (const s of seq) {
+    const at = itemsSrc.indexOf(s, pos);
+    if (at < 0) { orderOk = false; break; }
+    pos = at + 1;
+  }
+  const seps = (itemsSrc.match(/\{ "", 0, 1 \}/g) || []).length;
+  check('linux: the menu carries the Windows items in the Windows order',
+    orderOk && seps === 3 &&
+    /MENU_AUTO_START = 5/.test(menuh) && /MENU_UPDATES = 6/.test(menuh) &&
+    itemsSrc.includes('MENU_AUTO_START') && itemsSrc.includes('MENU_UPDATES'),
+    'the two missing items (autostart toggle, releases page) were what made the menus read differently');
+  // The blur region is a REGION in window coordinates: written once at creation
+  // it stays at the creation size, and the bar is created at its first content
+  // width before being resized to the terminal width (measured: the property
+  // still read 0,0,10,48 on a 2714px bar), so nearly the whole strip went
+  // unblurred - the acrylic backdrop the config asks for simply was not there.
+  check('linux: the blur region tracks the window size',
+    /static void applyBlurRegion\(void\)/.test(lx3) &&
+    /applyBlurRegion\(\);\s*\n\s*\}/.test(lx3) &&
+    /XResizeWindow\(g_dpy, g_win, \(unsigned\)g_w, \(unsigned\)g_h\);\s*\n\s*allocSurface\(\);\s*\n\s*applyShape\(\);\s*\n\s*applyBlurRegion\(\);/.test(lx3),
+    'a region written once freezes at the creation width, so the resized bar is unblurred behind everything past it');
+  check('linux: the autostart mark is read once per open, not per paint',
+    /menuRun\([\s\S]*?autoStartEnabled\(\)\);/.test(lx3) &&
+    /m\.startChecked = startChecked;/.test(menu3) &&
+    /g_items\[i\]\.id == MENU_AUTO_START && m->startChecked/.test(menu3),
+    'a systemctl subprocess per hover repaint would stall the menu; the state is read at open and painted from the cache');
+}
+
 // --- the bar's layer and its (absent) drag -------------------------------------------
 // KWin composites override-redirect windows in its TOP layer no matter which
 // _NET_WM_STATE hints they carry (measured on Plasma 6.6, 2026-10-19: every

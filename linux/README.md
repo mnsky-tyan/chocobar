@@ -81,9 +81,21 @@ the bar. A stale report (the script stopped, KWin restarted) is ignored after
 that no longer exists. The bar never becomes narrower than its chips.
 
 Left-click the tokens chip for the dashboard. Right-click opens the menu (the
-two dashboards, edit the config, reload, quit). `Esc`/`q` also quits when
+two dashboards, the autostart toggle, edit the config, open its folder, the
+releases page, reload, quit - the Windows tray menu's items in the same order).
+The menu opens on the button RELEASE, which is what Windows does
+(`WM_RBUTTONUP`): opening it on the press handed the menu its own opening
+release, which landed in its padding corner and dismissed it a few milliseconds
+after it appeared. `Esc`/`q` also quits when
 the bar has focus. The config is the SAME `~/.wizbar/config.json` the Windows bar
 reads, and it hot-reloads on save.
+
+"Start on login" toggles the systemd user unit (`systemctl --user
+enable/disable chocobar`), the Linux counterpart of the Windows "Start with
+Windows" Run value: the mark at the row's right edge is read at open time, and
+the config file is never rewritten. "Check for updates" opens the GitHub
+releases page, exactly as the Windows item does - it never downloads or swaps a
+binary.
 
 ### The bar heals its own KWin outline exclusion
 
@@ -165,7 +177,10 @@ On a Wayland session the window is presented through XWayland, which is how most
 X11 applications still run on KDE. It is translucent for real: the window is on a
 32-bit ARGB visual and its pixels carry an alpha channel, so the compositor
 blends it. `_KDE_NET_WM_BLUR_BEHIND_REGION` is set so KWin blurs what is behind
-the strip, which is what keeps the text readable over a busy terminal.
+the strip, which is what keeps the text readable over a busy terminal. That
+region is in window coordinates, so it is re-declared on every resize: written
+once at creation it froze at the bar's first content width (the property still
+read `0,0,10,48` on a 2714 px bar) and left nearly the whole strip unblurred.
 
 The one thing this design cannot do is follow a terminal window: a Wayland
 compositor does not let a client position itself relative to another window, and

@@ -3,10 +3,12 @@
 // On Windows the menu is a tray icon plus a popup; on Linux the bar itself is the
 // handle, so a right-click on the strip opens this: a small override-redirect
 // window painted with cairo, keyboard-navigable, closing on Escape or an outside
-// click. The items mirror native/src/p_ui.c's tray menu (Token dashboard,
-// Subscription dashboard, Edit config, Open config folder, Reload, Quit) minus the
-// two that have no Linux meaning (Start with Windows is systemd here; Check for
-// updates needs the release feed).
+// click. The items mirror native/src/p_ui.c's tray menu one for one, in the same
+// order: Token dashboard, Subscription dashboard, sep, the autostart toggle, sep,
+// Edit config, Open config folder, sep, Check for updates, Reload, Quit. The
+// autostart item is "Start on login" rather than the Windows string "Start with
+// Windows" because the mechanism here is the systemd user unit, not a Run value;
+// the id (5) and the position are the Windows ones so the two menus still line up.
 //
 // It is a separate top-level window on purpose: the bar is shaped to a rounded
 // strip, and drawing a menu inside it would either be clipped by that shape or
@@ -41,14 +43,18 @@ typedef struct {
     int separator;          // 1 = draw a divider instead of a row
 } MenuItem;
 
-// ids the bar acts on (menu.h)
+// ids the bar acts on (menu.h). The order and the ids are p_ui.c's kMenuItems,
+// so the menus line up when compared side by side.
 static const MenuItem g_items[] = {
     { "Token dashboard",        MENU_TOKEN_DASH, 0 },
     { "Subscription dashboard", MENU_SUBS_DASH,  0 },
     { "", 0, 1 },
+    { "Start on login",         MENU_AUTO_START, 0 },
+    { "", 0, 1 },
     { "Edit config",            MENU_EDIT,       0 },
     { "Open config folder",     MENU_OPEN_DIR,   0 },
     { "", 0, 1 },
+    { "Check for updates",      MENU_UPDATES,    0 },
     { "Reload chocobar",        MENU_RELOAD,     0 },
     { "Quit chocobar",          MENU_QUIT,       0 },
 };
@@ -68,6 +74,7 @@ typedef struct {
     /* palette, resolved by the caller from the config */
     double bg[3], fg[3], divider[3], accent[3];
     double bgAlpha;
+    int startChecked;      // the autostart state, read by the caller; menu only draws it
     /* persistent paint state: the bar keeps one too, and building a surface
        plus a toy font face on every hover move was an allocation per mouse
        pixel. The menu is static, so there is nothing to resize. */
@@ -123,6 +130,22 @@ static void menuPaint(Menu *m) {
         cairo_move_to(cr, 14 * m->scale, y + (rh - ext.height) / 2 - ext.y_bearing);
         cairo_show_text(cr, g_items[i].label);
         cairo_new_path(cr);
+        if (g_items[i].id == MENU_AUTO_START && m->startChecked) {
+            // the autostart tick, at the row's right edge like the Windows menu's
+            // U+2713. It is a stroked path, not a glyph: cairo's toy API has no
+            // font fallback, so a family without a check character would draw
+            // nothing. Two strokes read the same at this size.
+            double cy = y + rh / 2;
+            double cx = m->w - 12 * m->scale;
+            cairo_set_source_rgba(cr, m->fg[0], m->fg[1], m->fg[2], 1.0);
+            cairo_set_line_width(cr, 1.6 * m->scale);
+            cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+            cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_move_to(cr, cx - 5 * m->scale, cy);
+            cairo_line_to(cr, cx - 1.5 * m->scale, cy + 3.5 * m->scale);
+            cairo_line_to(cr, cx + 5 * m->scale, cy - 4 * m->scale);
+            cairo_stroke(cr);
+        }
         y += rh;
     }
     cairo_surface_flush(m->surf);
@@ -145,7 +168,7 @@ static int menuHit(Menu *m, int px, int py) {
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
             int atX, int atY, double scale, int fontPx, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double divider[3], const double accent[3]) {
+            const double divider[3], const double accent[3], int startChecked) {
     Menu m;
     memset(&m, 0, sizeof(m));
     m.dpy = dpy; m.visual = visual; m.cmap = cmap;
@@ -157,6 +180,7 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     memcpy(m.accent, accent, sizeof(m.accent));
     m.hover = -1;
     m.result = 0;
+    m.startChecked = startChecked;
 
     // height: every row plus the separators plus the padding
     double hh = MENU_PAD * 2;
