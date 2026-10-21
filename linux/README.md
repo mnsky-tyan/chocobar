@@ -3,10 +3,9 @@
 A floating translucent bar in the LOWER layer (under normal windows, the same
 behaviour as the Windows bar) showing the same chips: pet, the AI token count
 the shared scanner produces, the subscription gauge, cpu, ram, cpu temperature,
-volume, battery, gpu and clock. It does **not** follow a terminal window around;
-it sits where you put it vertically, and with `bar.align: 1` it takes the
-**active terminal's width and horizontal position**, so it reads as a strip
-along the top of that terminal.
+volume, battery, gpu and clock. With `bar.align: 1` it rides the **active
+terminal**: it takes the terminal's width and horizontal position and sits just
+above its top edge, so it reads as a strip along the top of that terminal.
 
 ![the bar](../docs/img/linux-bar.png)
 
@@ -200,7 +199,7 @@ right-click bounced the menu straight back open.
 
 | chip | source | note |
 |---|---|---|
-| pet | `/proc/<pid>/cmdline` | a process whose cmdline carries `modules.pet.exePath` as an exact token (or its `realpath`); the chip shows `on`/`off` and a click starts or stops it. The configured value must be a path - a bare name cannot identify one process and is refused, for starting and for matching alike |
+| pet | `/proc/<pid>/cmdline` | a process whose cmdline carries `modules.pet.exePath` as an exact token (or its `realpath`); the chip shows `on`/`off` and a click starts or stops it. The configured value must be ONE executable path - a bare name, or a command line carrying arguments, cannot identify one process and is refused, for starting and for matching alike |
 | cpu | `/proc/stat` delta | same arithmetic as `top` |
 | ram | `/proc/meminfo` | used = 100 - MemAvailable/MemTotal |
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |

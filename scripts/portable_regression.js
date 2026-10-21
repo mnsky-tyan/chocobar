@@ -353,41 +353,6 @@ function check(name, ok, detail) {
     'a dashboard with its own totals would disagree with the Windows board');
 }
 
-// --- the menu's dismissal gesture and the autostart state ------------------------------
-// The menu's open/dismiss/row-pick behaviour and the absence of the blur hint are
-// proven by linux/tests/behaviour.sh, which drives the real bar on a private Xvfb.
-// What stays here are the invariants no runtime check can see: the one resize
-// helper, the once-per-open autostart read, the pipe that must not block, and the
-// pet matcher's exact-token contract.
-{
-  const lx3 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
-  const menu3 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.c'), 'utf8');
-  // Every size change must resize, reallocate the surface AND re-apply the
-  // rounded shape: the shape region is in window coordinates, so a resize that
-  // skips it leaves the window clipped to the old rounded rect. The invariant
-  // lives in one helper that all three size-change sites go through.
-  check('linux: every size change goes through the one resize helper',
-    (lx3.match(/XResizeWindow\(/g) || []).length === 1 &&
-    /static void resizeWindow\(int w, int h\) \{[\s\S]*?XResizeWindow\(g_dpy, g_win, \(unsigned\)g_w, \(unsigned\)g_h\);\s*\n\s*allocSurface\(\);\s*\n\s*applyShape\(\);/.test(lx3) &&
-    /resizeWindow\(w, h\);/.test(lx3) &&
-    /resizeWindow\(wantW, g_h\);/.test(lx3) &&
-    /case ConfigureNotify:[\s\S]{0,400}?resizeWindow\(ev\.xconfigure\.width, ev\.xconfigure\.height\);/.test(lx3),
-    'a resize that skips the surface or the rounded shape clips the window to the old rect; the three size-change sites share one helper');
-  check('linux: the autostart mark is read once per open, not per paint',
-    /menuRun\([\s\S]*?startChecked\);/.test(lx3) &&
-    /m\.startChecked = startChecked;/.test(menu3) &&
-    /g_items\[i\]\.id == MENU_AUTO_START && m->startChecked/.test(menu3),
-    'a systemctl subprocess per hover repaint would stall the menu; the state is read at open and painted from the cache');
-  // A child's stderr pipe must lose its WRITE end in the parent right after
-  // the spawn. While the parent holds it, the pipe never reaches EOF, so the
-  // drain blocks for ever and takes the bar's single event loop with it: the
-  // menu simply never opened, and nothing logged an error.
-  check('linux: the subprocess pipe cannot block the event loop',
-    /close\(errfds\[1\]\); errfds\[1\] = -1;/.test(lx3) &&
-    /O_NONBLOCK/.test(lx3),
-    'an open write end means the pipe never ends and the drain blocks for ever: the menu stopped opening, silently');
-}
-
 // --- the bar's layer and its (absent) drag -------------------------------------------
 // KWin composites override-redirect windows in its TOP layer no matter which
 // _NET_WM_STATE hints they carry (measured on Plasma 6.6, 2026-10-19: every
@@ -480,25 +445,6 @@ function check(name, ok, detail) {
   check('linux: only the left group is clickable',
     /chipClickable/.test(lx) && /c->align == CHIP_LEFT && \(c->icon == SVG_DIAMOND \|\| c->icon == SVG_BOW\)/.test(lx),
     'a metric label must not look like a button; only the tokens chip and the pet chip act on a click');
-  // The pet chip: the Windows bar's CT_PET chip starts and stops the pet
-  // (p_ui.c petToggle). The Linux chip does the same, and the pet is the
-  // process carrying the configured path as an exact cmdline token - never a
-  // process name, which would hit every process of that name, and never a
-  // SIGKILL, so the pet can save its position first.
-  const pmet = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'p_metrics_linux.c'), 'utf8');
-  check('linux: the pet chip toggles the pet process, like the Windows bar',
-    /static void petToggle\(void\)/.test(lx) && /cbCfgPetPath\(\)/.test(lx) &&
-    /petProcessRunning\(petPath\)/.test(lx) && /petProcessStop\(petPath\)/.test(lx) &&
-    /petPathUsable\(petPath\)/.test(lx) &&
-    /int petProcessRunning/.test(pmet) && /int petProcessStop/.test(pmet),
-    'the Windows bar starts and stops the pet from its chip; the Linux chip must do the same');
-  check('linux: the pet is matched by an exact cmdline token, never a process name',
-    /\/proc\/%s\/cmdline/.test(pmet) && !/\/proc\/%s\/comm/.test(pmet) &&
-    /petPathUsable/.test(pmet) && /realpath\(/.test(pmet) &&
-    !/\bpkill\b/.test(pmet) && !/\bkillall\b/.test(pmet) &&
-    /SIGTERM/.test(pmet) && !/kill\([^;]*SIGKILL/.test(pmet),
-    'comm is the kernel\'s truncated basename, so a name match signals an unrelated process; the pid\'s own cmdline is the only identity, and it is re-checked right before the SIGTERM');
-
   // the dashboard shares the bar's connection, so its close button MUST go through
   // WM_DELETE_WINDOW: without the protocol the window manager falls back to
   // XKillClient, which severs the shared connection and takes the bar with it.

@@ -4,9 +4,9 @@
 // A small always-on-top, frameless, translucent strip that floats over the
 // desktop and shows the same chips as the Windows bar: cpu, ram, cpu temp,
 // volume, battery, clock, plus the token count the shared scanner produces.
-// It does NOT follow a terminal (that was a Wayland-shaped problem worth
-// skipping: see the README's Linux section); it sits where it is put and
-// remembers that position.
+// With bar.align 1 it rides the terminal: x and width come from the active
+// terminal (the KWin helper's report) and y sits just above its top edge - the
+// position is derived every tick and never persisted.
 //
 // HOW IT PAINTS
 // The Windows bar draws into a premultiplied 32bpp DIB and hands it to
@@ -933,12 +933,12 @@ static void onButtonRelease(XButtonEvent *e) {
         return;
     }
     if (e->button != 3) return;
-    // the release must still be over the bar: a press on the bar grabs the
-    // pointer, so a drag that ends off-window delivers the release HERE
-    // anyway. Windows sends WM_RBUTTONUP only when the release is over the
-    // window (the off-bar release goes to whatever is under the pointer), and
-    // the menu's position is the release point - opening it at an off-bar
-    // spot would draw it where the user did not click.
+    // the release must still be over the bar: the bar never grabs the pointer,
+    // so an off-bar drag delivers its release to whatever window the pointer is
+    // over and the bar is never asked - the same rule as Windows, which sends
+    // WM_RBUTTONUP only over the window, and the menu's position is the release
+    // point. The bounds check below is belt-and-braces: it can only fire when
+    // the bar itself moved or was resized between the press and the release.
     if (e->x < 0 || e->x >= g_w || e->y < 0 || e->y >= g_h) return;
     g_menuPending = 1;
     g_menuX = e->x_root;
@@ -1255,17 +1255,24 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 }
 
 // The pet chip's click: start or stop the modules.pet.exePath process, the same
-// toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). The pet is the
-// process carrying the configured path as an exact cmdline token, so the pet
-// this starts is the one the matcher (and the chip's own state) sees: start is a
-// detached `/bin/sh -c <path>`, which keeps the path as a token whether the shell
-// execs a binary or hands a shebang script to its interpreter. Stop is a verified
-// SIGTERM per matching pid (petProcessStop re-checks each cmdline).
+// toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). The configured
+// value is ONE path token and both halves agree on that: petPathUsable refuses
+// a value that is not an executable path (a bare name, or a command line that
+// carries arguments), and the start execs that path directly - no shell - so
+// the process the bar starts carries the configured path as an exact cmdline
+// token (the binary's own argv[0], or the script argument the kernel hands a
+// shebang interpreter), and the matcher (the chip's own state source) sees the
+// pet it started. Stop is a verified SIGTERM per matching pid (petProcessStop
+// re-checks each cmdline).
 //
-// Known consequence, deliberate: the spawned pet stays in the bar's systemd
-// cgroup, so restarting chocobar.service stops it (KillMode=control-group). The
-// pet is a companion to the bar, and dying with a bar restart beats outliving
-// one with no way to toggle it off.
+// Known consequence, deliberate: a child cannot escape its parent's cgroup, so
+// the pet the bar starts runs in chocobar.service's cgroup and inherits
+// everything that unit applies: a service restart stops it (the default
+// KillMode=control-group), it lives under the unit's MemoryMax, and it runs at
+// the unit's Nice and IOSchedulingClass. A pet that needs more than the unit
+// allows must be started by the user instead. The pet is a companion to the
+// bar, and dying with a bar restart beats outliving one with no way to toggle
+// it off.
 static void petToggle(void) {
     char petPath[512] = {0};
     const wchar_t *wp = cbCfgPetPath();
@@ -1276,22 +1283,38 @@ static void petToggle(void) {
     if (!petPathUsable(petPath)) return;
 
     if (petProcessRunning(petPath)) {
-        petProcessStop(petPath);
+        int n = petProcessStop(petPath);
+        fprintf(stderr, "chocobar: pet: stopped: %s (%d process%s)\n",
+                petPath, n, n == 1 ? "" : "es");
         return;
     }
     pid_t pid = fork();
-    if (pid != 0) return;
-    setsid();
-    // the pet is a GUI app: nothing it prints belongs on the bar's stderr
-    int devnull = open("/dev/null", O_RDWR);
-    if (devnull >= 0) {
-        dup2(devnull, 0);
-        dup2(devnull, 1);
-        dup2(devnull, 2);
-        if (devnull > 2) close(devnull);
+    if (pid < 0) {
+        fprintf(stderr, "chocobar: pet: cannot fork: %s\n", strerror(errno));
+        return;
     }
-    execl("/bin/sh", "sh", "-c", petPath, (char *)NULL);
-    _exit(127);
+    if (pid == 0) {
+        setsid();
+        // the pet is a GUI app: nothing it prints belongs on the bar's stderr,
+        // but a failed start must not be silent, so the original stderr is kept
+        // for the one report below
+        int errFd = dup(2);
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0);
+            dup2(devnull, 1);
+            dup2(devnull, 2);
+            if (devnull > 2) close(devnull);
+        }
+        execl(petPath, petPath, (char *)NULL);
+        if (errFd >= 0) {
+            dprintf(errFd, "chocobar: pet: cannot start %s: %s\n",
+                    petPath, strerror(errno));
+            close(errFd);
+        }
+        _exit(127);
+    }
+    fprintf(stderr, "chocobar: pet: started: %s\n", petPath);
 }
 
 static void configDirOf(char *out, size_t cap) {

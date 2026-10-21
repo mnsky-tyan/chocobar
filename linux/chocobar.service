@@ -26,10 +26,15 @@ Environment=DISPLAY=:0
 # WIZBAR_CONFIG is optional: without it the bar reads ~/.wizbar/config.json
 #Environment=WIZBAR_CONFIG=%h/.wizbar/config.json
 
-# keep it out of the way: the bar is a small client, not a service with state
+# keep it out of the way: the bar is a small client, not a service with state.
+# The pet the bar starts shares this cgroup and inherits Nice and
+# IOSchedulingClass with it - the bar cannot change those for a child it starts.
 Nice=5
 IOSchedulingClass=idle
-MemoryMax=256M
+# A ceiling, not a reservation: the bar itself needs a few tens of MB, and the
+# pet companion the bar starts shares this cgroup, so leave room for a real
+# companion app.
+MemoryMax=1G
 
 [Install]
 WantedBy=graphical-session.target

@@ -525,27 +525,26 @@ static int gpuPercent(void) {
 // truncated basename, so matching it makes a bare configured name hit every
 // process carrying that name, and the stop path signals whatever it matched.
 //
-// The configured value must therefore LOOK like a path (it must contain a '/').
-// A bare name cannot identify one process and is refused for both matching and
-// starting.
-//
-// The pet the bar STARTS is visible to the same matcher: petToggle runs it as
-// `/bin/sh -c <path>`, and the path survives as a cmdline token - as the
-// shell's own argument, as the exec'd binary's argv[0], or, for a shebang
-// script, as the script argument the kernel hands the interpreter.
-int petProcessRunning(const char *exePath);
-int petProcessStop(const char *exePath);
-int petPathUsable(const char *exePath);
+// The configured value is ONE path token - the same thing the start path
+// execs, so the pet the bar starts is the pet the matcher sees. It must
+// contain a '/' and name an executable file: a bare name cannot identify one
+// process, and a command line that carries arguments ("/path/pet.sh --flag")
+// is not a path. Both are refused for matching and starting alike.
 
-// 0 = the configured value cannot name a target: empty, or a bare name. Logged
+// 0 = the configured value cannot name a target: empty, a bare name, or a
+// command line carrying arguments rather than one executable path. Logged
 // once per distinct value, not once per tick.
 int petPathUsable(const char *exePath) {
     if (!exePath || !*exePath) return 0;
-    if (strchr(exePath, '/')) return 1;
+    if (strchr(exePath, '/') && access(exePath, X_OK) == 0) return 1;
     static char refused[512];
     if (strcmp(refused, exePath) != 0) {
         snprintf(refused, sizeof(refused), "%s", exePath);
-        fprintf(stderr, "chocobar: pet path is not a path: %s\n", exePath);
+        if (strchr(exePath, '/'))
+            fprintf(stderr, "chocobar: pet path is not an executable file "
+                            "(a path with arguments is not a path): %s\n", exePath);
+        else
+            fprintf(stderr, "chocobar: pet path is not a path: %s\n", exePath);
     }
     return 0;
 }

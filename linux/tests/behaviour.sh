@@ -12,6 +12,11 @@
 #   - only a click INSIDE the menu may pick a row
 #   - the bar must NOT ask the compositor for a blur (it flattens the strip)
 #   - the bar must ride above the terminal, and hide when there is no room
+#   - the pet chip starts and stops the configured process, by exact cmdline
+#     token - never a process name, which would stop a name twin too
+#   - the autostart mark is read once per menu open, the child's stderr pipe
+#     cannot block the bar's loop, and a width change moves the window and its
+#     rounded shape together
 #
 # Nothing here touches the user's session: the display is a private Xvfb, the
 # HOME is a throwaway directory, the D-Bus is a private daemon and systemctl is
@@ -34,6 +39,9 @@ skip() {
 command -v Xvfb      >/dev/null || skip "Xvfb is not installed"
 command -v dbus-daemon >/dev/null || skip "dbus-daemon is not installed"
 command -v xwininfo  >/dev/null || skip "xwininfo (x11-utils) is not installed"
+command -v xprop     >/dev/null || skip "xprop (x11-utils) is not installed"
+command -v xdotool   >/dev/null || skip "xdotool is not installed"
+command -v gdbus     >/dev/null || skip "gdbus (libglib2.0-bin) is not installed"
 command -v gcc      >/dev/null || skip "gcc is not installed"
 
 BIN="$ROOT/linux/build/chocobar-linux"
@@ -46,9 +54,12 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/chocobar-behave.XXXXXX") || exit 1
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$WORK/bus"
 XCLICK="$WORK/xclick"
+CALLS="$WORK/systemctl-calls"   # the fake systemctl appends one line per call
 
 cleanup() {
     [ -n "${BAR_PID:-}" ] && kill "$BAR_PID" 2>/dev/null
+    [ -n "${DECOY_PID:-}" ] && kill "$DECOY_PID" 2>/dev/null
+    if [ -s "$WORK/pet.pid" ]; then kill "$(cat "$WORK/pet.pid")" 2>/dev/null; fi
     [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
     [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
     rm -rf "$WORK"
@@ -62,18 +73,43 @@ check() { # check <name> <condition-result>
 }
 
 # ---- the throwaway environment -------------------------------------------
-mkdir -p "$WORK/home/.wizbar" "$WORK/fakebin"
-cat > "$WORK/home/.wizbar/config.json" <<'JSON'
+mkdir -p "$WORK/home/.wizbar" "$WORK/fakebin" "$WORK/decoy"
+# the pet module is FIRST (the leftmost left-group chip) and the tokens chip is
+# disabled, so every left click on the bar either hits the pet chip or is inert
+# - the pet chip can be FOUND by clicking x offsets and watching for the bar's
+# own "pet: started" log line
+cat > "$WORK/home/.wizbar/config.json" <<JSON
 {
   "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
            "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
            "backdrop": "acrylic", "radius": 8 },
-  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" }
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": true, "label": "pet",
+                          "exePath": "$WORK/home/pet" } }
 }
 JSON
-# a systemctl that always fails, so the autostart path is exercised honestly
-cat > "$WORK/fakebin/systemctl" <<'SH'
+# the fake pet: records its pid, traps SIGTERM and records that SIGTERM was
+# what stopped it (a SIGKILL would leave the pid file in place and the state
+# at "running"), then sleeps
+cat > "$WORK/home/pet" <<PET
 #!/bin/sh
+echo \$\$ > "$WORK/pet.pid"
+echo running > "$WORK/pet.state"
+trap 'echo SIGTERM > "$WORK/pet.state"; rm -f "$WORK/pet.pid"; exit 0' TERM
+while :; do sleep 0.2; done
+PET
+chmod +x "$WORK/home/pet"
+# the decoy: a sleeper whose executable is NAMED like the pet's basename
+# ("pet", so its comm is the pet's basename) but whose cmdline carries a
+# DIFFERENT path - exactly the process a name-based match would kill and an
+# exact-token match must leave alone
+printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/sleeper.c"
+# a systemctl that always fails, so the autostart path is exercised honestly,
+# and logs one line per call so the test can count reads
+cat > "$WORK/fakebin/systemctl" <<SH
+#!/bin/sh
+echo "call: \$*" >> "$CALLS"
 echo "Failed to get unit file state for chocobar.service: No such file or directory" >&2
 exit 4
 SH
@@ -81,6 +117,9 @@ chmod +x "$WORK/fakebin/systemctl"
 
 gcc -O1 -o "$XCLICK" "$HERE/xclick.c" -lX11 -lXtst 2>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the XTEST driver"; cat "$WORK/cc.log"; exit 1; }
+gcc -O1 -o "$WORK/decoy/pet" "$WORK/decoy/sleeper.c" 2>>"$WORK/cc.log" \
+    || { echo "FAIL: cannot build the decoy sleeper"; cat "$WORK/cc.log"; exit 1; }
+calls_n() { if [ -f "$CALLS" ]; then wc -l < "$CALLS"; else echo 0; fi; }
 
 # ---- the private display and bus -----------------------------------------
 DPYNUM=$(( 90 + RANDOM % 8 ))
@@ -122,6 +161,15 @@ SCALE=$(awk -v h="$HEIGHT" 'BEGIN{printf "%.4f", h/30.0}')
 root_children() { xwininfo -root -tree | grep -c '^     0x'; }
 BAR_BASE=$(root_children)
 menu_open() { [ "$(root_children)" -gt "$BAR_BASE" ]; }
+# the menu's window id and geometry: the mapped root child that is not the bar
+# (the bar's extra 1x1 helper window is filtered by the w/h > 1 test)
+menu_wh() {
+    for w in $(xwininfo -root -children | grep -o '^     0x[0-9a-f]*'); do
+        [ "$((w))" -eq "$BARWIN" ] && continue
+        out=$(xwininfo -id "$w" | awk '/Width:/{W=$2} /Height:/{H=$2} END{if (W>1 && H>1) printf "%d %d", W, H}')
+        if [ -n "$out" ]; then echo "$w $out"; return; fi
+    done
+}
 # the menu's row geometry, in logical px (linux/src/menu.c: MENU_PAD, MENU_ROW,
 # MENU_SEP). The second row is "Subscription dashboard", whose choice is
 # observable in the bar's own log without changing anything on disk; its centre
@@ -139,6 +187,13 @@ sleep 0.6
 ! menu_open
 check "a right-PRESS opens nothing" $?
 
+# 2b. with the menu never opened and the bar ticking on its 1 s loop, the
+#     autostart mark is not read at all: the fake systemctl logs one line per
+#     call and its log must be empty
+sleep 2
+[ "$(calls_n)" -eq 0 ]
+check "with the menu closed the autostart mark is not re-read per tick" $?
+
 # 3. the release opens the menu
 "$XCLICK" $((X+40)) $((Y+10)) 3 release
 sleep 0.6
@@ -150,19 +205,32 @@ check "the right-RELEASE opens the menu" $?
 #     for a 236 logical px wide menu. The ratio is scale-free, so it needs no
 #     DPI assumption, and a missing or extra item changes the height. (No click
 #     can observe this parity: the last row quits the bar.)
-menu_wh() {
-    for w in $(xwininfo -root -children | grep -o '^     0x[0-9a-f]*'); do
-        [ "$((w))" -eq "$BARWIN" ] && continue
-        xwininfo -id "$w" | awk '/Width:/{W=$2} /Height:/{H=$2} END{if (W>1 && H>1) printf "%d %d", W, H}'
-    done
-}
-read -r MENU_W_DEV MENU_H_DEV <<EOF
+read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
 $(menu_wh)
 EOF
-MENU_W_DEV=${MENU_W_DEV:-0}; MENU_H_DEV=${MENU_H_DEV:-0}
+MENU_WIN=${MENU_WIN:-0}; MENU_W_DEV=${MENU_W_DEV:-0}; MENU_H_DEV=${MENU_H_DEV:-0}
 WANT_MENU_H=$(awk -v w="$MENU_W_DEV" 'BEGIN{printf "%.0f", w*279/236}')
 [ "$MENU_W_DEV" -gt 0 ] && [ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ]
 check "the menu renders the Windows item set (${MENU_W_DEV}x${MENU_H_DEV}, want h~$WANT_MENU_H)" $?
+
+# 3c. opening the menu read the autostart mark exactly ONCE (one line in the
+#     fake systemctl's own call log), and the menu may then repaint - pointer
+#     moves across its rows repaint the menu on every hover change (menu.c) -
+#     without reading it again: the once-per-open, not-per-paint invariant
+[ "$(calls_n)" -eq 1 ]
+check "opening the menu read the autostart mark exactly once" $?
+if [ "$MENU_WIN" != "0" ]; then
+    MGEO=$(xdotool getwindowgeometry --shell "$MENU_WIN")
+    MENU_X=$(echo "$MGEO" | awk -F= '/^X=/{print $2}')
+    MENU_Y=$(echo "$MGEO" | awk -F= '/^Y=/{print $2}')
+    for i in 1 3 5 7 9 11; do
+        xdotool mousemove $((MENU_X + MENU_W_DEV / 2)) $((MENU_Y + i * MENU_H_DEV / 12))
+        sleep 0.1
+    done
+fi
+sleep 0.3
+[ "$(calls_n)" -eq 1 ]
+check "menu repaints do not re-read the autostart mark" $?
 
 # 4. right-clicking again dismisses it, and it STAYS dismissed
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
@@ -183,9 +251,10 @@ sleep 0.8
 ! menu_open
 check "the menu closes again when the bar is clicked outside it" $?
 
-# 5c. a right-press whose release lands OFF the bar opens nothing: the press
-#     grabs the pointer, so the release arrives at the bar anyway, and Windows
-#     sends WM_RBUTTONUP only when the release is over the window.
+# 5c. a right-press whose release lands OFF the bar opens nothing: the bar never
+#     grabs the pointer, so the X server delivers the off-bar release to the
+#     window under the pointer and the bar never sees it - the same rule as
+#     Windows, which sends WM_RBUTTONUP only when the release is over the window.
 "$XCLICK" $((X+40)) $((Y+10)) 3 drag $((X+40)) $((Y+HEIGHT+60))
 sleep 0.8
 ! menu_open
@@ -223,6 +292,49 @@ eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
 [ "$Y" -ge $((WANT_TOP-4)) ] && [ "$Y" -le $((WANT_TOP+4)) ]
 check "with no geometry report the bar falls back to the screen top (y=$Y want~$WANT_TOP)" $?
 
+# 6c. THE PET CHIP. The config wires the fake pet as the FIRST (and only
+#     left-group) chip; the other clickable chip (tokens, which opens the
+#     dashboard) is disabled, so the pet chip can be found safely by clicking
+#     x offsets and watching for the bar's own "pet: started" log line.
+#     The DECOY runs first: its executable is named like the pet's basename,
+#     so its comm IS the pet's basename while its cmdline carries a different
+#     path - the process a name-based match would stop.
+"$WORK/decoy/pet" >/dev/null 2>&1 &
+DECOY_PID=$!
+sleep 0.3
+kill -0 "$DECOY_PID" 2>/dev/null && [ "$(cat "/proc/$DECOY_PID/comm" 2>/dev/null)" = "pet" ]
+check "the decoy is a name twin of the pet (comm equals the pet's basename)" $?
+PET_X=0
+for xoff in 20 30 40 50 60 70 80; do
+    "$XCLICK" $((X+xoff)) $((Y+10)) 1 full
+    sleep 0.4
+    if grep -q "pet: started" "$WORK/bar.log"; then PET_X=$xoff; break; fi
+done
+[ "$PET_X" -gt 0 ]
+check "a click on the pet chip starts the pet (chip found at x offset $PET_X)" $?
+# the started pet must be the configured script and be alive: it recorded its
+# pid (the file exists) and its state is "running"
+[ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "the started pet is alive and recorded itself" $?
+
+# 6d. click the pet chip again: the chip's state source (the exact-token
+#     matcher over /proc/<pid>/cmdline) saw the started pet, so the toggle must
+#     STOP it - one start, one stop, and the pet's own record shows a SIGTERM
+#     (a SIGKILL would leave the pid file in place with the state "running";
+#     a blind duplicate start would log a second "pet: started" line)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+grep -q "pet: stopped" "$WORK/bar.log" && [ "$(grep -c "pet: started" "$WORK/bar.log")" -eq 1 ] &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+check "the second click stops the pet with a SIGTERM, not a duplicate, not a SIGKILL" $?
+
+# 6e. the decoy must survive the pet's stop: the match is an exact cmdline
+#     token, never a process name, and the decoy's comm IS the pet's basename
+kill -0 "$DECOY_PID" 2>/dev/null
+check "the name-twin decoy survives the pet's stop (exact token, never a name)" $?
+kill "$DECOY_PID" 2>/dev/null
+
 # 7. the bar rides above the terminal: a geometry report moves it.
 #    The move happens on the bar's own tick (at most once a second), so the
 #    waits below are generous on purpose - a flaky sleep must not look like a
@@ -239,6 +351,37 @@ WANT_W=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 900*s}')
 [ "$Y" -ge $((WANT_Y-8)) ] && [ "$Y" -le $((WANT_Y+8)) ] && [ "$WIDTH" -ge $((WANT_W-8)) ] && [ "$WIDTH" -le $((WANT_W+8)) ]
 check "the bar rides just above the reported terminal (y=$Y want~$WANT_Y, w=$WIDTH want~$WANT_W)" $?
 
+# 7b. a menu open spawns the autostart child whose stderr pipe is the one that
+#     used to hang the bar (the fake systemctl writes to stderr and exits): the
+#     menu must open anyway - the spawn, the stderr drain and the wait all
+#     completed inside the open - and the child must actually have run (its
+#     call landed in the log)
+CALLS_BEFORE=$(calls_n)
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+menu_open && [ "$(calls_n)" -eq $((CALLS_BEFORE+1)) ]
+check "a menu open spawns the stderr-writing child and still opens (the pipe cannot block the loop)" $?
+
+# 7c. the bar is still responsive to clicks after the child: the menu opens again
+"$XCLICK" 100 300 1 full
+sleep 0.8
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+menu_open
+check "after the child the bar still opens the menu on a click" $?
+"$XCLICK" 100 300 1 full
+sleep 0.8
+
+# 7d. and the clock still ticks: the move below only happens in the bar's own
+#     1 s tick branch, which a blocked loop would never reach - the report moves
+#     the terminal and the bar must follow it
+report kitty 900 100 350 1600
+sleep 2
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+WANT_Y2=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (350-30-12)*s}')
+[ "$Y" -ge $((WANT_Y2-8)) ] && [ "$Y" -le $((WANT_Y2+8)) ]
+check "the clock still ticks after the child (the bar followed a fresh report to y=$Y want~$WANT_Y2)" $?
+
 # 8. a terminal too high to fit the strip above it hides the bar
 report kitty 900 100 5 1600
 sleep 2
@@ -250,6 +393,22 @@ report kitty 900 100 300 1600
 sleep 2
 xwininfo -id "$BARWIN" | grep -q "Map State: IsViewable"
 check "the bar comes back when the terminal moves down" $?
+
+# 9b. a report that CHANGES the terminal's width must move BOTH the bar's
+#     window and its rounded SHAPE: the shape region is in window coordinates,
+#     so a resize that skipped re-applying it would leave the window clipped
+#     to the old rounded rect. The expected width is derived from the width the
+#     900-wide report produced (a ratio, so no DPI guess), and the shape's own
+#     bounding rectangle (xwininfo -shape) is the observable that catches a
+#     stale shape still reading the old width.
+WANT_W2=$(awk -v w="$WIDTH" 'BEGIN{printf "%.0f", w*1100/900}')
+report kitty 1100 100 300 1600
+sleep 2
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+SHAPE_W=$(xwininfo -id "$BARWIN" -shape | awk '/Window shape extents:/ {split($4, a, "x"); print a[1]}')
+[ "$WIDTH" -ge $((WANT_W2-8)) ] && [ "$WIDTH" -le $((WANT_W2+8)) ] &&
+    [ -n "$SHAPE_W" ] && [ "$SHAPE_W" -ge $((WANT_W2-8)) ] && [ "$SHAPE_W" -le $((WANT_W2+8)) ]
+check "a width change moves the window AND its shape (w=$WIDTH shape=$SHAPE_W want~$WANT_W2)" $?
 
 # 10. a STALE report (the helper stopped, KWin restarted) is dropped after 30 s
 #     and the bar falls back to the screen top instead of pinning itself to a
