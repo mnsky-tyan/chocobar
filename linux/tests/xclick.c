@@ -9,10 +9,11 @@
  * this MUST only ever be used on a private Xvfb display - never on the user's
  * session (the global rule: no synthetic input on the real desktop).
  *
- * usage: xclick <x> <y> <button> [full|press|release]
- *   full    press then release (default)
+ * usage: xclick <x> <y> <button> [full|press|release|drag] [<x2> <y2>]
+ *   full    press then release at the same spot (default)
  *   press   press only  (the bar must open NOTHING on this)
  *   release release only
+ *   drag    press at (x,y), move to (x2,y2), release there
  */
 #include <X11/Xlib.h>
 #include <X11/extensions/XTest.h>
@@ -23,7 +24,7 @@
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: xclick <x> <y> <button> [full|press|release]\n");
+        fprintf(stderr, "usage: xclick <x> <y> <button> [full|press|release|drag <x2> <y2>]\n");
         return 2;
     }
     Display *d = XOpenDisplay(NULL);
@@ -39,6 +40,14 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "press")) {
         XTestFakeButtonEvent(d, b, True, CurrentTime);
     } else if (!strcmp(mode, "release")) {
+        XTestFakeButtonEvent(d, b, False, CurrentTime);
+    } else if (!strcmp(mode, "drag") && argc >= 7) {
+        XTestFakeButtonEvent(d, b, True, CurrentTime);
+        XFlush(d);
+        usleep(60000);
+        XTestFakeMotionEvent(d, -1, atoi(argv[5]), atoi(argv[6]), CurrentTime);
+        XFlush(d);
+        usleep(60000);
         XTestFakeButtonEvent(d, b, False, CurrentTime);
     } else {
         XTestFakeButtonEvent(d, b, True, CurrentTime);

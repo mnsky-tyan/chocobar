@@ -518,84 +518,78 @@ static int gpuPercent(void) {
 
 // ---- pet presence ------------------------------------------------------------
 // The pet chip is "is this process alive" (p_ui.c builds it from
-// modules.pet.exePath; Windows reads a Toolhelp32 snapshot). On Linux a process
-// is named in /proc/<pid>/comm, which is the executable's basename truncated to
-// 15 characters - the same rule pgrep applies, and the reason a match against
-// the basename alone is the honest comparison.
+// modules.pet.exePath; Windows reads a Toolhelp32 snapshot). On Linux the pet is
+// identified by ONE thing: an exact token of /proc/<pid>/cmdline equal to the
+// configured path, or to its realpath() so a symlinked launcher still matches.
+// Never comm, never a basename, never a substring - comm is the kernel's
+// truncated basename, so matching it makes a bare configured name hit every
+// process carrying that name, and the stop path signals whatever it matched.
 //
-// A script target (the pet is python3 /path/pet.py) never matches on comm:
-// the kernel names the INTERPRETER ("python3"), not the script. So the primary
-// test is argv[0] EQUALITY against exePath, which is exact for both a launcher
-// that sets its own argv[0] (`exec -a "$0"`, what the shipped little-remielle
-// wrapper does) and an interpreter holding the script as argv[1]. comm equality
-// stays as the second test for a direct executable, skipped for interpreter
-// names. Never a substring: stopping a process can only ever hit the configured
-// target - the same rule as signalling a captured PID after re-checking it.
+// The configured value must therefore LOOK like a path (it must contain a '/').
+// A bare name cannot identify one process and is refused for both matching and
+// starting.
+//
+// The pet the bar STARTS is visible to the same matcher: petToggle runs it as
+// `/bin/sh -c <path>`, and the path survives as a cmdline token - as the
+// shell's own argument, as the exec'd binary's argv[0], or, for a shebang
+// script, as the script argument the kernel hands the interpreter.
 int petProcessRunning(const char *exePath);
 int petProcessStop(const char *exePath);
+int petPathUsable(const char *exePath);
 
-// 1 = this pid IS the pet target, by argv[0] equality (see above). comm is the
-// fallback for a plain executable, whose kernel name IS the basename.
-static int petIsInterpreter(const char *want) {
-    static const char *const kInterp[] = {
-        "python", "python2", "python3", "sh", "bash", "zsh", "dash", "fish",
-        "node", "bun", "deno", "perl", "ruby", "java", "env", NULL
-    };
-    for (int i = 0; kInterp[i]; i++)
-        if (!strcasecmp(want, kInterp[i])) return 1;
+// 0 = the configured value cannot name a target: empty, or a bare name. Logged
+// once per distinct value, not once per tick.
+int petPathUsable(const char *exePath) {
+    if (!exePath || !*exePath) return 0;
+    if (strchr(exePath, '/')) return 1;
+    static char refused[512];
+    if (strcmp(refused, exePath) != 0) {
+        snprintf(refused, sizeof(refused), "%s", exePath);
+        fprintf(stderr, "chocobar: pet path is not a path: %s\n", exePath);
+    }
     return 0;
 }
 
-static int petPidMatches(const char *exePath, const char *want, const char *pidName) {
+// realpath() of the configured path, empty when it cannot be resolved.
+static void petResolved(const char *exePath, char *out, size_t cap) {
+    out[0] = 0;
+    char *rp = realpath(exePath, NULL);
+    if (!rp) return;
+    snprintf(out, cap, "%s", rp);
+    free(rp);
+}
+
+// 1 = one of this pid's cmdline tokens is exactly path or its realpath.
+static int petPidMatches(const char *pidName, const char *path, const char *real) {
     char p[300];
     snprintf(p, sizeof(p), "/proc/%s/cmdline", pidName);
     FILE *f = fopen(p, "r");
     if (!f) return 0;              // the process may have exited already
-    char buf[1024];
+    char buf[4096];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
-    if (n > 0) {
-        buf[n] = 0;
-        // argv[0] is the first token; trailing args are irrelevant, so a wrapper
-        // that forwards arguments still matches. A `sh -c <path>` launcher has
-        // the path as an ARGUMENT with "sh" as argv[0], so it never matches -
-        // that is the whole point of comparing argv[0] and not "any token".
-        if (!strcmp(buf, exePath)) return 1;
+    buf[n] = 0;
+    for (size_t i = 0; i < n; ) {
+        const char *tok = buf + i;
+        size_t len = strlen(tok);
+        if (len && (!strcmp(tok, path) || (real[0] && !strcmp(tok, real)))) return 1;
+        i += len + 1;
     }
-    // the direct-executable case: the kernel names the binary (truncated to 15
-    // chars), never the script it interprets
-    if (petIsInterpreter(want)) return 0;
-    snprintf(p, sizeof(p), "/proc/%s/comm", pidName);
-    f = fopen(p, "r");
-    if (!f) return 0;
-    char comm[64] = {0};
-    int got = fgets(comm, sizeof(comm), f) != NULL;
-    fclose(f);
-    if (!got) return 0;
-    comm[strcspn(comm, "\n")] = 0;
-    // case-insensitive, like lstrcmpiW on Windows
-    return strcasecmp(comm, want) == 0;
+    return 0;
 }
 
 // ---- the tick ------------------------------------------------------------------
 int petProcessRunning(const char *exePath) {
-    if (!exePath || !*exePath) return 0;
-    // basename of exePath, whatever separators it carries
-    const char *b = exePath, *q;
-    for (q = exePath; *q; q++) if (*q == '/' || *q == '\\') b = q + 1;
-    // comm is capped at 15 chars + NUL by the kernel; comparing more than that
-    // against a longer name would make a match impossible
-    char want[16] = {0};
-    snprintf(want, sizeof(want), "%s", b);
-    if (!want[0]) return 0;
-
+    if (!petPathUsable(exePath)) return 0;
+    char real[4096];
+    petResolved(exePath, real, sizeof real);
     DIR *d = opendir("/proc");
     if (!d) return 0;
     int found = 0;
     struct dirent *e;
     while ((e = readdir(d)) && !found) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;   // pids only
-        if (petPidMatches(exePath, want, e->d_name)) found = 1;
+        if (petPidMatches(e->d_name, exePath, real)) found = 1;
     }
     closedir(d);
     return found;
@@ -605,22 +599,19 @@ int petProcessRunning(const char *exePath) {
 // against the pid's own cmdline immediately before the signal (the pid could
 // have been recycled between the scan and the kill). Returns how many were
 // signalled. Never SIGKILLs: the pet must save its position/settings first,
-// and the kill is always a verified one, never a bare process-name pattern.
+// and the signal only ever goes to a pid whose own cmdline matched the
+// configured path - never to a process-name pattern.
 int petProcessStop(const char *exePath) {
-    if (!exePath || !*exePath) return 0;
-    const char *b = exePath, *q;
-    for (q = exePath; *q; q++) if (*q == '/' || *q == '\\') b = q + 1;
-    char want[16] = {0};
-    snprintf(want, sizeof(want), "%s", b);
-    if (!want[0]) return 0;
-
+    if (!petPathUsable(exePath)) return 0;
+    char real[4096];
+    petResolved(exePath, real, sizeof real);
     DIR *d = opendir("/proc");
     if (!d) return 0;
     int stopped = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-        if (!petPidMatches(exePath, want, e->d_name)) continue;
+        if (!petPidMatches(e->d_name, exePath, real)) continue;
         pid_t pid = (pid_t)atoi(e->d_name);
         if (pid > 1 && kill(pid, SIGTERM) == 0) stopped++;
     }

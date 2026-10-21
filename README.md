@@ -374,6 +374,11 @@ gh release download <tag> --pattern chocobar-linux
 install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
 # the GPU chip needs the perf counters capability, and only that capability:
 sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
+# the menu's "Start on login" item toggles this unit, so install it too
+# (from a checkout of this repo - the release ships the binary only):
+cp linux/chocobar.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chocobar.service
 ```
 
 A build made by hand is fine for development, but the bar the user runs should

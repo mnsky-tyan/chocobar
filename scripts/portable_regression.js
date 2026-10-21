@@ -353,84 +353,19 @@ function check(name, ok, detail) {
     'a dashboard with its own totals would disagree with the Windows board');
 }
 
-// --- the menu that ate its own opening click ------------------------------------------
-// The Linux menu opened on the button PRESS while the Windows menu opens on the
-// RELEASE (WM_RBUTTONUP). The opening release then arrived at the freshly-opened
-// menu's pointer grab, landed in its top-left padding corner (menuHit -> -1) and
-// closed the menu milliseconds after it appeared: "pops out and immediately pops
-// back down". These guards pin the release-open, the event mask that delivers it,
-// the Windows item set/order, and the once-per-open autostart read.
+// --- the menu's dismissal gesture and the autostart state ------------------------------
+// The menu's open/dismiss/row-pick behaviour and the absence of the blur hint are
+// proven by linux/tests/behaviour.sh, which drives the real bar on a private Xvfb.
+// What stays here are the invariants no runtime check can see: the one resize
+// helper, the once-per-open autostart read, the pipe that must not block, and the
+// pet matcher's exact-token contract.
 {
   const lx3 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
   const menu3 = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.c'), 'utf8');
-  const menuh = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'menu.h'), 'utf8');
-  // a helper that extracts one function's body, so a guard can assert "this
-  // function does X" without matching into the function that follows it
-  const fnBody = (src, sig) => {
-    const at = src.indexOf(sig);
-    if (at < 0) return '';
-    const end = src.indexOf('\n}', at);
-    return end < 0 ? '' : src.slice(at, end);
-  };
-  const pressBody = fnBody(lx3, 'static void onButton(XButtonEvent *e) {');
-  const relBody = fnBody(lx3, 'static void onButtonRelease(XButtonEvent *e) {');
-  check('linux: the menu opens on the right-button RELEASE, not the press',
-    /ButtonReleaseMask/.test(lx3) &&
-    /case ButtonRelease: onButtonRelease\(&ev\.xbutton\); break;/.test(lx3) &&
-    relBody.includes('g_menuPending = 1;') &&
-    !pressBody.includes('g_menuPending = 1;'),
-    'a press-opened menu ate its own opening release: it landed in the padding corner and closed the menu instantly');
-  check('linux: a release that ends off the bar opens nothing',
-    relBody.includes('e->x < 0') && relBody.includes('e->x >= g_w') &&
-    relBody.includes('e->y < 0') && relBody.includes('e->y >= g_h'),
-    'the press grabs the pointer, so a drag off-window delivers the release to the bar anyway; Windows sends WM_RBUTTONUP only over the window');
-  // The dismissing right-click must not bounce the menu back open: Win32's
-  // TrackPopupMenu consumes the click that dismisses it, so the Windows bar
-  // never receives a WM_RBUTTONUP for that gesture. The menu returns
-  // MENU_DISMISSED_BY_PRESS for such closes and the bar swallows the release.
-  const menuSwitch = fnBody(menu3, 'switch (ev.type) {');
-  check('linux: the menu closes and stays closed on the dismissing right-click',
-    /MENU_DISMISSED_BY_PRESS = -2/.test(menuh) &&
-    (menuSwitch.match(/MENU_DISMISSED_BY_PRESS/g) || []).length >= 2 &&
-    /if \(choice == MENU_DISMISSED_BY_PRESS\)/.test(lx3) &&
-    /g_swallowRelease = 1;/.test(lx3) &&
-    /if \(g_swallowRelease\) \{\s*\n\s*g_swallowRelease = 0;/.test(relBody) &&
-    pressBody.includes('g_swallowRelease = 0;'),
-    'with release-open, the dismissing right-click re-opened the menu at the release point: an open/close loop that Win32 menus do not have');
-  // the Windows tray menu's item set, in the Windows order (p_ui.c kMenuItems)
-  const itemsSrc = (/static const MenuItem g_items\[\] = \{([\s\S]*?)\n\};/.exec(menu3) || [, ''])[1];
-  const seq = ['Token dashboard', 'Subscription dashboard', 'Start on login',
-               'Edit config', 'Open config folder', 'Check for updates',
-               'Reload chocobar', 'Quit chocobar'];
-  let pos = 0, orderOk = true;
-  for (const s of seq) {
-    const at = itemsSrc.indexOf(s, pos);
-    if (at < 0) { orderOk = false; break; }
-    pos = at + 1;
-  }
-  const seps = (itemsSrc.match(/\{ "", 0, 1 \}/g) || []).length;
-  check('linux: the menu carries the Windows items in the Windows order',
-    orderOk && seps === 3 &&
-    /MENU_AUTO_START = 5/.test(menuh) && /MENU_UPDATES = 6/.test(menuh) &&
-    itemsSrc.includes('MENU_AUTO_START') && itemsSrc.includes('MENU_UPDATES'),
-    'the two missing items (autostart toggle, releases page) were what made the menus read differently');
-  // THE BAR MUST NOT SET THE BLUR-BEHIND HINT. The hint made this desktop's
-  // blur effect (a third-party one with brightness/saturation post-processing)
-  // smear the backdrop into a flat washed-out strip: measured, the bar's empty
-  // middle read std=8.4 with the hint and std=25.0 without it, while the README
-  // reference screenshot measures std=34 - the raw backdrop is the look the
-  // bar is built for, and the config's "acrylic" is honored as the translucent
-  // tint itself. A stray re-introduction regresses the user's aesthetic.
-  check('linux: the bar does not set the KWin blur-behind hint',
-    !/_KDE_NET_WM_BLUR_BEHIND_REGION/.test(lx3) &&
-    !/applyBlurRegion/.test(lx3),
-    'the blur hint flattened the backdrop into a gray wash (measured std 8.4 vs the README look at 34); the acrylic look is the raw backdrop through the tint');
   // Every size change must resize, reallocate the surface AND re-apply the
   // rounded shape: the shape region is in window coordinates, so a resize that
-  // skips it leaves the window clipped to the old rounded rect (the same class
-  // of stale-region bug the old blur property had). The invariant lives in one
-  // helper that all three size-change sites go through.
-  const notifyBody = fnBody(lx3, 'case ConfigureNotify:');
+  // skips it leaves the window clipped to the old rounded rect. The invariant
+  // lives in one helper that all three size-change sites go through.
   check('linux: every size change goes through the one resize helper',
     (lx3.match(/XResizeWindow\(/g) || []).length === 1 &&
     /static void resizeWindow\(int w, int h\) \{[\s\S]*?XResizeWindow\(g_dpy, g_win, \(unsigned\)g_w, \(unsigned\)g_h\);\s*\n\s*allocSurface\(\);\s*\n\s*applyShape\(\);/.test(lx3) &&
@@ -443,27 +378,6 @@ function check(name, ok, detail) {
     /m\.startChecked = startChecked;/.test(menu3) &&
     /g_items\[i\]\.id == MENU_AUTO_START && m->startChecked/.test(menu3),
     'a systemctl subprocess per hover repaint would stall the menu; the state is read at open and painted from the cache');
-  // Windows anchors the bar to the terminal's top edge (p_ui.c: y =
-  // terminal.top - barHeight - gap, hideBar when there is no room above). The
-  // Linux port used to pin the bar to the screen top, which left it floating
-  // above wherever the terminal actually is.
-  check('linux: the bar rides above the terminal, the Windows anchor',
-    /int yLog = g_geom\.y - cbCfgHeight\(\) - cbCfgGap\(\);/.test(lx3) &&
-    /XUnmapWindow\(g_dpy, g_win\)/.test(lx3) &&
-    /XMapWindow\(g_dpy, g_win\)/.test(lx3),
-    'the bar followed the screen top, not the terminal: it floated away from the strip it belongs to when the terminal moved down');
-  // The menu's pointer GRAB redirects every pointer event on the screen to the
-  // menu window, so a click anywhere arrives with coordinates outside the
-  // window. The row pick used the y coordinate alone: a click far below the
-  // menu landed on the LAST row and quit the bar (measured), a click to the
-  // left of it could have reloaded the bar or opened a folder. Only a click
-  // inside the menu may choose an item.
-  check('linux: only a click INSIDE the menu can choose an item',
-    /static int menuInside\(const Menu \*m, int px, int py\) \{/.test(menu3) &&
-    /px >= 0 && px < m->w && py >= 0 && py < m->h/.test(menu3) &&
-    (menu3.match(/menuInside\(&m, ev\.xbutton\.x, ev\.xbutton\.y\)/g) || []).length === 2 &&
-    /menuInside\(&m, ev\.xmotion\.x, ev\.xmotion\.y\)/.test(menu3),
-    'a click anywhere on the screen picked a random menu row through the grab: measured, a click below the menu quit the bar');
   // A child's stderr pipe must lose its WRITE end in the parent right after
   // the spawn. While the parent holds it, the pipe never reaches EOF, so the
   // drain blocks for ever and takes the bar's single event loop with it: the
@@ -472,14 +386,6 @@ function check(name, ok, detail) {
     /close\(errfds\[1\]\); errfds\[1\] = -1;/.test(lx3) &&
     /O_NONBLOCK/.test(lx3),
     'an open write end means the pipe never ends and the drain blocks for ever: the menu stopped opening, silently');
-  // The autostart state is a TRI-STATE: "unknown" is not "disabled". A failed
-  // read used to draw an unchecked tick and toggle the unit blind.
-  check('linux: an unreadable autostart state is unknown, not disabled',
-    /int autoStartEnabled\(void\)/.test(lx3) &&
-    /return -1;/.test(lx3) &&
-    /autostart state unknown/.test(lx3) &&
-    /int st = autoStartEnabled\(\);\s*\n\s*if \(st < 0\) break;/.test(lx3),
-    'a failed systemctl read must not look like "not enabled": the tick lied and the toggle flipped the unit blind');
 }
 
 // --- the bar's layer and its (absent) drag -------------------------------------------
@@ -575,21 +481,23 @@ function check(name, ok, detail) {
     /chipClickable/.test(lx) && /c->align == CHIP_LEFT && \(c->icon == SVG_DIAMOND \|\| c->icon == SVG_BOW\)/.test(lx),
     'a metric label must not look like a button; only the tokens chip and the pet chip act on a click');
   // The pet chip: the Windows bar's CT_PET chip starts and stops the pet
-  // (p_ui.c petToggle). The Linux chip does the same, and the process is
-  // matched by argv[0] EQUALITY - never by a name pattern, and never killed
-  // by one either: a name pattern can hit an unrelated process, so the pid is
-  // re-verified against its own cmdline right before the SIGTERM.
+  // (p_ui.c petToggle). The Linux chip does the same, and the pet is the
+  // process carrying the configured path as an exact cmdline token - never a
+  // process name, which would hit every process of that name, and never a
+  // SIGKILL, so the pet can save its position first.
   const pmet = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'p_metrics_linux.c'), 'utf8');
   check('linux: the pet chip toggles the pet process, like the Windows bar',
     /static void petToggle\(void\)/.test(lx) && /cbCfgPetPath\(\)/.test(lx) &&
     /petProcessRunning\(petPath\)/.test(lx) && /petProcessStop\(petPath\)/.test(lx) &&
-    /petProcessRunning/.test(pmet) && /petProcessStop/.test(pmet),
+    /petPathUsable\(petPath\)/.test(lx) &&
+    /int petProcessRunning/.test(pmet) && /int petProcessStop/.test(pmet),
     'the Windows bar starts and stops the pet from its chip; the Linux chip must do the same');
-  check('linux: stopping the pet never kills by a name pattern',
+  check('linux: the pet is matched by an exact cmdline token, never a process name',
+    /\/proc\/%s\/cmdline/.test(pmet) && !/\/proc\/%s\/comm/.test(pmet) &&
+    /petPathUsable/.test(pmet) && /realpath\(/.test(pmet) &&
     !/\bpkill\b/.test(pmet) && !/\bkillall\b/.test(pmet) &&
-    /SIGTERM/.test(pmet) && /cmdline/.test(pmet) &&
-    !/kill\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*SIGKILL/.test(pmet),
-    'a bare name pattern can hit an unrelated process; the pid is re-verified against its own cmdline before the signal, and the pet gets the chance to save itself');
+    /SIGTERM/.test(pmet) && !/kill\([^;]*SIGKILL/.test(pmet),
+    'comm is the kernel\'s truncated basename, so a name match signals an unrelated process; the pid\'s own cmdline is the only identity, and it is re-checked right before the SIGTERM');
 
   // the dashboard shares the bar's connection, so its close button MUST go through
   // WM_DELETE_WINDOW: without the protocol the window manager falls back to

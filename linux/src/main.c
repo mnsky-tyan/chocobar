@@ -766,12 +766,18 @@ static int applyAlign(int *outW, int *outX) {
 // and Saturation post-processing), and stock KWin blur would flatten the
 // backdrop too, only less. A window that asks for no special treatment gets
 // none, which is also why nothing here re-declares anything per resize.
+static void setSizeHints(int x, int y);   // defined below, with the other window hints
+
 static void resizeWindow(int w, int h) {
     if (w == g_w && h == g_h) return;
     g_w = w; g_h = h;
     XResizeWindow(g_dpy, g_win, (unsigned)g_w, (unsigned)g_h);
     allocSurface();
     applyShape();
+    // the hints carry the size as well as the position, and a window manager
+    // places a managed window from them on map: a resize must refresh them here
+    // or the next map shows the OLD rectangle for a frame
+    setSizeHints(g_x, g_y);
 }
 
 // Sizing is ONE operation, not four: the rounded XShape region is in window
@@ -779,8 +785,6 @@ static void resizeWindow(int w, int h) {
 // the OLD rounded rect, and a surface kept at the old size paints into freed
 // memory. Every size change in this file goes through resizeWindow() so the
 // three-step invariant (window, surface, shape) holds by construction.
-static void resizeWindow(int w, int h);
-
 static void resizeToContent(void) {
     // width from the chips: pads + chips + the gaps between them. The two groups
     // are measured independently and then summed, because the gap between the
@@ -811,8 +815,6 @@ static void resizeToContent(void) {
     resizeWindow(w, h);
 }
 
-static void setSizeHints(int x, int y);   // defined below, with the other window hints
-
 static void moveWindow(int x, int y) {
     g_x = x; g_y = y;
     // keep WM_NORMAL_HINTS truthful: it is what a window manager reads when it
@@ -832,8 +834,10 @@ static void moveWindow(int x, int y) {
 static int g_hidden;             // no room above the terminal: bar unmapped
 
 // The y for the current tick, in device pixels. -1 = no room above the terminal
-// (the bar hides, the Windows hideBar() behaviour); the screen-top fallback is
-// for a terminal whose geometry has not arrived yet (or is stale).
+// (the bar hides, the Windows hideBar() behaviour). With align 1 but no usable
+// report (missing, or older than 30 s) it returns the screen-top position, so a
+// stopped helper or a KWin restart drops the bar to the top instead of pinning
+// it to a terminal that no longer exists.
 static int barYFor(void) {
     if (cbCfgAlign() == 1 && g_geom.valid && time(NULL) - g_geomAt < 30) {
         // g_geom carries LOGICAL pixels (KWin's coordinate space); the config's
@@ -1251,11 +1255,12 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 }
 
 // The pet chip's click: start or stop the modules.pet.exePath process, the same
-// toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). Stop is a verified
-// SIGTERM per matching pid (petProcessStop re-checks each cmdline), start is a
-// detached /bin/sh -c so a script target (python3 pet.py) runs through its
-// shebang and inherits the bar's environment - DISPLAY above all, since the pet
-// opens its own window on the bar's session.
+// toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). The pet is the
+// process carrying the configured path as an exact cmdline token, so the pet
+// this starts is the one the matcher (and the chip's own state) sees: start is a
+// detached `/bin/sh -c <path>`, which keeps the path as a token whether the shell
+// execs a binary or hands a shebang script to its interpreter. Stop is a verified
+// SIGTERM per matching pid (petProcessStop re-checks each cmdline).
 //
 // Known consequence, deliberate: the spawned pet stays in the bar's systemd
 // cgroup, so restarting chocobar.service stops it (KillMode=control-group). The
@@ -1268,7 +1273,7 @@ static void petToggle(void) {
     // the config string is wchar_t (UTF-32 here), so it MUST be converted rather
     // than cast - the same rule the metrics poll follows
     WideCharToMultiByte(65001 /*CP_UTF8*/, 0, wp, -1, petPath, sizeof(petPath), NULL, NULL);
-    if (!petPath[0]) return;
+    if (!petPathUsable(petPath)) return;
 
     if (petProcessRunning(petPath)) {
         petProcessStop(petPath);
@@ -1794,20 +1799,14 @@ int main(int argc, char **argv) {
             scanIfDue(now);
             buildChips();
             resizeToContent();
-            // align modes drive x AND y every tick: a terminal moved or resized
-            // must take the bar with it, horizontally and vertically.
+            // the position is derived every tick, in every align mode: x and
+            // width come from the terminal when it reports (and stay put when
+            // it does not), y always comes from barYFor - the terminal's top
+            // edge, or the screen top when align 1 has no usable report.
             {
                 int aw = 0, ax = 0;
-                if (applyAlign(&aw, &ax)) {
-                    int wantY = barYFor();
-                    if (wantY < 0) {
-                        // no room above the terminal: Windows hides the bar
-                        // (p_ui.c checks y < rcWork.top), and so does the port
-                        if (!g_hidden) { g_hidden = 1; XUnmapWindow(g_dpy, g_win); }
-                    } else {
-                        if (g_hidden) { g_hidden = 0; XMapWindow(g_dpy, g_win); }
-                        if (ax != g_x || wantY != g_y) moveWindow(ax, wantY);
-                    }
+                int aligned = applyAlign(&aw, &ax);
+                if (aligned) {
                     int wantW = aw;
                     int chipsW = (int)((PAD_L + PAD_R) * g_scale + 0.5);
                     for (int i = 0; i < g_chipCount; i++) {
@@ -1817,6 +1816,20 @@ int main(int argc, char **argv) {
                     }
                     if (wantW < chipsW) wantW = chipsW;
                     resizeWindow(wantW, g_h);
+                }
+                int wantY = barYFor();
+                if (wantY < 0) {
+                    // no room above the terminal: Windows hides the bar
+                    // (p_ui.c checks y < rcWork.top), and so does the port
+                    if (!g_hidden) { g_hidden = 1; XUnmapWindow(g_dpy, g_win); }
+                } else {
+                    // position (and the size hints) BEFORE the map: a window
+                    // manager places a managed window from the hints it reads on
+                    // map, so mapping first shows it at the old position for a
+                    // frame
+                    int wantX = aligned ? ax : g_x;
+                    if (wantX != g_x || wantY != g_y) moveWindow(wantX, wantY);
+                    if (g_hidden) { g_hidden = 0; XMapWindow(g_dpy, g_win); }
                 }
             }
             paint();
