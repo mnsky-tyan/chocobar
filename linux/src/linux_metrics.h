@@ -30,11 +30,13 @@ void linuxMetricsPrime(void);
 // in p_metrics_linux.c because the /proc walk lives there; the bar's click
 // handler calls both. The pet is the process whose EXECUTED file is the
 // configured path: argv[0] equal to the path (or its realpath), or an
-// interpreter argv[0] with the path as argv[1] for a shebang script. A process
-// that merely carries the path as an argument is not the pet. The configured
-// value must be ONE ABSOLUTE path to a regular executable file - a bare name,
-// a relative path, a directory, or a command line carrying arguments is
-// refused for both matching and starting.
+// interpreter argv[0] with the path as argv[1] for a shebang script - including
+// `env`, because a `#!/usr/bin/env <interp>` shebang makes the kernel exec env
+// literally - with a relative argv[1] resolved against that process's own cwd.
+// A process that merely carries the path as an argument is not the pet. The
+// configured value must be ONE ABSOLUTE path to a regular executable file - a
+// bare name, a relative path, a directory, or a command line carrying arguments
+// is refused for both matching and starting.
 int petProcessRunning(const char *exePath);
 int petProcessStop(const char *exePath);
 int petPathUsable(const char *exePath);

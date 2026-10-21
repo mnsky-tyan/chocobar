@@ -522,9 +522,11 @@ static int gpuPercent(void) {
 // identified by the process's EXECUTED file, never by a process that merely
 // mentions the path: argv[0] is the configured path (or its realpath), or - for
 // a shebang script, where the kernel runs the interpreter - argv[0] names an
-// interpreter and argv[1] is the configured path. No other token position
-// counts, so `tail -f <path>`, `sh -c <path>` and an editor with the file open
-// are not the pet, and the stop path cannot SIGTERM them.
+// interpreter and argv[1] is the configured path, as invoked - absolute when
+// the bar starts it, relative to that process's own cwd when the user starts
+// the pet as `./pet`. No other token position counts, so `tail -f <path>`,
+// `sh -c <path>` and an editor with the file open are not the pet, and the
+// stop path cannot SIGTERM them.
 // Never comm, never a basename, never a substring - comm is the kernel's
 // truncated basename, so matching it makes a bare configured name hit every
 // process carrying that name, and the stop path signals whatever it matched.
@@ -566,14 +568,54 @@ static void petResolved(const char *exePath, char *out, size_t cap) {
     free(rp);
 }
 
+// The configured file, as one cmdline token names it. A token written
+// relative (`./pet`) is resolved against the process's own cwd, because that
+// is where the user was when they started the pet and the kernel hands the
+// script path on exactly as it was typed. Compared by realpath, so a symlink
+// to the configured file is the same file.
+//
+// `scriptPath` says the token IS the script path (argv[1] under an
+// interpreter), so a bare name resolves against the cwd as well; for argv[0] a
+// bare name is a NAME from a PATH lookup, not a path, so it only counts when
+// it carries a slash.
+//
+// 1 = the token names the configured file.
+static int petTokenIsFile(const char *token, const char *pidName,
+                           const char *path, const char *real, int scriptPath) {
+    if (!token || !*token) return 0;
+    if (!strcmp(token, path) || (real[0] && !strcmp(token, real))) return 1;
+    if (token[0] == '/') return 0;              // absolute and not the file
+    if (!scriptPath && !strchr(token, '/')) return 0;   // a bare name is a name
+    char link[4096];
+    char cwd[300];
+    snprintf(cwd, sizeof(cwd), "/proc/%s/cwd", pidName);
+    ssize_t n = readlink(cwd, link, sizeof(link) - 1);
+    if (n <= 0) return 0;
+    link[n] = 0;
+    char abs[8200];
+    int w = snprintf(abs, sizeof(abs), "%s/%s", link, token);
+    if (w < 0 || w >= (int)sizeof(abs)) return 0;   // would not fit: not the file
+    char *rp = realpath(abs, NULL);
+    if (!rp) return 0;
+    int ok = !strcmp(rp, path) || (real[0] && !strcmp(rp, real));
+    free(rp);
+    return ok;
+}
+
 // The interpreters a shebang line can hand a script to. ONE list: it is what
 // decides whether argv[1] is the executed file. A script exec'd by the bar is
 // run by the kernel as `<interpreter> <script>`, so its argv[1] is the path the
 // config names; any other program carrying the path as an argument is not.
+//
+// `env` is one of them, and it is the most common shebang form: the kernel
+// execs `/usr/bin/env` LITERALLY for `#!/usr/bin/env <interp>`, so the process
+// it spawns has argv[0] naming env and argv[1] the interpreter. Naming env
+// makes that shape visible instead of invisible, and a direct `env <path>` has
+// the same shape.
 static const char *const kInterpreters[] = {
     "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
     "python", "python2", "python3", "perl", "ruby", "node", "nodejs",
-    "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript",
+    "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript", "env",
     NULL
 };
 
@@ -585,8 +627,9 @@ static int isInterpreter(const char *argv0) {
     return 0;
 }
 
-// 1 = argv[0] is path or its realpath, or argv[0] is an interpreter and argv[1]
-// is. Any other token position is an argument, not the executed file.
+// 1 = argv[0] is the executed file (the path, its realpath, or the same file
+// written relative to the process's own cwd), or argv[0] is an interpreter and
+// argv[1] is. Any other token position is an argument, not the executed file.
 static int petPidMatches(const char *pidName, const char *path, const char *real) {
     char p[300];
     snprintf(p, sizeof(p), "/proc/%s/cmdline", pidName);
@@ -602,9 +645,9 @@ static int petPidMatches(const char *pidName, const char *path, const char *real
         i += strlen(buf + i) + 1;
     }
     if (!argv[0] || !*argv[0]) return 0;
-    if (!strcmp(argv[0], path) || (real[0] && !strcmp(argv[0], real))) return 1;
+    if (petTokenIsFile(argv[0], pidName, path, real, 0)) return 1;
     if (argv[1] && *argv[1] && isInterpreter(argv[0]) &&
-        (!strcmp(argv[1], path) || (real[0] && !strcmp(argv[1], real))))
+        petTokenIsFile(argv[1], pidName, path, real, 1))
         return 1;
     return 0;
 }

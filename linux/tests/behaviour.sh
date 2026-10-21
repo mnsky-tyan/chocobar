@@ -17,8 +17,9 @@
 #     desktop with DEMANDS_ATTENTION set
 #   - the pet chip starts and stops the configured process, by the process's
 #     EXECUTED file - never a process name, and never a process that merely
-#     carries the path as an argument - and the children it leaves behind are
-#     reaped, not zombies
+#     carries the path as an argument - including an env-shebang script the
+#     user starts from its own directory with a relative path, and the children
+#     it leaves behind are reaped, not zombies
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -100,11 +101,13 @@ cat > "$WORK/home/.wizbar/config.json" <<JSON
                           "exePath": "$WORK/home/pet" } }
 }
 JSON
-# the fake pet: records its pid, traps SIGTERM and records that SIGTERM was
-# what stopped it (a SIGKILL would leave the pid file in place and the state
-# at "running"), then sleeps
+# the fake pet: an ENV-shebang script (the most common shebang form), so the
+# matcher must see through `env` to the script the kernel finally execs. It
+# records its pid, traps SIGTERM and records that SIGTERM was what stopped it
+# (a SIGKILL would leave the pid file in place and the state at "running"),
+# then sleeps
 cat > "$WORK/home/pet" <<PET
-#!/bin/sh
+#!/usr/bin/env bash
 echo \$\$ > "$WORK/pet.pid"
 echo running > "$WORK/pet.state"
 trap 'echo SIGTERM > "$WORK/pet.state"; rm -f "$WORK/pet.pid"; exit 0' TERM
@@ -417,6 +420,37 @@ check "an argument decoy is not the pet: the click starts the pet and spares the
 sleep 1.2
 kill "$ARGDECOY_PID" 2>/dev/null
 ARGDECOY_PID=""
+
+# 6f-2. a script the USER starts the way a user starts one - from its own
+#      directory with a RELATIVE path (./pet) - is still the pet. Its cmdline
+#      is `<interpreter>|./pet`, so the matcher must resolve argv[1] against
+#      that process's own cwd to see it is the configured file. A matcher that
+#      only compares strings reads the chip "off", so the click STARTS a second
+#      copy instead of stopping the one that is already running - and the stop
+#      action can then never stop what it started. The argdecoy is gone by
+#      here, so this click must take the STOP path against exactly this pid.
+( cd "$WORK/home" && ./pet >/dev/null 2>&1 & )
+USER_PID=""
+for _ in $(seq 1 20); do
+    [ -s "$WORK/pet.pid" ] && USER_PID=$(cat "$WORK/pet.pid" 2>/dev/null) && break
+    sleep 0.1
+done
+STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+[ -n "$USER_PID" ] && kill -0 "$USER_PID" 2>/dev/null &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "a user-started env-shebang pet (relative path) is alive and recording" $?
+# the chip's state source is the 1 Hz tick, so let one poll see the pet before
+# clicking: the click reads g_m.petRunning, not /proc
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq "$STARTED_BEFORE" ] &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+check "the chip sees a relative-path pet: the click stops it, no duplicate start" $?
+[ -n "$USER_PID" ] && kill -0 "$USER_PID" 2>/dev/null && kill "$USER_PID" 2>/dev/null
+# the click above already stopped it, so the zombie check below starts stopped
 
 # 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
 #     so a bar that never waits keeps one defunct entry per invocation for as

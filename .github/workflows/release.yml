@@ -37,11 +37,21 @@ jobs:
       # The LINUX bar needs its own toolchain: the bar the user actually runs
       # is a release artifact, so the release has to build it. Without this the
       # Linux bar could only ever exist as a hand-made local build.
+      #
+      # The runtime packages are listed explicitly because the step below RUNS
+      # the freshly built bar: `linux/build/chocobar-linux --version` is a
+      # dynamically linked binary (linux/build.sh links pkg-config --libs, no
+      # -static), so the loader needs libX11.so.6, libcairo.so.2, libcurl.so.4
+      # and the rest before main() can reach the --version branch. The -dev
+      # packages happen to pull those runtime counterparts in today, so this is
+      # belt-and-braces against a distro change dropping that dependency.
       - name: Install the Linux build dependencies
         run: |
           sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
                                libxcursor-dev libcairo2-dev libdbus-1-dev \
-                               libfontconfig1-dev libcurl4-openssl-dev
+                               libfontconfig1-dev libcurl4-openssl-dev \
+                               libx11-6 libxrender1 libxfixes3 libxcursor1 \
+                               libcairo2 libdbus-1-3 libfontconfig1 libcurl4
 
       - name: Verify the tag matches version.h
         run: |
