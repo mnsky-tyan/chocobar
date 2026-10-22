@@ -176,6 +176,13 @@ static int menuInside(const Menu *m, int px, int py) {
     return px >= 0 && px < m->w && py >= 0 && py < m->h;
 }
 
+// A menu click is the LEFT button, and only the left button. The pointer grab
+// delivers EVERY button to this window, and core X11 has no scroll events: a
+// wheel notch is a ButtonPress(4|5) followed by a ButtonRelease(4|5), while a
+// middle click is button 2. A release that chose a row without asking which
+// button it was would let a single wheel notch over a row act on it.
+static int menuClickButton(unsigned int button) { return button == 1; }
+
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
             int atX, int atY, double scale, int fontPx, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
@@ -300,13 +307,20 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 // the menu at the release point and the menu cannot be closed
                 // with the button that opened it
                 if (ev.xbutton.window != m.win) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
-                if (ev.xbutton.button == 3) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
+                // only the left button is a click: the wheel (4|5) and the
+                // middle button are presses too, and they must not leave the
+                // menu open for a release to choose a row
+                if (!menuClickButton(ev.xbutton.button)) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
                 if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
                     m.result = MENU_DISMISSED_BY_PRESS; done = 1; break;
                 }
                 break;
             case ButtonRelease: {
                 if (ev.xbutton.window != m.win) { done = 1; break; }
+                // only the left button may choose a row: a wheel notch ends
+                // with a release like any other click, and it must dismiss the
+                // menu, never act on the row under the pointer
+                if (!menuClickButton(ev.xbutton.button)) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
                 if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
                     // released outside the menu: dismiss it, never act on a row
                     m.result = MENU_DISMISSED_BY_PRESS; done = 1; break;

@@ -10,6 +10,8 @@
 #   - a release that ends off the bar opens nothing
 #   - the dismissing right-click must close the menu and NOT bounce it open
 #   - only a click INSIDE the menu may pick a row
+#   - only the LEFT button may pick a row: a wheel notch or a middle click
+#     over a row must pick nothing and close the menu
 #   - the bar must NOT ask the compositor for a blur (it flattens the strip)
 #   - the bar must ride above the terminal, and hide when there is no room
 #   - every map of the bar - the startup one and the tick's after a born-hidden
@@ -258,6 +260,9 @@ gcc -O1 -o "$WORK/decoy/argdecoy" "$WORK/decoy/argdecoy.c" 2>>"$WORK/cc.log" \
 gcc -O1 -o "$WORK/decoy/shaped" "$WORK/decoy/shaped.c" 2>>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the shaped decoy"; cat "$WORK/cc.log"; exit 1; }
 calls_n() { if [ -f "$CALLS" ]; then wc -l < "$CALLS"; else echo 0; fi; }
+# how many times the bar opened something with a browser (the fake xdg-open
+# records one line per call)
+xdg_opens_n() { if [ -f "$WORK/xdg-open-calls" ]; then wc -l < "$WORK/xdg-open-calls"; else echo 0; fi; }
 
 # ---- the private display and bus -----------------------------------------
 DPYNUM=$(( 90 + RANDOM % 8 ))
@@ -337,6 +342,8 @@ ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+30+15)*s}')
 # the "Start on login" row centre, in logical px from the menu's top edge
 # (menu.c: MENU_PAD, two rows, MENU_SEP, then half of this row)
 ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+2*30+9+15)*s}')
+# the "Check for updates" row centre: five rows and three separators down
+ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+5*30+3*9+15)*s}')
 
 # the geometry report can go out two ways, and the difference decides WHEN it
 # lands: gdbus introspects its destination before it calls, and the bar never
@@ -1340,12 +1347,64 @@ WANT_Y2=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (350-30-12)*s}')
 [ "$Y" -ge $((WANT_Y2-8)) ] && [ "$Y" -le $((WANT_Y2+8)) ]
 check "the clock still ticks after the child (the bar followed a fresh report to y=$Y want~$WANT_Y2)" $?
 
-# 7e. the autostart row acts through the stateful fake: is-enabled answers
-#     disabled, enable records its call and succeeds. The fake is swapped in
-#     by renaming so the bar's own PATH resolves it; the failing fake stays
-#     for the unknown-state checks on either side of this pair.
+# press a button on a menu row: open the menu, put the pointer on the row and
+# press+release the button there. The row offset is in logical px from the
+# menu's top edge (menu.c: MENU_PAD, MENU_ROW, MENU_SEP). Echoes the menu's
+# window id, or nothing at all when the menu never opened.
+row_press() { # row_press <button> <row offset>
+    "$XCLICK" $((X+40)) $((Y+10)) 3 full
+    sleep 0.8
+    local mw="" mw_dev="" mh_dev="" mg="" mx="" my=""
+    read -r mw mw_dev mh_dev <<EOF
+$(menu_wh)
+EOF
+    [ -n "$mw" ] || return 1
+    mg=$(xdotool getwindowgeometry --shell "$mw")
+    mx=$(echo "$mg" | awk -F= '/^X=/{print $2}')
+    my=$(echo "$mg" | awk -F= '/^Y=/{print $2}')
+    "$XCLICK" $((mx + mw_dev / 2)) $((my + $2)) "$1" full
+    sleep 0.8
+    echo "$mw"
+}
+
+# 7e-a. a WHEEL over a menu row must choose nothing. Core X11 has no scroll
+#     events: a wheel notch is a ButtonPress(4|5) followed by a
+#     ButtonRelease(4|5), and the menu's pointer grab delivers both of them to
+#     the menu. The release used to pick a row without asking which button it
+#     was, so one scroll over "Start on login" toggled the systemd unit. The
+#     oracle is the fake systemctl's own call log: a pick would add an
+#     enable/disable call, and the stateful fake in place WOULD record it (the
+#     failing fake would swallow the toggle, so the count would not move even
+#     for a pick - the fake has to be the stateful one for this to mean
+#     anything). The left click in 7e is the counterpart: the row still works.
 mv "$WORK/fakebin/systemctl" "$WORK/fakebin/systemctl-fail"
 mv "$WORK/fakebin/systemctl-good" "$WORK/fakebin/systemctl"
+ED_BEFORE=$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)
+XDG_BEFORE=$(xdg_opens_n)
+MW=$(row_press 4 "$ROW_AUTO_Y")
+[ -n "$MW" ] && ! menu_open &&
+    [ "$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)" -eq "$ED_BEFORE" ] &&
+    [ "$(xdg_opens_n)" -eq "$XDG_BEFORE" ] &&
+    xwininfo -id "$BARWIN" | grep -q "Map State: IsViewable"
+check "a wheel notch over a menu row picks nothing and closes the menu" $?
+
+# 7e-b. a MIDDLE click is a click like any other, and it picks nothing either:
+#     only the left button may choose a row. The oracle is the fake xdg-open's
+#     own record - a pick on "Check for updates" would run the program that
+#     opens the releases page.
+XDG_BEFORE=$(xdg_opens_n)
+MW=$(row_press 2 "$ROW_UPDATES_Y")
+[ -n "$MW" ] && ! menu_open &&
+    [ "$(xdg_opens_n)" -eq "$XDG_BEFORE" ] &&
+    [ "$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)" -eq "$ED_BEFORE" ] &&
+    xwininfo -id "$BARWIN" | grep -q "Map State: IsViewable"
+check "a middle click over a menu row picks nothing and closes the menu" $?
+
+# 7e. the autostart row acts through the stateful fake swapped in above:
+#     is-enabled answers disabled, enable records its call and succeeds. The
+#     fake is swapped in by renaming so the bar's own PATH resolves it; the
+#     failing fake stays for the unknown-state checks on either side of this
+#     pair.
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.8
 MENU_WIN=""
@@ -1439,7 +1498,6 @@ mv "$WORK/fakebin/systemctl-fail" "$WORK/fakebin/systemctl"
 #     this threaded bar may not allocate, and the PATH search allocates - so
 #     the fake xdg-open in the bar's own PATH is the one that runs, and its
 #     record proves the whole path: resolve, fork, exec.
-ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+5*30+3*9+15)*s}')
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.8
 MENU_WIN=""
