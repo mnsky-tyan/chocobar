@@ -480,8 +480,8 @@ Internal compatibility paths and filenames still use `wizbar`, including `~/.wiz
 headless and needs no GUI. The second, `linux/tests/behaviour.sh`, drives the
 real Linux bar: it starts a PRIVATE Xvfb display and a private D-Bus, drives a
 private pointer with XTEST and waits out the bar's 30 s staleness window, so it
-needs Xvfb, xdotool, xwininfo, xprop, gdbus, dbus-daemon and gcc and takes about
-a minute; where one of those tools is missing it skips cleanly on a developer
+needs Xvfb, xdotool, xwininfo, xprop, gdbus, dbus-daemon and gcc and takes a few
+minutes; where one of those tools is missing it skips cleanly on a developer
 machine and fails in CI. Nothing it does touches the user's session: the
 display, the bus, the HOME and the pointer it drives are all throwaway.
 
