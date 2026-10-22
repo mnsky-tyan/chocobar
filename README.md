@@ -371,6 +371,11 @@ workflow that builds the Windows exe:
 
 ```sh
 gh release download <tag> --pattern chocobar-linux
+# the runtime libraries the asset is linked against; most desktops already have
+# them, and a distro without them fails at load with "error while loading shared
+# libraries" naming the missing one
+sudo apt install libx11-6 libxrender1 libxfixes3 libxcursor1 libcairo2 \
+                 libdbus-1-3 libfontconfig1 libcurl4
 install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
 # the GPU chip needs the perf counters capability, and only that capability:
 sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux

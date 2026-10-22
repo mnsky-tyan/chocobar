@@ -51,8 +51,22 @@ command -v gdbus     >/dev/null || skip "gdbus (libglib2.0-bin) is not installed
 command -v dbus-send >/dev/null || skip "dbus-send is not installed"
 command -v gcc      >/dev/null || skip "gcc is not installed"
 
+# The bar itself has to be BUILT to be driven, and building needs the X11/cairo
+# DEVELOPMENT headers, not just the runtime tools above. A developer machine
+# without them used to fail `npm test` outright, which contradicts the promise
+# that a missing prerequisite skips cleanly here and fails in CI. A machine that
+# HAS the headers and still fails to build keeps the hard FAIL below.
+buildable() {
+    command -v pkg-config >/dev/null || return 1
+    for p in x11 xrender xfixes xcursor cairo dbus-1 fontconfig libcurl; do
+        pkg-config --exists "$p" || return 1
+    done
+    return 0
+}
+
 BIN="$ROOT/linux/build/chocobar-linux"
 if [ ! -x "$BIN" ]; then
+    buildable || skip "the X11/cairo development headers (pkg-config) are not installed"
     echo "--- building the bar"
     bash "$ROOT/linux/build.sh" >/dev/null || { echo "FAIL: the bar does not build"; exit 1; }
 fi
@@ -82,6 +96,21 @@ PASS=0; FAIL=0
 check() { # check <name> <condition-result>
     if [ "$2" -eq 0 ]; then echo "PASS: $1"; PASS=$((PASS+1))
     else echo "FAIL: $1"; FAIL=$((FAIL+1)); fi
+}
+# Wait for a line to appear in the bar's log, up to <timeout> seconds. The bar
+# picks a config change up on its OWN 2 s config check and only then logs
+# what it decided, so a fixed sleep after writing the config races that
+# cadence: a check that sleeps a constant and then greps is a check that
+# sometimes fails for no reason. Waiting for the OBSERVABLE is what the check
+# actually means.
+wait_log() { # wait_log <pattern> <timeout-seconds>
+    local pat="$1" limit="$2" waited=0
+    while [ "$waited" -lt "$((limit * 10))" ]; do
+        grep -q "$pat" "$WORK/bar.log" && return 0
+        sleep 0.1
+        waited=$((waited+1))
+    done
+    return 1
 }
 
 # ---- the throwaway environment -------------------------------------------
@@ -123,14 +152,18 @@ printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/s
 # and nothing else - the shape `tail -f <path>` has, and the one a matcher that
 # accepts any cmdline token would mistake for the pet
 printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/argdecoy.c"
-# a systemctl that always fails, so the autostart path is exercised honestly,
-# and logs one line per call so the test can count reads. The stateful twin
-# (systemctl-good) answers is-enabled from a state file and records
-# enable/disable; the checks swap the two by renaming so the bar's own PATH
-# resolves whichever mode a check needs.
+# a systemctl that always fails the way the real one does for a unit that is not
+# installed: the state WORD "not-found" on stdout and exit 4, plus the failure
+# text on stderr. The word is what the bar must read (the exit code cannot tell
+# "disabled" from a failure), and it logs one line per call so the test can
+# count reads. The stateful twin (systemctl-good) answers is-enabled from a state
+# file, printing the same words the real tool prints, and records enable/disable;
+# the checks swap them by renaming so the bar's own PATH resolves whichever mode
+# a check needs.
 cat > "$WORK/fakebin/systemctl" <<SH
 #!/bin/sh
 echo "call: \$*" >> "$CALLS"
+echo "not-found"
 echo "Failed to get unit file state for chocobar.service: No such file or directory" >&2
 exit 4
 SH
@@ -139,13 +172,25 @@ cat > "$WORK/fakebin/systemctl-good" <<SH
 #!/bin/sh
 echo "call: \$*" >> "$CALLS"
 case "\$2" in
-  is-enabled) [ -f "$WORK/autostart.enabled" ] && exit 0 || exit 1 ;;
+  is-enabled) if [ -f "$WORK/autostart.enabled" ]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
   enable) : > "$WORK/autostart.enabled"; exit 0 ;;
   disable) rm -f "$WORK/autostart.enabled"; exit 0 ;;
   *) exit 4 ;;
 esac
 SH
 chmod +x "$WORK/fakebin/systemctl-good"
+# a systemctl that answers "masked" and exits 1 - exactly what a real masked
+# unit does. The exit code alone cannot tell this from "disabled", so a bar
+# that reads the code reports a masked unit as disabled and flips it blind.
+cat > "$WORK/fakebin/systemctl-masked" <<SH
+#!/bin/sh
+echo "call: \$*" >> "$CALLS"
+case "\$2" in
+  is-enabled) echo masked; exit 1 ;;
+  *) exit 4 ;;
+esac
+SH
+chmod +x "$WORK/fakebin/systemctl-masked"
 
 gcc -O1 -o "$XCLICK" "$HERE/xclick.c" -lX11 -lXtst 2>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the XTEST driver"; cat "$WORK/cc.log"; exit 1; }
@@ -392,6 +437,54 @@ grep -q "pet: stopped" "$WORK/bar.log" && [ "$(grep -c "pet: started" "$WORK/bar
     [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
 check "the second click stops the pet with a SIGTERM, not a duplicate, not a SIGKILL" $?
 
+# 6d-2. THE RIGHT GROUP IS NOT A BUTTON, proven at runtime. A metric chip is a
+#       label: clicking one must do NOTHING - no pet start or stop, no menu, no
+#       dashboard - and the bar must still answer the next click. Every offset
+#       here is inside the right group (the right group is laid out from the
+#       right edge leftward, and the clock/battery/volume/ram/temp/cpu chips
+#       fill it), and strictly right of the pet chip, which is the ONLY
+#       clickable chip in this config (tokens are disabled). The counts, not a
+#       grep, are the oracle: the bar's log already carries pet lines from the
+#       checks above.
+PET_STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+PET_STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+# the chip's state comes from the bar's 1 Hz tick and 6d just stopped the pet:
+# let a tick pass so the chip reads "off" before anything is clicked
+sleep 2
+ROOT_BEFORE=$(root_children)
+RIGHT_HITS=0
+# a dense sweep of the right group's own extent: the right group is laid out
+# from the right edge leftward, so every offset between the right padding and
+# WIDTH-200 is a real metric chip (clock, battery, volume, ram, temp, cpu) or
+# the padding beside it - and never the pet chip, which is the only clickable
+# chip in this config (tokens are disabled) and sits at the far left.
+off=$((WIDTH-15))
+while [ "$off" -gt 90 ] && [ "$off" -lt "$WIDTH" ]; do
+    "$XCLICK" $((X+off)) $((Y+10)) 1 full
+    RIGHT_HITS=$((RIGHT_HITS+1))
+    off=$((off-8))
+    sleep 0.15
+done
+sleep 0.6
+[ "$RIGHT_HITS" -ge 8 ] &&
+    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq "$PET_STARTED_BEFORE" ] &&
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$PET_STOPPED_BEFORE" ] &&
+    [ "$(root_children)" -eq "$ROOT_BEFORE" ]
+check "a left click on a right-group metric chip does nothing ($RIGHT_HITS clicks, no action)" $?
+# and the bar still answers the next click, so the inert chip did not wedge it
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 2
+[ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((PET_STARTED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$PET_STOPPED_BEFORE" ]
+check "the bar still answers a click after the right-group clicks" $?
+# stop it again, so the checks below start from a stopped pet
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 2
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((PET_STOPPED_BEFORE+1)) ]
+check "the pet chip still stops the pet after the right-group clicks" $?
+
 # 6e. the decoy must survive the pet's stop: the match is the executed file,
 #     never a process name, and the decoy's comm IS the pet's basename
 kill -0 "$DECOY_PID" 2>/dev/null
@@ -452,6 +545,77 @@ check "the chip sees a relative-path pet: the click stops it, no duplicate start
 [ -n "$USER_PID" ] && kill -0 "$USER_PID" 2>/dev/null && kill "$USER_PID" 2>/dev/null
 # the click above already stopped it, so the zombie check below starts stopped
 
+# 6f-3. a VERSION-PINNED interpreter. The kernel names the live process after the
+#      interpreter the shebang finally selected, version included: an
+#      `#!/usr/bin/env python3.14` script runs with argv[0] = "python3.14", so a
+#      matcher with an exact-name allowlist ("python", "python3") never examines
+#      argv[1] and reads the chip "off" while the pet is running - a click then
+#      starts a SECOND copy and the stop action can never match it. The
+#      interpreter is whatever THIS runner has (never hardcoded), and the case
+#      is skipped when the runner has no versioned interpreter at all.
+VINTERP=""
+for c in /usr/bin/python3.* /usr/local/bin/python3.*; do
+    [ -x "$c" ] || continue
+    b=${c##*/}
+    # the interpreter itself, not a sibling like python3.14-config
+    case "$b" in *-*) continue ;; esac
+    case "$b" in python3.[0-9]*) VINTERP="$c"; break ;; esac
+done
+if [ -n "$VINTERP" ]; then
+    VBASE=${VINTERP##*/}
+    cat > "$WORK/home/pet" <<PET
+#!$VINTERP
+import os, signal, sys, time
+with open("$WORK/pet.pid", "w") as f: f.write(str(os.getpid()))
+with open("$WORK/pet.state", "w") as f: f.write("running")
+def bye(*a):
+    with open("$WORK/pet.state", "w") as f: f.write("SIGTERM")
+    try: os.unlink("$WORK/pet.pid")
+    except OSError: pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, bye)
+while True: time.sleep(0.2)
+PET
+    chmod +x "$WORK/home/pet"
+    rm -f "$WORK/pet.pid" "$WORK/pet.state"
+    # the chip's state is the bar's 1 Hz tick, and the check above left the pet
+    # stopped: let a tick pass so the click below takes the START path
+    sleep 2
+    STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+    "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+    sleep 1.5
+    VPID=$(cat "$WORK/pet.pid" 2>/dev/null)
+    # the matcher reads /proc/<pid>/cmdline, and for a shebang script the kernel
+    # replaces argv[0] with the INTERPRETER (argv[1] is the script), so the
+    # first token's basename is the versioned interpreter - that is the token
+    # the allowlist has to accept. (comm is the SCRIPT's basename here, not
+    # the interpreter's, so it is not the oracle.)
+    VPID_ARGV0=$(tr '\0' '\n' < "/proc/$VPID/cmdline" 2>/dev/null | head -1)
+    [ -n "$VPID" ] && kill -0 "$VPID" 2>/dev/null &&
+        [ "${VPID_ARGV0##*/}" = "$VBASE" ]
+    check "the pet runs under the versioned interpreter $VBASE (its argv[0])" $?
+    # the chip's state source is the 1 Hz tick, so let one poll see it
+    sleep 2
+    STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+    "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+    sleep 1.5
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+        [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+        [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+    check "a $VBASE-shebang pet is seen: the click stops it, no duplicate start" $?
+    [ -n "$VPID" ] && kill -0 "$VPID" 2>/dev/null && kill "$VPID" 2>/dev/null
+    # restore the shell-shebang pet the later checks were written against
+    cat > "$WORK/home/pet" <<PET
+#!/usr/bin/env bash
+echo \$\$ > "$WORK/pet.pid"
+echo running > "$WORK/pet.state"
+trap 'echo SIGTERM > "$WORK/pet.state"; rm -f "$WORK/pet.pid"; exit 0' TERM
+while :; do sleep 0.2; done
+PET
+    chmod +x "$WORK/home/pet"
+    rm -f "$WORK/pet.pid" "$WORK/pet.state"
+fi
+
 # 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
 #     so a bar that never waits keeps one defunct entry per invocation for as
 #     long as the service runs. One start/stop cycle above and a second one here
@@ -478,10 +642,27 @@ check "a pet start/stop cycle leaves no zombie child of the bar" $?
 # 6h. a DIRECTORY as the pet path is refused: access(X_OK) on a directory
 #     tests search permission, so a directory used to pass as "the pet" and
 #     every process carrying it as an argument became stopable. The bar
-#     hot-reloads its config (the 2 s mtime check), so swap in the throwaway
+#     hot-reloads its config (the 2 s config check), so swap in the throwaway
 #     HOME (a 0755 directory) and click the chip: nothing may start, nothing
-#     may stop, and the decoy must survive.
-cat > "$WORK/home/.wizbar/config.json" <<JSON
+#     may stop, and the decoy must survive. The refusal is logged once the bar
+#     has re-read the config, so the check WAITS for that line instead of
+#     sleeping a constant and racing the reload cadence.
+#
+#     The swap is written the way a writer IN PROGRESS leaves the file, on
+#     purpose: the file is truncated, held empty across the bar's 2 s check,
+#     and only then filled - and the finished file keeps the truncated file's
+#     whole-second mtime, because a truncate+write inside one second produces
+#     exactly that (the mtime has one-second resolution). A whole-second
+#     mtime therefore cannot tell the empty file from the finished one, and a
+#     bar that reads the empty file and moves its change token onto it loses
+#     the change for good. The bar's token carries the nanoseconds and the
+#     size as well, so the finished file still reads as a change and gets
+#     re-read - which is what the refusal line below proves.
+CFG="$WORK/home/.wizbar/config.json"
+: > "$CFG"                              # the writer truncates the file
+cp -p "$CFG" "$WORK/cfg.mtime"          # the timestamp the writer's write carries
+sleep 5                                 # the bar's 2 s check reads the EMPTY file
+cat > "$CFG" <<JSON
 {
   "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
            "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
@@ -492,8 +673,8 @@ cat > "$WORK/home/.wizbar/config.json" <<JSON
                           "exePath": "$WORK/home" } }
 }
 JSON
-sleep 3
-grep -q "pet path is not an absolute path to a regular executable file" "$WORK/bar.log"
+touch -r "$WORK/cfg.mtime" "$CFG"       # same whole-second mtime as the empty file
+wait_log "pet path is not an absolute path to a regular executable file" 10
 REFUSED=$?
 STARTED_N=$(grep -c "pet: started" "$WORK/bar.log" || true)
 STOPPED_N=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
@@ -629,6 +810,36 @@ sleep 0.8
 [ -n "$MENU_WIN" ] && ! menu_open &&
     [ "$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)" -eq "$ED_BEFORE" ]
 check "an unreadable state suppresses the enable/disable call" $?
+
+# 7h. a MASKED unit is unknown, not disabled. systemctl exits 1 for a masked unit
+#     exactly as it does for a disabled one, so a bar that reads the exit code
+#     shows "Start on login" unticked and flips the unit blind. The deciding
+#     input must be the state WORD on stdout: "masked" is neither enabled nor
+#     disabled, so the bar logs unknown and the toggle click adds no
+#     enable/disable call. The call log is the oracle - a bar that read the exit
+#     code would have issued "enable" here.
+mv "$WORK/fakebin/systemctl" "$WORK/fakebin/systemctl-fail"
+mv "$WORK/fakebin/systemctl-masked" "$WORK/fakebin/systemctl"
+ED_BEFORE=$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+MENU_WIN=""
+read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
+$(menu_wh)
+EOF
+if [ -n "$MENU_WIN" ]; then
+    MGEO=$(xdotool getwindowgeometry --shell "$MENU_WIN")
+    MENU_X=$(echo "$MGEO" | awk -F= '/^X=/{print $2}')
+    MENU_Y=$(echo "$MGEO" | awk -F= '/^Y=/{print $2}')
+    "$XCLICK" $((MENU_X + MENU_W_DEV / 2)) $((MENU_Y + ROW_AUTO_Y)) 1 full
+fi
+sleep 0.8
+[ -n "$MENU_WIN" ] && ! menu_open &&
+    [ "$(grep -cE "call: --user (enable|disable) chocobar" "$CALLS" || true)" -eq "$ED_BEFORE" ] &&
+    grep -q 'answer "masked"' "$WORK/bar.log"
+check "a masked unit reads as unknown: logged, and the toggle flips nothing" $?
+mv "$WORK/fakebin/systemctl" "$WORK/fakebin/systemctl-masked"
+mv "$WORK/fakebin/systemctl-fail" "$WORK/fakebin/systemctl"
 
 # 8. a terminal too high to fit the strip above it hides the bar
 report kitty 900 100 5 1600

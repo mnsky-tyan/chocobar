@@ -89,7 +89,12 @@ The menu opens on the button RELEASE, which is what Windows does
 release, which landed in its padding corner and dismissed it a few milliseconds
 after it appeared. `Esc`/`q` also quits when
 the bar has focus. The config is the SAME `~/.wizbar/config.json` the Windows bar
-reads, and it hot-reloads on save.
+reads, and it hot-reloads on save. The change is detected by the file's full
+stat identity (seconds, nanoseconds and size), not by the mtime alone: a save
+that is still in progress leaves the file truncated, and a whole-second mtime
+cannot tell that empty file from the finished one, so the bar would read the
+half-written config, keep the old one and never see the new one. With the full
+identity the finished file still reads as a change, and the bar re-reads it.
 
 "Start on login" toggles the systemd user unit (`systemctl --user
 enable/disable chocobar`), the Linux counterpart of the Windows "Start with
@@ -199,7 +204,7 @@ right-click bounced the menu straight back open.
 
 | chip | source | note |
 |---|---|---|
-| pet | `/proc/<pid>/cmdline` | the process whose EXECUTED file is `modules.pet.exePath`: `argv[0]` equal to the path (or its `realpath`), or an interpreter `argv[0]` (`python3`, `sh`, `node`, `env`, ...) with the path as `argv[1]`, which is what the kernel hands a shebang script - a `#!/usr/bin/env <interp>` shebang makes the kernel exec `env` literally, and a relative `argv[1]` (the user started the pet as `./pet`) is resolved against that process's own cwd, so it still matches. A process that merely carries the path as an argument - `tail -f <path>`, `sh -c <path>`, an editor with the file open - is NOT the pet, so the chip cannot read `on` for it and a click cannot stop it. The chip shows `on`/`off` and a click starts or stops the pet. The configured value must be one ABSOLUTE path to a regular executable file - a bare name, a relative path, or a directory cannot identify one process and is refused, for starting and for matching alike |
+| pet | `/proc/<pid>/cmdline` | the process whose EXECUTED file is `modules.pet.exePath`: `argv[0]` equal to the path (or its `realpath`), or an interpreter `argv[0]` with the path as `argv[1]`, which is what the kernel hands a shebang script, and a relative `argv[1]` (the user started the pet as `./pet`) is resolved against that process's own cwd, so it still matches. The interpreter is matched by basename plus an optional version suffix, because that is the name the kernel gives the live process: `#!/usr/bin/env python3.14` runs as `python3.14`, and an exact-name list would read that pet as `off` while it runs. `env` counts for a direct `env <path>`; an `#!/usr/bin/env <interp>` shebang replaces `env` with the interpreter, so the live process is named after that interpreter. A process that merely carries the path as an argument - `tail -f <path>`, `sh -c <path>`, an editor with the file open - is NOT the pet, so the chip cannot read `on` for it and a click cannot stop it. The chip shows `on`/`off` and a click starts or stops the pet. The configured value must be one ABSOLUTE path to a regular executable file - a bare name, a relative path, or a directory cannot identify one process and is refused, for starting and for matching alike |
 | cpu | `/proc/stat` delta | same arithmetic as `top` |
 | ram | `/proc/meminfo` | used = 100 - MemAvailable/MemTotal |
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |
@@ -271,10 +276,23 @@ the menu item says so rather than pretending.
 
 ## Tests
 
-`npm test` covers the shared core and the Linux bar's structural invariants (the
-ARGB visual, `CWEventMask`, the per-frame clear, the shape region, and that the
-icon geometry is shared rather than copied). Each of those guards exists because
-its absence produced a bar that looked right and did not work.
+`npm test` runs two suites. `scripts/portable_regression.js` covers the shared
+core and the Linux bar's structural invariants (the ARGB visual, `CWEventMask`,
+the per-frame clear, the shape region, and that the icon geometry is shared
+rather than copied). `linux/tests/behaviour.sh` is the suite that carries the
+real behaviour guarantees: it starts the built binary on a private Xvfb display
+with a throwaway `HOME`, a private D-Bus and a fake `systemctl`, drives the real
+pointer with XTEST, and asserts what the user would see - the menu opens on the
+button release and does not bounce, a press alone opens nothing, a click outside
+the menu picks no row, the bar asks for no blur hint, it rides above the reported
+terminal and hides/returns as that terminal moves, the pet chip starts and stops
+the configured process (never a process that merely names it), the autostart row
+reads its state once per open and refuses to flip an unreadable unit, and a
+right-group metric chip is inert.
+
+A missing tool (or the X11/cairo development headers the build needs) skips the
+behaviour suite cleanly on a developer machine and fails it when `CI` is set, so
+the gate cannot become a silent no-op.
 
 The executable token regressions (`scripts/token_regression.py`) are Windows-only;
 on Linux the scan is exercised by running the bar against a real store, which is

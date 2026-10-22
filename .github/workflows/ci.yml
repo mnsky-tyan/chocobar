@@ -46,8 +46,14 @@ jobs:
 
       - name: Linux behaviour test
         run: |
+          # The bar the previous step built is RUN here, and it is dynamically
+          # linked, so the runtime counterparts of the -dev packages above must
+          # be present as well. The -dev packages happen to pull them in today;
+          # naming them makes the gate independent of that.
           sudo apt-get install -y xvfb x11-utils xdotool libxtst-dev \
-                               libglib2.0-bin dbus
+                               libglib2.0-bin dbus \
+                               libx11-6 libxrender1 libxfixes3 libxcursor1 \
+                               libcairo2 libdbus-1-3 libfontconfig1 libcurl4
           bash linux/tests/behaviour.sh
 
       - name: Build console token harness

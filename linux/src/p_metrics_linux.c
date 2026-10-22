@@ -607,14 +607,22 @@ static int petTokenIsFile(const char *token, const char *pidName,
 // run by the kernel as `<interpreter> <script>`, so its argv[1] is the path the
 // config names; any other program carrying the path as an argument is not.
 //
-// `env` is one of them, and it is the most common shebang form: the kernel
-// execs `/usr/bin/env` LITERALLY for `#!/usr/bin/env <interp>`, so the process
-// it spawns has argv[0] naming env and argv[1] the interpreter. Naming env
-// makes that shape visible instead of invisible, and a direct `env <path>` has
-// the same shape.
+// A name is matched against the interpreter's BASENAME plus an optional version
+// suffix of digits and dots, because the kernel names the live process after the
+// interpreter the shebang finally selected, version included: an
+// `#!/usr/bin/env python3.14` shebang leaves a process whose argv[0] is
+// `python3.14`, `#!/usr/bin/node20` leaves `node20`. A list of bare names only
+// would read every version-pinned pet as "off". The suffix is digits and dots
+// only, so `sh` matches `sh5.2` but not `shotwell`.
+//
+// `env` is in the list for the two shapes it really names. An
+// `#!/usr/bin/env <interp>` shebang makes the kernel exec `/usr/bin/env`
+// LITERALLY, but env then REPLACES itself with the interpreter, so the live
+// process is named after that interpreter - only the microseconds before the
+// second exec carry `env` as argv[0]. A direct `env <path>` keeps it.
 static const char *const kInterpreters[] = {
     "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
-    "python", "python2", "python3", "perl", "ruby", "node", "nodejs",
+    "python", "perl", "ruby", "node", "nodejs",
     "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript", "env",
     NULL
 };
@@ -622,8 +630,13 @@ static const char *const kInterpreters[] = {
 static int isInterpreter(const char *argv0) {
     const char *base = strrchr(argv0, '/');
     base = base ? base + 1 : argv0;
-    for (int i = 0; kInterpreters[i]; i++)
-        if (!strcmp(base, kInterpreters[i])) return 1;
+    for (int i = 0; kInterpreters[i]; i++) {
+        size_t n = strlen(kInterpreters[i]);
+        if (strncmp(base, kInterpreters[i], n) != 0) continue;
+        const char *rest = base + n;
+        while (*rest && (isdigit((unsigned char)*rest) || *rest == '.')) rest++;
+        if (!*rest) return 1;
+    }
     return 0;
 }
 

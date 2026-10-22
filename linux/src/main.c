@@ -568,7 +568,7 @@ static void paint(void) {
         // hover pill behind a clickable LEFT-group chip (p_ui.c:1069-1077):
         // without it the tokens chip looks like a label, not something you can
         // open. Right-group chips are not clickable, so they get no pill.
-        int hovered = (i == g_hover) && (c->align == CHIP_LEFT) && chipClickable(c);
+        int hovered = (i == g_hover) && chipClickable(c);
         if (hovered) {
             double pl = cx - HOVER_PAD_X * g_scale;
             double pt = HOVER_PAD_Y * g_scale;
@@ -891,10 +891,11 @@ static int chipAt(int px) {
 // stop the modules.pet.exePath process.
 static void petToggle(void);
 
-// A left-group chip does something on click (today: the tokens chip opens the
-// dashboard and the pet chip toggles the pet process); a right-group metric is
-// a label. Only clickable chips get a hover pill, which is what tells the two
-// groups apart visually.
+// The ONE definition of "this chip does something on click": the tokens chip
+// (opens the dashboard) and the pet chip (toggles the pet process). Both are in
+// the LEFT group, and the click handler below, the hover pill and the cursor
+// shape all ask this function, so a right-group metric can never become a
+// button by any one of those paths drifting. Right-group metrics are labels.
 static int chipClickable(const Chip *c) {
     return c->align == CHIP_LEFT && (c->icon == SVG_DIAMOND || c->icon == SVG_BOW);
 }
@@ -910,7 +911,7 @@ static void onButton(XButtonEvent *e) {
         // (p_ui.c's CT_PET click); anywhere else is inert - the bar is not
         // draggable
         int hit = chipAt(e->x);
-        if (hit >= 0) {
+        if (hit >= 0 && chipClickable(&g_chips[hit])) {
             if (g_chips[hit].icon == SVG_DIAMOND) g_dashPending = 1;
             else if (g_chips[hit].icon == SVG_BOW) petToggle();
         }
@@ -1235,15 +1236,44 @@ static void scanIfDue(time_t now) {
 }
 
 // ---- config reload ----------------------------------------------------------------------------------
-static time_t g_cfgMtime = 0;
+// The change token for the config file. The mtime alone is too coarse to tell
+// two states of the file apart: it has whole-second resolution, so a rewrite
+// that lands in the same second as the previous one is invisible, and a file
+// that is being rewritten RIGHT NOW (truncated, not yet written) carries the
+// same mtime as the finished one. The bar then reads the half-written file,
+// the core keeps the previous config, and - because the token already moved -
+// the finished file is never reloaded: the change is lost for good. The full
+// stat identity (seconds AND nanoseconds AND the size) tells those states
+// apart, which is the same precision the Windows bar gets from its FILETIME
+// token.
+typedef struct {
+    time_t sec;
+    long nsec;
+    off_t size;
+} CfgId;
+
+static CfgId g_cfgId = { 0, 0, 0 };
 static char g_cfgPath[512];
 
-static int cfgStat(time_t *out) {
+static int cfgId(CfgId *out) {
     struct stat st;
     if (stat(g_cfgPath, &st) != 0) return 0;
-    *out = st.st_mtime;
+    out->sec = st.st_mtim.tv_sec;
+    out->nsec = st.st_mtim.tv_nsec;
+    out->size = st.st_size;
     return 1;
 }
+
+static int cfgIdSame(const CfgId *a, const CfgId *b) {
+    return a->sec == b->sec && a->nsec == b->nsec && a->size == b->size;
+}
+
+// Reload the config and keep the change token in step with what was actually
+// loaded. The token only moves when the file did not change WHILE it was
+// being read: a file that is being rewritten is read half-written, the core
+// keeps the previous config, and the token has to stay where it was for the
+// next tick to see the finished file as a change worth reloading.
+static void configReload(void);
 
 static void reloadConfig(void) {
     wchar_t wide[1024];
@@ -1254,6 +1284,16 @@ static void reloadConfig(void) {
     // the same on Windows, right after loadConfig)
     cbSubsSetRotateSec(cbCfgSubsRotateSec());
     resolveFontFamily();
+}
+
+static void configReload(void) {
+    CfgId before;
+    int have = cfgId(&before);
+    reloadConfig();
+    if (!have) return;
+    CfgId after;
+    if (!cfgId(&after)) return;
+    if (cfgIdSame(&before, &after)) g_cfgId = after;
 }
 
 // ---- the right-click menu and the dashboards --------------------------------------
@@ -1387,29 +1427,63 @@ static void configDirOf(char *out, size_t cap) {
 // the budget, and the toggle path pays it twice (is-enabled + enable). Bounded
 // and deliberate.
 //
-// err (may be NULL) receives the child's stderr, truncated and NUL-terminated:
-// "systemctl is-enabled" puts its failure text there ("Unit ... could not be
-// found"), and swallowing it made the common unit-file-not-installed case
-// undiagnosable. When err is NULL the child's stderr goes to /dev/null: the bar's
-// own output is a log line per real event, not another tool's chatter.
-static int runTimed(const char *const argv[], long budgetMs, char *err, size_t errCap) {
+// out/err (either may be NULL) receive the child's stdout and stderr, truncated
+// and NUL-terminated. stdout is captured because systemctl reports a unit's
+// state as a WORD there ("enabled", "disabled", "masked"), and its exit code
+// cannot distinguish them - `is-enabled` exits 1 for "disabled" and for every
+// generic failure alike. stderr carries the failure text ("Unit ... could not
+// be found", "Failed to connect to user scope bus"); swallowing it made the
+// common unit-file-not-installed case undiagnosable. A NULL buffer sends that
+// stream to /dev/null: the bar's own output is a log line per real event, not
+// another tool's chatter.
+static void captureDrain(int fd, char *buf, size_t cap, size_t *len) {
+    if (fd < 0 || !buf || cap == 0) return;
+    char tmp[512];
+    ssize_t n = read(fd, tmp, sizeof tmp);
+    if (n <= 0) return;
+    size_t take = (size_t)n;
+    if (take > cap - 1 - *len) take = cap - 1 - *len;
+    if (take == 0) return;
+    memcpy(buf + *len, tmp, take);
+    *len += take;
+    buf[*len] = 0;
+}
+
+// One capture pipe. The read end is non-blocking so a quiet child cannot stall
+// the poll loop below; 0 means "capture nothing", and the caller sends that
+// stream to /dev/null instead.
+static int captureOpen(int fds[2], char *buf, size_t cap) {
+    fds[0] = fds[1] = -1;
+    if (!buf || cap == 0) return 0;
+    buf[0] = 0;
+    if (pipe(fds)) { fds[0] = fds[1] = -1; return 0; }
+    int fl = fcntl(fds[0], F_GETFL, 0);
+    if (fl >= 0) fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+    return 1;
+}
+
+static int runTimed(const char *const argv[], long budgetMs,
+                    char *out, size_t outCap, char *err, size_t errCap) {
     extern char **environ;
     pid_t pid = -1;
-    int errfds[2] = { -1, -1 };
-    size_t errLen = 0;
-    if (err && errCap) {
-        if (pipe(errfds)) { errfds[0] = errfds[1] = -1; }
-        else {
-            // non-blocking read end: a quiet child must not stall the poll loop
-            int fl = fcntl(errfds[0], F_GETFL, 0);
-            if (fl >= 0) fcntl(errfds[0], F_SETFL, fl | O_NONBLOCK);
-        }
-        err[0] = 0;
-    }
+    int outfds[2], errfds[2];
+    size_t outLen = 0, errLen = 0;
+    int outOpen = captureOpen(outfds, out, outCap);
+    int errOpen = captureOpen(errfds, err, errCap);
     posix_spawn_file_actions_t fa;
-    if (posix_spawn_file_actions_init(&fa)) return -1;
-    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    if (errfds[1] >= 0) {
+    if (posix_spawn_file_actions_init(&fa)) {
+        if (outOpen) { close(outfds[0]); close(outfds[1]); }
+        if (errOpen) { close(errfds[0]); close(errfds[1]); }
+        return -1;
+    }
+    if (outOpen) {
+        posix_spawn_file_actions_adddup2(&fa, outfds[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&fa, outfds[1]);
+        posix_spawn_file_actions_addclose(&fa, outfds[0]);
+    } else {
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    }
+    if (errOpen) {
         posix_spawn_file_actions_adddup2(&fa, errfds[1], STDERR_FILENO);
         posix_spawn_file_actions_addclose(&fa, errfds[1]);
         posix_spawn_file_actions_addclose(&fa, errfds[0]);
@@ -1418,42 +1492,33 @@ static int runTimed(const char *const argv[], long budgetMs, char *err, size_t e
     }
     int spawned = posix_spawnp(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
     posix_spawn_file_actions_destroy(&fa);
-    // the parent's copy of the write end MUST go: while it is open the pipe
+    // the parent's copies of the write ends MUST go: while one is open the pipe
     // never reaches EOF, so the read below would block for ever once the child
     // is gone - and the bar's single event loop would hang with it
-    if (errfds[1] >= 0) { close(errfds[1]); errfds[1] = -1; }
+    if (outOpen) { close(outfds[1]); outfds[1] = -1; }
+    if (errOpen) { close(errfds[1]); errfds[1] = -1; }
     if (spawned != 0 || pid < 0) {
-        if (errfds[0] >= 0) close(errfds[0]);
+        if (outOpen) close(outfds[0]);
+        if (errOpen) close(errfds[0]);
         return -1;
     }
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (;;) {
-        // drain the child's stderr while waiting: is-enabled's failure text is
-        // short, so one read per poll keeps the buffer empty without blocking
-        // (the read end is non-blocking: a child that stays quiet must not
-        // stall the poll loop)
-        if (errfds[0] >= 0) {
-            char buf[512];
-            ssize_t n = read(errfds[0], buf, sizeof buf);
-            if (n > 0 && err && errLen + 1 < errCap) {
-                size_t take = (size_t)n;
-                if (take > errCap - 1 - errLen) take = errCap - 1 - errLen;
-                memcpy(err + errLen, buf, take);
-                errLen += take;
-                err[errLen] = 0;
-            }
-        }
+        // drain both streams while waiting: their output is short, so one read
+        // per poll keeps the buffers empty without blocking
+        if (outOpen) captureDrain(outfds[0], out, outCap, &outLen);
+        if (errOpen) captureDrain(errfds[0], err, errCap, &errLen);
         int status;
         pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid) {
-            if (errfds[0] >= 0) close(errfds[0]);
-            if (errfds[1] >= 0) close(errfds[1]);
+            if (outOpen) { captureDrain(outfds[0], out, outCap, &outLen); close(outfds[0]); }
+            if (errOpen) { captureDrain(errfds[0], err, errCap, &errLen); close(errfds[0]); }
             return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
         }
         if (r < 0) {
-            if (errfds[0] >= 0) close(errfds[0]);
-            if (errfds[1] >= 0) close(errfds[1]);
+            if (outOpen) close(outfds[0]);
+            if (errOpen) close(errfds[0]);
             return -1;
         }
         struct timespec now;
@@ -1462,8 +1527,8 @@ static int runTimed(const char *const argv[], long budgetMs, char *err, size_t e
         if (elapsed >= budgetMs) {
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
-            if (errfds[0] >= 0) close(errfds[0]);
-            if (errfds[1] >= 0) close(errfds[1]);
+            if (outOpen) close(outfds[0]);
+            if (errOpen) close(errfds[0]);
             return -1;
         }
         struct timespec w = { 0, 2 * 1000 * 1000 };
@@ -1474,28 +1539,39 @@ static int runTimed(const char *const argv[], long budgetMs, char *err, size_t e
 // The autostart state is the systemd user unit (the Linux Run key): the menu
 // item "Start on login" toggles it, the same control the Windows tray's "Start
 // with Windows" has over its own mechanism. The tri-state keeps a failed read
-// from masquerading as "disabled": -1 = unknown (spawn failure or budget kill),
-// 0 = disabled, 1 = enabled. is-enabled's exit code IS the answer (0 = enabled,
-// 1 = disabled); anything else is a real error whose text lands in err.
+// from masquerading as "disabled": -1 = unknown, 0 = disabled, 1 = enabled.
+//
+// The DECIDING input is the state WORD `is-enabled` prints, never its exit code:
+// systemctl exits 1 for ANY generic failure, not only for a disabled unit
+// (measured: an unreachable user manager prints "Failed to connect to user scope
+// bus" and exits 1, exactly like "disabled"). Reading the exit code therefore
+// reports a broken or masked unit as disabled, shows "Start on login" unticked,
+// and the toggle then flips the unit blind. Anything that is not a definite
+// enabled/disabled word - "masked", "not-found", "static", an empty answer -
+// is unknown, and the bar logs the answer and the child's error text.
 static int autoStartEnabled(void) {
     const char *argv[] = { "systemctl", "--user", "is-enabled", "chocobar", NULL };
-    char err[256];
-    int rc = runTimed(argv, 500, err, sizeof err);
-    if (rc == 0) return 1;
-    if (rc == 1) return 0;
+    char out[128], err[256];
+    int rc = runTimed(argv, 500, out, sizeof out, err, sizeof err);
+    char *word = out;
+    while (*word == ' ' || *word == '\t' || *word == '\r' || *word == '\n') word++;
+    word[strcspn(word, " \t\r\n")] = 0;
+    if (!strcmp(word, "enabled") || !strcmp(word, "enabled-runtime")) return 1;
+    if (!strcmp(word, "disabled")) return 0;
     if (rc < 0)
         fprintf(stderr, "chocobar: autostart state unknown: systemctl did not "
                         "run (spawn failure or timed out)\n");
     else
-        fprintf(stderr, "chocobar: autostart state unknown (systemctl exit %d): %s\n",
-                rc, *err ? err : "(no error text)");
+        fprintf(stderr, "chocobar: autostart state unknown (systemctl exit %d, "
+                        "answer \"%s\"): %s\n", rc, word,
+                *err ? err : "(no error text)");
     return -1;
 }
 
 static void autoStartSet(int on) {
     const char *argv[] = { "systemctl", "--user", on ? "enable" : "disable", "chocobar", NULL };
     char err[256];
-    int rc = runTimed(argv, 500, err, sizeof err);
+    int rc = runTimed(argv, 500, NULL, 0, err, sizeof err);
     if (rc == 0) return;
     if (rc < 0)
         fprintf(stderr, "chocobar: autostart %s failed: systemctl did not run "
@@ -1546,9 +1622,7 @@ static void handleMenuChoice(int choice) {
             break;
         }
         case MENU_RELOAD: {
-            reloadConfig();
-            time_t cur;
-            if (cfgStat(&cur)) g_cfgMtime = cur;
+            configReload();
             buildChips();
             resizeToContent();
             paint();
@@ -1672,8 +1746,7 @@ int main(int argc, char **argv) {
     // core: config lock, cursors, config load (the same startup the macOS bar does)
     cbCoreInit();
     cbTokensInit();
-    reloadConfig();
-    cfgStat(&g_cfgMtime);
+    configReload();
     resolveFontFamily();
     // the provider fetch loop: it does nothing until a provider is enabled, and
     // its first cycle lands a few seconds in, so starting it before the window
@@ -1843,11 +1916,14 @@ int main(int argc, char **argv) {
         geomPump(now);
         if (sel == 0 && now != lastPaint) {
             lastPaint = now;
-            // hot-reload the config on mtime change, then re-derive everything
+            // hot-reload the config when the file changes, then re-derive
+            // everything. The token is the file's full identity, so a config
+            // that is rewritten in the same second, or one that is rewritten
+            // WHILE the bar is reading it, is still seen as a change.
             if (now - lastCfgCheck >= 2) {
                 lastCfgCheck = now;
-                time_t cur;
-                if (cfgStat(&cur) && cur != g_cfgMtime) { g_cfgMtime = cur; reloadConfig(); }
+                CfgId cur;
+                if (cfgId(&cur) && !cfgIdSame(&cur, &g_cfgId)) configReload();
             }
             linuxMetricsPoll(&g_m);
             scanIfDue(now);
