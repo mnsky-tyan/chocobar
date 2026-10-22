@@ -22,6 +22,10 @@
 #     it leaves behind are reaped, not zombies; a start is logged only once the
 #     kernel took the exec, and a refused one logs "cannot start" and claims
 #     no start at all
+#   - the click that starts the pet never waits on the child's exec: a slow
+#     exec leaves the bar ticking, answering a right-click and following a
+#     fresh terminal report while the handshake pends, and the outcome still
+#     lands as the one true line
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -104,10 +108,10 @@ check() { # check <name> <condition-result>
 # cadence: a check that sleeps a constant and then greps is a check that
 # sometimes fails for no reason. Waiting for the OBSERVABLE is what the check
 # actually means.
-wait_log() { # wait_log <pattern> <timeout-seconds>
-    local pat="$1" limit="$2" waited=0
+wait_log() { # wait_log <pattern> <timeout-seconds> [log]
+    local pat="$1" limit="$2" log="${3:-$WORK/bar.log}" waited=0
     while [ "$waited" -lt "$((limit * 10))" ]; do
-        grep -q "$pat" "$WORK/bar.log" && return 0
+        grep -q "$pat" "$log" && return 0
         sleep 0.1
         waited=$((waited+1))
     done
@@ -291,6 +295,20 @@ ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+30+15)*s}')
 # the "Start on login" row centre, in logical px from the menu's top edge
 # (menu.c: MENU_PAD, two rows, MENU_SEP, then half of this row)
 ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+2*30+9+15)*s}')
+
+# the geometry report can go out two ways, and the difference decides WHEN it
+# lands: gdbus introspects its destination before it calls, and the bar never
+# answers Introspect (its bus loop replies to Report alone), so a gdbus call
+# stalls for seconds and its report arrives long after the bar's 700 ms
+# startup geometry wait. dbus-send delivers the method call directly, and the
+# bar's 10 ms startup pump answers it inside that wait - so a check that needs
+# the report to arrive BEFORE the first map, or DURING a window the bar's own
+# tick must live through, has to use the fast one.
+report() { gdbus call --timeout 5 --session --dest org.chocobar.Geom --object-path /ChocobarGeom \
+              --method org.chocobar.Geom.Report "$@" >/dev/null 2>&1; }
+report_fast() { dbus-send --session --dest=org.chocobar.Geom --type=method_call \
+    --print-reply /ChocobarGeom org.chocobar.Geom.Report \
+    "string:$1" "int32:$2" "int32:$3" "int32:$4" "int32:$5" >/dev/null 2>&1; }
 
 # 1. the bar must not ask for a compositor blur
 xprop -id "$BARWIN" _KDE_NET_WM_BLUR_BEHIND_REGION >"$WORK/prop.txt" 2>&1
@@ -749,22 +767,175 @@ check "the bar still opens the menu after a refused pet start, and reaps its chi
 "$XCLICK" 100 300 1 full
 sleep 0.8
 
+# 6j. a SLOW exec must not park the bar's loop. The click that starts the pet
+#     parks the CLOEXEC handshake and returns; the tick settles it once the
+#     child's exec lands. The pre-fix bar sat in a blocking read() on that pipe
+#     until the exec completed, so a slow exec - a big binary on cold storage -
+#     froze the clock, the menu and every click for as long as the storage
+#     took. The slowness is injected where it really happens: a preload shim
+#     sleeps inside the child's execv before handing it to the real one, so the
+#     handshake is guaranteed pending for the whole check. While it pends the
+#     bar must still open the menu on a right-click and follow a fresh terminal
+#     report on its own tick, and once the exec lands the one true pair must
+#     hold: "starting", and no "cannot start". The pet config is restored
+#     first because the restart reads it at startup, so the swap needs no
+#     reload wait, and the shim bar gets its own log so the greps below see
+#     only its own lines.
+cat > "$CFG" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": true, "label": "pet",
+                          "exePath": "$WORK/home/pet" } }
+}
+JSON
+cat > "$WORK/execslow.c" <<'SHIM'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <time.h>
+static int (*real_execv)(const char *, char *const[]);
+static long slow_ms;
+__attribute__((constructor)) static void slowExecInit(void) {
+    real_execv = dlsym(RTLD_NEXT, "execv");
+    const char *ms = getenv("CHOCOBAR_TEST_SLOW_EXEC_MS");
+    if (ms && *ms) slow_ms = strtol(ms, NULL, 10);
+}
+int execv(const char *path, char *const argv[]) {
+    if (slow_ms > 0 && real_execv) {
+        struct timespec ts = { slow_ms / 1000, (slow_ms % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    return real_execv ? real_execv(path, argv) : -1;
+}
+SHIM
+gcc -shared -fPIC -O1 -o "$WORK/execslow.so" "$WORK/execslow.c" -ldl 2>>"$WORK/cc.log" ||
+    { echo "FAIL: cannot build the slow-exec shim"; cat "$WORK/cc.log"; exit 1; }
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+for _ in $(seq 1 50); do
+    report_fast kitty 900 100 300 1600 && sleep 0.05 || break
+done
+for _ in $(seq 1 50); do
+    [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
+    sleep 0.05
+done
+CHOCOBAR_TEST_SLOW_EXEC_MS=4000 LD_PRELOAD="$WORK/execslow.so" \
+    HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar4.log" 2>&1 &
+BAR_PID=$!
+BARWIN=""
+for _ in $(seq 1 60); do
+    BARWIN=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "${BARWIN:-}" ] && break
+    sleep 0.2
+done
+[ -n "${BARWIN:-}" ] || { echo "FAIL: the slow-exec bar never opened a window"; cat "$WORK/bar4.log"; exit 1; }
+sleep 0.5
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+# the click that starts the pet: the handshake is pending from here for 4 s
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 0.4
+# still inside the pending window: the menu must open NOW, not 4 s from now -
+# a bar parked in a blocking read only reaches this click after the exec
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.6
+menu_open
+check "the bar opens the menu while the pet's exec handshake is pending" $?
+"$XCLICK" 100 300 1 full
+sleep 0.5
+# and the tick kept running: a fresh report must move the bar inside the same
+# pending window (a blocked loop has no tick, so the bar would stay put)
+report_fast kitty 900 100 320 1600
+sleep 1.4
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+WANT_Y_SLOW=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (320-30-12)*s}')
+[ "$Y" -ge $((WANT_Y_SLOW-8)) ] && [ "$Y" -le $((WANT_Y_SLOW+8)) ]
+check "the clock kept ticking while the handshake pended (y=$Y want~$WANT_Y_SLOW)" $?
+# once the exec lands, the one true line - and the pet it started is alive
+wait_log "pet: starting: $WORK/home/pet" 10 "$WORK/bar4.log"
+SLOW_SETTLED=$?
+sleep 0.5
+[ "$SLOW_SETTLED" -eq 0 ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar4.log" || true)" -eq 1 ] &&
+    ! grep -q "pet: cannot start" "$WORK/bar4.log" &&
+    [ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "the slow exec settles as the one true line (starting, no cannot start, pet alive)" $?
+
+# 6j-2. the refused half of the pair under the same slowness, and the
+#       one-handshake guard: the pet is stopped first, the config moves to the
+#       file the kernel refuses (ENOEXEC), and the start click forks a child
+#       whose exec fails four seconds later. A second click inside that window
+#       must fork nothing - the matcher cannot see a fork whose exec has not
+#       landed, so the guard is what keeps one click from starting a duplicate
+#       - and the refusal must land as exactly one "cannot start" with no
+#       "starting" at all.
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+grep -q "pet: stopped" "$WORK/bar4.log" &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+check "the pet the slow exec started stops on a click" $?
+cat > "$CFG" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": true, "label": "pet",
+                          "exePath": "$WORK/home/notpet" } }
+}
+JSON
+sleep 2.5
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+# the handshake is pending: this second click must be a no-op, not a second fork
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 0.3
+wait_log "pet: cannot start $WORK/home/notpet" 10 "$WORK/bar4.log"
+REFUSED_SLOW=$?
+sleep 5.5
+[ "$REFUSED_SLOW" -eq 0 ] &&
+    [ "$(grep -c "pet: cannot start $WORK/home/notpet" "$WORK/bar4.log" || true)" -eq 1 ] &&
+    [ "$(grep -c "pet: starting: $WORK/home/notpet" "$WORK/bar4.log" || true)" -eq 0 ] &&
+    [ ! -e "$WORK/pet.pid" ]
+check "a second click while the handshake pends forks nothing (one cannot start, no starting)" $?
+
+# back to the ordinary bar: the shim was this check's tool, not a property of
+# the bar, and the sections below were written against an unshimmed one
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+for _ in $(seq 1 50); do
+    report_fast kitty 900 100 300 1600 && sleep 0.05 || break
+done
+for _ in $(seq 1 50); do
+    [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
+    sleep 0.05
+done
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >>"$WORK/bar.log" 2>&1 &
+BAR_PID=$!
+BARWIN=""
+for _ in $(seq 1 60); do
+    BARWIN=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "${BARWIN:-}" ] && break
+    sleep 0.2
+done
+[ -n "${BARWIN:-}" ] || { echo "FAIL: the restored bar never opened a window"; cat "$WORK/bar.log"; exit 1; }
+sleep 0.5
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+
 # 7. the bar rides above the terminal: a geometry report moves it.
 #    The move happens on the bar's own tick (at most once a second), so the
 #    waits below are generous on purpose - a flaky sleep must not look like a
 #    broken bar.
-report() { gdbus call --timeout 5 --session --dest org.chocobar.Geom --object-path /ChocobarGeom \
-              --method org.chocobar.Geom.Report "$@" >/dev/null 2>&1; }
-# The report can go out two ways, and the difference decides WHEN it lands:
-# gdbus introspects its destination before it calls, and the bar never answers
-# Introspect (its bus loop replies to Report alone), so a gdbus call stalls for
-# seconds and its report arrives long after the bar's 700 ms startup geometry
-# wait. dbus-send delivers the method call directly, and the bar's 10 ms
-# startup pump answers it inside that wait - so a check that needs the report
-# to arrive BEFORE the first map has to use this one.
-report_fast() { dbus-send --session --dest=org.chocobar.Geom --type=method_call \
-    --print-reply /ChocobarGeom org.chocobar.Geom.Report \
-    "string:$1" "int32:$2" "int32:$3" "int32:$4" "int32:$5" >/dev/null 2>&1; }
 report kitty 900 100 300 1600
 sleep 2
 eval "$(xdotool getwindowgeometry --shell "$BARWIN")"

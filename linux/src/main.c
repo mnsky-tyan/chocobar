@@ -1426,6 +1426,13 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 // allows must be started by the user instead. The pet is a companion to the
 // bar, and dying with a bar restart beats outliving one with no way to toggle
 // it off.
+// One pet-start handshake may be in flight at a time: the click parks the
+// CLOEXEC pipe's read end here and returns, and the tick settles it
+// (petHandshakeDrain) - no click ever waits on a fork child's exec, so a slow
+// exec can never park the bar's single event loop with it.
+static int g_petPipe = -1;
+static char g_petPipePath[512];
+
 static void petToggle(void) {
     char petPath[512] = {0};
     const wchar_t *wp = cbCfgPetPath();
@@ -1441,10 +1448,15 @@ static void petToggle(void) {
                 petPath, n, n == 1 ? "" : "es");
         return;
     }
+    // the matcher cannot see a fork whose exec has not landed yet, so a second
+    // click inside that window would start a duplicate: one handshake at a time
+    if (g_petPipe >= 0) return;
     // The exec's outcome comes back over a CLOEXEC pipe: the write end closes
     // at a successful exec, and a failed exec writes the errno and exits. The
-    // parent then prints the one true line - "starting" only when the kernel
-    // took the exec, "cannot start" when it did not. The child itself may not
+    // click never waits for it - the pipe is parked and the tick settles it,
+    // which prints the one true line ("starting" only when the kernel took the
+    // exec, "cannot start" when it did not) - so a slow exec leaves the bar
+    // fully live while the handshake pends. The child itself may not
     // report anything: after a fork in this threaded bar it may only call
     // async-signal-safe functions until exec, and printing (dprintf) or
     // describing an error (strerror) allocates - a fork that lands while the
@@ -1468,11 +1480,21 @@ static void petToggle(void) {
     }
     close(pfd[1]);
     fcntl(wfd, F_SETFD, FD_CLOEXEC);
+    // the tick drains this pipe, so its read end may never block: O_NONBLOCK
+    // or no start at all
+    int fl = fcntl(pfd[0], F_GETFL, 0);
+    if (fl < 0 || fcntl(pfd[0], F_SETFL, fl | O_NONBLOCK) < 0) {
+        int e = errno;
+        close(pfd[0]);
+        close(wfd);
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
+        return;
+    }
     pid_t pid = fork();
     if (pid < 0) {
         int e = errno;
         close(pfd[0]);
-        close(pfd[1]);
+        close(wfd);
         fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
         return;
     }
@@ -1498,14 +1520,29 @@ static void petToggle(void) {
         _exit(127);
     }
     close(wfd);
+    // the click's work is done: the handshake is parked for the tick, and a
+    // slow exec holds nothing but this pipe
+    snprintf(g_petPipePath, sizeof g_petPipePath, "%s", petPath);
+    g_petPipe = pfd[0];
+}
+
+// Settle the parked pet-start handshake, from the tick: bytes on the pipe are
+// the child's refused-exec errno, EOF is the write end dying with a successful
+// exec, and EAGAIN means the exec is still in flight - the handshake settles
+// whenever it settles, and the bar keeps ticking meanwhile.
+static void petHandshakeDrain(void) {
+    if (g_petPipe < 0) return;
     int execErr = 0;
-    ssize_t got = read(pfd[0], &execErr, sizeof execErr);
-    close(pfd[0]);
+    ssize_t got = read(g_petPipe, &execErr, sizeof execErr);
+    if (got < 0) return;
+    close(g_petPipe);
+    g_petPipe = -1;
     if (got == (ssize_t)sizeof execErr) {
-        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(execErr));
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n",
+                g_petPipePath, strerror(execErr));
         return;
     }
-    fprintf(stderr, "chocobar: pet: starting: %s\n", petPath);
+    fprintf(stderr, "chocobar: pet: starting: %s\n", g_petPipePath);
 }
 
 static void configDirOf(char *out, size_t cap) {
@@ -2007,6 +2044,7 @@ int main(int argc, char **argv) {
             g_dashPending = 0;
             runDashboard();
         }
+        petHandshakeDrain();
         reapChildren();
         time_t now = time(NULL);
         geomPump(now);
