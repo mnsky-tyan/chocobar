@@ -12,12 +12,20 @@ above its top edge, so it reads as a strip along the top of that terminal.
 ## Build and run
 
 ```sh
-sudo apt install libx11-dev libxrender-dev libxfixes-dev libcairo2-dev \
-                 libdbus-1-dev
+sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
+                 libcairo2-dev libdbus-1-dev libfontconfig1-dev \
+                 libcurl4-openssl-dev
 bash linux/build.sh                 # -> linux/build/chocobar-linux
 ./linux/build/chocobar-linux        # reads ~/.wizbar/config.json
 ./linux/build/chocobar-linux --config /path/to/config.json
 ```
+
+The release asset (`chocobar-linux` on the next tag) is built on the
+`ubuntu-latest` runner and linked dynamically, so it needs that image's glibc
+(2.39): Ubuntu 24.04, Debian 13 and up. An older distro loads nothing - the
+loader stops on `GLIBC_2.39 not found` - and building it here, against the local
+glibc, is the way to run it there. The README carries the same note next to the
+release download.
 
 ### Run it supervised (recommended)
 

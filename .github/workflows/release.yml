@@ -48,6 +48,12 @@ jobs:
       # belt-and-braces against a distro change dropping that dependency.
       # libcurl.so.4 is not repeated: its runtime is the t64 package
       # (libcurl4t64), which libcurl4-openssl-dev already depends on.
+      #
+      # The bar stays on ubuntu-latest on purpose: the attached asset is built
+      # here and therefore requires that image's glibc (Ubuntu 24.04, glibc
+      # 2.39 - README.md documents that floor and points older distros at the
+      # source build). Pinning an older runner or a static link would trade a
+      # documented floor for a second build path nobody maintains.
       - name: Install the Linux build dependencies
         run: |
           sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \

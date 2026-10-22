@@ -368,22 +368,46 @@ See `linux/README.md` for the build, the measured cost, and what is per-OS.
 **The released asset is the bar to run.** The current release, v1.5.1, ships
 only `chocobar.exe`; the Linux bar is attached as `chocobar-linux` from the
 next release on, built from the tag by the same workflow that builds the
-Windows exe. Until that release is tagged, `bash linux/build.sh` builds the bar
-from source:
+Windows exe. Until that release is tagged, build it from source with the second
+block below.
+
+**From the release** - from the next release on, once a tag ships
+`chocobar-linux`:
 
 ```sh
 gh release download <tag> --pattern chocobar-linux
-# the runtime libraries the asset is linked against; most desktops already have
+# The asset is built on the `ubuntu-latest` runner (Ubuntu 24.04, glibc 2.39)
+# and linked dynamically, so it needs glibc 2.39 or newer: Ubuntu 24.04, Debian
+# 13 and up. An older distro fails at load with "GLIBC_2.39 not found" - use the
+# source build below there instead.
+# The runtime libraries the asset is linked against; most desktops already have
 # them, and a distro without them fails at load with "error while loading shared
-# libraries" naming the missing one - libcurl's runtime is libcurl4t64 on 24.04
-# and newer, libcurl4 before that
+# libraries" naming the missing one
 sudo apt install libx11-6 libxrender1 libxfixes3 libxcursor1 libcairo2 \
-                 libdbus-1-3 libfontconfig1
+                 libdbus-1-3 libfontconfig1 libcurl4t64
+mkdir -p ~/.local/bin
 install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
 # the GPU chip needs the perf counters capability, and only that capability:
 sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
 # the menu's "Start on login" item toggles this unit, so install it too
 # (from a checkout of this repo - the release ships the binary only):
+cp linux/chocobar.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chocobar.service
+```
+
+**From source** - works today, and the way to run the bar on a distro older
+than the asset's glibc floor:
+
+```sh
+sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
+                 libcairo2-dev libdbus-1-dev libfontconfig1-dev libcurl4-openssl-dev
+bash linux/build.sh
+mkdir -p ~/.local/bin
+install -m 0755 linux/build/chocobar-linux ~/.local/bin/chocobar-linux
+# the GPU chip needs the perf counters capability, and only that capability:
+sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
+# the menu's "Start on login" item toggles this unit, so install it too:
 cp linux/chocobar.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now chocobar.service
