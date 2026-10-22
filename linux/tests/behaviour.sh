@@ -20,7 +20,9 @@
 #     carries the path as an argument - including an env-shebang script the
 #     user starts from its own directory with a relative path, a version-pinned
 #     interpreter, and a shebang that carries an argument (the script sits at
-#     argv[2] there); and the children it leaves behind are reaped, not
+#     argv[2] there), and never a process that carries the path as an ARGUMENT
+#     to an interpreter - a later token, a "-c" command, or a relative name;
+#     and the children it leaves behind are reaped, not
 #     zombies; a start is logged only once the kernel took the exec, and a
 #     refused one logs "cannot start" and claims no start at all
 #   - the click that starts the pet never waits on the child's exec: a slow
@@ -96,6 +98,7 @@ cleanup() {
     [ -n "${BAR_PID:-}" ] && kill "$BAR_PID" 2>/dev/null
     [ -n "${DECOY_PID:-}" ] && kill "$DECOY_PID" 2>/dev/null
     [ -n "${ARGDECOY_PID:-}" ] && kill "$ARGDECOY_PID" 2>/dev/null
+    for p in ${SHAPED_PIDS:-}; do kill "$p" 2>/dev/null; done
     [ -n "${MON_PID:-}" ] && kill "$MON_PID" 2>/dev/null
     if [ -s "$WORK/pet.pid" ]; then kill "$(cat "$WORK/pet.pid")" 2>/dev/null; fi
     [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
@@ -164,6 +167,33 @@ printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/s
 # and nothing else - the shape `tail -f <path>` has, and the one a matcher that
 # accepts any cmdline token would mistake for the pet
 printf '#include <unistd.h>\nint main(void){for(;;)pause();}\n' > "$WORK/decoy/argdecoy.c"
+# the shaped decoy: a sleeper that presents a CHOSEN cmdline. The kernel fixes
+# a process's cmdline at exec time, so a shape can only be presented by
+# exec'ing with it - this program re-execs ITSELF with the tokens it was
+# given, and the re-executed copy sleeps for ever. /proc/<pid>/cmdline then
+# reads exactly those tokens: the shape the matcher has to judge, carried by a
+# real process and not by a mock.
+cat > "$WORK/decoy/shaped.c" <<'CSH'
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (!getenv("SHAPED_REEXEC")) {
+        char *args[8];
+        int n = 0;
+        if (argc < 2) _exit(2);
+        setenv("SHAPED_REEXEC", "1", 1);
+        for (int i = 1; i < argc && n < 7; i++) args[n++] = argv[i];
+        args[n] = 0;
+        execv("/proc/self/exe", args);
+        _exit(127);
+    }
+    for (;;) pause();
+}
+CSH
+# the script the shaped decoys name as "the script the interpreter runs": it is
+# never executed (the decoy only presents a cmdline), but the shape is only
+# believable when the file it names exists
+printf 'import time\nwhile True: time.sleep(0.2)\n' > "$WORK/decoy/other.py"
 # a systemctl that always fails the way the real one does for a unit that is not
 # installed: the state WORD "not-found" on stdout and exit 4, plus the failure
 # text on stderr. The word is what the bar must read (the exit code cannot tell
@@ -222,6 +252,8 @@ gcc -O1 -o "$WORK/decoy/pet" "$WORK/decoy/sleeper.c" 2>>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the decoy sleeper"; cat "$WORK/cc.log"; exit 1; }
 gcc -O1 -o "$WORK/decoy/argdecoy" "$WORK/decoy/argdecoy.c" 2>>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the argument decoy"; cat "$WORK/cc.log"; exit 1; }
+gcc -O1 -o "$WORK/decoy/shaped" "$WORK/decoy/shaped.c" 2>>"$WORK/cc.log" \
+    || { echo "FAIL: cannot build the shaped decoy"; cat "$WORK/cc.log"; exit 1; }
 calls_n() { if [ -f "$CALLS" ]; then wc -l < "$CALLS"; else echo 0; fi; }
 
 # ---- the private display and bus -----------------------------------------
@@ -716,6 +748,66 @@ while :; do sleep 0.2; done
 PET
 chmod +x "$WORK/home/pet"
 rm -f "$WORK/pet.pid" "$WORK/pet.state"
+
+# 6f-5. THE PET PATH AS AN ARGUMENT IS NOT THE PET, in every shape an
+#       interpreter can carry it in. The kernel executes the FIRST script an
+#       interpreter is given; a token after that one is the script's argument,
+#       so `python3 other.py <petpath>` runs other.py, and `sh -c <petpath>`
+#       runs a command rather than a script. All of them carry the configured
+#       path in their cmdline, so a matcher that scans every token after an
+#       interpreter reads the chip "on" while the pet is stopped: the click
+#       then takes the STOP path and SIGTERMs an unrelated process instead of
+#       starting the pet. The three decoys below present those shapes as real
+#       processes and must all survive - the click has to START the pet, and
+#       the stop that follows has to spare them.
+SHAPED_PIDS=""
+"$WORK/decoy/shaped" python3 "$WORK/decoy/other.py" "$WORK/home/pet" >/dev/null 2>&1 &
+SHAPED1_PID=$!
+"$WORK/decoy/shaped" sh -c "$WORK/home/pet" >/dev/null 2>&1 &
+SHAPED2_PID=$!
+# the third decoy carries the path RELATIVE, and runs in the pet's own
+# directory, so the name resolves to the configured file there
+( cd "$WORK/home" && exec "$WORK/decoy/shaped" python3 "$WORK/decoy/other.py" pet ) >/dev/null 2>&1 &
+SHAPED3_PID=$!
+SHAPED_PIDS="$SHAPED1_PID $SHAPED2_PID $SHAPED3_PID"
+sleep 0.3
+# the shape is what the matcher has to judge, so it is asserted, not assumed:
+# /proc/<pid>/cmdline is the oracle
+shaped_cmdline() { tr '\0' '|' < "/proc/$1/cmdline" 2>/dev/null; }
+SHAPED_OK=1
+for p in $SHAPED_PIDS; do
+    kill -0 "$p" 2>/dev/null || SHAPED_OK=0
+done
+[ "$SHAPED_OK" -eq 1 ] &&
+    [ "$(shaped_cmdline "$SHAPED1_PID")" = "python3|$WORK/decoy/other.py|$WORK/home/pet|" ] &&
+    [ "$(shaped_cmdline "$SHAPED2_PID")" = "sh|-c|$WORK/home/pet|" ] &&
+    [ "$(shaped_cmdline "$SHAPED3_PID")" = "python3|$WORK/decoy/other.py|pet|" ]
+check "the three argument-shaped decoys are alive and carry the shapes" $?
+# the chip's state comes from the bar's 1 Hz tick, so let one poll see the
+# decoys: the click reads g_m.petRunning, not /proc
+sleep 2
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+[ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$STOPPED_BEFORE" ] &&
+    [ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null
+check "a pet path carried as an argument is not the pet: the click starts the pet" $?
+# and the stop that follows must spare every decoy
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+SHAPED_OK=1
+for p in $SHAPED_PIDS; do
+    kill -0 "$p" 2>/dev/null || SHAPED_OK=0
+done
+[ "$SHAPED_OK" -eq 1 ] &&
+    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ]
+check "the argument-shaped decoys survive the pet's stop" $?
+for p in $SHAPED_PIDS; do kill "$p" 2>/dev/null; done
+SHAPED_PIDS=""
 
 # 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
 #     so a bar that never waits keeps one defunct entry per invocation for as

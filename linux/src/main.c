@@ -1426,10 +1426,11 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 // name, a relative path, a directory, or a command line that carries
 // arguments), and the start execs that path directly - no shell - so the
 // process the bar starts has the configured path as its EXECUTED file: argv[0]
-// for a binary, argv[1] for a script (the kernel hands it to the shebang
-// interpreter), and the matcher (the chip's own state source) sees the pet it
-// started. Stop is a verified SIGTERM per matching pid (petProcessStop
-// re-checks each cmdline).
+// for a binary, and the first non-option token after the shebang interpreter
+// for a script (the kernel hands it to the interpreter, and a shebang that
+// carries an argument puts the script at argv[2]), and the matcher (the chip's
+// own state source) sees the pet it started. Stop is a verified SIGTERM per
+// matching pid (petProcessStop re-checks each cmdline).
 //
 // Known consequence, deliberate: a child cannot escape its parent's cgroup, so
 // the pet the bar starts runs in chocobar.service's cgroup and inherits

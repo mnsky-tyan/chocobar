@@ -522,11 +522,12 @@ static int gpuPercent(void) {
 // identified by the process's EXECUTED file, never by a process that merely
 // mentions the path: argv[0] is the configured path (or its realpath), or - for
 // a shebang script, where the kernel runs the interpreter - argv[0] names an
-// interpreter and the configured path is one of the tokens after it, as invoked
-// - absolute when the bar starts it, relative to that process's own cwd when
-// the user starts the pet as `./pet`. No other token position counts, so
-// `tail -f <path>`, `sh -c <path>` and an editor with the file open are not the
-// pet, and the stop path cannot SIGTERM them.
+// interpreter and the executed file is the FIRST token after it that is not one
+// of the interpreter's own options, as invoked - absolute when the bar starts
+// it, relative to that process's own cwd when the user starts the pet as
+// `./pet`. No other token position counts, so `tail -f <path>`, `sh -c <path>`
+// and an editor with the file open are not the pet, and the stop path cannot
+// SIGTERM them.
 // Never comm, never a basename, never a substring - comm is the kernel's
 // truncated basename, so matching it makes a bare configured name hit every
 // process carrying that name, and the stop path signals whatever it matched.
@@ -574,10 +575,10 @@ static void petResolved(const char *exePath, char *out, size_t cap) {
 // script path on exactly as it was typed. Compared by realpath, so a symlink
 // to the configured file is the same file.
 //
-// `scriptPath` says the token IS the script path (argv[1] under an
-// interpreter), so a bare name resolves against the cwd as well; for argv[0] a
-// bare name is a NAME from a PATH lookup, not a path, so it only counts when
-// it carries a slash.
+// `scriptPath` says the token IS the script path (the first non-option token
+// after an interpreter), so a bare name resolves against the cwd as well; for
+// argv[0] a bare name is a NAME from a PATH lookup, not a path, so it only
+// counts when it carries a slash.
 //
 // 1 = the token names the configured file.
 static int petTokenIsFile(const char *token, const char *pidName,
@@ -603,9 +604,10 @@ static int petTokenIsFile(const char *token, const char *pidName,
 }
 
 // The interpreters a shebang line can hand a script to. ONE list: it is what
-// decides whether argv[1] is the executed file. A script exec'd by the bar is
-// run by the kernel as `<interpreter> <script>`, so its argv[1] is the path the
-// config names; any other program carrying the path as an argument is not.
+// decides whether the token after argv[0] is the executed file. A script
+// exec'd by the bar is run by the kernel as `<interpreter> <script>`, so the
+// script is the token after the interpreter; any other program carrying the
+// path as an argument is not.
 //
 // A name is matched against the interpreter's BASENAME plus an optional version
 // suffix of digits and dots, because the kernel names the live process after the
@@ -615,15 +617,16 @@ static int petTokenIsFile(const char *token, const char *pidName,
 // would read every version-pinned pet as "off". The suffix is digits and dots
 // only, so `sh` matches `sh5.2` but not `shotwell`.
 //
-// `env` is in the list for the two shapes it really names. An
-// `#!/usr/bin/env <interp>` shebang makes the kernel exec `/usr/bin/env`
-// LITERALLY, but env then REPLACES itself with the interpreter, so the live
-// process is named after that interpreter - only the microseconds before the
-// second exec carry `env` as argv[0]. A direct `env <path>` keeps it.
+// `env` is NOT in the list. An `#!/usr/bin/env <interp>` shebang makes the
+// kernel exec `/usr/bin/env` LITERALLY, but env then REPLACES ITSELF with the
+// interpreter it resolved, so the live process is named after that interpreter
+// (`python3|<script>`), never after env. Listing env would let the transient
+// env process match a script path that is its own ARGUMENT - the one shape
+// that must never be the pet.
 static const char *const kInterpreters[] = {
     "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
     "python", "perl", "ruby", "node", "nodejs",
-    "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript", "env",
+    "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript",
     NULL
 };
 
@@ -642,18 +645,23 @@ static int isInterpreter(const char *argv0) {
 
 // 1 = argv[0] is the executed file (the path, its realpath, or the same file
 // written relative to the process's own cwd), or argv[0] is an interpreter and
-// one of the tokens after it is. Any other token position is an argument, not
-// the executed file.
+// the executed file is the FIRST token after it that is not one of the
+// interpreter's own options. Any other token position is an argument, not the
+// executed file.
 //
-// When argv[0] is an interpreter the script is somewhere AFTER it, not always
-// at argv[1]: the kernel shebang rule is `<interpreter> [optional-arg]
-// <script>`, so `#!/bin/bash -e` runs as `/bin/bash|-e|./sbarg.sh` and
+// When argv[0] is an interpreter the script is not always at argv[1]: the
+// kernel shebang rule is `<interpreter> [optional-arg] <script>`, so
+// `#!/bin/bash -e` runs as `/bin/bash|-e|./sbarg.sh` and
 // `#!/usr/bin/env -S python3 -u` runs as `python3|-u|<script>` - the script is
 // argv[2] there, and a matcher that reads only argv[1] reads such a pet as
-// "off", starts a second copy on the next click and can never stop either.
-// Every token after the interpreter is therefore examined, because each is
-// either the interpreter's own options or the script. A NON-interpreter argv[0]
-// still matches only at argv[0] itself, so `tail -f <path>`, `ls <path>` and an
+// "off", starts a second copy on the next click and can never stop either. The
+// script is therefore the first token after the interpreter that is not an
+// option, and the scan STOPS there: every token after it is an argument to
+// that script, never the file the kernel executed, so
+// `python3 report.py <petpath>` runs report.py and is not the pet. An option
+// that takes a COMMAND rather than a script ("-c") ends the scan for the same
+// reason: `sh -c <petpath>` runs a command. A NON-interpreter argv[0] still
+// matches only at argv[0] itself, so `tail -f <path>`, `ls <path>` and an
 // editor with the file open are not the pet.
 static int petPidMatches(const char *pidName, const char *path, const char *real) {
     char p[300];
@@ -664,25 +672,29 @@ static int petPidMatches(const char *pidName, const char *path, const char *real
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
-    // argv[0], then every token after it when argv[0] is an interpreter: a
-    // shebang argument can sit at argv[1], so the script's own position is not
-    // fixed and only the scan finds it.
-    int found = 0;
-    size_t i = 0;
-    for (int a = 0; i < n && !found; a++) {
+    // an empty cmdline, and an empty argv[0], name nothing at all - such a
+    // process is never the pet
+    if (!*buf) return 0;
+    // argv[0]: the file itself, or the interpreter the kernel handed the
+    // script to - and the interpreter itself is never the file, so the tokens
+    // after it are the only place the script can be
+    size_t i = strlen(buf) + 1;
+    if (petTokenIsFile(buf, pidName, path, real, 0)) return 1;
+    if (!isInterpreter(buf)) return 0;
+    // the script is the first token after the interpreter that is not one of
+    // the interpreter's own options
+    while (i < n) {
         char *tok = buf + i;
         i += strlen(tok) + 1;
-        if (!*tok) continue;
-        if (a == 0) {
-            if (petTokenIsFile(tok, pidName, path, real, 0)) found = 1;
-            // the interpreter itself is never the file, so the tokens after it
-            // are the only place the script can be
-            if (!found && !isInterpreter(tok)) break;
+        if (tok[0] == '-') {
+            // "-c" takes a command, not a script: the next token is a
+            // command, so the file is not what this process executed
+            if (tok[1] == 'c') return 0;
             continue;
         }
-        if (petTokenIsFile(tok, pidName, path, real, 1)) found = 1;
+        return petTokenIsFile(tok, pidName, path, real, 1);
     }
-    return found;
+    return 0;
 }
 // ---- the tick ------------------------------------------------------------------
 int petProcessRunning(const char *exePath) {
