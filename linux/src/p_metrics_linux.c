@@ -525,9 +525,11 @@ static int gpuPercent(void) {
 // interpreter and the executed file is the FIRST token after it that is not one
 // of the interpreter's own options, as invoked - absolute when the bar starts
 // it, relative to that process's own cwd when the user starts the pet as
-// `./pet`. No other token position counts, so `tail -f <path>`, `sh -c <path>`
-// and an editor with the file open are not the pet, and the stop path cannot
-// SIGTERM them.
+// `./pet`. The interpreter's options are parsed as getopt bundles against its
+// own grammar, so a value-taking option's value is skipped and an option that
+// takes a command ends the scan. No other token position counts, so `tail -f
+// <path>`, `sh -c <path>`, `sh -ec <path>` and an editor with the file open are
+// not the pet, and the stop path cannot SIGTERM them.
 // Never comm, never a basename, never a substring - comm is the kernel's
 // truncated basename, so matching it makes a bare configured name hit every
 // process carrying that name, and the stop path signals whatever it matched.
@@ -603,11 +605,12 @@ static int petTokenIsFile(const char *token, const char *pidName,
     return ok;
 }
 
-// The interpreters a shebang line can hand a script to. ONE list: it is what
-// decides whether the token after argv[0] is the executed file. A script
-// exec'd by the bar is run by the kernel as `<interpreter> <script>`, so the
-// script is the token after the interpreter; any other program carrying the
-// path as an argument is not.
+// The interpreters a shebang line can hand a script to, with the option
+// grammar the script scan needs. ONE list: it decides both whether argv[0] is
+// an interpreter and which of its options consume the token that follows. A
+// script exec'd by the bar is run by the kernel as `<interpreter> <script>`, so
+// the script is the first token after the interpreter that is not one of its
+// own options; any other program carrying the path as an argument is not.
 //
 // A name is matched against the interpreter's BASENAME plus an optional version
 // suffix of digits and dots, because the kernel names the live process after the
@@ -623,24 +626,65 @@ static int petTokenIsFile(const char *token, const char *pidName,
 // (`python3|<script>`), never after env. Listing env would let the transient
 // env process match a script path that is its own ARGUMENT - the one shape
 // that must never be the pet.
-static const char *const kInterpreters[] = {
-    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
-    "python", "perl", "ruby", "node", "nodejs",
-    "php", "lua", "luajit", "tclsh", "wish", "expect", "Rscript",
-    NULL
+//
+// The option letters: an option is a getopt BUNDLE, so `-eu` is two flags and
+// `-ec` is a flag plus a command. A letter in `command` takes a COMMAND rather
+// than a script (`sh -c`, `sh -ec`, `node -e`, `perl -e`, `php -r`), reads the
+// program from stdin (`sh -s`), names a module rather than a file
+// (`python -m`), or only checks the file without executing it (`perl -c`,
+// `ruby -c`, `node -c`, `php -l`), so the token after it is never the executed
+// file. A letter in `script` takes the executed FILE as its value (`php -f`,
+// `expect -f`, `Rscript -f`), so that value IS the script. A letter in `value`
+// takes a value that is not the script (`-X utf8`, `-I lib`, `-r fs`) and the
+// scan skips it. A letter in `flag` takes nothing. A letter in none of the
+// four is unknown, and an unknown option ends the scan WITHOUT matching:
+// guessing that its value is the script would credit a process that merely
+// names the file, and the stop path would SIGTERM it. Every letter here is one
+// this machine can actually demonstrate or that the interpreter's own manual
+// spells out. A long option has no grammar here, so it ends the scan as unknown
+// too - unless its value is attached (`--require=fs`), which provably consumes
+// nothing and so lets the scan continue to the script.
+struct PetInterp {
+    const char *names;      // space separated interpreter basenames
+    const char *command;    // option letters whose value is a COMMAND
+    const char *script;     // option letters whose value is the executed FILE
+    const char *value;      // option letters that consume a non-script token
+    const char *flag;       // option letters that consume nothing
+};
+static const struct PetInterp kInterpreters[] = {
+    { "sh bash dash zsh ksh mksh fish csh tcsh", "cs", "", "oO",
+      "abdefghiklmnprtuvxBCDEHPT" },
+    { "python", "cm", "", "WX", "bBdEhiIOoPqsSuvVx" },
+    { "perl", "ceE", "", "IMmF", "01234567adDfgilnpsStTuvVwWXx" },
+    { "ruby", "ce", "", "CEFrW", "0adTilnpstuvVwySx" },
+    { "node nodejs", "cep", "", "rC", "ivh" },
+    { "php", "rl", "f", "cdStz", "aehimnqvwH" },
+    { "lua luajit", "e", "", "l", "iEvW" },
+    { "tclsh wish", "c", "", "", "di" },
+    { "expect", "c", "f", "", "di" },
+    { "Rscript", "e", "f", "", "v" },
+    { NULL, NULL, NULL, NULL, NULL }
 };
 
-static int isInterpreter(const char *argv0) {
+// the grammar row whose name list holds argv[0]'s basename, NULL when argv[0]
+// is not an interpreter
+static const struct PetInterp *petInterp(const char *argv0) {
     const char *base = strrchr(argv0, '/');
     base = base ? base + 1 : argv0;
-    for (int i = 0; kInterpreters[i]; i++) {
-        size_t n = strlen(kInterpreters[i]);
-        if (strncmp(base, kInterpreters[i], n) != 0) continue;
-        const char *rest = base + n;
-        while (*rest && (isdigit((unsigned char)*rest) || *rest == '.')) rest++;
-        if (!*rest) return 1;
+    for (int i = 0; kInterpreters[i].names; i++) {
+        const char *p = kInterpreters[i].names;
+        while (*p) {
+            while (*p == ' ') p++;
+            const char *start = p;
+            while (*p && *p != ' ') p++;
+            size_t n = (size_t)(p - start);
+            if (!n || strncmp(base, start, n) != 0) continue;
+            const char *rest = base + n;
+            while (*rest && (isdigit((unsigned char)*rest) || *rest == '.')) rest++;
+            if (!*rest) return &kInterpreters[i];
+        }
     }
-    return 0;
+    return NULL;
 }
 
 // 1 = argv[0] is the executed file (the path, its realpath, or the same file
@@ -652,17 +696,18 @@ static int isInterpreter(const char *argv0) {
 // When argv[0] is an interpreter the script is not always at argv[1]: the
 // kernel shebang rule is `<interpreter> [optional-arg] <script>`, so
 // `#!/bin/bash -e` runs as `/bin/bash|-e|./sbarg.sh` and
-// `#!/usr/bin/env -S python3 -u` runs as `python3|-u|<script>` - the script is
-// argv[2] there, and a matcher that reads only argv[1] reads such a pet as
-// "off", starts a second copy on the next click and can never stop either. The
-// script is therefore the first token after the interpreter that is not an
-// option, and the scan STOPS there: every token after it is an argument to
-// that script, never the file the kernel executed, so
-// `python3 report.py <petpath>` runs report.py and is not the pet. An option
-// that takes a COMMAND rather than a script ("-c") ends the scan for the same
-// reason: `sh -c <petpath>` runs a command. A NON-interpreter argv[0] still
-// matches only at argv[0] itself, so `tail -f <path>`, `ls <path>` and an
-// editor with the file open are not the pet.
+// `#!/usr/bin/env -S python3 -X utf8` runs as `python3|-X|utf8|<script>` - the
+// script is further along there, and a matcher that reads only argv[1] reads
+// such a pet as "off", starts a second copy on the next click and can never
+// stop either. Options are therefore parsed as a getopt bundle against the
+// interpreter's own grammar (kInterpreters), so an option that takes a value
+// consumes it and an option that takes a COMMAND ends the scan: `sh -c
+// <petpath>` and `sh -ec <petpath>` run a command. The script is the first
+// token that is not an option, and the scan STOPS there: every token after it
+// is an argument to that script, never the file the kernel executed, so
+// `python3 report.py <petpath>` runs report.py and is not the pet. A
+// NON-interpreter argv[0] still matches only at argv[0] itself, so `tail -f
+// <path>`, `ls <path>` and an editor with the file open are not the pet.
 static int petPidMatches(const char *pidName, const char *path, const char *real) {
     char p[300];
     snprintf(p, sizeof(p), "/proc/%s/cmdline", pidName);
@@ -680,19 +725,40 @@ static int petPidMatches(const char *pidName, const char *path, const char *real
     // after it are the only place the script can be
     size_t i = strlen(buf) + 1;
     if (petTokenIsFile(buf, pidName, path, real, 0)) return 1;
-    if (!isInterpreter(buf)) return 0;
+    const struct PetInterp *interp = petInterp(buf);
+    if (!interp) return 0;
     // the script is the first token after the interpreter that is not one of
     // the interpreter's own options
     while (i < n) {
         char *tok = buf + i;
         i += strlen(tok) + 1;
-        if (tok[0] == '-') {
-            // "-c" takes a command, not a script: the next token is a
-            // command, so the file is not what this process executed
-            if (tok[1] == 'c') return 0;
-            continue;
+        if (tok[0] != '-') return petTokenIsFile(tok, pidName, path, real, 1);
+        // "--" ends the options: the script is the token after it
+        if (!strcmp(tok, "--")) {
+            return i < n && petTokenIsFile(buf + i, pidName, path, real, 1);
         }
-        return petTokenIsFile(tok, pidName, path, real, 1);
+        // a lone "-" reads the program from stdin: not a script file. A long
+        // option has no grammar here, so it ends the scan unless its value is
+        // attached, which consumes nothing and leaves the script to follow
+        if (!tok[1]) return 0;
+        if (tok[1] == '-') {
+            if (strchr(tok, '=')) continue;
+            return 0;
+        }
+        for (const char *o = tok + 1; *o; o++) {
+            if (strchr(interp->command, *o)) return 0;
+            if (strchr(interp->script, *o)) {
+                const char *val = o[1] ? o + 1 : (i < n ? buf + i : NULL);
+                return val && petTokenIsFile(val, pidName, path, real, 1);
+            }
+            if (strchr(interp->value, *o)) {
+                if (o[1]) break;              // the value is attached to the token
+                if (i >= n) return 0;         // a value that never came
+                i += strlen(buf + i) + 1;     // the next token is the value
+                break;
+            }
+            if (!strchr(interp->flag, *o)) return 0;   // unknown: not the pet
+        }
     }
     return 0;
 }

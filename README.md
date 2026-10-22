@@ -514,7 +514,7 @@ native/src/p_agg.c      token aggregation: per-app / per-model / per-day totals
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons
+linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons, and linux/tests/ (behaviour.sh + xclick.c/xmonitor.c) which CI builds and drives
 macos/                  macOS front-end (Win32 adapter + bar) over the shared core parts
-scripts/                the portable regression suite and the Windows token regression runner
+scripts/                the portable regression suite (node scripts/portable_regression.js, half of `npm test` with the Linux behaviour suite) and the Windows token regression runner
 ```

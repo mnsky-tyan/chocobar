@@ -30,18 +30,21 @@ void linuxMetricsPrime(void);
 // in p_metrics_linux.c because the /proc walk lives there; the bar's click
 // handler calls both. The pet is the process whose EXECUTED file is the
 // configured path: argv[0] equal to the path (or its realpath), or an
-// interpreter argv[0] with the path at the FIRST token after it that is not one
-// of the interpreter's own options - the kernel shebang rule is
-// `<interpreter> [optional-arg] <script>`, so a shebang that carries an
-// argument puts the script at argv[2] - with a relative token resolved against
-// that process's own cwd. The scan stops at that token: every token after it
-// is an argument to the script, never the file the kernel executed, so
+// interpreter argv[0] whose own option grammar is parsed as getopt bundles, so
+// the path is the first token after it that is not one of its options - the
+// kernel shebang rule is `<interpreter> [optional-arg] <script>`, so a shebang
+// that carries an argument or a value-taking option (`#!/usr/bin/env -S python3
+// -X utf8`) puts the script further along - with a relative token resolved
+// against that process's own cwd. The scan stops at that token: every token
+// after it is an argument to the script, never the file the kernel executed, so
 // `python3 report.py <path>` runs report.py and is not the pet. An option that
-// takes a command rather than a script ("-c") ends the scan too, so
-// `sh -c <path>` is not the pet either. The interpreter is matched by basename
-// plus an optional version suffix (python3.14, node20), because that is the
-// name the kernel gives the live process; `env` is not in the list, because env
-// replaces ITSELF with the interpreter it resolved.
+// takes a command rather than a script ends the scan too, in every spelling and
+// bundle (`-c`, `-ec`, `-e`, `-r`, `-m`), so `sh -c <path>` and `sh -ec <path>`
+// are not the pet; an option whose value behaviour is unknown also ends it
+// without matching, so no unrelated process is credited. The interpreter is
+// matched by basename plus an optional version suffix (python3.14, node20),
+// because that is the name the kernel gives the live process; `env` is not in
+// the list, because env replaces ITSELF with the interpreter it resolved.
 // A process that merely carries the path as an argument is not the pet. The
 // configured value must be ONE ABSOLUTE path to a regular executable file - a
 // bare name, a relative path, a directory, or a command line carrying arguments

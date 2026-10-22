@@ -21,7 +21,10 @@
 #     user starts from its own directory with a relative path, a version-pinned
 #     interpreter, and a shebang that carries an argument (the script sits at
 #     argv[2] there), and never a process that carries the path as an ARGUMENT
-#     to an interpreter - a later token, a "-c" command, or a relative name;
+#     to an interpreter - a later token, a "-c" or bundled "-ec" command, a
+#     `node -e` / `perl -e` command, or a relative name - while a value-taking
+#     option before the script (`#!/usr/bin/env -S python3 -X utf8`) is still
+#     seen;
 #     and the children it leaves behind are reaped, not
 #     zombies; a start is logged only once the kernel took the exec, and a
 #     refused one logs "cannot start" and claims no start at all
@@ -757,9 +760,14 @@ rm -f "$WORK/pet.pid" "$WORK/pet.state"
 #       path in their cmdline, so a matcher that scans every token after an
 #       interpreter reads the chip "on" while the pet is stopped: the click
 #       then takes the STOP path and SIGTERMs an unrelated process instead of
-#       starting the pet. The three decoys below present those shapes as real
+#       starting the pet. The decoys below present those shapes as real
 #       processes and must all survive - the click has to START the pet, and
 #       the stop that follows has to spare them.
+#
+#       The command forms are spelled every way getopt allows, because a guard
+#       that recognises only the literal `-c` misses the BUNDLED `-ec` (there
+#       the command flag is the second letter) and the `node -e` / `perl -e`
+#       spellings entirely.
 SHAPED_PIDS=""
 "$WORK/decoy/shaped" python3 "$WORK/decoy/other.py" "$WORK/home/pet" >/dev/null 2>&1 &
 SHAPED1_PID=$!
@@ -769,7 +777,18 @@ SHAPED2_PID=$!
 # directory, so the name resolves to the configured file there
 ( cd "$WORK/home" && exec "$WORK/decoy/shaped" python3 "$WORK/decoy/other.py" pet ) >/dev/null 2>&1 &
 SHAPED3_PID=$!
-SHAPED_PIDS="$SHAPED1_PID $SHAPED2_PID $SHAPED3_PID"
+# the bundled command flag: `-ec` is -e and -c, so the next token is a command
+"$WORK/decoy/shaped" sh -ec "$WORK/home/pet" >/dev/null 2>&1 &
+SHAPED4_PID=$!
+# the same flag split across two option tokens
+"$WORK/decoy/shaped" sh -e -c "$WORK/home/pet" >/dev/null 2>&1 &
+SHAPED5_PID=$!
+# the interpreters whose command flag is not `c` at all
+"$WORK/decoy/shaped" node -e "require('$WORK/home/pet')" >/dev/null 2>&1 &
+SHAPED6_PID=$!
+"$WORK/decoy/shaped" perl -e "1 while 1" "$WORK/home/pet" >/dev/null 2>&1 &
+SHAPED7_PID=$!
+SHAPED_PIDS="$SHAPED1_PID $SHAPED2_PID $SHAPED3_PID $SHAPED4_PID $SHAPED5_PID $SHAPED6_PID $SHAPED7_PID"
 sleep 0.3
 # the shape is what the matcher has to judge, so it is asserted, not assumed:
 # /proc/<pid>/cmdline is the oracle
@@ -781,8 +800,12 @@ done
 [ "$SHAPED_OK" -eq 1 ] &&
     [ "$(shaped_cmdline "$SHAPED1_PID")" = "python3|$WORK/decoy/other.py|$WORK/home/pet|" ] &&
     [ "$(shaped_cmdline "$SHAPED2_PID")" = "sh|-c|$WORK/home/pet|" ] &&
-    [ "$(shaped_cmdline "$SHAPED3_PID")" = "python3|$WORK/decoy/other.py|pet|" ]
-check "the three argument-shaped decoys are alive and carry the shapes" $?
+    [ "$(shaped_cmdline "$SHAPED3_PID")" = "python3|$WORK/decoy/other.py|pet|" ] &&
+    [ "$(shaped_cmdline "$SHAPED4_PID")" = "sh|-ec|$WORK/home/pet|" ] &&
+    [ "$(shaped_cmdline "$SHAPED5_PID")" = "sh|-e|-c|$WORK/home/pet|" ] &&
+    [ "$(shaped_cmdline "$SHAPED6_PID")" = "node|-e|require('$WORK/home/pet')|" ] &&
+    [ "$(shaped_cmdline "$SHAPED7_PID")" = "perl|-e|1 while 1|$WORK/home/pet|" ]
+check "the argument-shaped decoys are alive and carry the shapes" $?
 # the chip's state comes from the bar's 1 Hz tick, so let one poll see the
 # decoys: the click reads g_m.petRunning, not /proc
 sleep 2
@@ -808,6 +831,76 @@ done
 check "the argument-shaped decoys survive the pet's stop" $?
 for p in $SHAPED_PIDS; do kill "$p" 2>/dev/null; done
 SHAPED_PIDS=""
+
+# 6f-6. A VALUE-TAKING OPTION BEFORE THE SCRIPT. `#!/usr/bin/env -S python3 -X
+#       utf8` is a real shebang shape, and the kernel runs it as
+#       `python3|-X|utf8|<script>` - a matcher that reads the first non-option
+#       token as the script reads `utf8` instead and never reaches the file, so
+#       the chip shows "off" for a pet the bar itself just started: the next
+#       click forks a SECOND copy and the stop action can never match either.
+#       The pet is started through the bar's own start path (the click), and
+#       /proc is the oracle for the shape before the chip's answer is asserted.
+#       A runner without python3 or without an `env` that understands `-S`
+#       cannot present the shape; that is a skip on a developer machine and a
+#       FAIL in CI, where the gate must not become a silent no-op.
+if ! command -v python3 >/dev/null 2>&1 || ! env -S /bin/true >/dev/null 2>&1; then
+    if [ "${CI:-}" = "true" ]; then
+        echo "FAIL: python3 and 'env -S' are needed to present a value-taking-option shebang"
+        FAIL=$((FAIL+1))
+    else
+        echo "SKIP: no python3 or no 'env -S', so the value-taking-option shebang is not presented"
+    fi
+else
+cat > "$WORK/home/pet" <<PET
+#!/usr/bin/env -S python3 -X utf8
+import os, signal, sys, time
+with open("$WORK/pet.pid", "w") as f: f.write(str(os.getpid()))
+with open("$WORK/pet.state", "w") as f: f.write("running")
+def bye(*a):
+    with open("$WORK/pet.state", "w") as f: f.write("SIGTERM")
+    try: os.unlink("$WORK/pet.pid")
+    except OSError: pass
+    sys.exit(0)
+signal.signal(signal.SIGTERM, bye)
+while True: time.sleep(0.2)
+PET
+chmod +x "$WORK/home/pet"
+rm -f "$WORK/pet.pid" "$WORK/pet.state"
+# the check above left the pet stopped, and the chip's state comes from the 1 Hz
+# tick, so let a tick pass before the click that has to take the START path
+sleep 2
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+VALUE_PID=$(cat "$WORK/pet.pid" 2>/dev/null)
+VALUE_ARGV=$(tr '\0' '|' < "/proc/$VALUE_PID/cmdline" 2>/dev/null)
+[ -n "$VALUE_PID" ] && kill -0 "$VALUE_PID" 2>/dev/null &&
+    [ "$(echo "$VALUE_ARGV" | cut -d'|' -f1)" = "python3" ] &&
+    [ "$(echo "$VALUE_ARGV" | cut -d'|' -f2)" = "-X" ] &&
+    [ "$(echo "$VALUE_ARGV" | cut -d'|' -f3)" = "utf8" ] &&
+    [ "$(echo "$VALUE_ARGV" | cut -d'|' -f4)" = "$WORK/home/pet" ]
+check "the pet runs as python3|-X|utf8|<script> (a value-taking option before the script)" $?
+# the chip's state source is the 1 Hz tick, so let one poll see it
+sleep 2
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+check "a value-taking-option pet is seen: the click stops it, no duplicate start" $?
+[ -n "$VALUE_PID" ] && kill -0 "$VALUE_PID" 2>/dev/null && kill "$VALUE_PID" 2>/dev/null
+# restore the shell-shebang pet the later checks were written against
+cat > "$WORK/home/pet" <<PET
+#!/usr/bin/env bash
+echo \$\$ > "$WORK/pet.pid"
+echo running > "$WORK/pet.state"
+trap 'echo SIGTERM > "$WORK/pet.state"; rm -f "$WORK/pet.pid"; exit 0' TERM
+while :; do sleep 0.2; done
+PET
+chmod +x "$WORK/home/pet"
+rm -f "$WORK/pet.pid" "$WORK/pet.state"
+fi
 
 # 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
 #     so a bar that never waits keeps one defunct entry per invocation for as
