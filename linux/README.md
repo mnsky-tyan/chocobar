@@ -290,9 +290,10 @@ the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, and a
 right-group metric chip is inert.
 
-A missing tool (or the X11/cairo development headers the build needs) skips the
-behaviour suite cleanly on a developer machine and fails it when `CI` is set, so
-the gate cannot become a silent no-op.
+A missing tool (or the development headers the build needs - the bar's own
+X11/cairo ones, and `libxtst-dev` for the XTEST driver the suite compiles) skips
+the behaviour suite cleanly on a developer machine and fails it when `CI` is set,
+so the gate cannot become a silent no-op.
 
 The executable token regressions (`scripts/token_regression.py`) are Windows-only;
 on Linux the scan is exercised by running the bar against a real store, which is

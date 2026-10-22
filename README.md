@@ -375,9 +375,10 @@ from source:
 gh release download <tag> --pattern chocobar-linux
 # the runtime libraries the asset is linked against; most desktops already have
 # them, and a distro without them fails at load with "error while loading shared
-# libraries" naming the missing one
+# libraries" naming the missing one - libcurl's runtime is libcurl4t64 on 24.04
+# and newer, libcurl4 before that
 sudo apt install libx11-6 libxrender1 libxfixes3 libxcursor1 libcairo2 \
-                 libdbus-1-3 libfontconfig1 libcurl4
+                 libdbus-1-3 libfontconfig1
 install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
 # the GPU chip needs the perf counters capability, and only that capability:
 sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
@@ -480,10 +481,11 @@ Internal compatibility paths and filenames still use `wizbar`, including `~/.wiz
 headless and needs no GUI. The second, `linux/tests/behaviour.sh`, drives the
 real Linux bar: it starts a PRIVATE Xvfb display and a private D-Bus, drives a
 private pointer with XTEST and waits out the bar's 30 s staleness window, so it
-needs Xvfb, xdotool, xwininfo, xprop, gdbus, dbus-daemon and gcc and takes a few
-minutes; where one of those tools is missing it skips cleanly on a developer
-machine and fails in CI. Nothing it does touches the user's session: the
-display, the bus, the HOME and the pointer it drives are all throwaway.
+needs Xvfb, xdotool, xwininfo, xprop, xdpyinfo, gdbus, dbus-send, dbus-daemon,
+gcc and the `libxtst-dev` headers it compiles its pointer driver against, and
+takes a few minutes; where one of those is missing it skips cleanly on a
+developer machine and fails in CI. Nothing it does touches the user's session:
+the display, the bus, the HOME and the pointer it drives are all throwaway.
 
 ```bash
 npm test

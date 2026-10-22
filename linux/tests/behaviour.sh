@@ -78,22 +78,29 @@ command -v gdbus     >/dev/null || skip "gdbus (libglib2.0-bin) is not installed
 command -v dbus-send >/dev/null || skip "dbus-send is not installed"
 command -v gcc      >/dev/null || skip "gcc is not installed"
 
-# The bar itself has to be BUILT to be driven, and building needs the X11/cairo
-# DEVELOPMENT headers, not just the runtime tools above. A developer machine
-# without them used to fail `npm test` outright, which contradicts the promise
-# that a missing prerequisite skips cleanly here and fails in CI. A machine that
-# HAS the headers and still fails to build keeps the hard FAIL below.
-buildable() {
+# The suite BUILDS things: its own XTEST driver and shims on every run, and the
+# bar itself when it is not built yet. Both need DEVELOPMENT headers, not just
+# the runtime tools above. A developer machine without them used to fail
+# `npm test` outright, which contradicts the promise that a missing prerequisite
+# skips cleanly here and fails in CI. A machine that HAS the headers and still
+# fails to build keeps the hard FAIL below.
+buildable() { # buildable <pkg-config module>...
     command -v pkg-config >/dev/null || return 1
-    for p in x11 xrender xfixes xcursor cairo dbus-1 fontconfig libcurl; do
+    for p in "$@"; do
         pkg-config --exists "$p" || return 1
     done
     return 0
 }
 
+# the driver is compiled on EVERY run, so its headers are probed on every run too:
+# a bar built by an earlier run must not turn a missing libxtst-dev into a hard
+# FAIL on a developer machine
+buildable x11 xtst || skip "the X11/XTest development headers (libx11-dev, libxtst-dev) are not installed"
+
 BIN="$ROOT/linux/build/chocobar-linux"
 if [ ! -x "$BIN" ]; then
-    buildable || skip "the X11/cairo development headers (pkg-config) are not installed"
+    buildable x11 xrender xfixes xcursor cairo dbus-1 fontconfig libcurl \
+        || skip "the X11/cairo development headers (pkg-config) are not installed"
     echo "--- building the bar"
     bash "$ROOT/linux/build.sh" >/dev/null || { echo "FAIL: the bar does not build"; exit 1; }
 fi
