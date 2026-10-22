@@ -18,14 +18,21 @@
 #   - the pet chip starts and stops the configured process, by the process's
 #     EXECUTED file - never a process name, and never a process that merely
 #     carries the path as an argument - including an env-shebang script the
-#     user starts from its own directory with a relative path, and the children
-#     it leaves behind are reaped, not zombies; a start is logged only once the
-#     kernel took the exec, and a refused one logs "cannot start" and claims
-#     no start at all
+#     user starts from its own directory with a relative path, a version-pinned
+#     interpreter, and a shebang that carries an argument (the script sits at
+#     argv[2] there); and the children it leaves behind are reaped, not
+#     zombies; a start is logged only once the kernel took the exec, and a
+#     refused one logs "cannot start" and claims no start at all
 #   - the click that starts the pet never waits on the child's exec: a slow
 #     exec leaves the bar ticking, answering a right-click and following a
 #     fresh terminal report while the handshake pends, and the outcome still
 #     lands as the one true line
+#   - the parked handshake is BOUNDED: a click refused while it pends is logged
+#     rather than swallowed, and a start that never reports is abandoned and
+#     logged, leaving the bar free to try again
+#   - the bar rides above the terminal at the height it is actually DRAWN with,
+#     so a tiny configured height cannot overlap the terminal, and hides when
+#     there is no room
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -651,6 +658,65 @@ PET
     rm -f "$WORK/pet.pid" "$WORK/pet.state"
 fi
 
+# 6f-4. a SHEBANG THAT CARRIES AN ARGUMENT. The kernel shebang rule is
+#      `<interpreter> [optional-arg] <script>`, so `#!/bin/bash -e` runs as
+#      `/bin/bash|-e|./pet` - the script is at argv[2], not argv[1], and a
+#      matcher that reads only argv[1] sees the interpreter's own option there
+#      and reads the chip "off" while the pet runs. A click then STARTS a second
+#      copy and the stop action can never match either. The pet is started by
+#      the USER the way a user starts one, from its own directory, so the token
+#      is the relative `./pet` the matcher must resolve against that process's
+#      own cwd. /proc/<pid>/cmdline is the oracle, not an assumption: the check
+#      below proves the shape before asserting the chip saw it.
+cat > "$WORK/home/pet" <<PET
+#!/bin/bash -e
+echo \$\$ > "$WORK/pet.pid"
+echo running > "$WORK/pet.state"
+trap 'echo SIGTERM > "$WORK/pet.state"; rm -f "$WORK/pet.pid"; exit 0' TERM
+while :; do sleep 0.2; done
+PET
+chmod +x "$WORK/home/pet"
+rm -f "$WORK/pet.pid" "$WORK/pet.state"
+( cd "$WORK/home" && ./pet >/dev/null 2>&1 & )
+ARG_PID=""
+for _ in $(seq 1 20); do
+    [ -s "$WORK/pet.pid" ] && ARG_PID=$(cat "$WORK/pet.pid" 2>/dev/null) && break
+    sleep 0.1
+done
+# the shape this check exists for: the interpreter, then its option, then the
+# script - three tokens, so argv[1] is an option and only a full scan finds the
+# file
+ARG_ARGV=$(tr '\0' '|' < "/proc/$ARG_PID/cmdline" 2>/dev/null)
+[ -n "$ARG_PID" ] && kill -0 "$ARG_PID" 2>/dev/null &&
+    [ "$(echo "$ARG_ARGV" | cut -d'|' -f1)" = "/bin/bash" ] &&
+    [ "$(echo "$ARG_ARGV" | cut -d'|' -f2)" = "-e" ] &&
+    [ "$(echo "$ARG_ARGV" | cut -d'|' -f3)" = "./pet" ] &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "the pet runs as /bin/bash|-e|./pet (the shebang argument is argv[1], the script argv[2])" $?
+# the chip's state source is the bar's 1 Hz tick, so let one poll see the pet
+# before clicking: the click reads g_m.petRunning, not /proc
+sleep 2
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$STARTED_BEFORE" ] &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] &&
+    ! kill -0 "$ARG_PID" 2>/dev/null
+check "a shebang-with-argument pet is seen: the click stops it, no duplicate start" $?
+[ -n "$ARG_PID" ] && kill -0 "$ARG_PID" 2>/dev/null && kill "$ARG_PID" 2>/dev/null
+# restore the shell-shebang pet the later checks were written against
+cat > "$WORK/home/pet" <<PET
+#!/usr/bin/env bash
+echo \$\$ > "$WORK/pet.pid"
+echo running > "$WORK/pet.state"
+trap 'echo SIGTERM > "$WORK/pet.state"; rm -f "$WORK/pet.pid"; exit 0' TERM
+while :; do sleep 0.2; done
+PET
+chmod +x "$WORK/home/pet"
+rm -f "$WORK/pet.pid" "$WORK/pet.state"
+
 # 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
 #     so a bar that never waits keeps one defunct entry per invocation for as
 #     long as the service runs. One start/stop cycle above and a second one here
@@ -906,6 +972,106 @@ sleep 5.5
     [ "$(grep -c "pet: starting: $WORK/home/notpet" "$WORK/bar4.log" || true)" -eq 0 ] &&
     [ ! -e "$WORK/pet.pid" ]
 check "a second click while the handshake pends forks nothing (one cannot start, no starting)" $?
+
+# 6j-3. the parked handshake has a DEADLINE, and a refused click is never
+#       silent. The pre-deadline bar parked the pipe for ever: a child stuck
+#       inside execv (an unresponsive mount) held the write end open, so every
+#       later click returned at the guard with NO log line at all and the stuck
+#       child was never reaped. Two halves, both observable in the bar's own
+#       log:
+#       (a) while the handshake pends, a click is LOGGED as ignored - the user
+#           made a click and the bar says why nothing happened;
+#       (b) when the budget passes, the tick closes the pipe, logs that the
+#           start never reported, and CLEARS the state - so the bar is not
+#           wedged for ever and the next click can try again.
+#       This needs its OWN bar: the shim's delay is fixed when the bar starts,
+#       and it must outlast the bar's own deadline for the deadline to be what
+#       settles the handshake (the 4 s bar above settles on its exec first,
+#       which is the point of that check). 12 s against a 5 s budget. The child
+#       itself is not killed: its exec still lands when the storage answers, so
+#       the pet runs and the bar reaps it - the deadline stopped the WAIT, not
+#       the child, which is what makes it an honest report rather than a kill.
+cat > "$CFG" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": true, "label": "pet",
+                          "exePath": "$WORK/home/pet" } }
+}
+JSON
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+for _ in $(seq 1 50); do
+    [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
+    sleep 0.05
+done
+CHOCOBAR_TEST_SLOW_EXEC_MS=12000 LD_PRELOAD="$WORK/execslow.so" \
+    HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar6.log" 2>&1 &
+BAR_PID=$!
+BARWIN6=""
+for _ in $(seq 1 60); do
+    BARWIN6=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "${BARWIN6:-}" ] && break
+    sleep 0.2
+done
+[ -n "${BARWIN6:-}" ] || { echo "FAIL: the deadline bar never opened a window"; cat "$WORK/bar6.log"; exit 1; }
+sleep 0.5
+# the report goes to the bar over its own bus name, so it can only be sent
+# once the bar owns it - then the bar sits where the earlier ones did, and the
+# pet chip is at the same offset in the window
+report_fast kitty 900 100 300 1600
+sleep 2
+eval "$(xdotool getwindowgeometry --shell "$BARWIN6")"
+rm -f "$WORK/pet.pid" "$WORK/pet.state"
+DEADLINE_BEFORE=$(grep -c "did not report" "$WORK/bar6.log" || true)
+IGNORED_BEFORE=$(grep -c "this click was ignored" "$WORK/bar6.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+# (a) the refused click: the handshake is still parked, so this click cannot
+#     start anything - and it must say so
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 0.5
+[ "$(grep -c "this click was ignored" "$WORK/bar6.log" || true)" -eq $((IGNORED_BEFORE+1)) ]
+check "a click refused while the handshake pends is logged, not silent" $?
+# and the bar is still live: the loop never parked on the child's exec
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+menu_open
+check "the bar still opens the menu while the handshake pends" $?
+"$XCLICK" 100 300 1 full
+sleep 0.5
+# (b) the deadline: the tick gives up waiting, logs it, and clears the state
+wait_log "did not report within" 12 "$WORK/bar6.log"
+DEADLINE_HIT=$?
+sleep 0.5
+[ "$DEADLINE_HIT" -eq 0 ] &&
+    [ "$(grep -c "did not report" "$WORK/bar6.log" || true)" -eq $((DEADLINE_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar6.log" || true)" -eq 0 ] &&
+    [ "$(grep -c "pet: cannot start" "$WORK/bar6.log" || true)" -eq 0 ]
+check "the parked handshake reports that its start never reported, and claims no start" $?
+# the abandoned child still lands its exec: the deadline stopped the WAIT, not
+# the child, so the pet runs - the pet's own pid file is the oracle, because
+# the bar had already given the handshake up and never heard the exec
+for _ in $(seq 1 200); do
+    [ -s "$WORK/pet.pid" ] && break
+    sleep 0.1
+done
+sleep 2
+[ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "the abandoned child still lands its exec, and the pet runs" $?
+# and the chip can stop it: the chip's state source is the 1 Hz matcher, which
+# sees the pet the abandoned child started, so the click takes the STOP path
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
+check "the pet the deadline did not kill is stopped by a click and leaves no zombie" $?
 
 # back to the ordinary bar: the shim was this check's tool, not a property of
 # the bar, and the sections below were written against an unshimmed one
@@ -1255,6 +1421,75 @@ check "the bar appears once a roomy terminal is reported" $?
 want_all_desktops "$BARWIN3" &&
     [ "$(grep -c '_NET_WM_DESKTOP 4294967295' "$CLIENTMSG" || true)" -gt "$ALLDESK_BEFORE" ]
 check "the bar mapped by the tick asks for all desktops like a startup map" $?
+
+# 12. the y is derived from the height the bar is DRAWN with, never from the raw
+#     configured height. A configured height below 8 device px is unreadable, so
+#     the bar is drawn 24 device px tall instead - and with the raw height in the
+#     y arithmetic the strip's bottom edge sat about 16 logical px BELOW the
+#     terminal's top edge, i.e. the bar overlapped the very terminal it is meant
+#     to ride above. The observable is the window's own geometry on a bar
+#     started with the tiny height (the config is read at startup). This runs
+#     last because it is the only check that needs its own bar height: the
+#     sections above measure the 30 px bar.
+#
+#     The scale is read off this bar's own WIDTH against the reported terminal
+#     width, not off its height: the clamp makes the drawn height exactly 24
+#     DEVICE px for every scale, so the height carries no scale information at
+#     all (reading it back would always yield 1.0). The terminal is reported
+#     WIDE enough that the width cannot be the chips' own, and the assertion
+#     below proves it: a content-sized bar would be narrower than the report.
+cat > "$CFG" <<JSON
+{
+  "bar": { "height": 4, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": false, "label": "pet",
+                          "exePath": "$WORK/home/pet" } }
+}
+JSON
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+for _ in $(seq 1 50); do
+    [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
+    sleep 0.05
+done
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar5.log" 2>&1 &
+BAR_PID=$!
+BARWIN5=""
+for _ in $(seq 1 60); do
+    BARWIN5=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "${BARWIN5:-}" ] && break
+    sleep 0.2
+done
+[ -n "${BARWIN5:-}" ] || { echo "FAIL: the tiny-height bar never opened a window"; cat "$WORK/bar5.log"; exit 1; }
+sleep 0.5
+# the report goes to the bar over its own bus name, so it can only be sent
+# once the bar owns it
+report_fast kitty 1200 0 300 1600
+sleep 2
+eval "$(xdotool getwindowgeometry --shell "$BARWIN5")"
+# the width must be the REPORT's width in device px (the terminal is far wider
+# than the bar's own chips), which is what makes the scale readable
+[ "$WIDTH" -ge 1200 ]
+check "the tiny bar took the reported terminal's width (w=$WIDTH, report 1200 logical)" $?
+TINY_SCALE=$(awk -v w="$WIDTH" 'BEGIN{printf "%.4f", w/1200.0}')
+# the drawn height is the clamp's 24 DEVICE px whatever the scale is
+[ "$HEIGHT" -eq 24 ]
+check "the tiny configured height is drawn as the 24 device px floor (h=$HEIGHT)" $?
+# the strip's bottom edge must sit the gap above the terminal's top edge - both
+# in device px: the terminal's top is 300 logical px, the gap 12 logical px
+BOTTOM=$((Y+HEIGHT))
+WANT_BOTTOM=$(awk -v s="$TINY_SCALE" 'BEGIN{printf "%.0f", (300-12)*s}')
+[ "$BOTTOM" -ge $((WANT_BOTTOM-3)) ] && [ "$BOTTOM" -le $((WANT_BOTTOM+3)) ]
+check "the tiny bar's bottom edge rides the gap above the terminal (bottom=$BOTTOM want~$WANT_BOTTOM, y=$Y h=$HEIGHT scale=$TINY_SCALE)" $?
+# and it must not overlap the terminal at all
+OVERLAP=$(awk -v b="$BOTTOM" -v s="$TINY_SCALE" 'BEGIN{printf "%d", (b > 300*s) ? 1 : 0}')
+[ "$OVERLAP" -eq 0 ]
+check "the tiny bar's bottom edge stays above the terminal's top edge (no overlap)" $?
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"

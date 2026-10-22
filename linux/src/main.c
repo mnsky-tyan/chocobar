@@ -786,6 +786,18 @@ static void resizeWindow(int w, int h) {
 // the OLD rounded rect, and a surface kept at the old size paints into freed
 // memory. Every size change in this file goes through resizeWindow() so the
 // three-step invariant (window, surface, shape) holds by construction.
+// The effective bar height in LOGICAL px - the config's own unit - with ONE
+// definition of the clamp: a height the bar would draw below 8 device px is
+// raised to 24 DEVICE px (24/scale logical). resizeToContent() draws it and
+// barYFor() derives y from it, so the two can never disagree: with the raw
+// configured height a short bar's bottom edge would sit below the terminal's top
+// edge and overlap it.
+static double barHeightLogical(void) {
+    double h = cbCfgHeight();
+    if ((int)(h * g_scale + 0.5) < 8) h = 24 / g_scale;
+    return h;
+}
+
 static void resizeToContent(void) {
     // width from the chips: pads + chips + the gaps between them. The two groups
     // are measured independently and then summed, because the gap between the
@@ -811,8 +823,7 @@ static void resizeToContent(void) {
         // would clip them, so the chips win and the bar sticks out
         if (aw > w) w = aw;
     }
-    int h = (int)(cbCfgHeight() * g_scale + 0.5);
-    if (h < 8) h = 24;
+    int h = (int)(barHeightLogical() * g_scale + 0.5);
     resizeWindow(w, h);
 }
 
@@ -843,8 +854,10 @@ static int barYFor(void) {
     if (cbCfgAlign() == 1 && g_geom.valid && time(NULL) - g_geomAt < 30) {
         // g_geom carries LOGICAL pixels (KWin's coordinate space); the config's
         // height and gap are CSS px, so the arithmetic stays logical and only
-        // the result is scaled - exactly p_ui.c's ef.top - bh - gap.
-        int yLog = g_geom.y - cbCfgHeight() - cbCfgGap();
+        // the result is scaled - exactly p_ui.c's ef.top - bh - gap. bh is the
+        // DRAWN height (barHeightLogical, the clamped one), so the strip's
+        // bottom edge always sits the gap above the terminal's top edge.
+        int yLog = g_geom.y - (int)(barHeightLogical() + 0.5) - cbCfgGap();
         if (yLog < 0) return -1;
         return (int)(yLog * g_scale + 0.5);
     }
@@ -1429,9 +1442,16 @@ static void spawnDetached(const char *argv0, const char *argv1) {
 // One pet-start handshake may be in flight at a time: the click parks the
 // CLOEXEC pipe's read end here and returns, and the tick settles it
 // (petHandshakeDrain) - no click ever waits on a fork child's exec, so a slow
-// exec can never park the bar's single event loop with it.
+// exec can never park the bar's single event loop with it. The park is BOUNDED:
+// a child that never lands its exec (an unresponsive mount, a stopped child)
+// holds the write end open, so the tick closes the pipe and reports an
+// unsettled start once PET_HANDSHAKE_MS has passed. Without that deadline the
+// pipe stays parked for ever, every later click is refused with no log line at
+// all, and the stuck child is never reaped.
+#define PET_HANDSHAKE_MS 5000
 static int g_petPipe = -1;
 static char g_petPipePath[512];
+static struct timespec g_petPipeAt;   // when the handshake was parked
 
 static void petToggle(void) {
     char petPath[512] = {0};
@@ -1449,8 +1469,14 @@ static void petToggle(void) {
         return;
     }
     // the matcher cannot see a fork whose exec has not landed yet, so a second
-    // click inside that window would start a duplicate: one handshake at a time
-    if (g_petPipe >= 0) return;
+    // click inside that window would start a duplicate: one handshake at a time.
+    // The refusal is LOGGED: a click the user made must never be silent, so a
+    // pending handshake reports itself rather than swallowing the click.
+    if (g_petPipe >= 0) {
+        fprintf(stderr, "chocobar: pet: start of %s has not reported yet, "
+                        "this click was ignored\n", g_petPipePath);
+        return;
+    }
     // The exec's outcome comes back over a CLOEXEC pipe: the write end closes
     // at a successful exec, and a failed exec writes the errno and exits. The
     // click never waits for it - the pipe is parked and the tick settles it,
@@ -1521,7 +1547,9 @@ static void petToggle(void) {
     }
     close(wfd);
     // the click's work is done: the handshake is parked for the tick, and a
-    // slow exec holds nothing but this pipe
+    // slow exec holds nothing but this pipe. The park is stamped so the tick can
+    // enforce its deadline.
+    clock_gettime(CLOCK_MONOTONIC, &g_petPipeAt);
     snprintf(g_petPipePath, sizeof g_petPipePath, "%s", petPath);
     g_petPipe = pfd[0];
 }
@@ -1529,12 +1557,31 @@ static void petToggle(void) {
 // Settle the parked pet-start handshake, from the tick: bytes on the pipe are
 // the child's refused-exec errno, EOF is the write end dying with a successful
 // exec, and EAGAIN means the exec is still in flight - the handshake settles
-// whenever it settles, and the bar keeps ticking meanwhile.
+// whenever it settles, and the bar keeps ticking meanwhile. A park that has
+// outlived PET_HANDSHAKE_MS is abandoned: closing the read end releases the
+// child (its write end then fails or is inherited, and the ordinary child
+// reaping collects it once it exits), the state clears so the next click can
+// try again, and the log carries the truth - the start never reported, so
+// nothing claims it started. The deadline never costs a working start: an exec
+// that lands reports its outcome first, and this branch is only reached when
+// nothing has been reported for the whole budget.
 static void petHandshakeDrain(void) {
     if (g_petPipe < 0) return;
     int execErr = 0;
     ssize_t got = read(g_petPipe, &execErr, sizeof execErr);
-    if (got < 0) return;
+    if (got < 0) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed = (now.tv_sec - g_petPipeAt.tv_sec) * 1000 +
+                       (now.tv_nsec - g_petPipeAt.tv_nsec) / 1000000;
+        if (elapsed < PET_HANDSHAKE_MS) return;
+        close(g_petPipe);
+        g_petPipe = -1;
+        fprintf(stderr, "chocobar: pet: start of %s did not report within "
+                        "%d ms, the start is not confirmed\n",
+                g_petPipePath, PET_HANDSHAKE_MS);
+        return;
+    }
     close(g_petPipe);
     g_petPipe = -1;
     if (got == (ssize_t)sizeof execErr) {
@@ -1933,7 +1980,7 @@ int main(int argc, char **argv) {
     scanIfDue(time(NULL));
     buildChips();
 
-    g_w = 10; g_h = (int)(cbCfgHeight() * g_scale + 0.5);
+    g_w = 10; g_h = (int)(barHeightLogical() * g_scale + 0.5);
     // With bar.align 1 the width comes from the terminal, so give the KWin helper
     // a moment to report before sizing: otherwise the window is born at the
     // content width and visibly pops to the terminal width a second later.

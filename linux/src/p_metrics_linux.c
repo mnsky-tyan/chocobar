@@ -522,11 +522,11 @@ static int gpuPercent(void) {
 // identified by the process's EXECUTED file, never by a process that merely
 // mentions the path: argv[0] is the configured path (or its realpath), or - for
 // a shebang script, where the kernel runs the interpreter - argv[0] names an
-// interpreter and argv[1] is the configured path, as invoked - absolute when
-// the bar starts it, relative to that process's own cwd when the user starts
-// the pet as `./pet`. No other token position counts, so `tail -f <path>`,
-// `sh -c <path>` and an editor with the file open are not the pet, and the
-// stop path cannot SIGTERM them.
+// interpreter and the configured path is one of the tokens after it, as invoked
+// - absolute when the bar starts it, relative to that process's own cwd when
+// the user starts the pet as `./pet`. No other token position counts, so
+// `tail -f <path>`, `sh -c <path>` and an editor with the file open are not the
+// pet, and the stop path cannot SIGTERM them.
 // Never comm, never a basename, never a substring - comm is the kernel's
 // truncated basename, so matching it makes a bare configured name hit every
 // process carrying that name, and the stop path signals whatever it matched.
@@ -642,7 +642,19 @@ static int isInterpreter(const char *argv0) {
 
 // 1 = argv[0] is the executed file (the path, its realpath, or the same file
 // written relative to the process's own cwd), or argv[0] is an interpreter and
-// argv[1] is. Any other token position is an argument, not the executed file.
+// one of the tokens after it is. Any other token position is an argument, not
+// the executed file.
+//
+// When argv[0] is an interpreter the script is somewhere AFTER it, not always
+// at argv[1]: the kernel shebang rule is `<interpreter> [optional-arg]
+// <script>`, so `#!/bin/bash -e` runs as `/bin/bash|-e|./sbarg.sh` and
+// `#!/usr/bin/env -S python3 -u` runs as `python3|-u|<script>` - the script is
+// argv[2] there, and a matcher that reads only argv[1] reads such a pet as
+// "off", starts a second copy on the next click and can never stop either.
+// Every token after the interpreter is therefore examined, because each is
+// either the interpreter's own options or the script. A NON-interpreter argv[0]
+// still matches only at argv[0] itself, so `tail -f <path>`, `ls <path>` and an
+// editor with the file open are not the pet.
 static int petPidMatches(const char *pidName, const char *path, const char *real) {
     char p[300];
     snprintf(p, sizeof(p), "/proc/%s/cmdline", pidName);
@@ -652,19 +664,26 @@ static int petPidMatches(const char *pidName, const char *path, const char *real
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
-    char *argv[2] = { NULL, NULL };
-    for (size_t i = 0, a = 0; i < n && a < 2; a++) {
-        argv[a] = buf + i;
-        i += strlen(buf + i) + 1;
+    // argv[0], then every token after it when argv[0] is an interpreter: a
+    // shebang argument can sit at argv[1], so the script's own position is not
+    // fixed and only the scan finds it.
+    int found = 0;
+    size_t i = 0;
+    for (int a = 0; i < n && !found; a++) {
+        char *tok = buf + i;
+        i += strlen(tok) + 1;
+        if (!*tok) continue;
+        if (a == 0) {
+            if (petTokenIsFile(tok, pidName, path, real, 0)) found = 1;
+            // the interpreter itself is never the file, so the tokens after it
+            // are the only place the script can be
+            if (!found && !isInterpreter(tok)) break;
+            continue;
+        }
+        if (petTokenIsFile(tok, pidName, path, real, 1)) found = 1;
     }
-    if (!argv[0] || !*argv[0]) return 0;
-    if (petTokenIsFile(argv[0], pidName, path, real, 0)) return 1;
-    if (argv[1] && *argv[1] && isInterpreter(argv[0]) &&
-        petTokenIsFile(argv[1], pidName, path, real, 1))
-        return 1;
-    return 0;
+    return found;
 }
-
 // ---- the tick ------------------------------------------------------------------
 int petProcessRunning(const char *exePath) {
     if (!petPathUsable(exePath)) return 0;
