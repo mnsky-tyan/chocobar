@@ -1316,6 +1316,13 @@ eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
 [ "$WIDTH" -ge 80 ] && [ "$WIDTH" -gt "$WANT_NARROW" ]
 check "a terminal narrower than the bar does not shrink it (w=$WIDTH, the report said 60 logical)" $?
 
+# The autostart child's own budget path is not covered by these checks: the
+# fakes answer immediately, and the case that would tell a bounded reap from a
+# blocking wait - a child that survives SIGKILL in uninterruptible sleep -
+# cannot be made deterministically in this harness (it needs a hung kernel
+# resource such as a wedged mount), so runTimed's kill window is trusted from
+# reading it, not from a click.
+#
 # 7b. a menu open spawns the autostart child whose stderr pipe is the one that
 #     used to hang the bar (the fake systemctl writes to stderr and exits): the
 #     menu must open anyway - the spawn, the stderr drain and the wait all

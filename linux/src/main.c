@@ -1345,8 +1345,9 @@ static void runDashboard(void) {
 // Reap every child of the bar that has exited. The pet and the detached spawns
 // are fire-and-forget, and a long-lived service that never waits keeps one
 // defunct entry per invocation for as long as it runs. runTimed's child is
-// spawned and waited inside one call and this runs from the same single event
-// loop, so it never takes a child that call still owns.
+// spawned and waited inside one call - a corpse that outlives its kill budget
+// is abandoned for exactly this loop to collect - and this runs from the same
+// single event loop, so it never takes a child that call still owns.
 static void reapChildren(void) {
     while (waitpid(-1, NULL, WNOHANG) > 0) { }
 }
@@ -1602,11 +1603,15 @@ static void configDirOf(char *out, size_t cap) {
 // child's exit status (0..255), or -1 when the spawn failed or the budget ran
 // out. systemctl --user is a local, fast operation (measured: under 10 ms), but a
 // wedged one must not stall the bar's loop: the budget kills it and the caller
-// reports the failure. The budget BOUNDS the stall, it does not eliminate it:
-// runTimed is synchronous inside the bar's single event loop, so a slow child
-// delays whatever the loop was about to do (a menu open, a clock tick) by up to
-// the budget, and the toggle path pays it twice (is-enabled + enable). Bounded
-// and deliberate.
+// reports the failure. SIGKILL is not instant - a child in uninterruptible
+// sleep takes the signal only when the kernel releases it - so the kill gets
+// the same budget to land, reaped without blocking, and a corpse that never
+// arrives is left to the ordinary child reaping (reapChildren) instead of
+// waited for. The budget BOUNDS the stall, it does not eliminate it: runTimed
+// is synchronous inside the bar's single event loop, so a slow child delays
+// whatever the loop was about to do (a menu open, a clock tick) by up to the
+// budget, twice while a killed child lingers, and the toggle path pays it
+// twice (is-enabled + enable). Bounded and deliberate.
 //
 // out/err (either may be NULL) receive the child's stdout and stderr, truncated
 // and NUL-terminated. stdout is captured because systemctl reports a unit's
@@ -1707,7 +1712,18 @@ static int runTimed(const char *const argv[], long budgetMs,
         long elapsed = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
         if (elapsed >= budgetMs) {
             kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (;;) {
+                if (outOpen) captureDrain(outfds[0], out, outCap, &outLen);
+                if (errOpen) captureDrain(errfds[0], err, errCap, &errLen);
+                pid_t kr = waitpid(pid, &status, WNOHANG);
+                if (kr == pid || kr < 0) break;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long killWait = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+                if (killWait >= budgetMs) break;
+                struct timespec kw = { 0, 2 * 1000 * 1000 };
+                nanosleep(&kw, NULL);
+            }
             if (outOpen) close(outfds[0]);
             if (errOpen) close(errfds[0]);
             return -1;
