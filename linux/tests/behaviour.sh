@@ -21,8 +21,9 @@
 #     EXECUTED file - never a process name, and never a process that merely
 #     carries the path as an argument - including an env-shebang script the
 #     user starts from its own directory with a relative path, a version-pinned
-#     interpreter, and a shebang that carries an argument (the script sits at
-#     argv[2] there), and never a process that carries the path as an ARGUMENT
+#     interpreter, a shebang that carries an argument (the script sits at
+#     argv[2] there), a SYMLINK to the configured file and a redundant absolute
+#     spelling of it, and never a process that carries the path as an ARGUMENT
 #     to an interpreter - a later token, a "-c" or bundled "-ec" command, a
 #     `node -e` / `perl -e` command, or a relative name - while a value-taking
 #     option before the script (`#!/usr/bin/env -S python3 -X utf8`) is still
@@ -40,6 +41,11 @@
 #   - the bar rides above the terminal at the height it is actually DRAWN with,
 #     so a tiny configured height cannot overlap the terminal, and hides when
 #     there is no room
+#   - the scale every expected pixel value is derived from is the one the bar
+#     itself detects off the server - the root's Xft.dpi resource, else the
+#     screen's physical DPI - never a ratio assumed off the bar's rounded
+#     height, so the pixel bands keep their margin under any DPI the server
+#     reports
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -66,6 +72,7 @@ command -v Xvfb      >/dev/null || skip "Xvfb is not installed"
 command -v dbus-daemon >/dev/null || skip "dbus-daemon is not installed"
 command -v xwininfo  >/dev/null || skip "xwininfo (x11-utils) is not installed"
 command -v xprop     >/dev/null || skip "xprop (x11-utils) is not installed"
+command -v xdpyinfo  >/dev/null || skip "xdpyinfo (x11-utils) is not installed"
 command -v xdotool   >/dev/null || skip "xdotool is not installed"
 command -v gdbus     >/dev/null || skip "gdbus (libglib2.0-bin) is not installed"
 command -v dbus-send >/dev/null || skip "dbus-send is not installed"
@@ -267,7 +274,11 @@ xdg_opens_n() { if [ -f "$WORK/xdg-open-calls" ]; then wc -l < "$WORK/xdg-open-c
 # ---- the private display and bus -----------------------------------------
 DPYNUM=$(( 90 + RANDOM % 8 ))
 while [ -e "/tmp/.X11-unix/X$DPYNUM" ]; do DPYNUM=$((DPYNUM+1)); done
-Xvfb ":$DPYNUM" -screen 0 1600x400x24 >"$WORK/xvfb.log" 2>&1 &
+# the bar scales by whatever THIS server reports, and the arguments are
+# overridable so the gate can be run under another DPI configuration
+# (CHOCOBAR_TEST_XVFB_ARGS='-screen 0 1600x400x24 -dpi 120') to prove the
+# expectations follow the server instead of assuming one scale
+Xvfb ":$DPYNUM" ${CHOCOBAR_TEST_XVFB_ARGS:--screen 0 1600x400x24} >"$WORK/xvfb.log" 2>&1 &
 XPID=$!
 export DISPLAY=":$DPYNUM"
 for _ in $(seq 1 50); do xwininfo -root >/dev/null 2>&1 && break; sleep 0.2; done
@@ -286,6 +297,17 @@ for _ in $(seq 1 50); do [ -S "$WORK/bus" ] && break; sleep 0.2; done
 MON_PID=$!
 sleep 0.3
 kill -0 "$MON_PID" 2>/dev/null || { echo "FAIL: the ClientMessage monitor did not start"; exit 1; }
+# a real session carries an Xft.dpi resource and the bar lets it decide the
+# scale before any physical size does, so the gate can set one - xprop writes
+# the root property exactly as xrdb would - and run under a scale the
+# RESOURCE chose rather than the screen size (CHOCOBAR_TEST_XFT_DPI=120).
+# The monitor above must already be running: it is the client that keeps the
+# server open, and a server left with no client at all RESETS itself -
+# wiping the root property - so this is the earliest spot the value survives
+# until the bar connects and reads it
+if [ -n "${CHOCOBAR_TEST_XFT_DPI:-}" ]; then
+    xprop -root -f RESOURCE_MANAGER 8s -set RESOURCE_MANAGER "Xft.dpi: ${CHOCOBAR_TEST_XFT_DPI}"
+fi
 # how many EWMH all-desktops requests did the bar send for that window? The
 # window id alone is not enough: Xvfb recycles a client's id range, so a bar
 # restarted in the same suite can be handed a previous bar's window id.
@@ -313,10 +335,53 @@ echo "--- bar window $BARWIN at ${X},${Y} ${WIDTH}x${HEIGHT}"
 # bar lives on every desktop, not just the one it happened to map on
 want_all_desktops "$BARWIN"
 check "the bar requests all desktops when it maps" $?
-# the report and the config are in LOGICAL pixels and the bar scales them. The
-# scale is read off the bar's own height (height = bar.height logical px *
-# scale), so every expected pixel value below is derived, not assumed.
-SCALE=$(awk -v h="$HEIGHT" 'BEGIN{printf "%.4f", h/30.0}')
+# the report and the config are in LOGICAL pixels and the bar scales them, so
+# every expected pixel value below is derived, not assumed. The scale must be
+# the bar's own, read off the same server the bar reads it (main.c:
+# detectScale()): the root's Xft.dpi resource decides, and only when that
+# leaves the scale at or below 1.01 does the screen's physical size - pixels
+# over millimetres, via xdpyinfo - take over, clamped to [1, 4]. A scale
+# derived from the bar's own window height instead only tells the scale to
+# the half pixel that height rounds to: half a pixel in 30 is up to 15 px on a
+# 900-logical-px width, more than the 8 px the bands below allow - on the
+# ~1.04 scale a plain Xvfb reports (height 31: 31/30 against the real 1.0427)
+# the width band's edge sat ON the real value and one pixel of drift turned
+# the gate red. This derivation matches the bar's own to the four decimals it
+# prints - under 0.05 px at 900 px - so the whole 8 px of every band below
+# is margin.
+bar_scale() {
+    awk -v dpi_str="$(
+        xprop -root RESOURCE_MANAGER 2>/dev/null | awk '
+            { i = index($0, "Xft.dpi:")
+              if (i) { rest = substr($0, i + 8)
+                       sub(/^[^0-9.+-]*/, "", rest)   # xprop renders a tab as \t
+                       print rest + 0; exit } }'
+    )" -v dims="$(
+        xdpyinfo | sed -n 's/^ *dimensions: *\([0-9]*\)x[0-9]* pixels (\([0-9]*\)x[0-9]* millimeters.*/\1 \2/p' | head -1
+    )" 'BEGIN {
+        s = 1.0
+        if (dpi_str != "" && dpi_str > 40 && dpi_str < 1000) s = dpi_str / 96.0
+        if (s <= 1.01) {
+            split(dims, a, " ")
+            if (a[2] > 0) {
+                d = a[1] * 25.4 / a[2]
+                if (d > 40 && d < 1000) s = d / 96.0
+            }
+        }
+        if (s < 1.0) s = 1.0
+        if (s > 4.0) s = 4.0
+        printf "%.4f", s
+    }'
+}
+SCALE=$(bar_scale)
+# and the derivation is proved against the bar itself on every run: the bar's
+# own height is 30 logical px times ITS scale, rounded to whole device
+# pixels, so a measured height more than a pixel away means the derivation
+# above and the bar's detectScale() have parted ways and every expectation
+# below is scaled by the wrong number
+H_EXPECT=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 30*s}')
+[ "$HEIGHT" -ge $((H_EXPECT-1)) ] && [ "$HEIGHT" -le $((H_EXPECT+1)) ]
+check "the derived scale is the bar's own (h=$HEIGHT, 30*${SCALE}=$H_EXPECT)" $?
 
 # how many mapped windows does the root have? the menu is an extra one. The
 # baseline is MEASURED, never assumed: the bar itself is not one root child but
@@ -628,6 +693,64 @@ sleep 1.2
 check "the chip sees a relative-path pet: the click stops it, no duplicate start" $?
 [ -n "$USER_PID" ] && kill -0 "$USER_PID" 2>/dev/null && kill "$USER_PID" 2>/dev/null
 # the click above already stopped it, so the zombie check below starts stopped
+
+# 6f-2b. the same file under another ABSOLUTE spelling: a SYMLINK to the
+#       configured file. The kernel hands the interpreter the script path
+#       exactly as the user typed it, so starting the pet through a symlink
+#       runs it as `<interpreter>|<symlink path>` - a token that is neither
+#       the configured path nor its realpath, though the file is the same one.
+#       A matcher that decides an absolute token by string comparison alone
+#       reads the chip "off" while the pet runs, so the click starts a
+#       duplicate it can then never stop.
+ln -s "$WORK/home/pet" "$WORK/home/petlink"
+"$WORK/home/petlink" >/dev/null 2>&1 &
+LINK_PID=""
+for _ in $(seq 1 20); do
+    [ -s "$WORK/pet.pid" ] && LINK_PID=$(cat "$WORK/pet.pid" 2>/dev/null) && break
+    sleep 0.1
+done
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+[ -n "$LINK_PID" ] && kill -0 "$LINK_PID" 2>/dev/null &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "a pet started through a symlink to it is alive and recording" $?
+# the chip's state source is the 1 Hz tick, so let one poll see the pet
+# before clicking: the click reads g_m.petRunning, not /proc
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$STARTED_BEFORE" ] &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+check "the chip sees a symlink-started pet: the click stops it, no duplicate start" $?
+[ -n "$LINK_PID" ] && kill -0 "$LINK_PID" 2>/dev/null && kill "$LINK_PID" 2>/dev/null
+rm -f "$WORK/home/petlink"
+
+# 6f-2c. the same file under a REDUNDANT absolute spelling: `$WORK/home/./pet`
+#       runs as `<interpreter>|$WORK/home/./pet`, which is not the configured
+#       path by bytes either - the same trap as the symlink above, spelled
+#       without any symlink
+"$WORK/home/./pet" >/dev/null 2>&1 &
+DOT_PID=""
+for _ in $(seq 1 20); do
+    [ -s "$WORK/pet.pid" ] && DOT_PID=$(cat "$WORK/pet.pid" 2>/dev/null) && break
+    sleep 0.1
+done
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
+STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+[ -n "$DOT_PID" ] && kill -0 "$DOT_PID" 2>/dev/null &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
+check "a pet started through a redundant path spelling is alive and recording" $?
+# the chip's state source is the 1 Hz tick, so let one poll see the pet
+# before clicking: the click reads g_m.petRunning, not /proc
+sleep 2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.2
+[ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$STARTED_BEFORE" ] &&
+    [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
+check "the chip sees a redundantly-spelled pet: the click stops it, no duplicate start" $?
+[ -n "$DOT_PID" ] && kill -0 "$DOT_PID" 2>/dev/null && kill "$DOT_PID" 2>/dev/null
 
 # 6f-3. a VERSION-PINNED interpreter. The kernel names the live process after the
 #      interpreter the shebang finally selected, version included: an

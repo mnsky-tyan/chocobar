@@ -35,7 +35,9 @@ void linuxMetricsPrime(void);
 // kernel shebang rule is `<interpreter> [optional-arg] <script>`, so a shebang
 // that carries an argument or a value-taking option (`#!/usr/bin/env -S python3
 // -X utf8`) puts the script further along - with a relative token resolved
-// against that process's own cwd. The scan stops at that token: every token
+// against that process's own cwd, and any other absolute spelling compared by
+// realpath (a symlink to the file, `/x/./pet`), because the kernel hands the
+// path on exactly as it was typed. The scan stops at that token: every token
 // after it is an argument to the script, never the file the kernel executed, so
 // `python3 report.py <path>` runs report.py and is not the pet. An option that
 // takes a command rather than a script ends the scan too, in every spelling and

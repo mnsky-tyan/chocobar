@@ -587,7 +587,17 @@ static int petTokenIsFile(const char *token, const char *pidName,
                            const char *path, const char *real, int scriptPath) {
     if (!token || !*token) return 0;
     if (!strcmp(token, path) || (real[0] && !strcmp(token, real))) return 1;
-    if (token[0] == '/') return 0;              // absolute and not the file
+    if (token[0] == '/') {
+        // an absolute token the comparison above did not catch is decided by
+        // what it resolves to, not by its bytes: a symlink to the file,
+        // /x/./pet - the kernel hands the path on exactly as it was typed -
+        // is still the file, and a token that resolves to nothing cannot be it
+        char *rp = realpath(token, NULL);
+        if (!rp) return 0;
+        int ok = !strcmp(rp, path) || (real[0] && !strcmp(rp, real));
+        free(rp);
+        return ok;
+    }
     if (!scriptPath && !strchr(token, '/')) return 0;   // a bare name is a name
     char link[4096];
     char cwd[300];
