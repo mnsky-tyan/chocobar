@@ -19,7 +19,9 @@
 #     EXECUTED file - never a process name, and never a process that merely
 #     carries the path as an argument - including an env-shebang script the
 #     user starts from its own directory with a relative path, and the children
-#     it leaves behind are reaped, not zombies
+#     it leaves behind are reaped, not zombies; a start is logged as the attempt
+#     it is (before the exec) and a failed one adds "cannot start", so no line
+#     ever claims a start the kernel never performed
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -87,7 +89,6 @@ cleanup() {
     if [ -s "$WORK/pet.pid" ]; then kill "$(cat "$WORK/pet.pid")" 2>/dev/null; fi
     [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
     [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
-    rm -f /tmp/chocobar-events.log
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -118,7 +119,7 @@ mkdir -p "$WORK/home/.wizbar" "$WORK/fakebin" "$WORK/decoy"
 # the pet module is FIRST (the leftmost left-group chip) and the tokens chip is
 # disabled, so every left click on the bar either hits the pet chip or is inert
 # - the pet chip can be FOUND by clicking x offsets and watching for the bar's
-# own "pet: started" log line
+# own "pet: starting" log line
 cat > "$WORK/home/.wizbar/config.json" <<JSON
 {
   "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
@@ -403,7 +404,7 @@ check "with no geometry report the bar falls back to the screen top (y=$Y want~$
 # 6c. THE PET CHIP. The config wires the fake pet as the FIRST (and only
 #     left-group) chip; the other clickable chip (tokens, which opens the
 #     dashboard) is disabled, so the pet chip can be found safely by clicking
-#     x offsets and watching for the bar's own "pet: started" log line.
+#     x offsets and watching for the bar's own "pet: starting" log line.
 #     The DECOY runs first: its executable is named like the pet's basename,
 #     so its comm IS the pet's basename while its cmdline carries a different
 #     path - the process a name-based match would stop.
@@ -416,10 +417,16 @@ PET_X=0
 for xoff in 20 30 40 50 60 70 80; do
     "$XCLICK" $((X+xoff)) $((Y+10)) 1 full
     sleep 0.4
-    if grep -q "pet: started" "$WORK/bar.log"; then PET_X=$xoff; break; fi
+    if grep -q "pet: starting" "$WORK/bar.log"; then PET_X=$xoff; break; fi
 done
 [ "$PET_X" -gt 0 ]
 check "a click on the pet chip starts the pet (chip found at x offset $PET_X)" $?
+# one start, one line, and it is the truth: the child logs the attempt BEFORE
+# the exec, so a successful start has "starting" and no "cannot start" - the
+# bar never claims a start it did not get
+grep -q "pet: starting: $WORK/home/pet" "$WORK/bar.log" &&
+    ! grep -q "pet: cannot start $WORK/home/pet" "$WORK/bar.log"
+check "a successful start logs 'starting' and no 'cannot start'" $?
 # the started pet must be the configured script and be alive: it recorded its
 # pid (the file exists) and its state is "running"
 [ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null &&
@@ -430,10 +437,10 @@ check "the started pet is alive and recorded itself" $?
 #     /proc/<pid>/cmdline) saw the started pet, so the toggle must STOP it -
 #     one start, one stop, and the pet's own record shows a SIGTERM (a SIGKILL
 #     would leave the pid file in place with the state "running"; a blind
-#     duplicate start would log a second "pet: started" line)
+#     duplicate start would log a second "pet: starting" line)
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.2
-grep -q "pet: stopped" "$WORK/bar.log" && [ "$(grep -c "pet: started" "$WORK/bar.log")" -eq 1 ] &&
+grep -q "pet: stopped" "$WORK/bar.log" && [ "$(grep -c "pet: starting" "$WORK/bar.log")" -eq 1 ] &&
     [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
 check "the second click stops the pet with a SIGTERM, not a duplicate, not a SIGKILL" $?
 
@@ -446,7 +453,7 @@ check "the second click stops the pet with a SIGTERM, not a duplicate, not a SIG
 #       clickable chip in this config (tokens are disabled). The counts, not a
 #       grep, are the oracle: the bar's log already carries pet lines from the
 #       checks above.
-PET_STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+PET_STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
 PET_STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
 # the chip's state comes from the bar's 1 Hz tick and 6d just stopped the pet:
 # let a tick pass so the chip reads "off" before anything is clicked
@@ -467,7 +474,7 @@ while [ "$off" -gt 90 ] && [ "$off" -lt "$WIDTH" ]; do
 done
 sleep 0.6
 [ "$RIGHT_HITS" -ge 8 ] &&
-    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq "$PET_STARTED_BEFORE" ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$PET_STARTED_BEFORE" ] &&
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$PET_STOPPED_BEFORE" ] &&
     [ "$(root_children)" -eq "$ROOT_BEFORE" ]
 check "a left click on a right-group metric chip does nothing ($RIGHT_HITS clicks, no action)" $?
@@ -475,7 +482,7 @@ check "a left click on a right-group metric chip does nothing ($RIGHT_HITS click
 sleep 2
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 2
-[ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((PET_STARTED_BEFORE+1)) ] &&
+[ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((PET_STARTED_BEFORE+1)) ] &&
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$PET_STOPPED_BEFORE" ]
 check "the bar still answers a click after the right-group clicks" $?
 # stop it again, so the checks below start from a stopped pet
@@ -500,11 +507,11 @@ check "the name-twin decoy survives the pet's stop (never a process name)" $?
 ARGDECOY_PID=$!
 sleep 0.3
 STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
-STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.2
 [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$STOPPED_BEFORE" ] &&
-    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
     kill -0 "$ARGDECOY_PID" 2>/dev/null &&
     [ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null
 check "an argument decoy is not the pet: the click starts the pet and spares the decoy" $?
@@ -528,7 +535,7 @@ for _ in $(seq 1 20); do
     [ -s "$WORK/pet.pid" ] && USER_PID=$(cat "$WORK/pet.pid" 2>/dev/null) && break
     sleep 0.1
 done
-STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
 STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
 [ -n "$USER_PID" ] && kill -0 "$USER_PID" 2>/dev/null &&
     [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "running" ]
@@ -539,7 +546,7 @@ sleep 2
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.2
 [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
-    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq "$STARTED_BEFORE" ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$STARTED_BEFORE" ] &&
     [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
 check "the chip sees a relative-path pet: the click stops it, no duplicate start" $?
 [ -n "$USER_PID" ] && kill -0 "$USER_PID" 2>/dev/null && kill "$USER_PID" 2>/dev/null
@@ -581,7 +588,7 @@ PET
     # the chip's state is the bar's 1 Hz tick, and the check above left the pet
     # stopped: let a tick pass so the click below takes the START path
     sleep 2
-    STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+    STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
     "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
     sleep 1.5
     VPID=$(cat "$WORK/pet.pid" 2>/dev/null)
@@ -600,7 +607,7 @@ PET
     "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
     sleep 1.5
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
-        [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+        [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
         [ ! -e "$WORK/pet.pid" ] && [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ]
     check "a $VBASE-shebang pet is seen: the click stops it, no duplicate start" $?
     [ -n "$VPID" ] && kill -0 "$VPID" 2>/dev/null && kill "$VPID" 2>/dev/null
@@ -628,13 +635,13 @@ zombies() {
     done
     echo "$n"
 }
-STARTED_BEFORE=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
 STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.2
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 2
-[ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
+[ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
     [ "$(zombies)" -eq 0 ]
 check "a pet start/stop cycle leaves no zombie child of the bar" $?
@@ -676,17 +683,51 @@ JSON
 touch -r "$WORK/cfg.mtime" "$CFG"       # same whole-second mtime as the empty file
 wait_log "pet path is not an absolute path to a regular executable file" 10
 REFUSED=$?
-STARTED_N=$(grep -c "pet: started" "$WORK/bar.log" || true)
+STARTED_N=$(grep -c "pet: starting" "$WORK/bar.log" || true)
 STOPPED_N=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.2
 [ "$REFUSED" -eq 0 ] &&
-    [ "$(grep -c "pet: started" "$WORK/bar.log" || true)" -eq "$STARTED_N" ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$STARTED_N" ] &&
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$STOPPED_N" ] &&
     kill -0 "$DECOY_PID" 2>/dev/null
 check "a directory pet path is refused and the chip is inert (decoy survives)" $?
 kill "$DECOY_PID" 2>/dev/null
 DECOY_PID=""
+
+# 6i. a start the kernel refuses reports THAT. The path passes the bar's own
+#     checks - absolute, a regular file, executable - and the exec still fails:
+#     a 0755 text file with no shebang returns ENOEXEC. The child logs the
+#     attempt before the exec, so a failed one leaves the attempt line plus the
+#     failure line and never a success claim, and nothing is left running. The
+#     config is re-read on the bar's own tick, which only runs while the event
+#     loop is idle, so the click is repeated SLOWLY (each gap lets one tick
+#     pass; until the reload the chip still answers for the directory path
+#     above, which is refused silently) until the new path is in force.
+printf 'not a program\n' > "$WORK/home/notpet"
+chmod +x "$WORK/home/notpet"
+cat > "$CFG" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 1, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": false },
+  "modules": { "pet": { "enabled": true, "label": "pet",
+                          "exePath": "$WORK/home/notpet" } }
+}
+JSON
+for _ in $(seq 1 20); do
+    "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+    sleep 1.2
+    grep -q "pet: cannot start $WORK/home/notpet" "$WORK/bar.log" && break
+done
+grep -q "pet: cannot start $WORK/home/notpet" "$WORK/bar.log" &&
+    ! grep -q "pet: started" "$WORK/bar.log" &&
+    [ "$(grep -c "pet: starting: $WORK/home/notpet" "$WORK/bar.log" || true)" -eq \
+      "$(grep -c "pet: cannot start $WORK/home/notpet" "$WORK/bar.log" || true)" ] &&
+    [ ! -e "$WORK/pet.pid" ]
+check "a pet that cannot exec logs 'cannot start' and claims no start" $?
 
 # 7. the bar rides above the terminal: a geometry report moves it.
 #    The move happens on the bar's own tick (at most once a second), so the
@@ -694,6 +735,16 @@ DECOY_PID=""
 #    broken bar.
 report() { gdbus call --timeout 5 --session --dest org.chocobar.Geom --object-path /ChocobarGeom \
               --method org.chocobar.Geom.Report "$@" >/dev/null 2>&1; }
+# The report can go out two ways, and the difference decides WHEN it lands:
+# gdbus introspects its destination before it calls, and the bar never answers
+# Introspect (its bus loop replies to Report alone), so a gdbus call stalls for
+# seconds and its report arrives long after the bar's 700 ms startup geometry
+# wait. dbus-send delivers the method call directly, and the bar's 10 ms
+# startup pump answers it inside that wait - so a check that needs the report
+# to arrive BEFORE the first map has to use this one.
+report_fast() { dbus-send --session --dest=org.chocobar.Geom --type=method_call \
+    --print-reply /ChocobarGeom org.chocobar.Geom.Report \
+    "string:$1" "int32:$2" "int32:$3" "int32:$4" "int32:$5" >/dev/null 2>&1; }
 report kitty 900 100 300 1600
 sleep 2
 eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
@@ -886,11 +937,16 @@ check "a stale geometry report falls back to the screen top (y=$Y want~$WANT_TOP
 #     its startup geometry wait, and read the window geometry at the first
 #     moment it exists. The bar must already sit at the reported terminal - not
 #     first at the screen-top centre and then jump one tick later.
+#     The report therefore goes out over dbus-send: over gdbus it lands
+#     seconds late, long after the first map, and the check would then measure
+#     a later tick instead of the position the bar was BORN at.
 kill "$BAR_PID" 2>/dev/null
 wait "$BAR_PID" 2>/dev/null
 BAR_PID=""
+# wait for the dead bar's bus name to be released (the report keeps working
+# while the old bar still owns it)
 for _ in $(seq 1 50); do
-    report kitty 900 100 300 1600 && sleep 0.05 || break
+    report_fast kitty 900 100 300 1600 && sleep 0.05 || break
 done
 for _ in $(seq 1 50); do
     [ -z "$(xdotool search --class chocobar 2>/dev/null)" ] && break
@@ -900,7 +956,7 @@ HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
     "$BIN" >"$WORK/bar2.log" 2>&1 &
 BAR_PID=$!
 for _ in $(seq 1 30); do
-    report kitty 900 100 300 1600 && break
+    report_fast kitty 900 100 300 1600 && break
     sleep 0.05
 done
 BARWIN2=""
@@ -932,12 +988,10 @@ check "a report before the first map makes the bar BORN at the terminal (x=$X y=
 #     ordinary tick map, which for this window is the FIRST map of its life
 #     (position and size hints set before it, the same way the startup map
 #     would have set them).
-#     The reports here go through dbus-send, NOT gdbus: gdbus introspects its
-#     destination before calling and the bar never answers Introspect (its bus
-#     loop replies to Report alone), so a gdbus call stalls for seconds and
-#     lands only after the bar's 700 ms startup geometry wait - too late to be
-#     the report the bar is BORN with. dbus-send delivers the method call
-#     directly and the bar's 10 ms startup pump answers it inside the wait.
+#     The reports here go through report_fast (dbus-send), for the reason
+#     report_fast spells out: a gdbus call stalls for seconds and lands after
+#     the bar's 700 ms startup geometry wait - too late to be the report the
+#     bar is BORN with.
 kill "$BAR_PID" 2>/dev/null
 wait "$BAR_PID" 2>/dev/null
 BAR_PID=""
@@ -948,9 +1002,6 @@ done
 # the too-high report has to land INSIDE the bar's startup geometry wait, so
 # the sender is retried in the background while the visibility watch runs in
 # the foreground without a gap
-report_fast() { dbus-send --session --dest=org.chocobar.Geom --type=method_call \
-    --print-reply /ChocobarGeom org.chocobar.Geom.Report \
-    "string:$1" "int32:$2" "int32:$3" "int32:$4" "int32:$5" >/dev/null 2>&1; }
 # every all-desktops request so far belongs to a bar started earlier: this bar
 # must add one of its own when the tick maps it
 ALLDESK_BEFORE=$(grep -c '_NET_WM_DESKTOP 4294967295' "$CLIENTMSG" || true)

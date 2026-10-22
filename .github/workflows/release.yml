@@ -1,6 +1,7 @@
 name: Release
 
-# Builds the Windows exe from the tagged commit and attaches it to the release.
+# Builds the Windows exe AND the Linux bar from the tagged commit and attaches
+# both to the release.
 #
 # Why this exists: releases used to be built by hand on one machine, so the
 # published exe could not be reproduced from its tag by anyone. From now on the

@@ -365,9 +365,11 @@ same core - the config parser, the session scanner and the aggregation are the
 same code - and with `bar.align: 1` it rides just above the active terminal.
 See `linux/README.md` for the build, the measured cost, and what is per-OS.
 
-**The released asset is the bar to run.** Every release carries
-`chocobar-linux` next to `chocobar.exe`, built from the tag by the same
-workflow that builds the Windows exe:
+**The released asset is the bar to run.** The current release, v1.5.1, ships
+only `chocobar.exe`; the Linux bar is attached as `chocobar-linux` from the
+next release on, built from the tag by the same workflow that builds the
+Windows exe. Until that release is tagged, `bash linux/build.sh` builds the bar
+from source:
 
 ```sh
 gh release download <tag> --pattern chocobar-linux

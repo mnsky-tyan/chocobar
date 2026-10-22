@@ -1391,9 +1391,14 @@ static void petToggle(void) {
     if (pid == 0) {
         setsid();
         // the pet is a GUI app: nothing it prints belongs on the bar's stderr,
-        // but a failed start must not be silent, so the original stderr is kept
-        // for the one report below
+        // but the start itself must not be silent, so the original stderr is
+        // kept for the reports below
         int errFd = dup(2);
+        // the child reports the attempt, never the parent: a successful fork
+        // says nothing about the exec, and only the child knows whether the
+        // kernel took it. "starting" is an attempt; a failed exec adds the
+        // failure line and there is no success line at all.
+        if (errFd >= 0) dprintf(errFd, "chocobar: pet: starting: %s\n", petPath);
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             dup2(devnull, 0);
@@ -1409,7 +1414,6 @@ static void petToggle(void) {
         }
         _exit(127);
     }
-    fprintf(stderr, "chocobar: pet: started: %s\n", petPath);
 }
 
 static void configDirOf(char *out, size_t cap) {
