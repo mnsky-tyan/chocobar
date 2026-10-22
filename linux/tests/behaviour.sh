@@ -19,9 +19,9 @@
 #     EXECUTED file - never a process name, and never a process that merely
 #     carries the path as an argument - including an env-shebang script the
 #     user starts from its own directory with a relative path, and the children
-#     it leaves behind are reaped, not zombies; a start is logged as the attempt
-#     it is (before the exec) and a failed one adds "cannot start", so no line
-#     ever claims a start the kernel never performed
+#     it leaves behind are reaped, not zombies; a start is logged only once the
+#     kernel took the exec, and a refused one logs "cannot start" and claims
+#     no start at all
 #   - the autostart mark is read once per menu open, the child's stderr pipe
 #     cannot block the bar's loop, and a width change moves the window and its
 #     rounded shape together
@@ -192,6 +192,16 @@ case "\$2" in
 esac
 SH
 chmod +x "$WORK/fakebin/systemctl-masked"
+# an xdg-open that records what it was asked to open. The bar resolves the
+# program to an absolute path BEFORE it forks (a child of a fork in this
+# threaded bar may not allocate, and the PATH search allocates), so this fake
+# in the bar's own PATH is the one that runs - and its record proves the whole
+# path: resolve, fork, exec.
+cat > "$WORK/fakebin/xdg-open" <<SH
+#!/bin/sh
+echo "\$*" >> "$WORK/xdg-open-calls"
+SH
+chmod +x "$WORK/fakebin/xdg-open"
 
 gcc -O1 -o "$XCLICK" "$HERE/xclick.c" -lX11 -lXtst 2>"$WORK/cc.log" \
     || { echo "FAIL: cannot build the XTEST driver"; cat "$WORK/cc.log"; exit 1; }
@@ -421,9 +431,9 @@ for xoff in 20 30 40 50 60 70 80; do
 done
 [ "$PET_X" -gt 0 ]
 check "a click on the pet chip starts the pet (chip found at x offset $PET_X)" $?
-# one start, one line, and it is the truth: the child logs the attempt BEFORE
-# the exec, so a successful start has "starting" and no "cannot start" - the
-# bar never claims a start it did not get
+# one start, one line, and it is the truth: the exec's outcome comes back over
+# the CLOEXEC pipe, so a successful start has "starting" and no "cannot start"
+# - the bar never claims a start the kernel refused
 grep -q "pet: starting: $WORK/home/pet" "$WORK/bar.log" &&
     ! grep -q "pet: cannot start $WORK/home/pet" "$WORK/bar.log"
 check "a successful start logs 'starting' and no 'cannot start'" $?
@@ -695,15 +705,16 @@ check "a directory pet path is refused and the chip is inert (decoy survives)" $
 kill "$DECOY_PID" 2>/dev/null
 DECOY_PID=""
 
-# 6i. a start the kernel refuses reports THAT. The path passes the bar's own
-#     checks - absolute, a regular file, executable - and the exec still fails:
-#     a 0755 text file with no shebang returns ENOEXEC. The child logs the
-#     attempt before the exec, so a failed one leaves the attempt line plus the
-#     failure line and never a success claim, and nothing is left running. The
-#     config is re-read on the bar's own tick, which only runs while the event
-#     loop is idle, so the click is repeated SLOWLY (each gap lets one tick
-#     pass; until the reload the chip still answers for the directory path
-#     above, which is refused silently) until the new path is in force.
+# 6i. a start the kernel refuses reports THAT, and claims nothing. The path
+#     passes the bar's own checks - absolute, a regular file, executable - and
+#     the exec still fails: a 0755 text file with no shebang returns ENOEXEC.
+#     The exec's outcome travels back over the CLOEXEC pipe, so a refused exec
+#     leaves the failure line and NO "starting" line at all, and nothing is left
+#     running. The config is re-read on the bar's own tick, which only runs
+#     while the event loop is idle, so the click is repeated SLOWLY (each gap
+#     lets one tick pass; until the reload the chip still answers for the
+#     directory path above, which is refused silently) until the new path is in
+#     force.
 printf 'not a program\n' > "$WORK/home/notpet"
 chmod +x "$WORK/home/notpet"
 cat > "$CFG" <<JSON
@@ -724,10 +735,19 @@ for _ in $(seq 1 20); do
 done
 grep -q "pet: cannot start $WORK/home/notpet" "$WORK/bar.log" &&
     ! grep -q "pet: started" "$WORK/bar.log" &&
-    [ "$(grep -c "pet: starting: $WORK/home/notpet" "$WORK/bar.log" || true)" -eq \
-      "$(grep -c "pet: cannot start $WORK/home/notpet" "$WORK/bar.log" || true)" ] &&
+    [ "$(grep -c "pet: starting: $WORK/home/notpet" "$WORK/bar.log" || true)" -eq 0 ] &&
     [ ! -e "$WORK/pet.pid" ]
 check "a pet that cannot exec logs 'cannot start' and claims no start" $?
+
+# 6i-2. the refused start leaves the bar alive and tidy: the failed exec's
+#       child is gone, so the bar must have reaped it (no zombie) and its own
+#       loop must still answer a click (the menu opens).
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 1.5
+menu_open && [ "$(zombies)" -eq 0 ]
+check "the bar still opens the menu after a refused pet start, and reaps its child" $?
+"$XCLICK" 100 300 1 full
+sleep 0.8
 
 # 7. the bar rides above the terminal: a geometry report moves it.
 #    The move happens on the bar's own tick (at most once a second), so the
@@ -891,6 +911,29 @@ sleep 0.8
 check "a masked unit reads as unknown: logged, and the toggle flips nothing" $?
 mv "$WORK/fakebin/systemctl" "$WORK/fakebin/systemctl-masked"
 mv "$WORK/fakebin/systemctl-fail" "$WORK/fakebin/systemctl"
+
+# 7i. the "Check for updates" row runs the program it names. The bar resolves
+#     the program to an absolute path BEFORE the fork - a child of a fork in
+#     this threaded bar may not allocate, and the PATH search allocates - so
+#     the fake xdg-open in the bar's own PATH is the one that runs, and its
+#     record proves the whole path: resolve, fork, exec.
+ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+5*30+3*9+15)*s}')
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+MENU_WIN=""
+read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
+$(menu_wh)
+EOF
+if [ -n "$MENU_WIN" ]; then
+    MGEO=$(xdotool getwindowgeometry --shell "$MENU_WIN")
+    MENU_X=$(echo "$MGEO" | awk -F= '/^X=/{print $2}')
+    MENU_Y=$(echo "$MGEO" | awk -F= '/^Y=/{print $2}')
+    "$XCLICK" $((MENU_X + MENU_W_DEV / 2)) $((MENU_Y + ROW_UPDATES_Y)) 1 full
+fi
+sleep 1.5
+[ -n "$MENU_WIN" ] && ! menu_open &&
+    grep -q "chocobar/releases/latest" "$WORK/xdg-open-calls"
+check "the Check for updates row runs the program it names (the PATH is resolved before the fork)" $?
 
 # 8. a terminal too high to fit the strip above it hides the bar
 report kitty 900 100 5 1600

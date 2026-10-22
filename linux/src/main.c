@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -1337,14 +1338,71 @@ static void reapChildren(void) {
     while (waitpid(-1, NULL, WNOHANG) > 0) { }
 }
 
+// Resolve a program name to a path exec() can take, in the PARENT, before any
+// fork. The child of a fork() in this threaded bar may call only
+// async-signal-safe functions until exec() replaces it (POSIX): the malloc
+// lock can be held by another thread at the instant of the fork, so a child
+// that allocates - the PATH search execlp does - can deadlock before it ever
+// reaches the exec. The search therefore happens here, where allocating is
+// allowed.
+// 1 = out holds a path exec() can take, 0 = nothing was found.
+static int programPath(const char *name, char *out, size_t cap) {
+    if (!name || !*name) return 0;
+    if (strchr(name, '/')) {
+        // an explicit path needs no search, and exec() takes it as it is
+        if (strlen(name) >= cap) return 0;
+        strcpy(out, name);
+        return 1;
+    }
+    const char *path = getenv("PATH");
+    if (!path || !*path) path = "/usr/local/bin:/usr/bin:/bin";
+    const char *p = path;
+    for (;;) {
+        const char *sep = strchr(p, ':');
+        size_t dlen = sep ? (size_t)(sep - p) : strlen(p);
+        char dir[PATH_MAX];
+        const char *d = ".";
+        if (dlen) {
+            if (dlen < sizeof dir) { memcpy(dir, p, dlen); dir[dlen] = 0; d = dir; }
+            else d = NULL;
+        }
+        if (d) {
+            char cand[PATH_MAX];
+            if (snprintf(cand, sizeof cand, "%s/%s", d, name) < (int)sizeof cand &&
+                access(cand, X_OK) == 0) {
+                struct stat st;
+                if (stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+                    if (strlen(cand) >= cap) return 0;
+                    strcpy(out, cand);
+                    return 1;
+                }
+            }
+        }
+        if (!sep) break;
+        p = sep + 1;
+    }
+    return 0;
+}
+
 // Run an external program without blocking the bar's loop: a config editor or a
-// file manager must not freeze the strip.
+// file manager must not freeze the strip. The program is resolved to a path
+// exec() can take BEFORE the fork, so the child only has to exec it: execlp's
+// PATH search allocates, and the child of a fork in this threaded bar may not
+// allocate before the exec (see programPath).
 static void spawnDetached(const char *argv0, const char *argv1) {
+    char prog[PATH_MAX];
+    if (!programPath(argv0, prog, sizeof prog)) {
+        fprintf(stderr, "chocobar: cannot run %s: not found\n", argv0 ? argv0 : "");
+        return;
+    }
     pid_t pid = fork();
     if (pid != 0) return;
     setsid();
-    if (argv1) execlp(argv0, argv0, argv1, (char *)NULL);
-    else execlp(argv0, argv0, (char *)NULL);
+    char *args[3];
+    args[0] = (char *)argv0;
+    args[1] = argv1 ? (char *)argv1 : NULL;
+    args[2] = NULL;
+    execv(prog, args);
     _exit(127);
 }
 
@@ -1383,22 +1441,45 @@ static void petToggle(void) {
                 petPath, n, n == 1 ? "" : "es");
         return;
     }
+    // The exec's outcome comes back over a CLOEXEC pipe: the write end closes
+    // at a successful exec, and a failed exec writes the errno and exits. The
+    // parent then prints the one true line - "starting" only when the kernel
+    // took the exec, "cannot start" when it did not. The child itself may not
+    // report anything: after a fork in this threaded bar it may only call
+    // async-signal-safe functions until exec, and printing (dprintf) or
+    // describing an error (strerror) allocates - a fork that lands while the
+    // subs thread holds the allocator lock would leave the child stuck before
+    // the exec, and the pet would silently never start.
+    int pfd[2];
+    if (pipe(pfd)) {
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(errno));
+        return;
+    }
+    // The write end must not survive the exec: its closing IS the success
+    // signal. It is moved above the standard streams first, so the child's
+    // redirect of 0/1/2 to /dev/null can never land on it.
+    int wfd = fcntl(pfd[1], F_DUPFD, 10);
+    if (wfd < 0) {
+        int e = errno;
+        close(pfd[0]);
+        close(pfd[1]);
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
+        return;
+    }
+    close(pfd[1]);
+    fcntl(wfd, F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "chocobar: pet: cannot fork: %s\n", strerror(errno));
+        int e = errno;
+        close(pfd[0]);
+        close(pfd[1]);
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
         return;
     }
     if (pid == 0) {
+        close(pfd[0]);
         setsid();
-        // the pet is a GUI app: nothing it prints belongs on the bar's stderr,
-        // but the start itself must not be silent, so the original stderr is
-        // kept for the reports below
-        int errFd = dup(2);
-        // the child reports the attempt, never the parent: a successful fork
-        // says nothing about the exec, and only the child knows whether the
-        // kernel took it. "starting" is an attempt; a failed exec adds the
-        // failure line and there is no success line at all.
-        if (errFd >= 0) dprintf(errFd, "chocobar: pet: starting: %s\n", petPath);
+        // the pet is a GUI app: nothing it prints belongs on the bar's stderr
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             dup2(devnull, 0);
@@ -1406,14 +1487,25 @@ static void petToggle(void) {
             dup2(devnull, 2);
             if (devnull > 2) close(devnull);
         }
-        execl(petPath, petPath, (char *)NULL);
-        if (errFd >= 0) {
-            dprintf(errFd, "chocobar: pet: cannot start %s: %s\n",
-                    petPath, strerror(errno));
-            close(errFd);
-        }
+        char *args[2] = { petPath, NULL };
+        execv(petPath, args);
+        // the exec was refused: hand the errno to the parent and leave.
+        // write() and _exit() are async-signal-safe, and nothing else may run
+        // in this child before it is gone.
+        int e = errno;
+        ssize_t ignored = write(wfd, &e, sizeof e);
+        (void)ignored;
         _exit(127);
     }
+    close(wfd);
+    int execErr = 0;
+    ssize_t got = read(pfd[0], &execErr, sizeof execErr);
+    close(pfd[0]);
+    if (got == (ssize_t)sizeof execErr) {
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(execErr));
+        return;
+    }
+    fprintf(stderr, "chocobar: pet: starting: %s\n", petPath);
 }
 
 static void configDirOf(char *out, size_t cap) {
