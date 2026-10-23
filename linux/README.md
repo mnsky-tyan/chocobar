@@ -3,22 +3,29 @@
 A floating translucent bar in the LOWER layer (under normal windows, the same
 behaviour as the Windows bar) showing the same chips: pet, the AI token count
 the shared scanner produces, the subscription gauge, cpu, ram, cpu temperature,
-volume, battery, gpu and clock. It does **not** follow a terminal window around;
-it sits where you put it vertically, and with `bar.align: 1` it takes the
-**active terminal's width and horizontal position**, so it reads as a strip
-along the top of that terminal.
+volume, battery, gpu and clock. With `bar.align: 1` it rides the **active
+terminal**: it takes the terminal's width and horizontal position and sits just
+above its top edge, so it reads as a strip along the top of that terminal.
 
 ![the bar](../docs/img/linux-bar.png)
 
 ## Build and run
 
 ```sh
-sudo apt install libx11-dev libxrender-dev libxfixes-dev libcairo2-dev \
-                 libdbus-1-dev
+sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
+                 libcairo2-dev libdbus-1-dev libfontconfig1-dev \
+                 libcurl4-openssl-dev
 bash linux/build.sh                 # -> linux/build/chocobar-linux
 ./linux/build/chocobar-linux        # reads ~/.wizbar/config.json
 ./linux/build/chocobar-linux --config /path/to/config.json
 ```
+
+The release asset (`chocobar-linux` on the next tag) is built on the
+`ubuntu-latest` runner and linked dynamically, so it needs that image's glibc
+(2.39): Ubuntu 24.04, Debian 13 and up. An older distro loads nothing - the
+loader stops on `GLIBC_2.39 not found` - and building it here, against the local
+glibc, is the way to run it there. The README carries the same note next to the
+release download.
 
 ### Run it supervised (recommended)
 
@@ -61,7 +68,7 @@ only allows opening PMU counters. AMD GPUs need none of this - they publish
 | `bar.align` | meaning |
 |---|---|
 | `0` (default) | centre of the screen, content-sized |
-| `1` | match the **active terminal's** width and x (the terminal look) |
+| `1` | match the **active terminal's** width and x, and ride just above its top edge |
 | `2` | span the whole screen width |
 
 `align: 1` needs a helper, because a Wayland compositor does not let a client
@@ -77,13 +84,32 @@ window and calls the bar over D-Bus with its `frameGeometry` in logical pixels.
 It recognises the terminal classes listed at the top of the script. Switching to
 a non-terminal keeps the last terminal's geometry, so alt-tabbing does not move
 the bar. A stale report (the script stopped, KWin restarted) is ignored after
-30 s and the bar falls back to centring rather than pinning itself to a window
-that no longer exists. The bar never becomes narrower than its chips.
+30 s and the bar falls back to the screen-top position (`bar.gap` below the top
+edge) rather than pinning itself to a window that no longer exists. The bar
+never becomes narrower than its chips.
 
-Left-click the tokens chip for the dashboard. Right-click opens the menu (the
-two dashboards, edit the config, reload, quit). `Esc`/`q` also quits when
+Left-click the tokens chip for the dashboard, the pet chip to start or stop the
+pet. Right-click opens the menu (the two dashboards, the autostart toggle, edit
+the config, open its folder, the releases page, reload, quit - the Windows tray
+menu's items in the same order).
+The menu opens on the button RELEASE, which is what Windows does
+(`WM_RBUTTONUP`): opening it on the press handed the menu its own opening
+release, which landed in its padding corner and dismissed it a few milliseconds
+after it appeared. `Esc`/`q` also quits when
 the bar has focus. The config is the SAME `~/.wizbar/config.json` the Windows bar
-reads, and it hot-reloads on save.
+reads, and it hot-reloads on save. The change is detected by the file's full
+stat identity (seconds, nanoseconds and size), not by the mtime alone: a save
+that is still in progress leaves the file truncated, and a whole-second mtime
+cannot tell that empty file from the finished one, so the bar would read the
+half-written config, keep the old one and never see the new one. With the full
+identity the finished file still reads as a change, and the bar re-reads it.
+
+"Start on login" toggles the systemd user unit (`systemctl --user
+enable/disable chocobar`), the Linux counterpart of the Windows "Start with
+Windows" Run value: the mark at the row's right edge is read at open time, and
+the config file is never rewritten. "Check for updates" opens the GitHub
+releases page, exactly as the Windows item does - it never downloads or swaps a
+binary.
 
 ### The bar heals its own KWin outline exclusion
 
@@ -111,7 +137,7 @@ and does nothing when the exclusion is already in place.
 | memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
 | CPU, steady state | 0.2% of one core, 1 Hz repaint |
 | threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
-| binary | 808 KB, no runtime |
+| binary | 875 KB, no runtime |
 | token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
 | subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
@@ -157,29 +183,40 @@ being managed - decorations, placement, focus - is exactly what those four
 properties neutralise.
 
 The bar is not draggable: its position is derived (x and width from the
-terminal via `bar.align`, y from `bar.gap`), and a dragged position would break
-that contract. Left-click the tokens chip for the dashboard, right-click for
-the menu.
+terminal via `bar.align`, y from the terminal's top edge and `bar.gap`), and a
+dragged position would break that contract. Left-click the tokens chip for the
+dashboard, the pet chip to toggle the pet, right-click for the menu.
 
 On a Wayland session the window is presented through XWayland, which is how most
 X11 applications still run on KDE. It is translucent for real: the window is on a
 32-bit ARGB visual and its pixels carry an alpha channel, so the compositor
-blends it. `_KDE_NET_WM_BLUR_BEHIND_REGION` is set so KWin blurs what is behind
-the strip, which is what keeps the text readable over a busy terminal.
+blends it.
 
-The one thing this design cannot do is follow a terminal window: a Wayland
-compositor does not let a client position itself relative to another window, and
-an X11 client cannot see Wayland-native windows at all. Following was left out on
-purpose - see the project README's feasibility notes.
+**The bar asks the compositor for NO blur.** The config's `backdrop: "acrylic"`
+is honoured as the translucent tint itself - the warm glass of the reference
+screenshots IS the wallpaper showing through 47% of cream - and the backdrop
+behind it is left raw. A blur-behind hint (`_KDE_NET_WM_BLUR_BEHIND_REGION`)
+was tried and measured: on this desktop the compositor's blur effect flattened
+the strip into a grey wash (the bar's empty middle measured std 8.4 with the
+hint and 25.0 without it, while the reference screenshot measures 34 - the raw
+backdrop). Readability never needed it: the strip sits above the terminal, not
+over its text.
+
+Right-click opens the menu on the button **release** (the Windows parity:
+`WM_RBUTTONUP`), and the button that dismisses the menu is consumed by the
+menu, not by the bar - Win32's `TrackPopupMenu` eats the dismissing click the
+same way, so the bar never sees a release for it. Without that, the dismissing
+right-click bounced the menu straight back open.
 
 ## What each chip reads
 
 | chip | source | note |
 |---|---|---|
+| pet | `/proc/<pid>/cmdline` | the process whose EXECUTED file is `modules.pet.exePath`: `argv[0]` equal to the path (or its `realpath`), or an interpreter `argv[0]` with the path at the FIRST token after it that is not one of the interpreter's own options. The kernel shebang rule is `<interpreter> [optional-arg] <script>`, so `#!/bin/bash -e` runs as `/bin/bash|-e|./pet` and the script is at argv[2], not argv[1]; the scan stops at that first non-option token, because every token after it is an ARGUMENT to the script and never the file the kernel executed - so `python3 report.py <path>` runs report.py and is not the pet. Options are parsed as getopt bundles against the interpreter's own grammar: a value-taking option consumes the next token (`#!/usr/bin/env -S python3 -X utf8` runs as `python3|-X|utf8|<script>`, and the script is still found), an option that takes a COMMAND rather than a script ends the scan in every spelling and bundle (`-c`, `-ec`, `-e`, `-r`, `-m`), so `sh -c <path>` and `sh -ec <path>` are not the pet either, and an option whose value behaviour is unknown also ends the scan without matching, so no unrelated process is credited. A relative token (the user started the pet as `./pet`) is resolved against that process's own cwd, so it still matches, and any other absolute spelling - a SYMLINK to the file, a redundant path such as `/x/./pet` - is compared by `realpath`, so the same file under its symlink is the pet too. The interpreter is matched by basename plus an optional version suffix, because that is the name the kernel gives the live process: `#!/usr/bin/env python3.14` runs as `python3.14`, and an exact-name list would read that pet as `off` while it runs. `env` is not in that list: env replaces ITSELF with the interpreter it resolved, so the live process is named after that interpreter, never after env. A process that merely carries the path as an argument - `tail -f <path>`, an editor with the file open - is NOT the pet, so the chip cannot read `on` for it and a click cannot stop it. The chip shows `on`/`off` and a click starts or stops the pet. The configured value must be one ABSOLUTE path to a regular executable file - a bare name, a relative path, or a directory cannot identify one process and is refused, for starting and for matching alike |
 | cpu | `/proc/stat` delta | same arithmetic as `top` |
 | ram | `/proc/meminfo` | used = 100 - MemAvailable/MemTotal |
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |
-| volume | `pactl get-sink-volume` | the only source that runs a process; once per second, only while enabled |
+| volume | `pactl get-sink-volume` | the only source that runs a process; spawned once per second, whether or not the chip is enabled |
 | battery | `/sys/class/power_supply/*` | green while charging, red only when low **and** on battery |
 | gpu | `amdgpu`'s `gpu_busy_percent`, then the i915 PMU | Intel needs the PMU (see the capability note above); without the capability the chip hides |
 | clock | local time, the config's `modules.clock.format` | same `{MMM} {dd} {Wkk} {HH}:{mm}` tokens |
@@ -247,10 +284,24 @@ the menu item says so rather than pretending.
 
 ## Tests
 
-`npm test` covers the shared core and the Linux bar's structural invariants (the
-ARGB visual, `CWEventMask`, the per-frame clear, the shape region, and that the
-icon geometry is shared rather than copied). Each of those guards exists because
-its absence produced a bar that looked right and did not work.
+`npm test` runs two suites. `scripts/portable_regression.js` covers the shared
+core and the Linux bar's structural invariants (the ARGB visual, `CWEventMask`,
+the per-frame clear, the shape region, and that the icon geometry is shared
+rather than copied). `linux/tests/behaviour.sh` is the suite that carries the
+real behaviour guarantees: it starts the built binary on a private Xvfb display
+with a throwaway `HOME`, a private D-Bus and a fake `systemctl`, drives the real
+pointer with XTEST, and asserts what the user would see - the menu opens on the
+button release and does not bounce, a press alone opens nothing, a click outside
+the menu picks no row, the bar asks for no blur hint, it rides above the reported
+terminal and hides/returns as that terminal moves, the pet chip starts and stops
+the configured process (never a process that merely names it), the autostart row
+reads its state once per open and refuses to flip an unreadable unit, and a
+right-group metric chip is inert.
+
+A missing tool (or the development headers the build needs - the bar's own
+X11/cairo ones, and `libxtst-dev` for the XTEST driver the suite compiles) skips
+the behaviour suite cleanly on a developer machine and fails it when `CI` is set,
+so the gate cannot become a silent no-op.
 
 The executable token regressions (`scripts/token_regression.py`) are Windows-only;
 on Linux the scan is exercised by running the bar against a real store, which is

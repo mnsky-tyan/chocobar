@@ -8,12 +8,13 @@
 // quantities, so the bar renders identical text.
 //
 // Every source is read from the kernel's own files or PMU counters, so the cost
-// is a few small reads per second (measured: ~0.3 ms for a full metrics tick on
-// this machine, against a 1 Hz timer). Nothing here shells out except the audio
-// mixer, which has no file interface: `pactl get-sink-volume` runs at most once
-// a second and only while the volume chip is enabled. The i915 gpu path keeps
-// its PMU counters open across ticks; the only per-tick cost there is one
-// read(2) per engine.
+// is a few small reads per second (measured: ~0.3 ms for the sensor reads, plus
+// the pet matcher's /proc walk - ~1.3-1.6 ms with ~500 processes, and run only
+// while the pet chip is enabled - against a 1 Hz timer). Nothing here shells
+// out except the audio mixer, which has no file interface: `pactl
+// get-sink-volume` is spawned once per tick. The i915 gpu path keeps its PMU
+// counters open across ticks; the only per-tick cost there is one read(2) per
+// engine.
 //
 // A source that is absent reads as "no value" (the bar shows an em dash, as the
 // Windows bar does for a missing sensor) - never as a fabricated 0.
@@ -31,15 +32,18 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <linux/perf_event.h>
 
@@ -515,43 +519,299 @@ static int gpuPercent(void) {
 
 // ---- pet presence ------------------------------------------------------------
 // The pet chip is "is this process alive" (p_ui.c builds it from
-// modules.pet.exePath; Windows reads a Toolhelp32 snapshot). On Linux a process
-// is named in /proc/<pid>/comm, which is the executable's basename truncated to
-// 15 characters - the same rule pgrep applies, and the reason a match against
-// the basename alone is the honest comparison.
-int petProcessRunning(const char *exePath);
+// modules.pet.exePath; Windows reads a Toolhelp32 snapshot). On Linux the pet is
+// identified by the process's EXECUTED file, never by a process that merely
+// mentions the path: argv[0] is the configured path (or its realpath), or - for
+// a shebang script, where the kernel runs the interpreter - argv[0] names an
+// interpreter and the executed file is the FIRST token after it that is not one
+// of the interpreter's own options, as invoked - absolute when the bar starts
+// it, relative to that process's own cwd when the user starts the pet as
+// `./pet`. The interpreter's options are parsed as getopt bundles against its
+// own grammar, so a value-taking option's value is skipped and an option that
+// takes a command ends the scan. No other token position counts, so `tail -f
+// <path>`, `sh -c <path>`, `sh -ec <path>` and an editor with the file open are
+// not the pet, and the stop path cannot SIGTERM them.
+// Never comm, never a basename, never a substring - comm is the kernel's
+// truncated basename, so matching it makes a bare configured name hit every
+// process carrying that name, and the stop path signals whatever it matched.
+//
+// The configured value is ONE path token - the same thing the start path
+// execs, so the pet the bar starts is the pet the matcher sees. It must be an
+// ABSOLUTE path to a REGULAR executable file: a bare name cannot identify one
+// process, a relative path depends on each process's own cwd, a directory
+// passes access(X_OK) through its search bit and would match every process
+// that merely carries it as an argument, and a command line carrying arguments
+// ("/path/pet.sh --flag") is not a path. All are refused for matching and
+// starting alike.
 
+// 0 = the configured value cannot name a target: empty, a bare name, a
+// relative path, a directory, or a command line carrying arguments rather than
+// one absolute executable path. Logged once per distinct value, not once per
+// tick.
+int petPathUsable(const char *exePath) {
+    if (!exePath || !*exePath) return 0;
+    struct stat st;
+    if (exePath[0] == '/' && stat(exePath, &st) == 0 && S_ISREG(st.st_mode) &&
+        access(exePath, X_OK) == 0)
+        return 1;
+    static char refused[512];
+    if (strcmp(refused, exePath) != 0) {
+        snprintf(refused, sizeof(refused), "%s", exePath);
+        fprintf(stderr, "chocobar: pet path is not an absolute path to a "
+                        "regular executable file: %s\n", exePath);
+    }
+    return 0;
+}
+
+// realpath() of the configured path, empty when it cannot be resolved.
+static void petResolved(const char *exePath, char *out, size_t cap) {
+    out[0] = 0;
+    char *rp = realpath(exePath, NULL);
+    if (!rp) return;
+    snprintf(out, cap, "%s", rp);
+    free(rp);
+}
+
+// The configured file, as one cmdline token names it. A token written
+// relative (`./pet`) is resolved against the process's own cwd, because that
+// is where the user was when they started the pet and the kernel hands the
+// script path on exactly as it was typed. Compared by realpath, so a symlink
+// to the configured file is the same file.
+//
+// `scriptPath` says the token IS the script path (the first non-option token
+// after an interpreter), so a bare name resolves against the cwd as well; for
+// argv[0] a bare name is a NAME from a PATH lookup, not a path, so it only
+// counts when it carries a slash.
+//
+// 1 = the token names the configured file.
+static int petTokenIsFile(const char *token, const char *pidName,
+                           const char *path, const char *real, int scriptPath) {
+    if (!token || !*token) return 0;
+    if (!strcmp(token, path) || (real[0] && !strcmp(token, real))) return 1;
+    if (token[0] == '/') {
+        // an absolute token the comparison above did not catch is decided by
+        // what it resolves to, not by its bytes: a symlink to the file,
+        // /x/./pet - the kernel hands the path on exactly as it was typed -
+        // is still the file, and a token that resolves to nothing cannot be it
+        char *rp = realpath(token, NULL);
+        if (!rp) return 0;
+        int ok = !strcmp(rp, path) || (real[0] && !strcmp(rp, real));
+        free(rp);
+        return ok;
+    }
+    if (!scriptPath && !strchr(token, '/')) return 0;   // a bare name is a name
+    char link[4096];
+    char cwd[300];
+    snprintf(cwd, sizeof(cwd), "/proc/%s/cwd", pidName);
+    ssize_t n = readlink(cwd, link, sizeof(link) - 1);
+    if (n <= 0) return 0;
+    link[n] = 0;
+    char abs[8200];
+    int w = snprintf(abs, sizeof(abs), "%s/%s", link, token);
+    if (w < 0 || w >= (int)sizeof(abs)) return 0;   // would not fit: not the file
+    char *rp = realpath(abs, NULL);
+    if (!rp) return 0;
+    int ok = !strcmp(rp, path) || (real[0] && !strcmp(rp, real));
+    free(rp);
+    return ok;
+}
+
+// The interpreters a shebang line can hand a script to, with the option
+// grammar the script scan needs. ONE list: it decides both whether argv[0] is
+// an interpreter and which of its options consume the token that follows. A
+// script exec'd by the bar is run by the kernel as `<interpreter> <script>`, so
+// the script is the first token after the interpreter that is not one of its
+// own options; any other program carrying the path as an argument is not.
+//
+// A name is matched against the interpreter's BASENAME plus an optional version
+// suffix of digits and dots, because the kernel names the live process after the
+// interpreter the shebang finally selected, version included: an
+// `#!/usr/bin/env python3.14` shebang leaves a process whose argv[0] is
+// `python3.14`, `#!/usr/bin/node20` leaves `node20`. A list of bare names only
+// would read every version-pinned pet as "off". The suffix is digits and dots
+// only, so `sh` matches `sh5.2` but not `shotwell`.
+//
+// `env` is NOT in the list. An `#!/usr/bin/env <interp>` shebang makes the
+// kernel exec `/usr/bin/env` LITERALLY, but env then REPLACES ITSELF with the
+// interpreter it resolved, so the live process is named after that interpreter
+// (`python3|<script>`), never after env. Listing env would let the transient
+// env process match a script path that is its own ARGUMENT - the one shape
+// that must never be the pet.
+//
+// The option letters: an option is a getopt BUNDLE, so `-eu` is two flags and
+// `-ec` is a flag plus a command. A letter in `command` takes a COMMAND rather
+// than a script (`sh -c`, `sh -ec`, `node -e`, `perl -e`, `php -r`), reads the
+// program from stdin (`sh -s`), names a module rather than a file
+// (`python -m`), or only checks the file without executing it (`sh -n`,
+// `perl -c`, `ruby -c`, `node -c`, `php -l`), so the token after it is never
+// the executed file. A letter in `script` takes the executed FILE as its value (`php -f`,
+// `expect -f`, `Rscript -f`), so that value IS the script. A letter in `value`
+// takes a value that is not the script (`-X utf8`, `-I lib`, `-r fs`) and the
+// scan skips it. A letter in `flag` takes nothing. A letter in none of the
+// four is unknown, and an unknown option ends the scan WITHOUT matching:
+// guessing that its value is the script would credit a process that merely
+// names the file, and the stop path would SIGTERM it. Every letter here is one
+// this machine can actually demonstrate or that the interpreter's own manual
+// spells out. A long option has no grammar here, so it ends the scan as unknown
+// too - unless its value is attached (`--require=fs`), which provably consumes
+// nothing and so lets the scan continue to the script.
+struct PetInterp {
+    const char *names;      // space separated interpreter basenames
+    const char *command;    // option letters whose value is a COMMAND
+    const char *script;     // option letters whose value is the executed FILE
+    const char *value;      // option letters that consume a non-script token
+    const char *flag;       // option letters that consume nothing
+};
+static const struct PetInterp kInterpreters[] = {
+    { "sh bash dash zsh ksh mksh fish csh tcsh", "cns", "", "oO",
+      "abdefghiklmprtuvxBCDEHPT" },
+    { "python", "cm", "", "WX", "bBdEhiIOoPqsSuvVx" },
+    { "perl", "ceE", "", "IMmF", "01234567adDfgilnpsStTuvVwWXx" },
+    { "ruby", "ce", "", "CEFrW", "0adTilnpstuvVwySx" },
+    { "node nodejs", "cep", "", "rC", "ivh" },
+    { "php", "rl", "f", "cdStz", "aehimnqvwH" },
+    { "lua luajit", "e", "", "l", "iEvW" },
+    { "tclsh wish", "c", "", "", "di" },
+    { "expect", "c", "f", "", "di" },
+    { "Rscript", "e", "f", "", "v" },
+    { NULL, NULL, NULL, NULL, NULL }
+};
+
+// the grammar row whose name list holds argv[0]'s basename, NULL when argv[0]
+// is not an interpreter
+static const struct PetInterp *petInterp(const char *argv0) {
+    const char *base = strrchr(argv0, '/');
+    base = base ? base + 1 : argv0;
+    for (int i = 0; kInterpreters[i].names; i++) {
+        const char *p = kInterpreters[i].names;
+        while (*p) {
+            while (*p == ' ') p++;
+            const char *start = p;
+            while (*p && *p != ' ') p++;
+            size_t n = (size_t)(p - start);
+            if (!n || strncmp(base, start, n) != 0) continue;
+            const char *rest = base + n;
+            while (*rest && (isdigit((unsigned char)*rest) || *rest == '.')) rest++;
+            if (!*rest) return &kInterpreters[i];
+        }
+    }
+    return NULL;
+}
+
+// 1 = argv[0] is the executed file (the path, its realpath, or the same file
+// written relative to the process's own cwd), or argv[0] is an interpreter and
+// the executed file is the FIRST token after it that is not one of the
+// interpreter's own options. Any other token position is an argument, not the
+// executed file.
+//
+// When argv[0] is an interpreter the script is not always at argv[1]: the
+// kernel shebang rule is `<interpreter> [optional-arg] <script>`, so
+// `#!/bin/bash -e` runs as `/bin/bash|-e|./sbarg.sh` and
+// `#!/usr/bin/env -S python3 -X utf8` runs as `python3|-X|utf8|<script>` - the
+// script is further along there, and a matcher that reads only argv[1] reads
+// such a pet as "off", starts a second copy on the next click and can never
+// stop either. Options are therefore parsed as a getopt bundle against the
+// interpreter's own grammar (kInterpreters), so an option that takes a value
+// consumes it and an option that takes a COMMAND ends the scan: `sh -c
+// <petpath>` and `sh -ec <petpath>` run a command. The script is the first
+// token that is not an option, and the scan STOPS there: every token after it
+// is an argument to that script, never the file the kernel executed, so
+// `python3 report.py <petpath>` runs report.py and is not the pet. A
+// NON-interpreter argv[0] still matches only at argv[0] itself, so `tail -f
+// <path>`, `ls <path>` and an editor with the file open are not the pet.
+static int petPidMatches(const char *pidName, const char *path, const char *real) {
+    char p[300];
+    snprintf(p, sizeof(p), "/proc/%s/cmdline", pidName);
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;              // the process may have exited already
+    char buf[4096];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    // an empty cmdline, and an empty argv[0], name nothing at all - such a
+    // process is never the pet
+    if (!*buf) return 0;
+    // argv[0]: the file itself, or the interpreter the kernel handed the
+    // script to - and the interpreter itself is never the file, so the tokens
+    // after it are the only place the script can be
+    size_t i = strlen(buf) + 1;
+    if (petTokenIsFile(buf, pidName, path, real, 0)) return 1;
+    const struct PetInterp *interp = petInterp(buf);
+    if (!interp) return 0;
+    // the script is the first token after the interpreter that is not one of
+    // the interpreter's own options
+    while (i < n) {
+        char *tok = buf + i;
+        i += strlen(tok) + 1;
+        if (tok[0] != '-') return petTokenIsFile(tok, pidName, path, real, 1);
+        // "--" ends the options: the script is the token after it
+        if (!strcmp(tok, "--")) {
+            return i < n && petTokenIsFile(buf + i, pidName, path, real, 1);
+        }
+        // a lone "-" reads the program from stdin: not a script file. A long
+        // option has no grammar here, so it ends the scan unless its value is
+        // attached, which consumes nothing and leaves the script to follow
+        if (!tok[1]) return 0;
+        if (tok[1] == '-') {
+            if (strchr(tok, '=')) continue;
+            return 0;
+        }
+        for (const char *o = tok + 1; *o; o++) {
+            if (strchr(interp->command, *o)) return 0;
+            if (strchr(interp->script, *o)) {
+                const char *val = o[1] ? o + 1 : (i < n ? buf + i : NULL);
+                return val && petTokenIsFile(val, pidName, path, real, 1);
+            }
+            if (strchr(interp->value, *o)) {
+                if (o[1]) break;              // the value is attached to the token
+                if (i >= n) return 0;         // a value that never came
+                i += strlen(buf + i) + 1;     // the next token is the value
+                break;
+            }
+            if (!strchr(interp->flag, *o)) return 0;   // unknown: not the pet
+        }
+    }
+    return 0;
+}
 // ---- the tick ------------------------------------------------------------------
 int petProcessRunning(const char *exePath) {
-    if (!exePath || !*exePath) return 0;
-    // basename of exePath, whatever separators it carries
-    const char *b = exePath, *q;
-    for (q = exePath; *q; q++) if (*q == '/' || *q == '\\') b = q + 1;
-    // comm is capped at 15 chars + NUL by the kernel; comparing more than that
-    // against a longer name would make a match impossible
-    char want[16] = {0};
-    snprintf(want, sizeof(want), "%s", b);
-    if (!want[0]) return 0;
-
+    if (!petPathUsable(exePath)) return 0;
+    char real[4096];
+    petResolved(exePath, real, sizeof real);
     DIR *d = opendir("/proc");
     if (!d) return 0;
     int found = 0;
     struct dirent *e;
     while ((e = readdir(d)) && !found) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;   // pids only
-        char p[300];
-        snprintf(p, sizeof(p), "/proc/%s/comm", e->d_name);
-        FILE *f = fopen(p, "r");
-        if (!f) continue;              // the process may have exited already
-        char comm[64] = {0};
-        if (!fgets(comm, sizeof(comm), f)) { fclose(f); continue; }
-        fclose(f);
-        comm[strcspn(comm, "\n")] = 0;
-        // case-insensitive, like lstrcmpiW on Windows
-        if (!strcasecmp(comm, want)) found = 1;
+        if (petPidMatches(e->d_name, exePath, real)) found = 1;
     }
     closedir(d);
     return found;
+}
+
+// Stop every process that is the pet target: SIGTERM, re-verifying the match
+// against the pid's own cmdline immediately before the signal (the pid could
+// have been recycled between the scan and the kill). Returns how many were
+// signalled. Never SIGKILLs: the pet must save its position/settings first,
+// and the signal only ever goes to a pid whose own cmdline matched the
+// configured path - never to a process-name pattern.
+int petProcessStop(const char *exePath) {
+    if (!petPathUsable(exePath)) return 0;
+    char real[4096];
+    petResolved(exePath, real, sizeof real);
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    int stopped = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        if (!petPidMatches(e->d_name, exePath, real)) continue;
+        pid_t pid = (pid_t)atoi(e->d_name);
+        if (pid > 1 && kill(pid, SIGTERM) == 0) stopped++;
+    }
+    closedir(d);
+    return stopped;
 }
 
 // One call per bar timer tick fills every field. Fields with no source keep
@@ -561,6 +821,7 @@ void linuxMetricsPoll(LinuxMetrics *m) {
     // the pet path comes from the core's config, which this TU only sees through
     // the extern (the core struct is not included here)
     extern const wchar_t *cbCfgPetPath(void);
+    extern int cbCfgPetEnabled(void);
     extern int WideCharToMultiByte(unsigned, unsigned long, const wchar_t *, int,
                                    char *, int, const char *, int *);
     m->cpu = cpuPercent();
@@ -576,13 +837,13 @@ void linuxMetricsPoll(LinuxMetrics *m) {
     // MUST be converted rather than cast: casting read only the first byte and
     // every process lookup compared against "k" (measured: kitty was running and
     // the chip still said "off").
-    {
+    if (cbCfgPetEnabled()) {
         char petPath[512] = {0};
         const wchar_t *wp = cbCfgPetPath();
         if (wp && *wp)
             WideCharToMultiByte(65001 /*CP_UTF8*/, 0, wp, -1, petPath, sizeof(petPath), NULL, NULL);
         m->petRunning = petProcessRunning(petPath);
-    }
+    } else m->petRunning = 0;
     m->clockNow = time(NULL);
 }
 

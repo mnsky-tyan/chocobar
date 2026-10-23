@@ -1,6 +1,7 @@
 name: Release
 
-# Builds the Windows exe from the tagged commit and attaches it to the release.
+# Builds the Windows exe AND the Linux bar from the tagged commit and attaches
+# both to the release.
 #
 # Why this exists: releases used to be built by hand on one machine, so the
 # published exe could not be reproduced from its tag by anyone. From now on the
@@ -34,6 +35,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
 
+      # The LINUX bar needs its own toolchain: the bar the user actually runs
+      # is a release artifact, so the release has to build it. Without this the
+      # Linux bar could only ever exist as a hand-made local build.
+      #
+      # The runtime packages are listed explicitly because the step below RUNS
+      # the freshly built bar: `linux/build/chocobar-linux --version` is a
+      # dynamically linked binary (linux/build.sh links pkg-config --libs, no
+      # -static), so the loader needs libX11.so.6, libcairo.so.2, libcurl.so.4
+      # and the rest before main() can reach the --version branch. The -dev
+      # packages happen to pull those runtime counterparts in today, so this is
+      # belt-and-braces against a distro change dropping that dependency.
+      # libcurl.so.4 is not repeated: its runtime is the t64 package
+      # (libcurl4t64), which libcurl4-openssl-dev already depends on.
+      #
+      # The bar stays on ubuntu-latest on purpose: the attached asset is built
+      # here and therefore requires that image's glibc (Ubuntu 24.04, glibc
+      # 2.39 - README.md documents that floor and points older distros at the
+      # source build). Pinning an older runner or a static link would trade a
+      # documented floor for a second build path nobody maintains.
+      - name: Install the Linux build dependencies
+        run: |
+          sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
+                               libxcursor-dev libcairo2-dev libdbus-1-dev \
+                               libfontconfig1-dev libcurl4-openssl-dev \
+                               libx11-6 libxrender1 libxfixes3 libxcursor1 \
+                               libcairo2 libdbus-1-3 libfontconfig1
+
       - name: Verify the tag matches version.h
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -49,6 +77,11 @@ jobs:
           bash native/build.sh --no-nix
           ls -la native/chocobar.exe
 
+      - name: Build the Linux bar
+        run: |
+          bash linux/build.sh
+          ls -la linux/build/chocobar-linux
+
       - name: Verify the built exe reports the tagged version
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -57,10 +90,17 @@ jobs:
           strings -el native/chocobar.exe | grep -qx "$tag" \
             || { echo "::error::built exe does not contain version string $tag"; exit 1; }
 
-      - name: Attach the exe to the release
+      - name: Verify the built Linux bar reports the tagged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          linux/build/chocobar-linux --version | grep -qx "$tag" \
+            || { echo "::error::the built Linux bar does not report version $tag"; exit 1; }
+
+      - name: Attach the exe and the Linux bar to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" native/chocobar.exe --clobber
+          gh release upload "$GITHUB_REF_NAME" linux/build/chocobar-linux --clobber

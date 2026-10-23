@@ -4,6 +4,11 @@ Documentation=https://github.com/mnsky-tyan/chocobar
 # The bar is an X11 client; it needs the graphical session, not the network.
 After=graphical-session.target
 PartOf=graphical-session.target
+# Do not give up after a burst of restarts: the default StartLimitBurst=5 in 10 s
+# would stop the service permanently after a compositor restart loop. Both keys
+# live in [Unit] - systemd moved them there in v229 and IGNORES them in [Service].
+StartLimitIntervalSec=0
+StartLimitBurst=0
 
 [Service]
 Type=simple
@@ -15,19 +20,21 @@ ExecStart=%h/.local/bin/chocobar-linux
 # gone" a thing that cannot persist for more than two seconds.
 Restart=always
 RestartSec=2
-# do not give up after a burst of restarts (the default StartLimitBurst=5 in 10s
-# would stop the service permanently after a compositor restart loop)
-StartLimitIntervalSec=0
 
 # it must be able to see the display
 Environment=DISPLAY=:0
 # WIZBAR_CONFIG is optional: without it the bar reads ~/.wizbar/config.json
 #Environment=WIZBAR_CONFIG=%h/.wizbar/config.json
 
-# keep it out of the way: the bar is a small client, not a service with state
+# keep it out of the way: the bar is a small client, not a service with state.
+# The pet the bar starts shares this cgroup and inherits Nice and
+# IOSchedulingClass with it - the bar cannot change those for a child it starts.
 Nice=5
 IOSchedulingClass=idle
-MemoryMax=256M
+# A ceiling, not a reservation: the bar itself needs a few tens of MB, and the
+# pet companion the bar starts shares this cgroup, so leave room for a real
+# companion app.
+MemoryMax=1G
 
 [Install]
 WantedBy=graphical-session.target

@@ -1,22 +1,25 @@
 // linux/src/main.c - the Linux Chocobar bar.
 //
 // WHAT THIS IS
-// A small always-on-top, frameless, translucent strip that floats over the
-// desktop and shows the same chips as the Windows bar: cpu, ram, cpu temp,
-// volume, battery, clock, plus the token count the shared scanner produces.
-// It does NOT follow a terminal (that was a Wayland-shaped problem worth
-// skipping: see the README's Linux section); it sits where it is put and
-// remembers that position.
+// A small lower-layer, frameless, translucent strip that floats over the
+// desktop and shows the same chips as the Windows bar: pet, the token count
+// the shared scanner produces, the subscription gauge, cpu, gpu, cpu temp,
+// ram, volume, battery and clock.
+// With bar.align 1 it rides the terminal: x and width come from the active
+// terminal (the KWin helper's report) and y sits just above its top edge - the
+// position is derived every tick and never persisted.
 //
 // HOW IT PAINTS
 // The Windows bar draws into a premultiplied 32bpp DIB and hands it to
-// UpdateLayeredWindow. The Linux equivalent is an override-redirect X11 window
-// whose background is an XRender picture built from a cairo ARGB32 surface:
-//  - override-redirect: the window manager never manages it, so it has no
-//    title bar, no taskbar entry, never takes focus, and sits exactly where we
-//    put it. That is the same role WS_EX_LAYERED + WS_EX_NOACTIVATE plays on
-//    Windows, and it is what makes a "floating bar" trivial instead of a
-//    protocol negotiation.
+// UpdateLayeredWindow. The Linux equivalent is a MANAGED X11 window on a
+// 32-bit ARGB visual, painted through a cairo surface bound to the window:
+//  - managed, NOT override-redirect (a measured fact: KWin composites every
+//    override-redirect window in its top layer no matter which state atoms it
+//    carries, so the lower layer is reachable only by a managed BELOW window).
+//    _NET_WM_STATE_BELOW/SKIP_TASKBAR/SKIP_PAGER/STICKY, undecorated
+//    _MOTIF_WM_HINTS, InputHint False and a USPosition geometry give it no
+//    title bar, no taskbar entry, no focus, and the exact derived rectangle -
+//    the same role WS_EX_LAYERED + WS_EX_NOACTIVATE plays on Windows.
 //  - cairo draws with real anti-aliasing, so the rounded corners and the icons
 //    are smooth; the window is shaped to the same rounded rect so the pixels
 //    outside it are genuinely not part of the window (no black corner squares).
@@ -32,6 +35,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -39,8 +43,9 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <spawn.h>
 #include <time.h>
-#include <unistd.h>
 #include <unistd.h>
 #include <X11/Xatom.h>
 #include <X11/Xcursor/Xcursor.h>
@@ -55,6 +60,7 @@
 #include <X11/keysym.h>
 
 #include "chocobar_core.h"
+#include "version.h"      // CB_VER_STR: the one version the release tags
 #include "svg_geometry.h"   // the shared icon ids (SVG_CPU, ...)
 #include "linux_metrics.h"
 #include "geomdbus.h"
@@ -177,6 +183,7 @@ static volatile sig_atomic_t g_quit = 0;
 // ---- right-click menu and dashboard state -----------------------------------------
 static int g_menuPending = 0;
 static int g_menuX = 0, g_menuY = 0;
+static int g_swallowRelease = 0;   // the menu's dismissing gesture: eat its release
 static int g_dashPending = 0;   // 1 = token dashboard, 2 = subscriptions
 
 
@@ -565,7 +572,7 @@ static void paint(void) {
         // hover pill behind a clickable LEFT-group chip (p_ui.c:1069-1077):
         // without it the tokens chip looks like a label, not something you can
         // open. Right-group chips are not clickable, so they get no pill.
-        int hovered = (i == g_hover) && (c->align == CHIP_LEFT) && chipClickable(c);
+        int hovered = (i == g_hover) && chipClickable(c);
         if (hovered) {
             double pl = cx - HOVER_PAD_X * g_scale;
             double pt = HOVER_PAD_Y * g_scale;
@@ -751,6 +758,49 @@ static int applyAlign(int *outW, int *outX) {
     return 0;
 }
 
+// THE BLUR-BEHIND HINT IS DELIBERATELY NOT SET. KWin's blur (the property
+// Konsole/Dolphin set) composited with this desktop's blur effect turns the
+// bar into a flat washed-out strip: measured on the session's own wallpaper,
+// the bar's empty middle read std=8.4 with the hint set and std=25.0 one
+// second after removing it, and the README's reference screenshot (the look
+// the bar is built for) measures std=34 - the raw backdrop, not the blur.
+// The config's "acrylic" is honored as the translucent tint itself: the
+// warm glass the reference shows IS the wallpaper showing through 47% cream.
+// This desktop's effect is a third-party one (better_blur_dx with Brightness
+// and Saturation post-processing), and stock KWin blur would flatten the
+// backdrop too, only less. A window that asks for no special treatment gets
+// none, which is also why nothing here re-declares anything per resize.
+static void setSizeHints(int x, int y);   // defined below, with the other window hints
+
+static void resizeWindow(int w, int h) {
+    if (w == g_w && h == g_h) return;
+    g_w = w; g_h = h;
+    XResizeWindow(g_dpy, g_win, (unsigned)g_w, (unsigned)g_h);
+    allocSurface();
+    applyShape();
+    // the hints carry the size as well as the position, and a window manager
+    // places a managed window from them on map: a resize must refresh them here
+    // or the next map shows the OLD rectangle for a frame
+    setSizeHints(g_x, g_y);
+}
+
+// Sizing is ONE operation, not four: the rounded XShape region is in window
+// coordinates, so a resize that skips applyShape() leaves the window clipped to
+// the OLD rounded rect, and a surface kept at the old size paints into freed
+// memory. Every size change in this file goes through resizeWindow() so the
+// three-step invariant (window, surface, shape) holds by construction.
+// The effective bar height in LOGICAL px - the config's own unit - with ONE
+// definition of the clamp: a height the bar would draw below 8 device px is
+// raised to 24 DEVICE px (24/scale logical). resizeToContent() draws it and
+// barYFor() derives y from it, so the two can never disagree: with the raw
+// configured height a short bar's bottom edge would sit below the terminal's top
+// edge and overlap it.
+static double barHeightLogical(void) {
+    double h = cbCfgHeight();
+    if ((int)(h * g_scale + 0.5) < 8) h = 24 / g_scale;
+    return h;
+}
+
 static void resizeToContent(void) {
     // width from the chips: pads + chips + the gaps between them. The two groups
     // are measured independently and then summed, because the gap between the
@@ -776,17 +826,9 @@ static void resizeToContent(void) {
         // would clip them, so the chips win and the bar sticks out
         if (aw > w) w = aw;
     }
-    int h = (int)(cbCfgHeight() * g_scale + 0.5);
-    if (h < 8) h = 24;
-    if (w != g_w || h != g_h) {
-        g_w = w; g_h = h;
-        XResizeWindow(g_dpy, g_win, (unsigned)g_w, (unsigned)g_h);
-        allocSurface();
-        applyShape();
-    }
+    int h = (int)(barHeightLogical() * g_scale + 0.5);
+    resizeWindow(w, h);
 }
-
-static void setSizeHints(int x, int y);   // defined below, with the other window hints
 
 static void moveWindow(int x, int y) {
     g_x = x; g_y = y;
@@ -799,12 +841,39 @@ static void moveWindow(int x, int y) {
 
 // ---- position -----------------------------------------------------------------------
 // The bar's position is DERIVED, never user-dragged: x and width come from the
-// terminal (bar.align), y is bar.gap below the screen's top edge. Nothing is
-// persisted: a dragged bar was the Windows bar's affordance, and on Linux the
-// alignment contract makes a manual position meaningless.
+// terminal (bar.align), y follows the TERMINAL's top edge the way Windows does
+// (p_ui.c: y = terminal.top - barHeight - gap), so the bar rides just above the
+// terminal wherever it is. Nothing is persisted: a dragged bar was the Windows
+// bar's affordance, and on Linux the alignment contract makes a manual position
+// meaningless.
+static int g_hidden;             // no room above the terminal: bar unmapped
+
+// The y for the current tick, in device pixels. -1 = no room above the terminal
+// (the bar hides, the Windows hideBar() behaviour). With align 1 but no usable
+// report (missing, or older than 30 s) it returns the screen-top position, so a
+// stopped helper or a KWin restart drops the bar to the top instead of pinning
+// it to a terminal that no longer exists.
+static int barYFor(void) {
+    if (cbCfgAlign() == 1 && g_geom.valid && time(NULL) - g_geomAt < 30) {
+        // g_geom carries LOGICAL pixels (KWin's coordinate space); the config's
+        // height and gap are CSS px, so the arithmetic stays logical and only
+        // the result is scaled - exactly p_ui.c's ef.top - bh - gap. bh is the
+        // DRAWN height (barHeightLogical, the clamped one), so the strip's
+        // bottom edge always sits the gap above the terminal's top edge.
+        int yLog = g_geom.y - (int)(barHeightLogical() + 0.5) - cbCfgGap();
+        if (yLog < 0) return -1;
+        return (int)(yLog * g_scale + 0.5);
+    }
+    return (int)(cbCfgGap() * g_scale + 0.5);
+}
+
 static void positionInit(int screenW) {
-    g_x = (screenW - g_w) / 2;
-    g_y = (int)(cbCfgGap() * g_scale + 0.5);
+    int aw = 0, ax = 0;
+    if (applyAlign(&aw, &ax)) g_x = ax;
+    else g_x = (screenW - g_w) / 2;
+    int wantY = barYFor();
+    g_y = wantY < 0 ? (int)(cbCfgGap() * g_scale + 0.5) : wantY;
+    if (wantY < 0) g_hidden = 1;
 }
 
 // ---- events -------------------------------------------------------------------------------
@@ -835,29 +904,70 @@ static int chipAt(int px) {
     return -1;
 }
 
-// A left-group chip does something on click (today: the tokens chip opens the
-// dashboard); a right-group metric is a label. Only clickable chips get a hover
-// pill, which is what tells the two groups apart visually.
+// The pet chip's click handler (defined next to spawnDetached, below): start or
+// stop the modules.pet.exePath process.
+static void petToggle(void);
+
+// The ONE definition of "this chip does something on click": the tokens chip
+// (opens the dashboard) and the pet chip (toggles the pet process). Both are in
+// the LEFT group, and the click handler below, the hover pill and the cursor
+// shape all ask this function, so a right-group metric can never become a
+// button by any one of those paths drifting. Right-group metrics are labels.
 static int chipClickable(const Chip *c) {
-    return c->align == CHIP_LEFT && c->icon == SVG_DIAMOND;
+    return c->align == CHIP_LEFT && (c->icon == SVG_DIAMOND || c->icon == SVG_BOW);
 }
 
 static void onButton(XButtonEvent *e) {
     dbg("ButtonPress button=%u x_root=%d y_root=%d", e->button, e->x_root, e->y_root);
+    // any new press ends the gesture the menu may have marked for swallowing:
+    // a fresh click is a fresh gesture, and its release must be honoured
+    g_swallowRelease = 0;
     if (e->button == 1) {
         // a left click on the token chip opens the dashboard (the Windows bar's
-        // behaviour); anywhere else is inert - the bar is not draggable
+        // behaviour); a left click on the pet chip toggles the pet process
+        // (p_ui.c's CT_PET click); anywhere else is inert - the bar is not
+        // draggable
         int hit = chipAt(e->x);
-        if (hit >= 0 && g_chips[hit].icon == SVG_DIAMOND) {
-            g_dashPending = 1;
+        if (hit >= 0 && chipClickable(&g_chips[hit])) {
+            if (g_chips[hit].icon == SVG_DIAMOND) g_dashPending = 1;
+            else if (g_chips[hit].icon == SVG_BOW) petToggle();
         }
-    } else if (e->button == 3) {
-        // right-click opens the menu - the same items the Windows tray menu has.
-        // It used to quit outright, which was a placeholder, not a design.
-        g_menuPending = 1;
-        g_menuX = e->x_root;
-        g_menuY = e->y_root;
     }
+    // A button-3 PRESS does nothing here: the menu opens on the RELEASE, the
+    // Windows parity (p_ui.c WM_RBUTTONUP -> showTrayMenu). Opening on the
+    // press made the menu eat its own opening release - the press opened the
+    // menu at the cursor, the menu's pointer grab then received the release,
+    // which landed in the padding corner (menuHit -> -1) and closed the menu
+    // a few milliseconds after it appeared: "pops out and immediately pops
+    // back down".
+}
+
+static void onButtonRelease(XButtonEvent *e) {
+    dbg("ButtonRelease button=%u x=%d y=%d", e->button, e->x, e->y);
+    // the release of the gesture that DISMISSED the menu never opens anything:
+    // the menu returns MENU_DISMISSED_BY_PRESS for it (Win32's TrackPopupMenu
+    // consumes the dismissing click the same way, so the Windows bar sees no
+    // WM_RBUTTONUP for it). Without the swallow the menu would bounce back open
+    // on the very click that closed it.
+    if (g_swallowRelease) {
+        g_swallowRelease = 0;
+        dbg("release swallowed (menu dismissal gesture)");
+        return;
+    }
+    if (e->button != 3) return;
+    // The release must still be over the bar. The X implicit grab delivers
+    // every pointer event from the press until the last release to the window
+    // that got the press, wherever the pointer wanders (measured: the press
+    // window receives the release at coordinates outside its own bounds and
+    // the window under the pointer receives nothing), so an off-bar drag's
+    // release arrives HERE. The bounds check below is the rule's enforcement,
+    // exactly as on Windows, which sends WM_RBUTTONUP only over the window -
+    // it is not belt-and-braces: deleting it would let an off-bar release
+    // open the menu.
+    if (e->x < 0 || e->x >= g_w || e->y < 0 || e->y >= g_h) return;
+    g_menuPending = 1;
+    g_menuX = e->x_root;
+    g_menuY = e->y_root;
 }
 
 static void onMotion(XMotionEvent *e) {
@@ -908,7 +1018,8 @@ static void createWindow(void) {
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = g_cmap;
-    swa.event_mask = ExposureMask | ButtonPressMask | ButtonMotionMask |
+    swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                     ButtonMotionMask |
                      LeaveWindowMask | KeyPressMask | StructureNotifyMask;
     // MANAGED, not override-redirect: KWin composites override-redirect windows in
     // its top layer no matter what hints they set (measured on Plasma 6.6), so an
@@ -940,7 +1051,7 @@ static void createWindow(void) {
     // the concrete number back (measured: the property read 0 after map while
     // STICKY stayed set, and the bar then did not appear on desktop 2). The
     // request that works is the one made after the window is managed, so the
-    // sticky request lives in the post-map block below.
+    // sticky request lives in afterMap(), which every map of this window runs.
     // InputHint FALSE: the bar must never take the keyboard. Pointer events are
     // independent of this hint (the server routes them by stacking), so the
     // right-click menu and chip clicks still land; clicking the bar simply never
@@ -973,14 +1084,6 @@ static void createWindow(void) {
     unsigned long zeroTime = 0;
     XChangeProperty(g_dpy, g_win, XInternAtom(g_dpy, "_NET_WM_USER_TIME", False),
                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&zeroTime, 1);
-    // KWin's blur-behind hint (the same property Konsole/Dolphin set): the
-    // compositor blurs what is behind the window inside the region, which is what
-    // makes a translucent bar readable over text. Harmless on other compositors.
-    Atom blurAtom = XInternAtom(g_dpy, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
-    long blurRegion[4] = { 0, 0, g_w, g_h };
-    XChangeProperty(g_dpy, g_win, blurAtom, XA_CARDINAL, 32, PropModeReplace,
-                    (unsigned char *)blurRegion, 4);
-
     XStoreName(g_dpy, g_win, "Chocobar");
     XClassHint cls = { (char *)"chocobar", (char *)"Chocobar" };
     XSetClassHint(g_dpy, g_win, &cls);
@@ -999,6 +1102,44 @@ static void setSizeHints(int x, int y) {
     sh.x = x; sh.y = y;
     sh.width = g_w; sh.height = g_h;
     XSetWMNormalHints(g_dpy, g_win, &sh);
+}
+
+// The work every map of the bar must do, the startup map and a later one alike:
+// wait (bounded) for the window manager to finish managing the window, then
+// rewrite _NET_WM_STATE - KWin adds DEMANDS_ATTENTION to it when a window maps
+// without user activity, and re-writing the property after the map is the
+// client-side contract for "attention handled" - and send the EWMH all-desktops
+// request. That request is a ClientMessage to the root window, not a property
+// write, and it only works once the window is managed, which is why both live
+// here instead of in createWindow(). A map that skips this work (the tick's,
+// after a born-hidden start) leaves the bar on one desktop with attention set.
+static void afterMap(void) {
+    XEvent ev;
+    XFlush(g_dpy);
+    for (int i = 0; i < 200; i++) {   // bounded: never block the loop
+        if (XCheckTypedWindowEvent(g_dpy, g_win, MapNotify, &ev)) break;
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
+    Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
+    Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
+    Atom skipPager = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
+    Atom sticky = XInternAtom(g_dpy, "_NET_WM_STATE_STICKY", False);
+    Atom states[4] = { below, skipTask, skipPager, sticky };
+    XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)states, 4);
+    XEvent cm;
+    memset(&cm, 0, sizeof(cm));
+    cm.xclient.type = ClientMessage;
+    cm.xclient.window = g_win;
+    cm.xclient.message_type = XInternAtom(g_dpy, "_NET_WM_DESKTOP", False);
+    cm.xclient.format = 32;
+    cm.xclient.data.l[0] = 0xFFFFFFFF;   // all desktops
+    cm.xclient.data.l[1] = 1;            // source: normal application
+    XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
+               SubstructureNotifyMask | SubstructureRedirectMask, &cm);
+    XFlush(g_dpy);
 }
 
 // ---- DPI ---------------------------------------------------------------------------------------
@@ -1112,15 +1253,44 @@ static void scanIfDue(time_t now) {
 }
 
 // ---- config reload ----------------------------------------------------------------------------------
-static time_t g_cfgMtime = 0;
+// The change token for the config file. The mtime alone is too coarse to tell
+// two states of the file apart: it has whole-second resolution, so a rewrite
+// that lands in the same second as the previous one is invisible, and a file
+// that is being rewritten RIGHT NOW (truncated, not yet written) carries the
+// same mtime as the finished one. The bar then reads the half-written file,
+// the core keeps the previous config, and - because the token already moved -
+// the finished file is never reloaded: the change is lost for good. The full
+// stat identity (seconds AND nanoseconds AND the size) tells those states
+// apart, which is the same precision the Windows bar gets from its FILETIME
+// token.
+typedef struct {
+    time_t sec;
+    long nsec;
+    off_t size;
+} CfgId;
+
+static CfgId g_cfgId = { 0, 0, 0 };
 static char g_cfgPath[512];
 
-static int cfgStat(time_t *out) {
+static int cfgId(CfgId *out) {
     struct stat st;
     if (stat(g_cfgPath, &st) != 0) return 0;
-    *out = st.st_mtime;
+    out->sec = st.st_mtim.tv_sec;
+    out->nsec = st.st_mtim.tv_nsec;
+    out->size = st.st_size;
     return 1;
 }
+
+static int cfgIdSame(const CfgId *a, const CfgId *b) {
+    return a->sec == b->sec && a->nsec == b->nsec && a->size == b->size;
+}
+
+// Reload the config and keep the change token in step with what was actually
+// loaded. The token only moves when the file did not change WHILE it was
+// being read: a file that is being rewritten is read half-written, the core
+// keeps the previous config, and the token has to stay where it was for the
+// next tick to see the finished file as a change worth reloading.
+static void configReload(void);
 
 static void reloadConfig(void) {
     wchar_t wide[1024];
@@ -1131,6 +1301,16 @@ static void reloadConfig(void) {
     // the same on Windows, right after loadConfig)
     cbSubsSetRotateSec(cbCfgSubsRotateSec());
     resolveFontFamily();
+}
+
+static void configReload(void) {
+    CfgId before;
+    int have = cfgId(&before);
+    reloadConfig();
+    if (!have) return;
+    CfgId after;
+    if (!cfgId(&after)) return;
+    if (cfgIdSame(&before, &after)) g_cfgId = after;
 }
 
 // ---- the right-click menu and the dashboards --------------------------------------
@@ -1165,20 +1345,440 @@ static void runDashboard(void) {
              g_fontFamily, page, card, fg, dim, div, ramp);
 }
 
+// Reap every child of the bar that has exited. The pet and the detached spawns
+// are fire-and-forget, and a long-lived service that never waits keeps one
+// defunct entry per invocation for as long as it runs. runTimed's child is
+// spawned and waited inside one call - a corpse that outlives its kill budget
+// is abandoned for exactly this loop to collect - and this runs from the same
+// single event loop, so it never takes a child that call still owns.
+static void reapChildren(void) {
+    while (waitpid(-1, NULL, WNOHANG) > 0) { }
+}
+
+// Resolve a program name to a path exec() can take, in the PARENT, before any
+// fork. The child of a fork() in this threaded bar may call only
+// async-signal-safe functions until exec() replaces it (POSIX): the malloc
+// lock can be held by another thread at the instant of the fork, so a child
+// that allocates - the PATH search execlp does - can deadlock before it ever
+// reaches the exec. The search therefore happens here, where allocating is
+// allowed.
+// 1 = out holds a path exec() can take, 0 = nothing was found.
+static int programPath(const char *name, char *out, size_t cap) {
+    if (!name || !*name) return 0;
+    if (strchr(name, '/')) {
+        // an explicit path needs no search, and exec() takes it as it is
+        if (strlen(name) >= cap) return 0;
+        strcpy(out, name);
+        return 1;
+    }
+    const char *path = getenv("PATH");
+    if (!path || !*path) path = "/usr/local/bin:/usr/bin:/bin";
+    const char *p = path;
+    for (;;) {
+        const char *sep = strchr(p, ':');
+        size_t dlen = sep ? (size_t)(sep - p) : strlen(p);
+        char dir[PATH_MAX];
+        const char *d = ".";
+        if (dlen) {
+            if (dlen < sizeof dir) { memcpy(dir, p, dlen); dir[dlen] = 0; d = dir; }
+            else d = NULL;
+        }
+        if (d) {
+            char cand[PATH_MAX];
+            if (snprintf(cand, sizeof cand, "%s/%s", d, name) < (int)sizeof cand &&
+                access(cand, X_OK) == 0) {
+                struct stat st;
+                if (stat(cand, &st) == 0 && S_ISREG(st.st_mode)) {
+                    if (strlen(cand) >= cap) return 0;
+                    strcpy(out, cand);
+                    return 1;
+                }
+            }
+        }
+        if (!sep) break;
+        p = sep + 1;
+    }
+    return 0;
+}
+
 // Run an external program without blocking the bar's loop: a config editor or a
-// file manager must not freeze the strip.
+// file manager must not freeze the strip. The program is resolved to a path
+// exec() can take BEFORE the fork, so the child only has to exec it: execlp's
+// PATH search allocates, and the child of a fork in this threaded bar may not
+// allocate before the exec (see programPath).
 static void spawnDetached(const char *argv0, const char *argv1) {
+    char prog[PATH_MAX];
+    if (!programPath(argv0, prog, sizeof prog)) {
+        fprintf(stderr, "chocobar: cannot run %s: not found\n", argv0 ? argv0 : "");
+        return;
+    }
     pid_t pid = fork();
     if (pid != 0) return;
     setsid();
-    if (argv1) execlp(argv0, argv0, argv1, (char *)NULL);
-    else execlp(argv0, argv0, (char *)NULL);
+    char *args[3];
+    args[0] = (char *)argv0;
+    args[1] = argv1 ? (char *)argv1 : NULL;
+    args[2] = NULL;
+    execv(prog, args);
     _exit(127);
+}
+
+// The pet chip's click: start or stop the modules.pet.exePath process, the same
+// toggle the Windows bar has (p_ui.c petToggle, CT_PET chip). The configured
+// value is ONE path token and both halves agree on that: petPathUsable refuses
+// a value that is not an absolute path to a regular executable file (a bare
+// name, a relative path, a directory, or a command line that carries
+// arguments), and the start execs that path directly - no shell - so the
+// process the bar starts has the configured path as its EXECUTED file: argv[0]
+// for a binary, and the first non-option token after the shebang interpreter
+// for a script (the kernel hands it to the interpreter, and a shebang that
+// carries an argument puts the script at argv[2]), and the matcher (the chip's
+// own state source) sees the pet it started. Stop is a verified SIGTERM per
+// matching pid (petProcessStop re-checks each cmdline).
+//
+// Known consequence, deliberate: a child cannot escape its parent's cgroup, so
+// the pet the bar starts runs in chocobar.service's cgroup and inherits
+// everything that unit applies: a service restart stops it (the default
+// KillMode=control-group), it lives under the unit's MemoryMax, and it runs at
+// the unit's Nice and IOSchedulingClass. A pet that needs more than the unit
+// allows must be started by the user instead. The pet is a companion to the
+// bar, and dying with a bar restart beats outliving one with no way to toggle
+// it off.
+// One pet-start handshake may be in flight at a time: the click parks the
+// CLOEXEC pipe's read end here and returns, and the tick settles it
+// (petHandshakeDrain) - no click ever waits on a fork child's exec, so a slow
+// exec can never park the bar's single event loop with it. The park is BOUNDED:
+// a child that never lands its exec (an unresponsive mount, a stopped child)
+// holds the write end open, so the tick closes the pipe and reports an
+// unsettled start once PET_HANDSHAKE_MS has passed. Without that deadline the
+// pipe stays parked for ever, every later click is refused with no log line at
+// all, and the stuck child is never reaped.
+#define PET_HANDSHAKE_MS 5000
+static int g_petPipe = -1;
+static char g_petPipePath[512];
+static struct timespec g_petPipeAt;   // when the handshake was parked
+
+static void petToggle(void) {
+    char petPath[512] = {0};
+    const wchar_t *wp = cbCfgPetPath();
+    if (!wp || !*wp) return;
+    // the config string is wchar_t (UTF-32 here), so it MUST be converted rather
+    // than cast - the same rule the metrics poll follows
+    WideCharToMultiByte(65001 /*CP_UTF8*/, 0, wp, -1, petPath, sizeof(petPath), NULL, NULL);
+    if (!petPathUsable(petPath)) return;
+
+    if (petProcessRunning(petPath)) {
+        int n = petProcessStop(petPath);
+        fprintf(stderr, "chocobar: pet: stopped: %s (%d process%s)\n",
+                petPath, n, n == 1 ? "" : "es");
+        return;
+    }
+    // the matcher cannot see a fork whose exec has not landed yet, so a second
+    // click inside that window would start a duplicate: one handshake at a time.
+    // The refusal is LOGGED: a click the user made must never be silent, so a
+    // pending handshake reports itself rather than swallowing the click.
+    if (g_petPipe >= 0) {
+        fprintf(stderr, "chocobar: pet: start of %s has not reported yet, "
+                        "this click was ignored\n", g_petPipePath);
+        return;
+    }
+    // The exec's outcome comes back over a CLOEXEC pipe: the write end closes
+    // at a successful exec, and a failed exec writes the errno and exits. The
+    // click never waits for it - the pipe is parked and the tick settles it,
+    // which prints the one true line ("starting" only when the kernel took the
+    // exec, "cannot start" when it did not) - so a slow exec leaves the bar
+    // fully live while the handshake pends. The child itself may not
+    // report anything: after a fork in this threaded bar it may only call
+    // async-signal-safe functions until exec, and printing (dprintf) or
+    // describing an error (strerror) allocates - a fork that lands while the
+    // subs thread holds the allocator lock would leave the child stuck before
+    // the exec, and the pet would silently never start.
+    int pfd[2];
+    if (pipe(pfd)) {
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(errno));
+        return;
+    }
+    // The write end must not survive the exec: its closing IS the success
+    // signal. It is moved above the standard streams first, so the child's
+    // redirect of 0/1/2 to /dev/null can never land on it.
+    int wfd = fcntl(pfd[1], F_DUPFD, 10);
+    if (wfd < 0) {
+        int e = errno;
+        close(pfd[0]);
+        close(pfd[1]);
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
+        return;
+    }
+    close(pfd[1]);
+    fcntl(wfd, F_SETFD, FD_CLOEXEC);
+    // the tick drains this pipe, so its read end may never block: O_NONBLOCK
+    // or no start at all
+    int fl = fcntl(pfd[0], F_GETFL, 0);
+    if (fl < 0 || fcntl(pfd[0], F_SETFL, fl | O_NONBLOCK) < 0) {
+        int e = errno;
+        close(pfd[0]);
+        close(wfd);
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
+        return;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        int e = errno;
+        close(pfd[0]);
+        close(wfd);
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n", petPath, strerror(e));
+        return;
+    }
+    if (pid == 0) {
+        close(pfd[0]);
+        setsid();
+        // the pet is a GUI app: nothing it prints belongs on the bar's stderr
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0);
+            dup2(devnull, 1);
+            dup2(devnull, 2);
+            if (devnull > 2) close(devnull);
+        }
+        char *args[2] = { petPath, NULL };
+        execv(petPath, args);
+        // the exec was refused: hand the errno to the parent and leave.
+        // write() and _exit() are async-signal-safe, and nothing else may run
+        // in this child before it is gone.
+        int e = errno;
+        ssize_t ignored = write(wfd, &e, sizeof e);
+        (void)ignored;
+        _exit(127);
+    }
+    close(wfd);
+    // the click's work is done: the handshake is parked for the tick, and a
+    // slow exec holds nothing but this pipe. The park is stamped so the tick can
+    // enforce its deadline.
+    clock_gettime(CLOCK_MONOTONIC, &g_petPipeAt);
+    snprintf(g_petPipePath, sizeof g_petPipePath, "%s", petPath);
+    g_petPipe = pfd[0];
+}
+
+// Settle the parked pet-start handshake, from the tick: bytes on the pipe are
+// the child's refused-exec errno, EOF is the write end dying with a successful
+// exec, and EAGAIN means the exec is still in flight - the handshake settles
+// whenever it settles, and the bar keeps ticking meanwhile. A park that has
+// outlived PET_HANDSHAKE_MS is abandoned: closing the read end releases the
+// child (its write end then fails or is inherited, and the ordinary child
+// reaping collects it once it exits), the state clears so the next click can
+// try again, and the log carries the truth - the start never reported, so
+// nothing claims it started. The deadline never costs a working start: an exec
+// that lands reports its outcome first, and this branch is only reached when
+// nothing has been reported for the whole budget.
+static void petHandshakeDrain(void) {
+    if (g_petPipe < 0) return;
+    int execErr = 0;
+    ssize_t got = read(g_petPipe, &execErr, sizeof execErr);
+    if (got < 0) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed = (now.tv_sec - g_petPipeAt.tv_sec) * 1000 +
+                       (now.tv_nsec - g_petPipeAt.tv_nsec) / 1000000;
+        if (elapsed < PET_HANDSHAKE_MS) return;
+        close(g_petPipe);
+        g_petPipe = -1;
+        fprintf(stderr, "chocobar: pet: start of %s did not report within "
+                        "%d ms, the start is not confirmed\n",
+                g_petPipePath, PET_HANDSHAKE_MS);
+        return;
+    }
+    close(g_petPipe);
+    g_petPipe = -1;
+    if (got == (ssize_t)sizeof execErr) {
+        fprintf(stderr, "chocobar: pet: cannot start %s: %s\n",
+                g_petPipePath, strerror(execErr));
+        return;
+    }
+    fprintf(stderr, "chocobar: pet: starting: %s\n", g_petPipePath);
 }
 
 static void configDirOf(char *out, size_t cap) {
     const char *home = getenv("HOME");
     snprintf(out, cap, "%s/.wizbar", home ? home : "/tmp");
+}
+
+// Run a short-lived helper to completion under a hard time budget. Returns the
+// child's exit status (0..255), or -1 when the spawn failed or the budget ran
+// out. systemctl --user is a local, fast operation (measured: under 10 ms), but a
+// wedged one must not stall the bar's loop: the budget kills it and the caller
+// reports the failure. SIGKILL is not instant - a child in uninterruptible
+// sleep takes the signal only when the kernel releases it - so the kill gets
+// the same budget to land, reaped without blocking, and a corpse that never
+// arrives is left to the ordinary child reaping (reapChildren) instead of
+// waited for. The budget BOUNDS the stall, it does not eliminate it: runTimed
+// is synchronous inside the bar's single event loop, so a slow child delays
+// whatever the loop was about to do (a menu open, a clock tick) by up to the
+// budget, twice while a killed child lingers, and the toggle path pays it
+// twice (is-enabled + enable). Bounded and deliberate.
+//
+// out/err (either may be NULL) receive the child's stdout and stderr, truncated
+// and NUL-terminated. stdout is captured because systemctl reports a unit's
+// state as a WORD there ("enabled", "disabled", "masked"), and its exit code
+// cannot distinguish them - `is-enabled` exits 1 for "disabled" and for every
+// generic failure alike. stderr carries the failure text ("Unit ... could not
+// be found", "Failed to connect to user scope bus"); swallowing it made the
+// common unit-file-not-installed case undiagnosable. A NULL buffer sends that
+// stream to /dev/null: the bar's own output is a log line per real event, not
+// another tool's chatter.
+static void captureDrain(int fd, char *buf, size_t cap, size_t *len) {
+    if (fd < 0 || !buf || cap == 0) return;
+    char tmp[512];
+    ssize_t n = read(fd, tmp, sizeof tmp);
+    if (n <= 0) return;
+    size_t take = (size_t)n;
+    if (take > cap - 1 - *len) take = cap - 1 - *len;
+    if (take == 0) return;
+    memcpy(buf + *len, tmp, take);
+    *len += take;
+    buf[*len] = 0;
+}
+
+// One capture pipe. The read end is non-blocking so a quiet child cannot stall
+// the poll loop below; 0 means "capture nothing", and the caller sends that
+// stream to /dev/null instead.
+static int captureOpen(int fds[2], char *buf, size_t cap) {
+    fds[0] = fds[1] = -1;
+    if (!buf || cap == 0) return 0;
+    buf[0] = 0;
+    if (pipe(fds)) { fds[0] = fds[1] = -1; return 0; }
+    int fl = fcntl(fds[0], F_GETFL, 0);
+    if (fl >= 0) fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+    return 1;
+}
+
+static int runTimed(const char *const argv[], long budgetMs,
+                    char *out, size_t outCap, char *err, size_t errCap) {
+    extern char **environ;
+    pid_t pid = -1;
+    int outfds[2], errfds[2];
+    size_t outLen = 0, errLen = 0;
+    int outOpen = captureOpen(outfds, out, outCap);
+    int errOpen = captureOpen(errfds, err, errCap);
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa)) {
+        if (outOpen) { close(outfds[0]); close(outfds[1]); }
+        if (errOpen) { close(errfds[0]); close(errfds[1]); }
+        return -1;
+    }
+    if (outOpen) {
+        posix_spawn_file_actions_adddup2(&fa, outfds[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&fa, outfds[1]);
+        posix_spawn_file_actions_addclose(&fa, outfds[0]);
+    } else {
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    }
+    if (errOpen) {
+        posix_spawn_file_actions_adddup2(&fa, errfds[1], STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&fa, errfds[1]);
+        posix_spawn_file_actions_addclose(&fa, errfds[0]);
+    } else {
+        posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    }
+    int spawned = posix_spawnp(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    // the parent's copies of the write ends MUST go: while one is open the pipe
+    // never reaches EOF, so the read below would block for ever once the child
+    // is gone - and the bar's single event loop would hang with it
+    if (outOpen) { close(outfds[1]); outfds[1] = -1; }
+    if (errOpen) { close(errfds[1]); errfds[1] = -1; }
+    if (spawned != 0 || pid < 0) {
+        if (outOpen) close(outfds[0]);
+        if (errOpen) close(errfds[0]);
+        return -1;
+    }
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        // drain both streams while waiting: their output is short, so one read
+        // per poll keeps the buffers empty without blocking
+        if (outOpen) captureDrain(outfds[0], out, outCap, &outLen);
+        if (errOpen) captureDrain(errfds[0], err, errCap, &errLen);
+        int status;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (outOpen) { captureDrain(outfds[0], out, outCap, &outLen); close(outfds[0]); }
+            if (errOpen) { captureDrain(errfds[0], err, errCap, &errLen); close(errfds[0]); }
+            return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+        }
+        if (r < 0) {
+            if (outOpen) close(outfds[0]);
+            if (errOpen) close(errfds[0]);
+            return -1;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+        if (elapsed >= budgetMs) {
+            kill(pid, SIGKILL);
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (;;) {
+                if (outOpen) captureDrain(outfds[0], out, outCap, &outLen);
+                if (errOpen) captureDrain(errfds[0], err, errCap, &errLen);
+                pid_t kr = waitpid(pid, &status, WNOHANG);
+                if (kr == pid || kr < 0) break;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long killWait = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
+                if (killWait >= budgetMs) break;
+                struct timespec kw = { 0, 2 * 1000 * 1000 };
+                nanosleep(&kw, NULL);
+            }
+            if (outOpen) close(outfds[0]);
+            if (errOpen) close(errfds[0]);
+            return -1;
+        }
+        struct timespec w = { 0, 2 * 1000 * 1000 };
+        nanosleep(&w, NULL);
+    }
+}
+
+// The autostart state is the systemd user unit (the Linux Run key): the menu
+// item "Start on login" toggles it, the same control the Windows tray's "Start
+// with Windows" has over its own mechanism. The tri-state keeps a failed read
+// from masquerading as "disabled": -1 = unknown, 0 = disabled, 1 = enabled.
+//
+// The DECIDING input is the state WORD `is-enabled` prints, never its exit code:
+// systemctl exits 1 for ANY generic failure, not only for a disabled unit
+// (measured: an unreachable user manager prints "Failed to connect to user scope
+// bus" and exits 1, exactly like "disabled"). Reading the exit code therefore
+// reports a broken or masked unit as disabled, shows "Start on login" unticked,
+// and the toggle then flips the unit blind. Anything that is not a definite
+// enabled/disabled word - "masked", "not-found", "static", an empty answer -
+// is unknown, and the bar logs the answer and the child's error text.
+static int autoStartEnabled(void) {
+    const char *argv[] = { "systemctl", "--user", "is-enabled", "chocobar", NULL };
+    char out[128], err[256];
+    int rc = runTimed(argv, 500, out, sizeof out, err, sizeof err);
+    char *word = out;
+    while (*word == ' ' || *word == '\t' || *word == '\r' || *word == '\n') word++;
+    word[strcspn(word, " \t\r\n")] = 0;
+    if (!strcmp(word, "enabled") || !strcmp(word, "enabled-runtime")) return 1;
+    if (!strcmp(word, "disabled")) return 0;
+    if (rc < 0)
+        fprintf(stderr, "chocobar: autostart state unknown: systemctl did not "
+                        "run (spawn failure or timed out)\n");
+    else
+        fprintf(stderr, "chocobar: autostart state unknown (systemctl exit %d, "
+                        "answer \"%s\"): %s\n", rc, word,
+                *err ? err : "(no error text)");
+    return -1;
+}
+
+static void autoStartSet(int on) {
+    const char *argv[] = { "systemctl", "--user", on ? "enable" : "disable", "chocobar", NULL };
+    char err[256];
+    int rc = runTimed(argv, 500, NULL, 0, err, sizeof err);
+    if (rc == 0) return;
+    if (rc < 0)
+        fprintf(stderr, "chocobar: autostart %s failed: systemctl did not run "
+                        "(spawn failure or timed out)\n", on ? "enable" : "disable");
+    else
+        fprintf(stderr, "chocobar: autostart %s failed (systemctl exit %d): %s\n",
+                on ? "enable" : "disable", rc, *err ? err : "(no error text)");
 }
 
 static void handleMenuChoice(int choice) {
@@ -1187,6 +1787,23 @@ static void handleMenuChoice(int choice) {
         case MENU_TOKEN_DASH: g_dashPending = 1; break;
         case MENU_SUBS_DASH:
             fprintf(stderr, "chocobar: the subscription board is not ported to Linux yet\n");
+            break;
+        case MENU_AUTO_START: {
+            // the menu IS the control, like the Windows Run value: the config
+            // file is never rewritten, so an edited file wins until toggled.
+            // The state is tri-state: an unknown read must not flip the unit
+            // blind (it already logged why the read failed).
+            int st = autoStartEnabled();
+            if (st < 0) break;
+            autoStartSet(!st);
+            break;
+        }
+        case MENU_UPDATES:
+            // Opens the releases page rather than self-updating, exactly the
+            // Windows item's behaviour (p_ui.c id 6): no download, no file
+            // swap, no unsigned-binary trust question.
+            spawnDetached("xdg-open",
+                "https://github.com/mnsky-tyan/chocobar/releases/latest");
             break;
         case MENU_EDIT: {
             char dir[512];
@@ -1205,9 +1822,7 @@ static void handleMenuChoice(int choice) {
             break;
         }
         case MENU_RELOAD: {
-            reloadConfig();
-            time_t cur;
-            if (cfgStat(&cur)) g_cfgMtime = cur;
+            configReload();
             buildChips();
             resizeToContent();
             paint();
@@ -1306,6 +1921,11 @@ int main(int argc, char **argv) {
             return installGeometry();
         } else if (!strcmp(argv[i], "--remove-geometry")) {
             return removeGeometry();
+        } else if (!strcmp(argv[i], "--version")) {
+            // the release workflow verifies the built asset the same way it
+            // verifies the Windows exe: the binary itself must carry the tag
+            printf("%s\n", CB_VER_STR);
+            return 0;
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("chocobar-linux [--config PATH]\n"
                    "  floating status bar: cpu, ram, temp, volume, battery, clock, tokens\n"
@@ -1313,7 +1933,8 @@ int main(int argc, char **argv) {
                    "  the dashboard (the bar itself is not draggable)\n"
                    "  --install-geometry  load the KWin helper that makes bar.align 1\n"
                    "                      (match the active terminal's width) work\n"
-                   "  --remove-geometry   unload and delete that helper\n");
+                   "  --remove-geometry   unload and delete that helper\n"
+                   "  --version           print the version and exit\n");
             return 0;
         }
     }
@@ -1325,8 +1946,7 @@ int main(int argc, char **argv) {
     // core: config lock, cursors, config load (the same startup the macOS bar does)
     cbCoreInit();
     cbTokensInit();
-    reloadConfig();
-    cfgStat(&g_cfgMtime);
+    configReload();
     resolveFontFamily();
     // the provider fetch loop: it does nothing until a provider is enabled, and
     // its first cycle lands a few seconds in, so starting it before the window
@@ -1380,7 +2000,7 @@ int main(int argc, char **argv) {
     scanIfDue(time(NULL));
     buildChips();
 
-    g_w = 10; g_h = (int)(cbCfgHeight() * g_scale + 0.5);
+    g_w = 10; g_h = (int)(barHeightLogical() * g_scale + 0.5);
     // With bar.align 1 the width comes from the terminal, so give the KWin helper
     // a moment to report before sizing: otherwise the window is born at the
     // content width and visibly pops to the terminal width a second later.
@@ -1408,44 +2028,19 @@ int main(int argc, char **argv) {
     // and visibly shrinks against the desktop's scaled one (measured via the
     // same symptom on an Electron app that lacked Wayland fractional scaling)
     cursorsInit();
-    XMapWindow(g_dpy, g_win);
-    // KWin adds DEMANDS_ATTENTION to the state property when a window maps
-    // without user activity. Clear it: re-writing _NET_WM_STATE after the map
-    // is the client-side contract for "attention handled".
-    {
-        Atom wmState = XInternAtom(g_dpy, "_NET_WM_STATE", False);
-        Atom below = XInternAtom(g_dpy, "_NET_WM_STATE_BELOW", False);
-        Atom skipTask = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
-        Atom skipPager = XInternAtom(g_dpy, "_NET_WM_STATE_SKIP_PAGER", False);
-        Atom sticky = XInternAtom(g_dpy, "_NET_WM_STATE_STICKY", False);
-        Atom states[4] = { below, skipTask, skipPager, sticky };
-        XEvent ev;
-        for (int i = 0; i < 200; i++) {   // bounded: never block startup
-            while (XPending(g_dpy)) {
-                XNextEvent(g_dpy, &ev);
-                if (ev.type == MapNotify && ev.xany.window == g_win) i = 200;
-            }
-            struct timespec ts = { 0, 10 * 1000 * 1000 };
-            nanosleep(&ts, NULL);
-        }
-        XChangeProperty(g_dpy, g_win, wmState, XA_ATOM, 32, PropModeReplace,
-                        (unsigned char *)states, 4);
-        // and the sticky request. Writing _NET_WM_DESKTOP as a property is NOT
-        // the EWMH request: KWin keeps the value but treats the window as
-        // single-desktop (measured: onAllDesktops=false with the property at
-        // 0xFFFFFFFF and STICKY set). The protocol is a ClientMessage to the
-        // root window, and it has to arrive after KWin has finished managing.
-        XEvent cm;
-        memset(&cm, 0, sizeof(cm));
-        cm.xclient.type = ClientMessage;
-        cm.xclient.window = g_win;
-        cm.xclient.message_type = XInternAtom(g_dpy, "_NET_WM_DESKTOP", False);
-        cm.xclient.format = 32;
-        cm.xclient.data.l[0] = 0xFFFFFFFF;   // all desktops
-        cm.xclient.data.l[1] = 1;            // source: normal application
-        XSendEvent(g_dpy, RootWindow(g_dpy, g_screen), False,
-                   SubstructureNotifyMask | SubstructureRedirectMask, &cm);
-        XFlush(g_dpy);
+    // g_hidden is positionInit()'s verdict that there is no room above the
+    // terminal: the window must not be mapped AT ALL while it holds - mapping
+    // here would composite the strip at the top for a frame or two before an
+    // unmap could take it away. Skipping the first map is safe because every
+    // property a window manager needs to manage the first map it sees - the
+    // _NET_WM_STATE layer and desktop hints (createWindow) and the USPosition
+    // rectangle in WM_NORMAL_HINTS (setSizeHints above) - is already on the
+    // window: the tick that later finds room moves and maps it the same way and
+    // then runs the same afterMap() work, so a bar mapped later is managed
+    // exactly like one mapped here.
+    if (!g_hidden) {
+        XMapWindow(g_dpy, g_win);
+        afterMap();
     }
     paint();
 
@@ -1472,15 +2067,16 @@ int main(int argc, char **argv) {
             switch (ev.type) {
                 case Expose: if (ev.xexpose.count == 0) onExpose(); break;
                 case ButtonPress: onButton(&ev.xbutton); break;
+                case ButtonRelease: onButtonRelease(&ev.xbutton); break;
                 case MotionNotify: onMotion(&ev.xmotion); break;
                 case LeaveNotify: onLeave(); break;
                 case KeyPress: onKey(&ev.xkey); break;
                 case ConfigureNotify:
-                    if (ev.xconfigure.width != g_w || ev.xconfigure.height != g_h) {
-                        g_w = ev.xconfigure.width; g_h = ev.xconfigure.height;
-                        allocSurface();
-                        paint();
-                    }
+                    // a foreign resize (an XWayland output-scale change or a
+                    // WM re-layout) must go through the same helper so the
+                    // surface AND the rounded shape follow the new size
+                    resizeWindow(ev.xconfigure.width, ev.xconfigure.height);
+                    paint();
                     break;
                 default: break;
             }
@@ -1495,54 +2091,68 @@ int main(int argc, char **argv) {
             double fg3[3] = { fgc.r, fgc.g, fgc.b };
             double dv3[3] = { divc.r, divc.g, divc.b };
             double ac3[3] = { accc.r, accc.g, accc.b };
-            // no dim colour: the menu has no dim text (menu.h)
+            // no dim colour: the menu has no dim text (menu.h). The autostart
+            // mark is read per open (not per paint): a subprocess per hover move
+            // would be absurd, and the state cannot change while the menu is up.
+            int startChecked = autoStartEnabled() == 1;
             int choice = menuRun(g_dpy, g_screen, g_visual, g_cmap, 32,
                                  g_menuX, g_menuY, g_scale, (int)fontSizePx(),
-                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3);
-            handleMenuChoice(choice);
+                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3,
+                                 startChecked);
+            if (choice == MENU_DISMISSED_BY_PRESS) {
+                // the button that closed the menu is still held: its release
+                // would bounce the menu back open, so the bar eats it
+                g_swallowRelease = 1;
+            } else {
+                handleMenuChoice(choice);
+            }
+            if (g_petPipe >= 0) clock_gettime(CLOCK_MONOTONIC, &g_petPipeAt);
         }
         if (g_dashPending) {
             g_dashPending = 0;
             runDashboard();
         }
+        petHandshakeDrain();
+        reapChildren();
         time_t now = time(NULL);
         geomPump(now);
         if (sel == 0 && now != lastPaint) {
             lastPaint = now;
-            // hot-reload the config on mtime change, then re-derive everything
+            // hot-reload the config when the file changes, then re-derive
+            // everything. The token is the file's full identity, so a config
+            // that is rewritten in the same second, or one that is rewritten
+            // WHILE the bar is reading it, is still seen as a change.
             if (now - lastCfgCheck >= 2) {
                 lastCfgCheck = now;
-                time_t cur;
-                if (cfgStat(&cur) && cur != g_cfgMtime) { g_cfgMtime = cur; reloadConfig(); }
+                CfgId cur;
+                if (cfgId(&cur) && !cfgIdSame(&cur, &g_cfgId)) configReload();
             }
             linuxMetricsPoll(&g_m);
             scanIfDue(now);
             buildChips();
             resizeToContent();
+            // the position is derived every tick, in every align mode: x and
+            // width come from the terminal when it reports (and stay put when
+            // it does not), y always comes from barYFor - the terminal's top
+            // edge, or the screen top when align 1 has no usable report. The
+            // width is resizeToContent()'s decision, made just above from the
+            // same applyAlign() numbers: it is the ONE owner of the width.
             {
                 int aw = 0, ax = 0;
-                if (applyAlign(&aw, &ax) && ax != g_x) moveWindow(ax, g_y);
-            }
-            // align modes drive x every tick: a terminal moved or resized must
-            // take the bar with it. The y stays where the user put it.
-            {
-                int aw = 0, ax = 0;
-                if (applyAlign(&aw, &ax)) {
-                    if (ax != g_x) moveWindow(ax, g_y);
-                    int wantW = aw;
-                    int chipsW = (int)((PAD_L + PAD_R) * g_scale + 0.5);
-                    for (int i = 0; i < g_chipCount; i++) {
-                        int iw = g_chips[i].icon >= 0 ? (int)(ICON_BOX * g_scale + 0.5) : 0;
-                        chipsW += iw + (iw ? (int)(ICO_GAP * g_scale + 0.5) : 0) + textWidthPx(g_chips[i].text);
-                        if (i) chipsW += (int)(SEG_GAP * g_scale + 0.5);
-                    }
-                    if (wantW < chipsW) wantW = chipsW;
-                    if (wantW != g_w) {
-                        g_w = wantW;
-                        XResizeWindow(g_dpy, g_win, (unsigned)g_w, (unsigned)g_h);
-                        allocSurface();
-                        applyShape();
-                    }
+                int aligned = applyAlign(&aw, &ax);
+                int wantY = barYFor();
+                if (wantY < 0) {
+                    // no room above the terminal: Windows hides the bar
+                    // (p_ui.c checks y < rcWork.top), and so does the port
+                    if (!g_hidden) { g_hidden = 1; XUnmapWindow(g_dpy, g_win); }
+                } else {
+                    // position (and the size hints) BEFORE the map: a window
+                    // manager places a managed window from the hints it reads on
+                    // map, so mapping first shows it at the old position for a
+                    // frame
+                    int wantX = aligned ? ax : g_x;
+                    if (wantX != g_x || wantY != g_y) moveWindow(wantX, wantY);
+                    if (g_hidden) { g_hidden = 0; XMapWindow(g_dpy, g_win); afterMap(); }
                 }
             }
             paint();

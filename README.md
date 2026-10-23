@@ -359,11 +359,63 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
 
 ## Linux
 
-A floating Linux bar (cpu, ram, temperature, volume, battery, clock and the token
-count) lives in `linux/` and is built with `bash linux/build.sh`. It shares the
-same core - the config parser, the session scanner and the aggregation are the
-same code - and does not follow a terminal window. See `linux/README.md` for the
-build, the measured cost, and what is per-OS.
+A floating Linux bar (cpu, gpu, ram, temperature, volume, battery, clock, the
+token count, the subscription gauge and the pet chip) lives in `linux/` and is
+built with `bash linux/build.sh`. It shares the same core - the config parser,
+the session scanner and the aggregation are the same code - and with
+`bar.align: 1` it rides just above the active terminal. See `linux/README.md`
+for the build, the measured cost, and what is per-OS.
+
+**The released asset is the bar to run.** The current release, v1.5.1, ships
+only `chocobar.exe`; the Linux bar is attached as `chocobar-linux` from the
+next release on, built from the tag by the same workflow that builds the
+Windows exe. Until that release is tagged, build it from source with the second
+block below.
+
+**From the release** - from the next release on, once a tag ships
+`chocobar-linux`:
+
+```sh
+gh release download <tag> --pattern chocobar-linux
+# The asset is built on the `ubuntu-latest` runner (Ubuntu 24.04, glibc 2.39)
+# and linked dynamically, so it needs glibc 2.39 or newer: Ubuntu 24.04, Debian
+# 13 and up. An older distro fails at load with "GLIBC_2.39 not found" - use the
+# source build below there instead.
+# The runtime libraries the asset is linked against; most desktops already have
+# them, and a distro without them fails at load with "error while loading shared
+# libraries" naming the missing one
+sudo apt install libx11-6 libxrender1 libxfixes3 libxcursor1 libcairo2 \
+                 libdbus-1-3 libfontconfig1 libcurl4t64
+mkdir -p ~/.local/bin
+install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
+# the GPU chip needs the perf counters capability, and only that capability:
+sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
+# the menu's "Start on login" item toggles this unit, so install it too
+# (from a checkout of this repo - the release ships the binary only):
+cp linux/chocobar.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chocobar.service
+```
+
+**From source** - works today, and the way to run the bar on a distro older
+than the asset's glibc floor:
+
+```sh
+sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
+                 libcairo2-dev libdbus-1-dev libfontconfig1-dev libcurl4-openssl-dev
+bash linux/build.sh
+mkdir -p ~/.local/bin
+install -m 0755 linux/build/chocobar-linux ~/.local/bin/chocobar-linux
+# the GPU chip needs the perf counters capability, and only that capability:
+sudo setcap cap_perfmon+ep ~/.local/bin/chocobar-linux
+# the menu's "Start on login" item toggles this unit, so install it too:
+cp linux/chocobar.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chocobar.service
+```
+
+A build made by hand is fine for development, but the bar the user runs should
+be the released one: that is the only way to know which code is running.
 
 ## Token accounting
 
@@ -450,7 +502,15 @@ Internal compatibility paths and filenames still use `wizbar`, including `~/.wiz
 
 ## Tests
 
-Tests are headless and require no GUI:
+`npm test` runs two halves. The first, `scripts/portable_regression.js`, is
+headless and needs no GUI. The second, `linux/tests/behaviour.sh`, drives the
+real Linux bar: it starts a PRIVATE Xvfb display and a private D-Bus, drives a
+private pointer with XTEST and waits out the bar's 30 s staleness window, so it
+needs Xvfb, xdotool, xwininfo, xprop, xdpyinfo, gdbus, dbus-send, dbus-daemon,
+gcc and the `libxtst-dev` headers it compiles its pointer driver against, and
+takes a few minutes; where one of those is missing it skips cleanly on a
+developer machine and fails in CI. Nothing it does touches the user's session:
+the display, the bus, the HOME and the pointer it drives are all throwaway.
 
 ```bash
 npm test
@@ -481,7 +541,7 @@ native/src/p_agg.c      token aggregation: per-app / per-model / per-day totals
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons
+linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons, and linux/tests/ (behaviour.sh + xclick.c/xmonitor.c) which CI builds and drives
 macos/                  macOS front-end (Win32 adapter + bar) over the shared core parts
-scripts/                the portable regression suite and the Windows token regression runner
+scripts/                the portable regression suite (node scripts/portable_regression.js, half of `npm test` with the Linux behaviour suite) and the Windows token regression runner
 ```

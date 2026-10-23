@@ -3,10 +3,12 @@
 // On Windows the menu is a tray icon plus a popup; on Linux the bar itself is the
 // handle, so a right-click on the strip opens this: a small override-redirect
 // window painted with cairo, keyboard-navigable, closing on Escape or an outside
-// click. The items mirror native/src/p_ui.c's tray menu (Token dashboard,
-// Subscription dashboard, Edit config, Open config folder, Reload, Quit) minus the
-// two that have no Linux meaning (Start with Windows is systemd here; Check for
-// updates needs the release feed).
+// click. The items mirror native/src/p_ui.c's tray menu one for one, in the same
+// order: Token dashboard, Subscription dashboard, sep, the autostart toggle, sep,
+// Edit config, Open config folder, sep, Check for updates, Reload, Quit. The
+// autostart item is "Start on login" rather than the Windows string "Start with
+// Windows" because the mechanism here is the systemd user unit, not a Run value;
+// the id (5) and the position are the Windows ones so the two menus still line up.
 //
 // It is a separate top-level window on purpose: the bar is shaped to a rounded
 // strip, and drawing a menu inside it would either be clipped by that shape or
@@ -41,14 +43,18 @@ typedef struct {
     int separator;          // 1 = draw a divider instead of a row
 } MenuItem;
 
-// ids the bar acts on (menu.h)
+// ids the bar acts on (menu.h). The order and the ids are p_ui.c's kMenuItems,
+// so the menus line up when compared side by side.
 static const MenuItem g_items[] = {
     { "Token dashboard",        MENU_TOKEN_DASH, 0 },
     { "Subscription dashboard", MENU_SUBS_DASH,  0 },
     { "", 0, 1 },
+    { "Start on login",         MENU_AUTO_START, 0 },
+    { "", 0, 1 },
     { "Edit config",            MENU_EDIT,       0 },
     { "Open config folder",     MENU_OPEN_DIR,   0 },
     { "", 0, 1 },
+    { "Check for updates",      MENU_UPDATES,    0 },
     { "Reload chocobar",        MENU_RELOAD,     0 },
     { "Quit chocobar",          MENU_QUIT,       0 },
 };
@@ -68,6 +74,7 @@ typedef struct {
     /* palette, resolved by the caller from the config */
     double bg[3], fg[3], divider[3], accent[3];
     double bgAlpha;
+    int startChecked;      // the autostart state, read by the caller; menu only draws it
     /* persistent paint state: the bar keeps one too, and building a surface
        plus a toy font face on every hover move was an allocation per mouse
        pixel. The menu is static, so there is nothing to resize. */
@@ -123,6 +130,22 @@ static void menuPaint(Menu *m) {
         cairo_move_to(cr, 14 * m->scale, y + (rh - ext.height) / 2 - ext.y_bearing);
         cairo_show_text(cr, g_items[i].label);
         cairo_new_path(cr);
+        if (g_items[i].id == MENU_AUTO_START && m->startChecked) {
+            // the autostart tick, at the row's right edge like the Windows menu's
+            // U+2713. It is a stroked path, not a glyph: cairo's toy API has no
+            // font fallback, so a family without a check character would draw
+            // nothing. Two strokes read the same at this size.
+            double cy = y + rh / 2;
+            double cx = m->w - 12 * m->scale;
+            cairo_set_source_rgba(cr, m->fg[0], m->fg[1], m->fg[2], 1.0);
+            cairo_set_line_width(cr, 1.6 * m->scale);
+            cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+            cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_move_to(cr, cx - 5 * m->scale, cy);
+            cairo_line_to(cr, cx - 1.5 * m->scale, cy + 3.5 * m->scale);
+            cairo_line_to(cr, cx + 5 * m->scale, cy - 4 * m->scale);
+            cairo_stroke(cr);
+        }
         y += rh;
     }
     cairo_surface_flush(m->surf);
@@ -142,10 +165,28 @@ static int menuHit(Menu *m, int px, int py) {
     return -1;
 }
 
+// Is (px, py) inside the menu window? The pointer grab redirects EVERY pointer
+// event to the menu window, so a click anywhere on the screen arrives here with
+// coordinates that are outside the window (negative, or past the edge). Without
+// this check the y coordinate alone picked a row: a click far below the menu
+// landed on the last row and QUIT the bar (measured), and a click to the left
+// of it could have reloaded the bar or opened a folder. Only a click that
+// really is inside the menu may choose an item.
+static int menuInside(const Menu *m, int px, int py) {
+    return px >= 0 && px < m->w && py >= 0 && py < m->h;
+}
+
+// A menu click is the LEFT button, and only the left button. The pointer grab
+// delivers EVERY button to this window, and core X11 has no scroll events: a
+// wheel notch is a ButtonPress(4|5) followed by a ButtonRelease(4|5), while a
+// middle click is button 2. A release that chose a row without asking which
+// button it was would let a single wheel notch over a row act on it.
+static int menuClickButton(unsigned int button) { return button == 1; }
+
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
             int atX, int atY, double scale, int fontPx, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double divider[3], const double accent[3]) {
+            const double divider[3], const double accent[3], int startChecked) {
     Menu m;
     memset(&m, 0, sizeof(m));
     m.dpy = dpy; m.visual = visual; m.cmap = cmap;
@@ -157,6 +198,7 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     memcpy(m.accent, accent, sizeof(m.accent));
     m.hover = -1;
     m.result = 0;
+    m.startChecked = startChecked;
 
     // height: every row plus the separators plus the padding
     double hh = MENU_PAD * 2;
@@ -248,7 +290,10 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 menuPaint(&m);
                 break;
             case MotionNotify: {
-                int hit = menuHit(&m, ev.xmotion.x, ev.xmotion.y);
+                // the grab delivers motion from the whole screen: only motion
+                // inside the menu may highlight a row
+                int hit = menuInside(&m, ev.xmotion.x, ev.xmotion.y)
+                              ? menuHit(&m, ev.xmotion.x, ev.xmotion.y) : -1;
                 if (hit != m.hover) { m.hover = hit; menuPaint(&m); }
                 break;
             }
@@ -256,12 +301,30 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 if (m.hover != -1) { m.hover = -1; menuPaint(&m); }
                 break;
             case ButtonPress:
-                // a press outside the window (the grab delivers it) closes
-                if (ev.xbutton.window != m.win) { done = 1; break; }
-                if (ev.xbutton.button == 3) { done = 1; break; }
+                // a press outside the window (the grab delivers it) closes; the
+                // closing gesture's release is still coming, so mark it for the
+                // bar to swallow - otherwise its own onButtonRelease re-opens
+                // the menu at the release point and the menu cannot be closed
+                // with the button that opened it
+                if (ev.xbutton.window != m.win) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
+                // only the left button is a click: the wheel (4|5) and the
+                // middle button are presses too, and they must not leave the
+                // menu open for a release to choose a row
+                if (!menuClickButton(ev.xbutton.button)) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
+                if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
+                    m.result = MENU_DISMISSED_BY_PRESS; done = 1; break;
+                }
                 break;
             case ButtonRelease: {
                 if (ev.xbutton.window != m.win) { done = 1; break; }
+                // only the left button may choose a row: a wheel notch ends
+                // with a release like any other click, and it must dismiss the
+                // menu, never act on the row under the pointer
+                if (!menuClickButton(ev.xbutton.button)) { done = 1; break; }
+                if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
+                    // released outside the menu: dismiss it, never act on a row
+                    done = 1; break;
+                }
                 int hit = menuHit(&m, ev.xbutton.x, ev.xbutton.y);
                 if (hit >= 0 && !g_items[hit].separator) { m.result = g_items[hit].id; done = 1; }
                 else if (hit < 0) done = 1;   // released outside a row

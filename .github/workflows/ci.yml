@@ -1,5 +1,14 @@
 # Hand-maintained native CI: keep MinGW installation in this workflow.
 # The compile-only build check must stay side-effect free.
+#
+# The Windows cross-compile and the Linux gate are SEPARATE jobs on purpose. The
+# MinGW toolchain is a 114 MB download from a mirror we do not control: measured
+# on 2026-10-23 (run 39898956643), a single job that installed MinGW and then
+# built and behaviour-tested the Linux bar spent ~14 of its 15 minutes inside
+# that download and was cancelled before the Linux steps ever ran - a red gate
+# with nothing wrong in the code, and the bar the user runs left unvalidated.
+# Each job now carries a budget sized for its own work, so one slow mirror can
+# never starve the other gate.
 name: CI
 
 on:
@@ -16,9 +25,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-test:
+  # The compile-only C check and the console token harness: both need MinGW,
+  # and neither needs a display, a compositor or the Linux runtime libraries.
+  windows-compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +38,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
           bash native/build.sh --check
-
-      - name: Test
-        run: |
-          node scripts/portable_regression.js
 
       - name: Build console token harness
         run: bash scripts/build_token_regression.sh native/token-regression.exe
@@ -42,8 +49,45 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The LINUX bar was never compiled by CI: a Linux-only compile error
+  # (a missing include, a changed libdbus signature) merged green and only
+  # surfaced on the user's machine. It is also the bar the user runs, so it
+  # gets the same gate as the Windows one - plus a BEHAVIOUR test, because
+  # the source guards in portable_regression.js only read text.
+  linux-build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
+                               libxcursor-dev libcairo2-dev libdbus-1-dev \
+                               libfontconfig1-dev libcurl4-openssl-dev
+          bash linux/build.sh
+
+      - name: Test
+        run: |
+          node scripts/portable_regression.js
+
+      - name: Linux behaviour test
+        run: |
+          # The bar the previous step built is RUN here, and it is dynamically
+          # linked, so the runtime counterparts of the -dev packages above must
+          # be present as well. The -dev packages happen to pull them in today;
+          # naming them makes the gate independent of that. libcurl is the one
+          # exception: its runtime library is the t64 package (libcurl4t64),
+          # which libcurl4-openssl-dev above already depends on.
+          sudo apt-get install -y xvfb x11-utils xdotool libxtst-dev \
+                               libglib2.0-bin dbus \
+                               libx11-6 libxrender1 libxfixes3 libxcursor1 \
+                               libcairo2 libdbus-1-3 libfontconfig1
+          bash linux/tests/behaviour.sh
+
   token-runtime:
-    needs: build-test
+    needs: windows-compile
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
