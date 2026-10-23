@@ -359,11 +359,12 @@ The bar grew out of an Electron app, and a few old keys still appear in configs 
 
 ## Linux
 
-A floating Linux bar (cpu, ram, temperature, volume, battery, clock and the token
-count) lives in `linux/` and is built with `bash linux/build.sh`. It shares the
-same core - the config parser, the session scanner and the aggregation are the
-same code - and with `bar.align: 1` it rides just above the active terminal.
-See `linux/README.md` for the build, the measured cost, and what is per-OS.
+A floating Linux bar (cpu, gpu, ram, temperature, volume, battery, clock, the
+token count, the subscription gauge and the pet chip) lives in `linux/` and is
+built with `bash linux/build.sh`. It shares the same core - the config parser,
+the session scanner and the aggregation are the same code - and with
+`bar.align: 1` it rides just above the active terminal. See `linux/README.md`
+for the build, the measured cost, and what is per-OS.
 
 **The released asset is the bar to run.** The current release, v1.5.1, ships
 only `chocobar.exe`; the Linux bar is attached as `chocobar-linux` from the

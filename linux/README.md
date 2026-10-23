@@ -68,7 +68,7 @@ only allows opening PMU counters. AMD GPUs need none of this - they publish
 | `bar.align` | meaning |
 |---|---|
 | `0` (default) | centre of the screen, content-sized |
-| `1` | match the **active terminal's** width and x (the terminal look) |
+| `1` | match the **active terminal's** width and x, and ride just above its top edge |
 | `2` | span the whole screen width |
 
 `align: 1` needs a helper, because a Wayland compositor does not let a client
@@ -137,7 +137,7 @@ and does nothing when the exclusion is already in place.
 | memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
 | CPU, steady state | 0.2% of one core, 1 Hz repaint |
 | threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
-| binary | 808 KB, no runtime |
+| binary | 875 KB, no runtime |
 | token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
 | subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
@@ -216,7 +216,7 @@ right-click bounced the menu straight back open.
 | cpu | `/proc/stat` delta | same arithmetic as `top` |
 | ram | `/proc/meminfo` | used = 100 - MemAvailable/MemTotal |
 | temp | hwmon `coretemp`/`k10temp`, then `x86_pkg_temp`, then thermal zones, then `acpitz` | prefers the CPU's own sensor over a lagging ACPI zone |
-| volume | `pactl get-sink-volume` | the only source that runs a process; once per second, only while enabled |
+| volume | `pactl get-sink-volume` | the only source that runs a process; spawned once per second, whether or not the chip is enabled |
 | battery | `/sys/class/power_supply/*` | green while charging, red only when low **and** on battery |
 | gpu | `amdgpu`'s `gpu_busy_percent`, then the i915 PMU | Intel needs the PMU (see the capability note above); without the capability the chip hides |
 | clock | local time, the config's `modules.clock.format` | same `{MMM} {dd} {Wkk} {HH}:{mm}` tokens |

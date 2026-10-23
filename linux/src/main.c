@@ -1,22 +1,25 @@
 // linux/src/main.c - the Linux Chocobar bar.
 //
 // WHAT THIS IS
-// A small always-on-top, frameless, translucent strip that floats over the
-// desktop and shows the same chips as the Windows bar: cpu, ram, cpu temp,
-// volume, battery, clock, plus the token count the shared scanner produces.
+// A small lower-layer, frameless, translucent strip that floats over the
+// desktop and shows the same chips as the Windows bar: pet, the token count
+// the shared scanner produces, the subscription gauge, cpu, gpu, cpu temp,
+// ram, volume, battery and clock.
 // With bar.align 1 it rides the terminal: x and width come from the active
 // terminal (the KWin helper's report) and y sits just above its top edge - the
 // position is derived every tick and never persisted.
 //
 // HOW IT PAINTS
 // The Windows bar draws into a premultiplied 32bpp DIB and hands it to
-// UpdateLayeredWindow. The Linux equivalent is an override-redirect X11 window
-// whose background is an XRender picture built from a cairo ARGB32 surface:
-//  - override-redirect: the window manager never manages it, so it has no
-//    title bar, no taskbar entry, never takes focus, and sits exactly where we
-//    put it. That is the same role WS_EX_LAYERED + WS_EX_NOACTIVATE plays on
-//    Windows, and it is what makes a "floating bar" trivial instead of a
-//    protocol negotiation.
+// UpdateLayeredWindow. The Linux equivalent is a MANAGED X11 window on a
+// 32-bit ARGB visual, painted through a cairo surface bound to the window:
+//  - managed, NOT override-redirect (a measured fact: KWin composites every
+//    override-redirect window in its top layer no matter which state atoms it
+//    carries, so the lower layer is reachable only by a managed BELOW window).
+//    _NET_WM_STATE_BELOW/SKIP_TASKBAR/SKIP_PAGER/STICKY, undecorated
+//    _MOTIF_WM_HINTS, InputHint False and a USPosition geometry give it no
+//    title bar, no taskbar entry, no focus, and the exact derived rectangle -
+//    the same role WS_EX_LAYERED + WS_EX_NOACTIVATE plays on Windows.
 //  - cairo draws with real anti-aliasing, so the rounded corners and the icons
 //    are smooth; the window is shaped to the same rounded rect so the pixels
 //    outside it are genuinely not part of the window (no black corner squares).
