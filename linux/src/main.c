@@ -2103,6 +2103,7 @@ int main(int argc, char **argv) {
             } else {
                 handleMenuChoice(choice);
             }
+            if (g_petPipe >= 0) clock_gettime(CLOCK_MONOTONIC, &g_petPipeAt);
         }
         if (g_dashPending) {
             g_dashPending = 0;

@@ -25,9 +25,9 @@
 #     argv[2] there), a SYMLINK to the configured file and a redundant absolute
 #     spelling of it, and never a process that carries the path as an ARGUMENT
 #     to an interpreter - a later token, a "-c" or bundled "-ec" command, a
-#     `node -e` / `perl -e` command, or a relative name - while a value-taking
-#     option before the script (`#!/usr/bin/env -S python3 -X utf8`) is still
-#     seen;
+#     `node -e` / `perl -e` command, an `sh -n` syntax check, or a relative
+#     name - while a value-taking option before the script
+#     (`#!/usr/bin/env -S python3 -X utf8`) is still seen;
 #     and the children it leaves behind are reaped, not
 #     zombies; a start is logged only once the kernel took the exec, and a
 #     refused one logs "cannot start" and claims no start at all
@@ -37,7 +37,9 @@
 #     lands as the one true line
 #   - the parked handshake is BOUNDED: a click refused while it pends is logged
 #     rather than swallowed, and a start that never reports is abandoned and
-#     logged, leaving the bar free to try again
+#     logged, leaving the bar free to try again - but the budget counts only
+#     time the loop was free to drain, so a menu held open past the deadline
+#     does not abandon a pending start
 #   - the bar rides above the terminal at the height it is actually DRAWN with,
 #     so a tiny configured height cannot overlap the terminal, and hides when
 #     there is no room
@@ -904,7 +906,9 @@ rm -f "$WORK/pet.pid" "$WORK/pet.state"
 #       The command forms are spelled every way getopt allows, because a guard
 #       that recognises only the literal `-c` misses the BUNDLED `-ec` (there
 #       the command flag is the second letter) and the `node -e` / `perl -e`
-#       spellings entirely.
+#       spellings entirely; `sh -n` is the no-execute twin - it syntax-checks
+#       the file rather than running it, so the process that carries it is
+#       never the pet.
 SHAPED_PIDS=""
 "$WORK/decoy/shaped" python3 "$WORK/decoy/other.py" "$WORK/home/pet" >/dev/null 2>&1 &
 SHAPED1_PID=$!
@@ -925,7 +929,11 @@ SHAPED5_PID=$!
 SHAPED6_PID=$!
 "$WORK/decoy/shaped" perl -e "1 while 1" "$WORK/home/pet" >/dev/null 2>&1 &
 SHAPED7_PID=$!
-SHAPED_PIDS="$SHAPED1_PID $SHAPED2_PID $SHAPED3_PID $SHAPED4_PID $SHAPED5_PID $SHAPED6_PID $SHAPED7_PID"
+# the no-execute switch: `sh -n <petpath>` syntax-checks the file, so the
+# process that carries it never runs the pet
+"$WORK/decoy/shaped" sh -n "$WORK/home/pet" >/dev/null 2>&1 &
+SHAPED8_PID=$!
+SHAPED_PIDS="$SHAPED1_PID $SHAPED2_PID $SHAPED3_PID $SHAPED4_PID $SHAPED5_PID $SHAPED6_PID $SHAPED7_PID $SHAPED8_PID"
 sleep 0.3
 # the shape is what the matcher has to judge, so it is asserted, not assumed:
 # /proc/<pid>/cmdline is the oracle
@@ -941,7 +949,8 @@ done
     [ "$(shaped_cmdline "$SHAPED4_PID")" = "sh|-ec|$WORK/home/pet|" ] &&
     [ "$(shaped_cmdline "$SHAPED5_PID")" = "sh|-e|-c|$WORK/home/pet|" ] &&
     [ "$(shaped_cmdline "$SHAPED6_PID")" = "node|-e|require('$WORK/home/pet')|" ] &&
-    [ "$(shaped_cmdline "$SHAPED7_PID")" = "perl|-e|1 while 1|$WORK/home/pet|" ]
+    [ "$(shaped_cmdline "$SHAPED7_PID")" = "perl|-e|1 while 1|$WORK/home/pet|" ] &&
+    [ "$(shaped_cmdline "$SHAPED8_PID")" = "sh|-n|$WORK/home/pet|" ]
 check "the argument-shaped decoys are alive and carry the shapes" $?
 # the chip's state comes from the bar's 1 Hz tick, so let one poll see the
 # decoys: the click reads g_m.petRunning, not /proc
@@ -1394,6 +1403,58 @@ sleep 1.5
 grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
     [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
 check "the pet the deadline did not kill is stopped by a click and leaves no zombie" $?
+
+# 6j-4. a menu held open past the deadline must not count against the park's
+#       budget. The budget measures time the loop was free to drain, and the
+#       menu's nested event loop owns the clock while it is open, so a start
+#       that outlived its budget only because the user held a menu open must
+#       NOT be abandoned ("not confirmed"), and the next click must be refused
+#       by the still-pending handshake - never forked into a second pet. The
+#       12 s shim bar above is still running: click the pet, hold the menu open
+#       past the 5 s budget, close it, and click the pet once more - one
+#       start, one refused click, no deadline line.
+rm -f "$WORK/pet.pid" "$WORK/pet.state"
+MENU_SLOW_STARTED=$(grep -c "pet: starting" "$WORK/bar6.log" || true)
+MENU_SLOW_DEADLINE=$(grep -c "did not report" "$WORK/bar6.log" || true)
+MENU_SLOW_IGNORED=$(grep -c "this click was ignored" "$WORK/bar6.log" || true)
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 0.6
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.8
+menu_open
+check "the menu is open while the pet start pends (the deadline budget check)" $?
+# hold the menu open past the 5 s budget, then close it and click the chip once
+sleep 7
+"$XCLICK" 100 300 1 full
+sleep 1.2
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 0.5
+[ "$(grep -c "did not report" "$WORK/bar6.log" || true)" -eq "$MENU_SLOW_DEADLINE" ] &&
+    [ "$(grep -c "this click was ignored" "$WORK/bar6.log" || true)" -eq $((MENU_SLOW_IGNORED+1)) ]
+check "a menu held open past the deadline does not abandon the pending start (click refused, no not-confirmed)" $?
+# the exec still lands and settles as the one true line, once
+wait_log "pet: starting: $WORK/home/pet" 10 "$WORK/bar6.log"
+MENU_SLOW_SETTLED=$?
+sleep 0.5
+[ "$MENU_SLOW_SETTLED" -eq 0 ] &&
+    [ "$(grep -c "pet: starting" "$WORK/bar6.log" || true)" -eq $((MENU_SLOW_STARTED+1)) ] &&
+    [ -s "$WORK/pet.pid" ] && kill -0 "$(cat "$WORK/pet.pid")" 2>/dev/null
+check "the start the menu protected settles as one starting line and one pet" $?
+# the chip's state source is the 1 Hz tick, so let one poll see the pet before
+# the click below: the click reads g_m.petRunning, not /proc. The bar's own
+# geometry is re-read here too: the menu hold plus the waits above can outlive
+# the 30 s geometry-report freshness, and the bar then falls back to the screen
+# top at its own content width, so a coordinate from earlier is off the window
+sleep 2
+eval "$(xdotool getwindowgeometry --shell "$BARWIN6")"
+"$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
+sleep 1.5
+grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
+check "the pet the protected start ran stops on a click and leaves no zombie" $?
+grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
+check "the pet the protected start ran stops on a click and leaves no zombie" $?
 
 # back to the ordinary bar: the shim was this check's tool, not a property of
 # the bar, and the sections below were written against an unshimmed one

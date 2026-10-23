@@ -8,12 +8,13 @@
 // quantities, so the bar renders identical text.
 //
 // Every source is read from the kernel's own files or PMU counters, so the cost
-// is a few small reads per second (measured: ~0.3 ms for a full metrics tick on
-// this machine, against a 1 Hz timer). Nothing here shells out except the audio
-// mixer, which has no file interface: `pactl get-sink-volume` runs at most once
-// a second and only while the volume chip is enabled. The i915 gpu path keeps
-// its PMU counters open across ticks; the only per-tick cost there is one
-// read(2) per engine.
+// is a few small reads per second (measured: ~0.3 ms for the sensor reads, plus
+// the pet matcher's /proc walk - ~1.3-1.6 ms with ~500 processes, and run only
+// while the pet chip is enabled - against a 1 Hz timer). Nothing here shells
+// out except the audio mixer, which has no file interface: `pactl
+// get-sink-volume` is spawned once per tick. The i915 gpu path keeps its PMU
+// counters open across ticks; the only per-tick cost there is one read(2) per
+// engine.
 //
 // A source that is absent reads as "no value" (the bar shows an em dash, as the
 // Windows bar does for a missing sensor) - never as a fabricated 0.
@@ -641,9 +642,9 @@ static int petTokenIsFile(const char *token, const char *pidName,
 // `-ec` is a flag plus a command. A letter in `command` takes a COMMAND rather
 // than a script (`sh -c`, `sh -ec`, `node -e`, `perl -e`, `php -r`), reads the
 // program from stdin (`sh -s`), names a module rather than a file
-// (`python -m`), or only checks the file without executing it (`perl -c`,
-// `ruby -c`, `node -c`, `php -l`), so the token after it is never the executed
-// file. A letter in `script` takes the executed FILE as its value (`php -f`,
+// (`python -m`), or only checks the file without executing it (`sh -n`,
+// `perl -c`, `ruby -c`, `node -c`, `php -l`), so the token after it is never
+// the executed file. A letter in `script` takes the executed FILE as its value (`php -f`,
 // `expect -f`, `Rscript -f`), so that value IS the script. A letter in `value`
 // takes a value that is not the script (`-X utf8`, `-I lib`, `-r fs`) and the
 // scan skips it. A letter in `flag` takes nothing. A letter in none of the
@@ -662,8 +663,8 @@ struct PetInterp {
     const char *flag;       // option letters that consume nothing
 };
 static const struct PetInterp kInterpreters[] = {
-    { "sh bash dash zsh ksh mksh fish csh tcsh", "cs", "", "oO",
-      "abdefghiklmnprtuvxBCDEHPT" },
+    { "sh bash dash zsh ksh mksh fish csh tcsh", "cns", "", "oO",
+      "abdefghiklmprtuvxBCDEHPT" },
     { "python", "cm", "", "WX", "bBdEhiIOoPqsSuvVx" },
     { "perl", "ceE", "", "IMmF", "01234567adDfgilnpsStTuvVwWXx" },
     { "ruby", "ce", "", "CEFrW", "0adTilnpstuvVwySx" },
@@ -820,6 +821,7 @@ void linuxMetricsPoll(LinuxMetrics *m) {
     // the pet path comes from the core's config, which this TU only sees through
     // the extern (the core struct is not included here)
     extern const wchar_t *cbCfgPetPath(void);
+    extern int cbCfgPetEnabled(void);
     extern int WideCharToMultiByte(unsigned, unsigned long, const wchar_t *, int,
                                    char *, int, const char *, int *);
     m->cpu = cpuPercent();
@@ -835,13 +837,13 @@ void linuxMetricsPoll(LinuxMetrics *m) {
     // MUST be converted rather than cast: casting read only the first byte and
     // every process lookup compared against "k" (measured: kitty was running and
     // the chip still said "off").
-    {
+    if (cbCfgPetEnabled()) {
         char petPath[512] = {0};
         const wchar_t *wp = cbCfgPetPath();
         if (wp && *wp)
             WideCharToMultiByte(65001 /*CP_UTF8*/, 0, wp, -1, petPath, sizeof(petPath), NULL, NULL);
         m->petRunning = petProcessRunning(petPath);
-    }
+    } else m->petRunning = 0;
     m->clockNow = time(NULL);
 }
 

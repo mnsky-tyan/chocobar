@@ -320,10 +320,10 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 // only the left button may choose a row: a wheel notch ends
                 // with a release like any other click, and it must dismiss the
                 // menu, never act on the row under the pointer
-                if (!menuClickButton(ev.xbutton.button)) { m.result = MENU_DISMISSED_BY_PRESS; done = 1; break; }
+                if (!menuClickButton(ev.xbutton.button)) { done = 1; break; }
                 if (!menuInside(&m, ev.xbutton.x, ev.xbutton.y)) {
                     // released outside the menu: dismiss it, never act on a row
-                    m.result = MENU_DISMISSED_BY_PRESS; done = 1; break;
+                    done = 1; break;
                 }
                 int hit = menuHit(&m, ev.xbutton.x, ev.xbutton.y);
                 if (hit >= 0 && !g_items[hit].separator) { m.result = g_items[hit].id; done = 1; }
