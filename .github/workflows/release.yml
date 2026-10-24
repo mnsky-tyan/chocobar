@@ -59,8 +59,10 @@ jobs:
           sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
                                libxcursor-dev libcairo2-dev libdbus-1-dev \
                                libfontconfig1-dev libcurl4-openssl-dev \
+                               libxinerama-dev \
                                libx11-6 libxrender1 libxfixes3 libxcursor1 \
-                               libcairo2 libdbus-1-3 libfontconfig1
+                               libcairo2 libdbus-1-3 libfontconfig1 \
+                               libxinerama1
 
       - name: Verify the tag matches version.h
         run: |

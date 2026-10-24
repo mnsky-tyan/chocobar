@@ -23,8 +23,7 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
                 const double page[3], const double card[3], const double fg[3],
                 const double dim[3], const double divider[3], const double ramp[5][3],
                 const double pink[3], const double pinkDeep[3],
-                const double warn[3], const double good[3], const double yellow[3],
-                long long lastScanAt);
+                const double yellow[3], long long lastScanAt);
 
 // Handles one event that belongs to the board's window (the caller routes by
 // xany.window). Returns 1 when the board wants to close (Esc, q, middle/right

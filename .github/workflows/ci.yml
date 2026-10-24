@@ -65,7 +65,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxrender-dev libxfixes-dev \
                                libxcursor-dev libcairo2-dev libdbus-1-dev \
-                               libfontconfig1-dev libcurl4-openssl-dev
+                               libfontconfig1-dev libcurl4-openssl-dev \
+                               libxinerama-dev
           bash linux/build.sh
 
       - name: Test
@@ -80,10 +81,15 @@ jobs:
           # naming them makes the gate independent of that. libcurl is the one
           # exception: its runtime library is the t64 package (libcurl4t64),
           # which libcurl4-openssl-dev above already depends on.
+          # python3-dbus and python3-gi are for the KWin Scripting stub the
+          # helper-stack check drives: the bar's unload-before-load contract is
+          # only observable against a service that answers isScriptLoaded.
           sudo apt-get install -y xvfb x11-utils xdotool libxtst-dev \
                                libglib2.0-bin dbus \
                                libx11-6 libxrender1 libxfixes3 libxcursor1 \
-                               libcairo2 libdbus-1-3 libfontconfig1
+                               libcairo2 libdbus-1-3 libfontconfig1 \
+                               libxinerama1 \
+                               python3-dbus python3-gi
           bash linux/tests/behaviour.sh
 
   token-runtime:

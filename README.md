@@ -402,7 +402,8 @@ than the asset's glibc floor:
 
 ```sh
 sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
-                 libcairo2-dev libdbus-1-dev libfontconfig1-dev libcurl4-openssl-dev
+                 libcairo2-dev libdbus-1-dev libfontconfig1-dev libcurl4-openssl-dev \
+                 libxinerama-dev
 bash linux/build.sh
 mkdir -p ~/.local/bin
 install -m 0755 linux/build/chocobar-linux ~/.local/bin/chocobar-linux

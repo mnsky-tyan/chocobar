@@ -81,8 +81,6 @@ extern int cbCfgSubsRotateSec(void);
 extern const wchar_t *cbCfgIconColor(void);
 extern const wchar_t *cbCfgPinkDeep(void);
 extern const wchar_t *cbCfgYellow(void);
-extern const wchar_t *cbCfgWarn(void);
-extern const wchar_t *cbCfgGood(void);
 
 // The board's own pixel constants, transcribed from p_ui.c paintDash. CSS px;
 // every use multiplies by the scale, exactly as DX() does on Windows.
@@ -90,9 +88,11 @@ extern const wchar_t *cbCfgGood(void);
 #define DASH_PAD_T 14
 #define DASH_GAP 12
 #define DASH_HM_WEEKS 26          // p_ui.c HM_WEEKS: fixed heatmap width in weeks
-#define DASH_MODEL_ROWS 40        // DASH_MAX_MODELS on Windows; the table is clipped by height
 #define DASH_MAX_DAYS 190         // p_agg.c's per-day window (about 27 weeks)
 #define DASH_DAY_DETAIL_ROWS 6    // p_ui.c ddRows cap
+// the MODEL table's row cap is NOT defined here: it is p_agg's own
+// DASH_MODEL_ROWS, reached through cbTokModelRowCap() so the two boards cannot
+// disagree about how many rows the same store shows
 
 typedef struct { double r, g, b; } Rgb3;
 
@@ -103,7 +103,7 @@ typedef struct {
     int w, h;
     double scale;
     char fontFamily[128];
-    Rgb3 bg, card, head, zebra, fg, dim, divider, pinkDeep, pink, warn, good, yellow;
+    Rgb3 bg, card, zebra, fg, dim, divider, pinkDeep, pink, yellow;
     Rgb3 ramp[5];
     Atom wmDelete;             // WM_DELETE_WINDOW, registered on the window
     int contentH;              // painted content bottom (device px) -> content fit
@@ -335,14 +335,12 @@ static void tableHead(Dash *d, cairo_t *cr, double x0, double y, const int *xs,
 // ---- the paint -------------------------------------------------------------------
 
 // The theme, resolved from the config exactly as p_ui.c dashResolveTheme does.
-// card = pinkBg blended 25% toward white; head = card blended another 25% (the
-// stacked tint); zebra = card blended 50% back to the page.
+// card = pinkBg blended 25% toward white; zebra = card blended 50% back to the
+// page.
 static void resolveTheme(Dash *d) {
     Rgb3 bg = d->bg;
     d->card = (Rgb3){ bg.r + (1 - bg.r) * 0.25, bg.g + (1 - bg.g) * 0.25,
                       bg.b + (1 - bg.b) * 0.25 };
-    d->head = (Rgb3){ d->card.r + (1 - d->card.r) * 0.25, d->card.g + (1 - d->card.g) * 0.25,
-                      d->card.b + (1 - d->card.b) * 0.25 };
     d->zebra = (Rgb3){ (d->card.r + bg.r) / 2.0, (d->card.g + bg.g) / 2.0,
                        (d->card.b + bg.b) / 2.0 };
 }
@@ -504,11 +502,34 @@ static void paint(Dash *d) {
 
         double hmH = 7 * pitch - cgap;
         int hasSel = d->daySel >= 0 && d->daySel < days;
+        int ddAll = 0, ddRows = 0;
+        if (hasSel) {
+            // the selected day's apps: every row the detail could draw, then
+            // how many of them fit (p_ui.c ddRows/ddAll)
+            int napp = cbTokAppCount();
+            for (int i = 0; i < napp; i++) if (cbTokDayAppReqs(d->daySel, i) > 0) ddAll++;
+            ddRows = ddAll > DASH_DAY_DETAIL_ROWS ? DASH_DAY_DETAIL_ROWS : ddAll;
+        }
         double ddFixed = (10 + 8 + 15 + 13) * S;
         double secH = (10 + 11 + 8 + 13) * S + hmH + 2 * S + 10 * S;
-        if (hasSel) secH += ddFixed + DASH_DAY_DETAIL_ROWS * 17 * S;
+        if (hasSel) {
+            // the detail's height is fitted to the room the tables still leave,
+            // and the FIT GATE stays on the no-selection height: the detail
+            // expands the card only while the expansion fits, else it is
+            // clipped - a selection must never collapse the section (the hit
+            // rects would go stale and keep firing)
+            int tblReserve = (10 + 13 + 2 * 17 + 10) * S;
+            double room = vh - 24 * S - gap - tblReserve - y - secH;
+            int fitRows = (int)((room - ddFixed) / (17 * S));
+            if (fitRows < 0) fitRows = 0;
+            if (ddRows > fitRows) ddRows = fitRows;
+            if (ddRows <= 0) hasSel = 0;
+        }
+        double ddH = hasSel ? ddFixed + ddRows * 17 * S : 0;
 
         if (y + secH < vh - 26 * S) {
+            if (hasSel && y + secH + ddH < vh - 26 * S) secH += ddH;
+            else hasSel = 0;
             card(d, cr, padL, y, innerW, secH, 8 * S, d->card, 0.85, d->divider);
             double hx = padL + secPadX;
             double hy = y + (10 + 11 + 8 + 13) * S;
@@ -593,7 +614,7 @@ static void paint(Dash *d) {
 
             // day detail: the picked day's per-app rows
             if (hasSel) {
-                double ddy = y + secH - 10 * S - (ddFixed + DASH_DAY_DETAIL_ROWS * 17 * S);
+                double ddy = y + secH - 10 * S - ddH;
                 hairline(cr, padL + secPadX, padL + innerW - secPadX, ddy, d->divider, 0.55, 1);
                 ddy += 8 * S;
                 int selIdx = days - 1 - d->daySel;
@@ -648,19 +669,14 @@ static void paint(Dash *d) {
                     setFont(d, cr, 9, 0);
                     tableHead(d, cr, padL + secPadX, ddy + 9 * S, xs, "APP");
                     ddy += 13 * S;
-                    // the reserve holds 6 rows: when the day has more apps, the
-                    // last slot carries an overflow line instead of a silently
-                    // dropped row (p_ui.c ddLimit)
-                    int ddLimit = dayAppN > DASH_DAY_DETAIL_ROWS
-                                  ? DASH_DAY_DETAIL_ROWS - 1 : DASH_DAY_DETAIL_ROWS;
+                    // the reserve holds the fitted rows: when the day has more
+                    // apps, the last slot carries an overflow line instead of a
+                    // silently dropped row (p_ui.c ddLimit)
+                    int ddLimit = dayAppN > ddRows ? ddRows - 1 : ddRows;
                     int k = 0;
                     for (int i = 0; i < napp && shownRows < ddLimit; i++) {
                         int req = cbTokDayAppReqs(d->daySel, i);
                         if (req <= 0) continue;
-                        // find this app's row in dayRows (same order as the scan)
-                        int slot = -1;
-                        for (int q = k; q < dayAppN; q++) { slot = q; break; }
-                        (void)slot;
                         tableRow(d, cr, padL + secPadX, innerW - 2 * secPadX, ddy,
                                  17 * S, xs, cbTokAppName(i),
                                  appDotColor(cbTokAppName(i), d), 0.0, &dayRows[k]);
@@ -721,10 +737,15 @@ static void paint(Dash *d) {
         RowAgg models[128];
         char modelLabels[128][64];
         if (mdlAll > 128) mdlAll = 128;
+        // the cap the WINDOWS board applies: p_agg's own DASH_MODEL_ROWS through
+        // the accessor it publishes for this, so both boards show the same rows
+        // for the same store. The remainder is the "+N more models" line.
+        int mdlN = cbTokModelRowCap();
+        if (mdlN > mdlAll) mdlN = mdlAll;
+        // the same INPUT / OUTPUT / CACHE R / CACHE W / CALLS columns the app
+        // table shows: both tables read the same record shape, so the board
+        // cannot tell two different stories about one token record
         for (int i = 0; i < mdlAll; i++) {
-            // the same INPUT / OUTPUT / CACHE R / CACHE W / CALLS columns the app
-            // table shows: both tables read the same record shape, so the board
-            // cannot tell two different stories about one token record
             models[i].in = cbTokModelIn(i);
             models[i].out = cbTokModelOut(i);
             models[i].cr = cbTokModelCr(i);
@@ -732,10 +753,11 @@ static void paint(Dash *d) {
             models[i].req = cbTokModelReqs(i);
             snprintf(modelLabels[i], 64, "%s", cbTokModelLabel(i));
         }
-        int mdlN = mdlAll;
         int mdlOrder[128];
-        for (int i = 0; i < mdlN; i++) mdlOrder[i] = i;
-        for (int i = 1; i < mdlN; i++) {
+        // sort the full set, cap only the displayed rows: every slot the sort
+        // touches must be defined, exactly as p_ui.c does
+        for (int i = 0; i < mdlAll; i++) mdlOrder[i] = i;
+        for (int i = 1; i < mdlAll; i++) {
             int v = mdlOrder[i], j = i - 1;
             long long vt = cbTokModelSum(v);
             while (j >= 0) {
@@ -755,9 +777,12 @@ static void paint(Dash *d) {
             if (apps[i].cw > 0) appCacheW = 1;
         }
         int mdlCacheR = 0, mdlCacheW = 0;
+        // the cap is applied to the SORTED order, so every decision about the
+        // model table's rows must read mdlOrder too: models[i] is the first N by
+        // index, which is not the set the table draws
         for (int i = 0; i < mdlN; i++) {
-            if (models[i].cr > 0) mdlCacheR = 1;
-            if (models[i].cw > 0) mdlCacheW = 1;
+            if (models[mdlOrder[i]].cr > 0) mdlCacheR = 1;
+            if (models[mdlOrder[i]].cw > 0) mdlCacheW = 1;
         }
 
         // rows that fit: reserve the "+N more models" line, then settle the two
@@ -791,7 +816,8 @@ static void paint(Dash *d) {
                 if (side == 0) {
                     for (int i = 0; i < appN; i++) tableRowNeeds(d, cr, &apps[i], need);
                 } else {
-                    for (int i = 0; i < mdlN; i++) tableRowNeeds(d, cr, &models[i], need);
+                    for (int i = 0; i < mdlN; i++)
+                        tableRowNeeds(d, cr, &models[mdlOrder[i]], need);
                 }
                 tableHeadNeeds(d, cr, need);
                 tableCols((int)(sx + 12 * S + inner), side == 0 ? appCacheR : mdlCacheR,
@@ -898,37 +924,44 @@ static void dashFitToContent(void) {
     int want = d->contentH;
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (want < lo) want = lo;
-    // the screen's work area, in device px: Xinerama-aware, because the bar
-    // itself can live on any head
-    int hi = 0;
+    // the containing head's work-area bottom, in device px: Xinerama-aware,
+    // because the board can live on any head. Both the height clamp and the
+    // move-up below read this one value.
+    int headBottom = 0;
     if (d->dpy) {
-        int scr = DefaultScreen(d->dpy);
-        hi = DisplayHeight(d->dpy, scr) - 40;
+        headBottom = DisplayHeight(d->dpy, DefaultScreen(d->dpy)) - 40;
         int n = 0;
         XineramaScreenInfo *xi = XineramaQueryScreens(d->dpy, &n);
         if (xi && n > 0) {
             for (int i = 0; i < n; i++) {
                 if (xi[i].x_org <= d->x && d->x < xi[i].x_org + xi[i].width &&
                     xi[i].y_org <= d->y && d->y < xi[i].y_org + xi[i].height) {
-                    hi = xi[i].height - 40;
+                    headBottom = xi[i].y_org + xi[i].height - 40;
                     break;
                 }
             }
             XFree(xi);
         }
     }
+    if (headBottom <= 0) return;
+    // keep the whole board on screen: p_ui.c moves the window up to the head's
+    // work-area bottom before sizing it, so a board whose content reaches the
+    // clamp still shows its last row (and the "last scan" footer) instead of
+    // having it clipped off the bottom edge. The move MUST come before the
+    // clamp: clamping to the room at the OLD position would make the move below
+    // unreachable, which is the bug this order fixes.
+    if (d->y + want > headBottom) {
+        d->y = headBottom - want;
+        if (d->y < 0) d->y = 0;
+    }
+    int hi = headBottom - d->y;
     if (hi <= 0) return;
     if (want > hi) want = hi;
-    // keep the whole board on screen: a board that would run past the bottom
-    // edge moves up instead of being clipped
-    int ny = d->y;
-    if (ny + want > d->y + d->h) { /* the board grew: keep its top */ }
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
         int sw = DisplayWidth(d->dpy, scr);
         if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
     }
-    (void)ny;
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -946,8 +979,7 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
                 const double page[3], const double card[3], const double fg[3],
                 const double dim[3], const double divider[3], const double ramp[5][3],
                 const double pink[3], const double pinkDeep[3],
-                const double warn[3], const double good[3], const double yellow[3],
-                long long lastScanAt) {
+                const double yellow[3], long long lastScanAt) {
     // A SECOND open must never leak the first board. The struct below is
     // memset, so opening over a live board used to forget the old window id and
     // leave a mapped, unclosable window behind - every extra click on the tokens
@@ -966,8 +998,6 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     d->divider = (Rgb3){ divider[0], divider[1], divider[2] };
     d->pink = (Rgb3){ pink[0], pink[1], pink[2] };
     d->pinkDeep = (Rgb3){ pinkDeep[0], pinkDeep[1], pinkDeep[2] };
-    d->warn = (Rgb3){ warn[0], warn[1], warn[2] };
-    d->good = (Rgb3){ good[0], good[1], good[2] };
     d->yellow = (Rgb3){ yellow[0], yellow[1], yellow[2] };
     for (int i = 0; i < 5; i++) d->ramp[i] = (Rgb3){ ramp[i][0], ramp[i][1], ramp[i][2] };
     d->daySel = -1;
@@ -1121,6 +1151,62 @@ static int heatCellAt(Dash *d, int x, int y) {
     return -1;
 }
 
+// p_ui.c dashTipCell: the heat card for the cell under the pointer - the
+// weekday/date, that day's token total and its per-app lines - shown on every
+// motion, hidden the moment the pointer is not over a real cell. Root
+// coordinates, not window ones: tipShow places the box on the screen.
+static void dashTipCell(Dash *d, int x, int y, int xRoot, int yRoot) {
+    int days = cbTokDayCount();
+    int back = heatCellAt(d, x, y);
+    if (back < 0 || back >= days) { tipHide(); return; }
+    int di = days - 1 - back;
+    long long tot = cbTokDayTotal(di);
+    struct tm dt;
+    time_t ts = time(NULL) - (time_t)back * 86400;
+    localtime_r(&ts, &dt);
+    static const char *DAYS[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *MONTHS[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    char tip[704], num[24];
+    fmtTok(tot, num, sizeof(num));
+    if (tot > 0) {
+        int n = snprintf(tip, sizeof(tip), "%s, %s %d, %d\n%s tokens",
+                         DAYS[dt.tm_wday % 7], MONTHS[dt.tm_mon], dt.tm_mday,
+                         dt.tm_year + 1900, num);
+        // per-app lines, capped so the card stays a card and the last slot
+        // carries the remainder instead of silently dropping apps
+        int napp = cbTokAppCount(), skipped = 0;
+        for (int i = 0; i < napp; i++) {
+            int req = cbTokDayAppReqs(back, i);
+            if (req <= 0) continue;
+            long long s = cbTokDayAppIn(back, i) + cbTokDayAppOut(back, i) +
+                          cbTokDayAppCr(back, i) + cbTokDayAppCw(back, i);
+            char sn[24], line[80];
+            fmtTok(s, sn, sizeof(sn));
+            int ln = snprintf(line, sizeof(line), "\n%s: %s (%d)",
+                              cbTokAppName(i), sn, req);
+            if (n < 0 || ln < 0 || (size_t)(n + ln) >= sizeof(tip) - 32) { skipped++; continue; }
+            memcpy(tip + n, line, (size_t)ln);
+            n += ln;
+            tip[n] = 0;
+        }
+        if (skipped) {
+            char more[32];
+            int mn = snprintf(more, sizeof(more), "\n+%d more", skipped);
+            if (n >= 0 && mn > 0 && (size_t)(n + mn) < sizeof(tip)) {
+                memcpy(tip + n, more, (size_t)mn);
+                n += mn;
+                tip[n] = 0;
+            }
+        }
+    } else {
+        snprintf(tip, sizeof(tip), "%s, %s %d, %d\nno usage",
+                  DAYS[dt.tm_wday % 7], MONTHS[dt.tm_mon], dt.tm_mday,
+                  dt.tm_year + 1900);
+    }
+    tipShow(tip, xRoot, yRoot, d->fontFamily, 10.0, 1);
+}
+
 int dashEvent(XEvent *ev) {
     if (!g_boardOpen) return 0;
     Dash *d = &g_dash;
@@ -1151,6 +1237,11 @@ int dashEvent(XEvent *ev) {
                 cairo_surface_flush(d->surf);
                 XFlush(d->dpy);
             }
+            // the heat card, the board's own tooltip (p_ui.c dashTipCell on every
+            // WM_MOUSEMOVE): the weekday/date, that day's token total and its
+            // per-app lines, in the dark rounded card the Windows board shows
+            dashTipCell(d, ev->xmotion.x, ev->xmotion.y,
+                        ev->xmotion.x_root, ev->xmotion.y_root);
             break;
         }
         case LeaveNotify:
@@ -1160,6 +1251,7 @@ int dashEvent(XEvent *ev) {
                 cairo_surface_flush(d->surf);
                 XFlush(d->dpy);
             }
+            tipHide();
             break;
         case ButtonRelease:
             // the board's titlebar buttons act on the RELEASE inside their own
@@ -1205,6 +1297,7 @@ void dashClose(void) {
     if (!g_boardOpen) return;
     Dash *d = &g_dash;
     g_boardOpen = 0;
+    tipHide();   // the board's own heat card must not outlive the board
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }
     if (d->surf) { cairo_surface_destroy(d->surf); d->surf = NULL; }
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }

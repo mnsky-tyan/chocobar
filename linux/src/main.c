@@ -710,18 +710,47 @@ static time_t g_scriptCheckAt = 0;    // last isScriptLoaded probe
 static char g_scriptLockPath[600];
 static int g_scriptLockHeld = 0;
 
-static int scriptLockAcquire(void) {
-    if (g_scriptLockHeld) return 1;
+// TRUE when the lock's named owner is still a live chocobar process. A bare
+// kill(pid, 0) is not enough: pids are recycled, so a lock left behind by a
+// killed bar can name an unrelated long-running process for years, and that
+// would wedge the bar out of ever taking the helper back (the freeze this lock
+// exists to prevent, paid for as a permanently dead bar.align 1).
+static int lockOwnerAlive(long owner) {
+    if (owner <= 1) return 0;   // 1 is init, and the file may be empty or junk
+    if (kill((pid_t)owner, 0) != 0) return 0;
+    char path[64], comm[32];
+    snprintf(path, sizeof(path), "/proc/%ld/comm", owner);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 1;      // a live process we cannot inspect: leave it alone
+    ssize_t r = read(fd, comm, sizeof(comm) - 1);
+    close(fd);
+    if (r <= 0) return 1;
+    comm[r] = 0;
+    char *nl = strchr(comm, '\n');
+    if (nl) *nl = 0;
+    // the install name varies (chocobar-linux from the build, whatever the
+    // user renamed it to when installing by hand), so match the prefix
+    return strncmp(comm, "chocobar", 8) == 0;
+}
+
+// The lock file's path: XDG_RUNTIME_DIR when set, else $HOME/.cache. One
+// definition, so the self-test and the bar agree on which file is the lock.
+static int scriptLockPath(char *out, size_t cap) {
     const char *rt = getenv("XDG_RUNTIME_DIR");
-    char dir[512];
-    if (!rt || !*rt) {
-        const char *home = getenv("HOME");
-        if (!home || !*home) return 0;
-        snprintf(dir, sizeof(dir), "%s/.cache", home);
-    } else {
-        snprintf(dir, sizeof(dir), "%s", rt);
-    }
-    snprintf(g_scriptLockPath, sizeof(g_scriptLockPath), "%s/chocobar-geom.lock", dir);
+    if (rt && *rt) { snprintf(out, cap, "%s/chocobar-geom.lock", rt); return 1; }
+    const char *home = getenv("HOME");
+    if (!home || !*home) return 0;
+    snprintf(out, cap, "%s/.cache/chocobar-geom.lock", home);
+    return 1;
+}
+
+// Take the lock on `path`: O_EXCL first, and when a lock already exists, take
+// it over only if its owner is not a live bar. The held flag is this process's
+// own record, so a second call while we hold it succeeds without touching the
+// file. Returns 1 when this process holds the lock afterwards.
+static int scriptLockAcquireAt(const char *path) {
+    if (g_scriptLockHeld) return 1;
+    snprintf(g_scriptLockPath, sizeof(g_scriptLockPath), "%s", path);
     for (int attempt = 0; attempt < 2; attempt++) {
         int fd = open(g_scriptLockPath, O_CREAT | O_EXCL | O_WRONLY, 0600);
         if (fd >= 0) {
@@ -732,7 +761,7 @@ static int scriptLockAcquire(void) {
             g_scriptLockHeld = 1;
             return 1;
         }
-        // the lock exists: is its owner still alive?
+        // the lock exists: is its owner still a live bar?
         int ofd = open(g_scriptLockPath, O_RDONLY);
         long owner = 0;
         if (ofd >= 0) {
@@ -741,17 +770,50 @@ static int scriptLockAcquire(void) {
             close(ofd);
             if (r > 0) { b[r] = 0; owner = strtol(b, NULL, 10); }
         }
-        if (owner > 1 && kill((pid_t)owner, 0) == 0) return 0;   // a live owner: do not load
-        // stale (the owner is gone, or the file is unreadable): take it over
+        if (lockOwnerAlive(owner)) return 0;   // a live bar owns it: do not load
+        // stale (the owner is gone, or it is not a bar any more): take it over
         unlink(g_scriptLockPath);
     }
     return 0;
+}
+
+static int scriptLockAcquire(void) {
+    char path[600];
+    if (!scriptLockPath(path, sizeof(path))) return 0;
+    return scriptLockAcquireAt(path);
 }
 
 static void scriptLockRelease(void) {
     if (!g_scriptLockHeld) return;
     unlink(g_scriptLockPath);
     g_scriptLockHeld = 0;
+}
+
+// The lock's self-test, driven by the behaviour suite against a lock file IT
+// seeds: a live bar's lock is refused, a dead owner's is taken over, and a lock
+// left by a killed bar whose pid has been RECYCLED by an unrelated process is
+// taken over too - that last case is the wedge, where the bar silently gives up
+// on bar.align 1 for the rest of its life. Exercising the real acquire is the
+// only way to prove the liveness judgement, so the suite never re-implements it.
+// argv: --self-test-lock <lockfile>. The pid the suite wants to seed is the
+// lock file's own content, so there is nothing else to pass.
+static int scriptLockSelfTest(const char *path) {
+    int got = scriptLockAcquireAt(path);
+    long named = 0;
+    FILE *f = fopen(path, "r");
+    if (f) { if (fscanf(f, "%ld", &named) != 1) named = 0; fclose(f); }
+    if (got) {
+        // whatever the outcome, the lock must now name THIS process: a takeover
+        // that left the dead pid in place would pass the next probe as stale too
+        int ok = named == (long)getpid();
+        printf("took=%d named=%ld self=%ld\n", got, named, (long)getpid());
+        scriptLockRelease();
+        printf("%s\n", ok ? "LOCK-OK" : "LOCK-BAD");
+        return ok ? 0 : 1;
+    }
+    printf("took=0 named=%ld\n", named);
+    printf("%s\n", "LOCK-REFUSED");
+    return 1;
 }
 
 // Pull whatever the bus has. Reconnects with backoff: the session bus outlives the
@@ -1477,17 +1539,13 @@ static void runDashboard(void) {
     int ddepth = DefaultDepth(g_dpy, g_screen);
     Rgb pinkc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
     Rgb pinkdc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
-    Rgb warnc = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
-    Rgb goodc = hexRgb(cbCfgGood(), (Rgb){0, 0.39, 0});
     Rgb yellowc = hexRgb(cbCfgYellow(), (Rgb){0.72, 0.66, 0.42});
     double pink3[3] = { pinkc.r, pinkc.g, pinkc.b };
     double pinkd3[3] = { pinkdc.r, pinkdc.g, pinkdc.b };
-    double warn3[3] = { warnc.r, warnc.g, warnc.b };
-    double good3[3] = { goodc.r, goodc.g, goodc.b };
     double yellow3[3] = { yellowc.r, yellowc.g, yellowc.b };
     dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
              g_fontFamily, page, card, fg, dim, div, ramp,
-             pink3, pinkd3, warn3, good3, yellow3, (long long)g_lastScan);
+             pink3, pinkd3, yellow3, (long long)g_lastScan);
 }
 
 // Reap every child of the bar that has exited. The pet and the detached spawns
@@ -2025,21 +2083,27 @@ static int installGeometry(void) {
     // (A stack of copies doubles and triples the compositor's main-thread work;
     // two copies froze the desktop for a minute on 2026-10-24.)
     GeomBus bus = { -1 };
-    int ok = 0;
-    if (geomBusConnect(&bus)) {
-        // a bar that is already running owns org.chocobar.Geom and owns the
-        // helper too; loading a second copy from here would stack a poller in
-        // KWin and double the compositor's per-tick work
-        if (!geomBusOwnsName()) {
-            geomBusClose(&bus);
-            fprintf(stderr,
-                    "chocobar: another Chocobar instance is running and owns the "
-                    "geometry helper.\n  Stop it first (systemctl --user stop chocobar), "
-                    "then re-run --install-geometry.\n");
-            return 1;
-        }
+    int ok = geomBusConnect(&bus);
+    // a bar that is already running owns org.chocobar.Geom and owns the
+    // helper too; loading a second copy from here would stack a poller in
+    // KWin and double the compositor's per-tick work. geomBusConnect only
+    // succeeds once this process owns the name, so !ok here means either
+    // another bar holds it or the bus/KWin is unreachable - geomBusLastError
+    // tells the two apart and each has its own advice.
+    if (ok) {
         ok = geomBusReloadScript(path, KW_SCRIPT_NAME);
         geomBusClose(&bus);
+    } else if (strstr(geomBusLastError(), "already owns")) {
+        fprintf(stderr, "chocobar: another Chocobar instance is running and owns the "
+                        "geometry helper.\n  Stop it first (systemctl --user stop chocobar), "
+                        "then re-run --install-geometry.\n");
+        return 1;
+    } else {
+        fprintf(stderr, "chocobar: could not talk to KWin over D-Bus (%s).\n"
+                        "  The script is installed; enable it in System Settings > "
+                        "Window Management > KWin Scripts,\n  or log out and back in.\n",
+                geomBusLastError());
+        return 1;
     }
     if (!ok) {
         fprintf(stderr, "chocobar: could not talk to KWin over D-Bus.\n"
@@ -2054,14 +2118,28 @@ static int installGeometry(void) {
 static int removeGeometry(void) {
     char path[600];
     if (!kwScriptPath(path, sizeof(path))) return 1;
-    // unload over the same bus path the loader uses (best effort: the file is
-    // removed either way, and a KWin that is not listening simply keeps its
-    // copy of a script whose file is gone)
+    // Unload over the same bus path the loader uses. A failure here is NOT
+    // best-effort: geomBusConnect only succeeds once this process owns
+    // org.chocobar.Geom, so failing means a running bar holds the name and this
+    // process cannot unload anything. Deleting the file anyway and printing
+    // "removed" is a false success - the compositor keeps running the script it
+    // already loaded, now pointed at a missing file - so both outcomes are
+    // reported truthfully and the file is only deleted when the unload path was
+    // actually reachable.
     GeomBus bus = { -1 };
-    if (geomBusConnect(&bus)) {
-        if (geomBusOwnsName()) geomBusUnloadScript(KW_SCRIPT_NAME);
-        geomBusClose(&bus);
+    if (!geomBusConnect(&bus)) {
+        if (strstr(geomBusLastError(), "already owns"))
+            fprintf(stderr, "chocobar: another Chocobar instance is running and owns the "
+                            "geometry helper.\n  Stop it first (systemctl --user stop chocobar), "
+                            "then re-run --remove-geometry.\n");
+        else
+            fprintf(stderr, "chocobar: could not talk to KWin over D-Bus (%s).\n"
+                            "  %s was left in place; unlinking it would strand a loaded "
+                            "helper on a missing file.\n", geomBusLastError(), path);
+        return 1;
     }
+    geomBusUnloadScript(KW_SCRIPT_NAME);
+    geomBusClose(&bus);
     unlink(path);
     printf("removed %s\n", path);
     return 0;
@@ -2086,6 +2164,9 @@ int main(int argc, char **argv) {
             return installGeometry();
         } else if (!strcmp(argv[i], "--remove-geometry")) {
             return removeGeometry();
+        } else if (!strcmp(argv[i], "--self-test-lock") && i + 1 < argc) {
+            // the behaviour suite's way to exercise the REAL acquire logic
+            return scriptLockSelfTest(argv[i + 1]);
         } else if (!strcmp(argv[i], "--version")) {
             // the release workflow verifies the built asset the same way it
             // verifies the Windows exe: the binary itself must carry the tag
@@ -2099,7 +2180,8 @@ int main(int argc, char **argv) {
                    "  --install-geometry  load the KWin helper that makes bar.align 1\n"
                    "                      (match the active terminal's width) work\n"
                    "  --remove-geometry   unload and delete that helper\n"
-                   "  --version           print the version and exit\n");
+                   "  --version           print the version and exit\n"
+                   "  --self-test-lock F   (internal) exercise the helper lock on F\n");
             return 0;
         }
     }

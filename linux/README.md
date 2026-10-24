@@ -14,7 +14,7 @@ above its top edge, so it reads as a strip along the top of that terminal.
 ```sh
 sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
                  libcairo2-dev libdbus-1-dev libfontconfig1-dev \
-                 libcurl4-openssl-dev
+                 libcurl4-openssl-dev libxinerama-dev
 bash linux/build.sh                 # -> linux/build/chocobar-linux
 ./linux/build/chocobar-linux        # reads ~/.wizbar/config.json
 ./linux/build/chocobar-linux --config /path/to/config.json
@@ -78,6 +78,13 @@ read another window's geometry. Install it once:
 chocobar-linux --install-geometry     # writes a KWin script and loads it
 chocobar-linux --remove-geometry      # unload and delete it
 ```
+
+Both refuse while the bar itself is running, because the running bar owns
+`org.chocobar.Geom` and owns the helper: a second process loading a copy is what
+stacks a second poller in KWin, and a second process cannot unload at all, so
+`--remove-geometry` leaves the script file in place rather than deleting it and
+reporting a removal that did not happen. Stop the service
+(`systemctl --user stop chocobar`) first.
 
 The helper (`linux/src/geomwatch.js`) is a KWin script that watches the active
 window and calls the bar over D-Bus with its `frameGeometry` in logical pixels.
@@ -296,12 +303,18 @@ the menu picks no row, the bar asks for no blur hint, it rides above the reporte
 terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, and a
-right-group metric chip is inert.
+right-group metric chip is inert. The helper-stack gate runs against a stub
+`org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded` and
+records every `unloadScript`/`loadScript` call, so the unload-before-load
+contract is observed on the bus rather than read off the source; the lock that
+keeps a second bar process out is exercised through the binary's own acquire
+(`--self-test-lock`), never a shell re-implementation of it.
 
 A missing tool (or the development headers the build needs - the bar's own
 X11/cairo ones, and `libxtst-dev` for the XTEST driver the suite compiles) skips
 the behaviour suite cleanly on a developer machine and fails it when `CI` is set,
-so the gate cannot become a silent no-op.
+so the gate cannot become a silent no-op. The KWin stub additionally needs
+`python3-dbus` and `python3-gi`.
 
 The executable token regressions (`scripts/token_regression.py`) are Windows-only;
 on Linux the scan is exercised by running the bar against a real store, which is
