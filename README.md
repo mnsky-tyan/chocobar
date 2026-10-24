@@ -366,14 +366,11 @@ the session scanner and the aggregation are the same code - and with
 `bar.align: 1` it rides just above the active terminal. See `linux/README.md`
 for the build, the measured cost, and what is per-OS.
 
-**The released asset is the bar to run.** The current release, v1.5.1, ships
-only `chocobar.exe`; the Linux bar is attached as `chocobar-linux` from the
-next release on, built from the tag by the same workflow that builds the
-Windows exe. Until that release is tagged, build it from source with the second
-block below.
+**The released asset is the bar to run.** Releases attach `chocobar-linux` next
+to `chocobar.exe`, built from the tag by the same workflow that builds the
+Windows exe.
 
-**From the release** - from the next release on, once a tag ships
-`chocobar-linux`:
+**From the release** - the attached `chocobar-linux`:
 
 ```sh
 gh release download <tag> --pattern chocobar-linux
@@ -385,7 +382,7 @@ gh release download <tag> --pattern chocobar-linux
 # them, and a distro without them fails at load with "error while loading shared
 # libraries" naming the missing one
 sudo apt install libx11-6 libxrender1 libxfixes3 libxcursor1 libcairo2 \
-                 libdbus-1-3 libfontconfig1 libcurl4t64
+                 libdbus-1-3 libfontconfig1 libcurl4t64 libxinerama1
 mkdir -p ~/.local/bin
 install -m 0755 chocobar-linux ~/.local/bin/chocobar-linux
 # the GPU chip needs the perf counters capability, and only that capability:
@@ -508,10 +505,11 @@ headless and needs no GUI. The second, `linux/tests/behaviour.sh`, drives the
 real Linux bar: it starts a PRIVATE Xvfb display and a private D-Bus, drives a
 private pointer with XTEST and waits out the bar's 30 s staleness window, so it
 needs Xvfb, xdotool, xwininfo, xprop, xdpyinfo, gdbus, dbus-send, dbus-daemon,
-gcc and the `libxtst-dev` headers it compiles its pointer driver against, and
-takes a few minutes; where one of those is missing it skips cleanly on a
-developer machine and fails in CI. Nothing it does touches the user's session:
-the display, the bus, the HOME and the pointer it drives are all throwaway.
+gcc, the `libxtst-dev` headers it compiles its pointer driver against, and
+`python3-dbus` plus `python3-gi` for the KWin stub, and it takes a few minutes;
+where one of those is missing it skips cleanly on a developer machine and fails
+in CI. Nothing it does touches the user's session: the display, the bus, the
+HOME and the pointer it drives are all throwaway.
 
 ```bash
 npm test
@@ -542,7 +540,7 @@ native/src/p_agg.c      token aggregation: per-app / per-model / per-day totals
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons, and linux/tests/ (behaviour.sh + xclick.c/xmonitor.c) which CI builds and drives
+linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons, and linux/tests/ (behaviour.sh + xclick.c/xmonitor.c + kwstub.py) which CI builds and drives
 macos/                  macOS front-end (Win32 adapter + bar) over the shared core parts
 scripts/                the portable regression suite (node scripts/portable_regression.js, half of `npm test` with the Linux behaviour suite) and the Windows token regression runner
 ```

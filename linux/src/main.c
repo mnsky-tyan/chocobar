@@ -2014,9 +2014,10 @@ static void handleMenuChoice(int choice) {
 
 // ---- the KWin geometry helper: install / remove ----------------------------------
 // KWin loads a script from ~/.local/share/kwin/scripts/<name>/contents/code/main.js
-// and needs to be told to load and start it over D-Bus. qdbus is used rather than
-// linking sd-bus: it is one call at install time, and a missing qdbus must fail
-// with a clear message rather than a silent no-op.
+// and needs to be told to load and start it over D-Bus. That goes through
+// geomdbus.c (libdbus, the same path the bar's self-heal uses), so an install
+// unloads before it loads and a failure is REPORTED: a KWin that cannot be
+// reached must say so, never look like a success.
 // KW_SCRIPT_NAME is defined above with the geometry state; the install path uses it too.
 
 static int kwScriptPath(char *out, size_t cap) {

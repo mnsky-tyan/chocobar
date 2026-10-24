@@ -20,7 +20,7 @@ bash linux/build.sh                 # -> linux/build/chocobar-linux
 ./linux/build/chocobar-linux --config /path/to/config.json
 ```
 
-The release asset (`chocobar-linux` on the next tag) is built on the
+The release asset (`chocobar-linux`) is built on the
 `ubuntu-latest` runner and linked dynamically, so it needs that image's glibc
 (2.39): Ubuntu 24.04, Debian 13 and up. An older distro loads nothing - the
 loader stops on `GLIBC_2.39 not found` - and building it here, against the local
@@ -95,10 +95,12 @@ the bar. A stale report (the script stopped, KWin restarted) is ignored after
 edge) rather than pinning itself to a window that no longer exists. The bar
 never becomes narrower than its chips.
 
-Left-click the tokens chip for the dashboard, the pet chip to start or stop the
-pet. Right-click opens the menu (the two dashboards, the autostart toggle, edit
-the config, open its folder, the releases page, reload, quit - the Windows tray
-menu's items in the same order).
+Left-click the tokens chip for the dashboard (a second click closes it), the pet
+chip to start or stop the pet. Hovering a chip shows its title - except the pet
+chip, whose own on/off text is the message - and hovering a heatmap cell on the
+dashboard shows that day's totals and apps. Right-click opens the menu (the two
+dashboards, the autostart toggle, edit the config, open its folder, the releases
+page, reload, quit - the Windows tray menu's items in the same order).
 The menu opens on the button RELEASE, which is what Windows does
 (`WM_RBUTTONUP`): opening it on the press handed the menu its own opening
 release, which landed in its padding corner and dismissed it a few milliseconds
@@ -144,7 +146,7 @@ and does nothing when the exclusion is already in place.
 | memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
 | CPU, steady state | 0.2% of one core, 1 Hz repaint |
 | threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
-| binary | 875 KB, no runtime |
+| binary | 995 KB, no runtime |
 | token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
 | subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
@@ -191,8 +193,7 @@ properties neutralise.
 
 The bar is not draggable: its position is derived (x and width from the
 terminal via `bar.align`, y from the terminal's top edge and `bar.gap`), and a
-dragged position would break that contract. Left-click the tokens chip for the
-dashboard, the pet chip to toggle the pet, right-click for the menu.
+dragged position would break that contract.
 
 On a Wayland session the window is presented through XWayland, which is how most
 X11 applications still run on KDE. It is translucent for real: the window is on a

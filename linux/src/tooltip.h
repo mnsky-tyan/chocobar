@@ -3,9 +3,10 @@
 // The Windows bar has exactly this component (p_ui.c tipShow/tipHide): a
 // browser-style white tooltip naming a chip under the pointer ("CPU usage",
 // "Memory usage", ...) and a dark rounded card for a heatmap cell
-// ("Thursday, Sep 12, 2025 - 1.2M tokens"). Both platforms must show the same
-// thing on hover, so both front-ends share one implementation instead of each
-// growing its own popup.
+// ("Thursday, Sep 12, 2025" over "1.2M tokens"). Both platforms must show the
+// same thing on hover. The popup is front-end code (X11), so it cannot live in
+// the shared core: this is the Linux implementation, shared by the bar's chip
+// titles and the board's heat card, and it reproduces the Windows look.
 //
 // It is ONE window reused for every tip: created on first use, shown/hidden,
 // resized to the text. Override-redirect and never focused, so it behaves like
