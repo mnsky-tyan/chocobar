@@ -32,6 +32,12 @@ typedef struct {
 // geomBusLastError() (never fatal: the bar simply centres itself).
 int geomBusConnect(GeomBus *bus);
 
+// TRUE when this process owns org.chocobar.Geom, i.e. it is the ONE bar the KWin
+// helper talks to. A second bar must then never install, reload or unload that
+// helper: two bars managing one compositor-side script is how a stacked poller
+// froze the whole desktop (2026-10-24).
+int geomBusOwnsName(void);
+
 // Read pending messages. Returns the number of reports decoded into *out (the
 // last one wins), or -1 if the connection is gone - in which case it has already
 // been released and the caller must call geomBusConnect again.
@@ -49,6 +55,16 @@ int geomBusScriptLoaded(const char *pluginName);
 // Re-load the KWin helper over the bus - what --install-geometry does, but
 // callable from inside the bar when the script has been unloaded out from
 // under it (a KWin restart, or anything else calling unloadScript).
-void geomBusReloadScript(const char *scriptPath, const char *pluginName);
+//
+// It UNLOADS first and then loads, so exactly one instance exists afterwards.
+// That is not tidiness: KWin stacks a second live copy of a script when
+// loadScript is called on a name that is already loaded, and this script polls
+// the compositor's main thread every 250 ms - two copies froze the whole
+// desktop for a minute on 2026-10-24. Returns 1 on success, 0 on failure.
+int geomBusReloadScript(const char *scriptPath, const char *pluginName);
+
+// Unload one instance of the helper by plugin name (--remove-geometry).
+// Returns 1 when KWin answered, 0 otherwise.
+int geomBusUnloadScript(const char *pluginName);
 
 #endif

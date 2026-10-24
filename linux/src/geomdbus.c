@@ -28,6 +28,9 @@
 
 static DBusConnection *g_conn = NULL;
 static char g_err[200];
+// 1 while this process owns org.chocobar.Geom. Only that process may touch the
+// compositor-side helper (see geomBusOwnsName in the header).
+static int g_ownsName = 0;
 
 static void recordError(const char *what) {
     snprintf(g_err, sizeof(g_err), "%s", what ? what : "unknown");
@@ -37,11 +40,19 @@ static void recordError(const char *what) {
 // unref on a private connection, and forgetting it in one path is how a broken
 // connection used to be handed back to the next caller.
 static void closeConn(void) {
+    g_ownsName = 0;
     if (!g_conn) return;
     dbus_connection_close(g_conn);
     dbus_connection_unref(g_conn);
     g_conn = NULL;
 }
+
+// TRUE when this process owns org.chocobar.Geom, i.e. it is the ONE bar the KWin
+// helper talks to. A second bar (a dev build next to the released one, or a
+// service restart overlapping the old process) gets FALSE, and must then never
+// install, reload or unload the helper: managing a compositor-side script that
+// belongs to another bar's session is how a stacked poller freezes the desktop.
+int geomBusOwnsName(void) { return g_ownsName; }
 
 int geomBusConnect(GeomBus *bus) {
     (void)bus;
@@ -74,8 +85,10 @@ int geomBusConnect(GeomBus *bus) {
         rc != DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER) {
         recordError("another process already owns org.chocobar.Geom");
         closeConn();
+        g_ownsName = 0;
         return 0;
     }
+    g_ownsName = 1;
 
     // accept the call from any sender: the KWin script runs inside kwin_wayland
     // and its unique name changes with every KWin restart
@@ -157,23 +170,53 @@ const char *geomBusLastError(void) { return g_err; }
 
 // Re-load the KWin script, for when it has been unloaded out from under the bar.
 //
-// A KWin restart (and anything else that calls unloadScript) drops the helper
-// WITHOUT telling the bar, and the bar then silently loses bar.align 1 for the
-// rest of its life - measured on this machine, three times. Loading it back is
-// the same call --install-geometry makes, sent over the session bus so the bar
-// can heal the loss itself. The caller supplies the script path and plugin name
-// because the install path is the bar's business, not the bus's.
-void geomBusReloadScript(const char *scriptPath, const char *pluginName) {
-    if (!g_conn || !dbus_connection_get_is_connected(g_conn)) return;
-    if (!scriptPath || !*scriptPath || !pluginName || !*pluginName) return;
+// Load the KWin helper back after it has been unloaded out from under the bar.
+//
+// THE UNLOAD FIRST IS LOAD-BEARING, not belt-and-braces. KWin keeps script
+// INSTANCES: loadScript on a name that is already loaded adds a SECOND live
+// copy of the same file. The helper polls every 250 ms and calls back over
+// D-Bus each time it sees a change, so N stacked copies mean N polls and N
+// calls per 250 ms inside the COMPOSITOR'S MAIN THREAD. Measured on this
+// machine 2026-10-24: a bar restart that raced the self-heal loaded the script
+// twice, and KWin logged "The main thread was hanging temporarily!" for over a
+// minute while the desktop froze. The bar must therefore be able to promise
+// "exactly one instance", which means unloading before loading - and it must
+// never call this while an instance it knows about is still loaded.
+//
+// Returns 1 when the script was loaded (or was already loaded), 0 on failure.
+int geomBusReloadScript(const char *scriptPath, const char *pluginName) {
+    if (!g_conn || !dbus_connection_get_is_connected(g_conn)) return 0;
+    if (!scriptPath || !*scriptPath || !pluginName || !*pluginName) return 0;
+
+    // 1. unload any existing instance. A false reply means "was not loaded",
+    //    which is the normal path for the first load of a fresh KWin.
+    {
+        DBusMessage *u = dbus_message_new_method_call("org.kde.KWin", "/Scripting",
+                                                      "org.kde.kwin.Scripting",
+                                                      "unloadScript");
+        if (u) {
+            const char *n = pluginName;
+            if (dbus_message_append_args(u, DBUS_TYPE_STRING, &n, DBUS_TYPE_INVALID)) {
+                dbus_message_set_auto_start(u, FALSE);
+                DBusError ue;
+                dbus_error_init(&ue);
+                DBusMessage *ur = dbus_connection_send_with_reply_and_block(g_conn, u, 2000, &ue);
+                if (ur) dbus_message_unref(ur);
+                dbus_error_free(&ue);
+            }
+            dbus_message_unref(u);
+        }
+    }
+
+    // 2. load exactly one instance.
     DBusMessage *msg = dbus_message_new_method_call("org.kde.KWin", "/Scripting",
                                                     "org.kde.kwin.Scripting",
                                                     "loadScript");
-    if (!msg) return;
+    if (!msg) return 0;
     if (!dbus_message_append_args(msg, DBUS_TYPE_STRING, &scriptPath,
                                      DBUS_TYPE_STRING, &pluginName, DBUS_TYPE_INVALID)) {
         dbus_message_unref(msg);
-        return;
+        return 0;
     }
     dbus_message_set_auto_start(msg, FALSE);
     DBusError err;
@@ -183,9 +226,53 @@ void geomBusReloadScript(const char *scriptPath, const char *pluginName) {
     if (!reply) {
         if (dbus_error_is_set(&err)) recordError(err.message);
         dbus_error_free(&err);
-        return;
+        return 0;
     }
     dbus_message_unref(reply);
+
+    // 3. start it (KWin loads a script paused; start() is what runs its timers).
+    {
+        DBusMessage *st = dbus_message_new_method_call("org.kde.KWin", "/Scripting",
+                                                       "org.kde.kwin.Scripting", "start");
+        if (st) {
+            dbus_message_set_auto_start(st, FALSE);
+            DBusError se;
+            dbus_error_init(&se);
+            DBusMessage *sr = dbus_connection_send_with_reply_and_block(g_conn, st, 2000, &se);
+            if (sr) dbus_message_unref(sr);
+            dbus_error_free(&se);
+            dbus_message_unref(st);
+        }
+    }
+    return 1;
+}
+
+// Unload one instance of the KWin helper by plugin name (--remove-geometry).
+// Returns 1 when KWin answered, 0 otherwise.
+int geomBusUnloadScript(const char *pluginName) {
+    if (!g_conn || !dbus_connection_get_is_connected(g_conn)) return 0;
+    if (!pluginName || !*pluginName) return 0;
+    DBusMessage *msg = dbus_message_new_method_call("org.kde.KWin", "/Scripting",
+                                                    "org.kde.kwin.Scripting",
+                                                    "unloadScript");
+    if (!msg) return 0;
+    const char *n = pluginName;
+    if (!dbus_message_append_args(msg, DBUS_TYPE_STRING, &n, DBUS_TYPE_INVALID)) {
+        dbus_message_unref(msg);
+        return 0;
+    }
+    dbus_message_set_auto_start(msg, FALSE);
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage *reply = dbus_connection_send_with_reply_and_block(g_conn, msg, 2000, &err);
+    dbus_message_unref(msg);
+    if (!reply) {
+        if (dbus_error_is_set(&err)) recordError(err.message);
+        dbus_error_free(&err);
+        return 0;
+    }
+    dbus_message_unref(reply);
+    return 1;
 }
 
 // TRUE when the KWin script of that name is loaded. Read through the same

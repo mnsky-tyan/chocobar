@@ -16,10 +16,14 @@
 // Creates the board window and paints it once. Returns the window id, or None
 // if the window could not be created. Events for that window are then routed
 // by the bar's loop into dashEvent(), and dashClose() destroys it.
+// lastScanAt: the local epoch the token scan last finished, shown in the
+// footer as "last scan HH:MM:SS" (0 = never scanned, drawn as an em dash).
 Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 int cssW, int cssH, double scale, const char *fontFamily,
                 const double page[3], const double card[3], const double fg[3],
-                const double dim[3], const double divider[3], const double ramp[5][3]);
+                const double dim[3], const double divider[3], const double ramp[5][3],
+                const double pink[3], const double pinkDeep[3],
+                const double yellow[3], long long lastScanAt);
 
 // Handles one event that belongs to the board's window (the caller routes by
 // xany.window). Returns 1 when the board wants to close (Esc, q, middle/right

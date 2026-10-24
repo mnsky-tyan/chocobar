@@ -79,6 +79,12 @@ command -v xdotool   >/dev/null || skip "xdotool is not installed"
 command -v gdbus     >/dev/null || skip "gdbus (libglib2.0-bin) is not installed"
 command -v dbus-send >/dev/null || skip "dbus-send is not installed"
 command -v gcc      >/dev/null || skip "gcc is not installed"
+# the KWin Scripting stub is Python: the helper-stack check drives it instead of
+# reading the reload path's source, because the unload-before-load contract is
+# only observable against a service that answers isScriptLoaded
+command -v python3  >/dev/null || skip "python3 is not installed"
+python3 -c 'import dbus, gi' >/dev/null 2>&1 \
+    || skip "python3-dbus and python3-gi are not installed"
 
 # The suite BUILDS things: its own XTEST driver and shims on every run, and the
 # bar itself when it is not built yet. Both need DEVELOPMENT headers, not just
@@ -124,6 +130,9 @@ cleanup() {
     if [ -s "$WORK/pet.pid" ]; then kill "$(cat "$WORK/pet.pid")" 2>/dev/null; fi
     [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null
     [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
+    for p in ${KWBAR:-} ${KWSTUB_PID:-} ${KWDPID:-} ${SECOND_BAR:-} ${HEATXPID:-}; do
+        [ -n "$p" ] && kill "$p" 2>/dev/null
+    done
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -408,6 +417,16 @@ menu_wh() {
         if [ -n "$out" ]; then echo "$w $out"; return; fi
     done
 }
+# same count, minus the tooltip window: the tip is created once on the first
+# hover and then mapped/unmapped, so it must not read as "a click opened a window"
+root_children_excluding_tip() {
+    for w in $(xwininfo -root -children | grep -o '^     0x[0-9a-f]*'); do
+        case "$(xprop -id "$w" WM_CLASS 2>/dev/null)" in
+            *ChocobarTip*) continue ;;
+        esac
+        echo "$w"
+    done | wc -l
+}
 # the menu's row geometry, in logical px (linux/src/menu.c: MENU_PAD, MENU_ROW,
 # MENU_SEP). The second row is "Subscription dashboard", whose choice is
 # observable in the bar's own log without changing anything on disk; its centre
@@ -609,7 +628,9 @@ PET_STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
 # the chip's state comes from the bar's 1 Hz tick and 6d just stopped the pet:
 # let a tick pass so the chip reads "off" before anything is clicked
 sleep 2
-ROOT_BEFORE=$(root_children)
+# the chip tooltip is a hover effect, not a click action: the sweep passes over
+# every chip, so the tip window legitimately appears and the count must ignore it
+ROOT_BEFORE=$(root_children_excluding_tip)
 RIGHT_HITS=0
 # a dense sweep of the right group's own extent: the right group is laid out
 # from the right edge leftward, so every offset between the right padding and
@@ -627,7 +648,7 @@ sleep 0.6
 [ "$RIGHT_HITS" -ge 8 ] &&
     [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$PET_STARTED_BEFORE" ] &&
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$PET_STOPPED_BEFORE" ] &&
-    [ "$(root_children)" -eq "$ROOT_BEFORE" ]
+    [ "$(root_children_excluding_tip)" -eq "$ROOT_BEFORE" ]
 check "a left click on a right-group metric chip does nothing ($RIGHT_HITS clicks, no action)" $?
 # and the bar still answers the next click, so the inert chip did not wedge it
 sleep 2
@@ -1931,6 +1952,564 @@ check "the tiny bar's bottom edge rides the gap above the terminal (bottom=$BOTT
 OVERLAP=$(awk -v b="$BOTTOM" -v s="$TINY_SCALE" 'BEGIN{printf "%d", (b > 300*s) ? 1 : 0}')
 [ "$OVERLAP" -eq 0 ]
 check "the tiny bar's bottom edge stays above the terminal's top edge (no overlap)" $?
+
+# ---------------------------------------------------------------------------
+# 12b. HOVER: the pill and the title tooltip (the user's own request, 2026-10-23:
+#      "hovering LHS buttons must highlight them; hovering RHS buttons must show
+#      a label line saying what it is").
+#
+#      Two defects made that impossible and neither is visible to a click test:
+#        * the bar selected ButtonMotionMask but NOT PointerMotionMask, so a
+#          plain hover never produced a MotionNotify and onMotion never ran;
+#        * onMotion handed tipShow the WINDOW-relative pointer position while
+#          tipShow places the box at screen coordinates, so the tip landed in
+#          the screen's top-left corner instead of under the pointer.
+#      The tooltip is an override-redirect window of its own, so this reads the
+#      root's child list rather than the bar's pixels. Both defects are only
+#      visible as behaviour - a grep for the event mask or for the coordinate
+#      field would pass on a branch that never runs - so the check below drives
+#      the pointer and reads where the tip actually landed.
+tip_win() { xwininfo -root -children 2>/dev/null | awk '/chocobar-tip/ { print $1; exit }'; }
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+Y_BAR=$Y
+TIP_SEEN=0
+TIP_NEAR=0
+for frac in 3 12 22 32 42 52 62 72 82 92; do
+    hx=$((WIDTH * frac / 100))
+    HOVER_X=$((X + hx))
+    xdotool mousemove "$HOVER_X" $((Y + HEIGHT / 2))
+    sleep 0.35
+    TW=$(tip_win)
+    if [ -n "${TW:-}" ]; then
+        eval "$(xdotool getwindowgeometry --shell "$TW")"
+        TIP_SEEN=$((TIP_SEEN+1))
+        # the tip must sit just under the pointer and roughly above/right of it.
+        # This is the assertion that separates the two bugs: window-relative
+        # coordinates land the box at a FIXED place (tipX = pointerX - barX), so
+        # it would be ~0 on a centred bar and never track the pointer across the
+        # strip. Allowing a band around the hovered x is what makes a pass mean
+        # "the box followed the pointer" rather than "a box appeared".
+        if [ "$Y" -ge "$Y_BAR" ] && [ "$X" -ge $((HOVER_X - 40)) ] \
+           && [ "$X" -le $((HOVER_X + 40)) ]; then
+            TIP_NEAR=$((TIP_NEAR+1))
+        fi
+    fi
+done
+[ "$TIP_SEEN" -ge 1 ] && [ "$TIP_NEAR" -ge 1 ]
+check "hovering a chip shows its tooltip under the pointer ($TIP_SEEN tips, $TIP_NEAR tracked the pointer)" $?
+# leave the bar the way a pointer really does: motion OUT of the window fires
+# LeaveNotify, which is what tipHide hangs off. A single jump to the screen
+# corner can be delivered as one synthetic motion with no leave event at all,
+# so the move is made in two steps, the second landing outside the bar.
+xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT + 30))
+sleep 0.25
+xdotool mousemove 5 5
+sleep 0.45
+TW=$(tip_win)
+# tipHide UNMAPS the window rather than destroying it (one shared tip window,
+# so a hover storm never allocates), so the check reads its map state
+[ -z "${TW:-}" ] || xwininfo -id "$TW" 2>/dev/null | grep -qi "Map State: IsUnMapped"
+check "moving off the bar hides the tooltip" $?
+
+# ---------------------------------------------------------------------------
+# 13. THE KWIN HELPER CAN NEVER BE STACKED.
+#
+#     geomwatch.js polls the COMPOSITOR'S MAIN THREAD every 250 ms. KWin runs
+#     every loadScript as a NEW instance of the same file, so a second copy
+#     doubles that work, a third triples it. Measured on this machine
+#     2026-10-24: a bar restart raced the self-heal, two instances ended up
+#     loaded, and KWin logged "The main thread was hanging temporarily!" for
+#     over a minute while the whole desktop froze.
+#
+#     The suite's private session bus means the bar's KWin calls go nowhere, so
+#     this cannot test KWin itself. What it CAN prove - and what actually
+#     prevents the stack - is the bar's own contract:
+#       a. the reload path unloads before it loads (one instance after any
+#          reload, even a racing one);
+#       b. the cross-process lock makes a SECOND bar process refuse to load
+#          while the first one holds it, so two bars cannot both decide;
+#       c. a stale lock (its owner is gone) is taken over instead of wedging
+#          the bar out of ever loading the helper again.
+#     (a), (b) and (c) are all exercised for real: (a) against a stub
+#     org.kde.KWin on a second private bus, (b) and (c) through the bar's own
+#     acquire via --self-test-lock.
+#
+# (a) is observable after all: a stub org.kde.KWin on the suite's own bus
+#     answers isScriptLoaded and records every call. The bar is started against
+#     it with the helper's file MISSING, so KWin reports "not loaded", the bar
+#     reloads, and the recorded call sequence is the contract: an unload must
+#     precede every load, and exactly one load must follow it. A stacked reload
+#     shows up as two loads with no unload between them, or a load with no
+#     unload before it at all.
+if command -v python3 >/dev/null && python3 -c 'import dbus, gi' 2>/dev/null; then
+    # a second bus: the one above carries the bar's own org.chocobar.Geom, and a
+    # stub KWin must not disturb it. The address is BUILT from the socket path,
+    # exactly as the suite's own bus address is, and never read back from the
+    # daemon's log: the socket appears before the daemon prints its address, so
+    # a log read can come back empty - and an empty DBUS_SESSION_BUS_ADDRESS
+    # makes the bar fall back to the DEFAULT session bus, which is the user's.
+    dbus-daemon --session --address="unix:path=$WORK/bus2" --print-address \
+        --nofork >"$WORK/dbus2.log" 2>&1 &
+    KWDPID=$!
+    for _ in $(seq 1 50); do [ -S "$WORK/bus2" ] && break; sleep 0.2; done
+    [ -S "$WORK/bus2" ] || { echo "FAIL: the KWin stub bus did not come up"; exit 1; }
+    KWADDR="unix:path=$WORK/bus2"
+    [ -n "$KWADDR" ] || { echo "FAIL: the KWin stub bus has no address"; exit 1; }
+    KWLOG="$WORK/kwin-calls.log"
+    : > "$KWLOG"
+    # loaded=0: KWin says the helper is NOT loaded, which is the only situation
+    # in which the bar is allowed to reload it
+    python3 "$HERE/kwstub.py" "$KWADDR" "$KWLOG" 0 >"$WORK/kwstub.log" 2>&1 &
+    KWSTUB_PID=$!
+    # Wait until the stub actually OWNS org.kde.KWin before the bar starts. The
+    # bar probes once on its fresh connection and then not again for 30 s, so a
+    # bar that starts while the stub is still importing loses the whole window
+    # and the check below sees zero loads - a race that has already fired once.
+    for _ in $(seq 1 100); do
+        dbus-send --bus="$KWADDR" --dest=org.freedesktop.DBus --type=method_call \
+            --print-reply /org/freedesktop/DBus \
+            org.freedesktop.DBus.NameHasOwner string:org.kde.KWin 2>/dev/null |
+            grep -q "boolean true" && break
+        sleep 0.1
+    done
+    HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+        DBUS_SESSION_BUS_ADDRESS="$KWADDR" "$BIN" >"$WORK/bar-kwin.log" 2>&1 &
+    KWBAR=$!
+    for _ in $(seq 1 60); do
+        grep -q '^loadScript ' "$KWLOG" && break
+        sleep 0.2
+    done
+    sleep 1
+    kill "$KWBAR" 2>/dev/null
+    wait "$KWBAR" 2>/dev/null
+    kill "$KWSTUB_PID" 2>/dev/null
+    wait "$KWSTUB_PID" 2>/dev/null
+    kill "$KWDPID" 2>/dev/null
+    wait "$KWDPID" 2>/dev/null
+    # every loadScript must be preceded, in the same log, by an unloadScript:
+    # unload-then-load is the whole shape, and a load without its unload is how
+    # a second live copy gets stacked in KWin
+    read -r RELOAD_LOADS RELOAD_BAD <<<"$(awk '
+        /^unloadScript / { seen_unload = 1; next }
+        /^loadScript / {
+            loads++
+            if (!seen_unload) bad++
+            seen_unload = 0
+            next
+        }
+        END { printf "%d %d", loads + 0, bad + 0 }' "$KWLOG")"
+    [ "${RELOAD_LOADS:-0}" -ge 1 ] && [ "${RELOAD_BAD:-1}" -eq 0 ]
+    check "the helper reload unloads first and loads exactly once (${RELOAD_LOADS} loads, ${RELOAD_BAD} without a preceding unload)" $?
+    # a zero-load result is a harness race, not a product finding: say so with
+    # the evidence rather than leaving a bare number to interpret
+    if [ "${RELOAD_LOADS:-0}" -lt 1 ]; then
+        echo "  (KWin stub bus: $KWADDR)"
+        echo "  (stub log:) $(cat "$WORK/kwstub.log" 2>/dev/null)"
+        echo "  (bar log:) $(cat "$WORK/bar-kwin.log" 2>/dev/null)"
+    fi
+else
+    # python3 + dbus are on every runner this suite targets; skipping would let
+    # the gate pass on a machine that cannot prove the contract at all
+    check "the helper reload unloads first and loads exactly once" 1
+fi
+
+# only the bar that OWNS org.chocobar.Geom may manage the compositor-side
+# helper. Two bars both reloading it is what stacked a second 250 ms poller in
+# KWin and froze the desktop on 2026-10-24, so a SECOND bar must stay out of the
+# way - and that is observable in its own words: it cannot take the name, so it
+# logs the ownership reason instead of managing anything. The bar above is still
+# running, so this second process is exactly the dev-build-beside-the-service
+# case the gate exists for.
+SECOND_BIN_OUT="$WORK/bar2.log"
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$SECOND_BIN_OUT" 2>&1 &
+SECOND_BAR=$!
+SECOND_SEEN=0
+for _ in $(seq 1 40); do
+    grep -q "already owns org.chocobar.Geom" "$SECOND_BIN_OUT" && { SECOND_SEEN=1; break; }
+    kill -0 "$SECOND_BAR" 2>/dev/null || break
+    sleep 0.2
+done
+kill "$SECOND_BAR" 2>/dev/null
+wait "$SECOND_BAR" 2>/dev/null
+[ "$SECOND_SEEN" -eq 1 ]
+check "a second bar does not take the geometry name and says so ($SECOND_SEEN of 1)" $?
+# --install-geometry must refuse while another bar owns the name, and say why.
+# This is the CLI path of the same gate, run against the bar that is still
+# running: it cannot own the name, so it must print the ownership advice (stop
+# the service first), NOT the D-Bus/KWin diagnosis that would name a problem
+# that does not exist.
+INST_OUT=$(HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" "$BIN" --install-geometry 2>&1); INST_RC=$?
+[ "$INST_RC" -ne 0 ] &&
+    echo "$INST_OUT" | grep -q "another Chocobar instance is running and owns the" &&
+    ! echo "$INST_OUT" | grep -q "could not talk to KWin"
+check "--install-geometry refuses while another bar owns the name, and names the real reason" $?
+# --remove-geometry has the same gate and must not delete the helper's file when
+# it cannot unload it: the compositor would keep running the loaded script with
+# its file gone, and "removed" would be a lie. Observable: the file survives and
+# the exit status is non-zero.
+SCRIPT_FILE="$WORK/home/.local/share/kwin/scripts/chocobar-geometry/contents/code/main.js"
+mkdir -p "$(dirname "$SCRIPT_FILE")"
+printf '// placeholder\n' > "$SCRIPT_FILE"
+REM_OUT=$(HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" "$BIN" --remove-geometry 2>&1); REM_RC=$?
+[ "$REM_RC" -ne 0 ] && [ -f "$SCRIPT_FILE" ] &&
+    echo "$REM_OUT" | grep -q "another Chocobar instance is running and owns the"
+check "--remove-geometry refuses while another bar owns the name, and keeps the file" $?
+rm -f "$SCRIPT_FILE"
+
+# the lock: a SECOND process must be refused while a live bar holds it, and a
+# lock whose holder DIED (SIGKILL: systemd timeout, OOM, a killed dev build)
+# must be taken over - that last one is the wedge: the bar silently gives up
+# on bar.align 1 for the rest of its life. Both run through the bar's OWN
+# acquire (main.c scriptLockAcquire, reached by --self-test-lock), and the
+# refusal is observed against a REAL holder: --self-test-lock-hold takes the
+# lock in a live process and marks it, so what is refused is an actual kernel
+# lock rather than a file the suite seeded with a pid. There is no stale-pid
+# case left to stage: the lock is an flock the kernel releases when the holder
+# dies, and the bar never reads the lock file's pid line.
+LOCK="$WORK/geom.lock"
+mkdir -p "$(dirname "$LOCK")"
+rm -f "$LOCK"
+HELD="$WORK/geom.lock.holder"
+rm -f "$HELD"
+"$BIN" --self-test-lock-hold "$LOCK" "$HELD" 30 >/dev/null 2>&1 &
+HOLDER=$!
+for _ in $(seq 1 50); do [ -s "$HELD" ] && break; sleep 0.1; done
+# (a) a lock held by a live process: refused, and the holder's own record in
+#     the file is left standing
+if [ -s "$HELD" ]; then
+    HELD_PID=$(cat "$HELD")
+    OUT=$("$BIN" --self-test-lock "$LOCK"); RC=$?
+    [ "$RC" -ne 0 ] && echo "$OUT" | grep -q LOCK-REFUSED &&
+        [ "$(cat "$LOCK")" = "$HELD_PID" ]
+    check "a live holder's lock is refused and left untouched ($OUT)" $?
+else
+    check "a live holder's lock is refused and left untouched" 1
+fi
+# (b) the holder is SIGKILLed mid-hold - exactly how a bar dies under a
+#     systemd timeout or OOM - and the next acquirer takes over with nothing
+#     to judge: the kernel dropped the flock the moment the holder died
+kill -9 "$HOLDER" 2>/dev/null
+wait "$HOLDER" 2>/dev/null
+OUT=$("$BIN" --self-test-lock "$LOCK"); RC=$?
+[ "$RC" -eq 0 ] && echo "$OUT" | grep -q LOCK-OK
+check "a killed holder's lock is taken over ($OUT)" $?
+rm -f "$LOCK" "$HELD"
+
+
+# ---------------------------------------------------------------------------
+# 14. THE HEATMAP'S COLUMNS ARE DAY-ALIGNED.
+#
+#     The grid is one column per week and one row per weekday, Sun-first, and
+#     the dow=0 cell of column wk is (weeks-1-wk)*7 + endDow days back. Every
+#     other offset - a Monday-based (back + todayDow)/7 included - shifts whole
+#     columns against each other and the grid reads as diagonal streaks. A
+#     source grep cannot see that, so this drives the real bar: a store is
+#     seeded with usage on ONE day, the board is opened, and the pointer is
+#     swept across it. The heat card for a day WITH usage carries one more line
+#     than the "no usage" card, so exactly one cell stands out, and the column
+#     and row it lands in must be the pair the Sun-first grid predicts.
+#
+#     The day is 8 back rather than 0: today's cell sits in the LAST column and
+#     TODAY's row whatever the offset is, so it cannot tell the two apart.
+HEAT_BACK=8
+HEAT_STORE="$WORK/heatstore"
+mkdir -p "$HEAT_STORE"
+HEAT_TS=$(( $(date +%s%3N) - HEAT_BACK * 86400000 ))
+printf '{"type":"assistant","usage":{"input":1000,"output":2000,"cacheRead":3000,"cacheWrite":4000},"model":"m","timestamp":%s}\n' \
+    "$HEAT_TS" > "$HEAT_STORE/seed.jsonl"
+cat > "$WORK/home/.wizbar/config.json" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 0, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": true,
+              "sources": [ { "app": "pi", "path": "$HEAT_STORE", "recursive": false } ] },
+  "modules": { "pet": { "enabled": false } }
+}
+JSON
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+sleep 0.5
+# A taller display for this section only: the suite's own is 400 px, which
+# clamps the board to the full head height and makes both the content fit and
+# the selection's effect on it unobservable. The bus is display-independent, so
+# the bar below reuses the suite's.
+HEATDPYNUM=$((DPYNUM + 40))
+while [ -e "/tmp/.X11-unix/X$HEATDPYNUM" ]; do HEATDPYNUM=$((HEATDPYNUM+1)); done
+Xvfb ":$HEATDPYNUM" -screen 0 1600x1000x24 >"$WORK/heatxvfb.log" 2>&1 &
+HEATXPID=$!
+export DISPLAY=":$HEATDPYNUM"
+for _ in $(seq 1 50); do xwininfo -root >/dev/null 2>&1 && break; sleep 0.2; done
+xwininfo -root >/dev/null 2>&1 ||
+    { echo "FAIL: the heatmap display did not come up"; exit 1; }
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar-heat.log" 2>&1 &
+BAR_PID=$!
+sleep 3
+HEATWIN=""
+for _ in $(seq 1 60); do
+    HEATWIN=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "${HEATWIN:-}" ] && break
+    sleep 0.2
+done
+[ -n "${HEATWIN:-}" ] || { echo "FAIL: the heatmap bar never opened a window"; exit 1; }
+eval "$(xdotool getwindowgeometry --shell "$HEATWIN")"
+# left-click along the strip until the dashboard opens: the tokens chip is the
+# leftmost left-group chip, and a bar that has not scanned yet shows nothing
+for xo in 10 20 30 40 50 60 70 80 90 100 110 120; do
+    xdotool mousemove $((X + xo)) $((Y + HEIGHT / 2))
+    sleep 0.1
+    xdotool click 1
+    sleep 0.7
+    HEATDASH=$(xwininfo -root -children 2>/dev/null |
+               awk '/Token usage/ { print $1; exit }')
+    [ -n "${HEATDASH:-}" ] && break
+done
+if [ -z "${HEATDASH:-}" ]; then
+    check "the heatmap's columns are day-aligned (the dashboard never opened)" 1
+else
+    eval "$(xdotool getwindowgeometry --shell "$HEATDASH")"
+    # The bar's event loop is select-driven: a motion is handled some time
+    # AFTER xdotool's warp lands, and no fixed sleep bounds that, so every
+    # observation below polls the tip window until its state reflects the
+    # position being sampled. The pointer always enters a sample from a KNOWN
+    # mapped state (the anchor cell, or the previous sample's own card), which
+    # makes both outcomes decisive: a geometry other than the pre-move one can
+    # only be the sample's own card, and the tip disappearing can only be the
+    # sample's own motion hiding it. A stale card from an earlier position can
+    # therefore never be recorded, at any pointer latency.
+    TIP_TW=""; TIP_ST=0; TIP_GX=0; TIP_GY=0; TIP_W=0; TIP_H=0
+    HOPX=0; HOPY=0; ANCHOR_G="none"; LASTX=0; LASTY=0
+    tip_read() { # one X round trip -> TIP_ST plus the tip's placement and size
+        local out line
+        if [ -z "$TIP_TW" ]; then
+            TIP_TW=$(xwininfo -root -tree 2>/dev/null |
+                     awk '/chocobar-tip/ { print $1; exit }')
+            [ -z "$TIP_TW" ] && { TIP_ST=0; return 0; }
+        fi
+        out=$(xwininfo -id "$TIP_TW" 2>/dev/null) ||
+            { TIP_ST=0; TIP_TW=""; return 0; }
+        TIP_ST=0; TIP_GX=0; TIP_GY=0; TIP_W=0; TIP_H=0
+        while IFS= read -r line; do
+            case "$line" in
+                *"Map State: IsViewable"*) TIP_ST=1 ;;
+                *"Absolute upper-left X:"*) TIP_GX=$(( ${line##*: } )) ;;
+                *"Absolute upper-left Y:"*) TIP_GY=$(( ${line##*: } )) ;;
+                *"Width:"*) TIP_W=$(( ${line##*: } )) ;;
+                *"Height:"*) TIP_H=$(( ${line##*: } )) ;;
+            esac
+        done <<<"$out"
+        return 0
+    }
+    # Put the tip back on the anchor cell - the one cell the search found - so
+    # the next sample always starts from a known mapped state. Already showing
+    # the anchor's geometry is the common case and costs nothing.
+    tip_anchor() { # 0 anchored, 1 the bar stopped answering
+        local pre="$TIP_GX $TIP_GY $TIP_W $TIP_H" preSt=$TIP_ST
+        local dl g
+        if [ "$preSt" = 1 ] && [ "$pre" = "$ANCHOR_G" ]; then return 0; fi
+        xdotool mousemove "$HOPX" "$HOPY" 2>/dev/null
+        dl=$(( $(date +%s%N) + 3000000000 ))
+        while :; do
+            tip_read
+            if [ "$TIP_ST" = 1 ]; then
+                g="$TIP_GX $TIP_GY $TIP_W $TIP_H"
+                if [ "$preSt" = 0 ] || [ "$g" != "$pre" ]; then
+                    ANCHOR_G="$g"
+                    LASTX=$HOPX; LASTY=$HOPY
+                    return 0
+                fi
+            fi
+            [ "$(date +%s%N)" -ge "$dl" ] && return 1
+        done
+    }
+    # 0 = the heat card for THIS screen position is showing, 1 = this
+    # position's own motion proved there is none, 2 = the bar stopped
+    # answering. Only the caller records anything, and it records the SAMPLE's
+    # position with the card's size, so a stale card can never be misfiled.
+    tip_at() { # tip_at <x> <y>
+        local x=$1 y=$2 pre dl
+        if [ "$TIP_ST" = 0 ] || { [ "$x" = "$LASTX" ] && [ "$y" = "$LASTY" ]; }; then
+            tip_anchor || return 2
+        fi
+        if [ "$x" = "$HOPX" ] && [ "$y" = "$HOPY" ]; then return 0; fi
+        pre="$TIP_GX $TIP_GY $TIP_W $TIP_H"
+        xdotool mousemove "$x" "$y" 2>/dev/null
+        dl=$(( $(date +%s%N) + 3000000000 ))
+        while :; do
+            tip_read
+            if [ "$TIP_ST" = 1 ]; then
+                if [ "$TIP_GX $TIP_GY $TIP_W $TIP_H" != "$pre" ]; then
+                    LASTX=$x; LASTY=$y
+                    return 0
+                fi
+            else
+                return 1
+            fi
+            [ "$(date +%s%N)" -ge "$dl" ] && return 2
+        done
+    }
+    # Settle on the board's empty top-left corner: the click loop ended on the
+    # bar, where the chip tooltip may still be mapped, and the corner is
+    # padding - it can never show a card - so once the pointer rests there the
+    # tip is hidden and stays hidden.
+    SETTLED=0
+    xdotool mousemove $((X + 2)) $((Y + 2)) 2>/dev/null
+    for _ in $(seq 1 60); do
+        tip_read
+        [ "$TIP_ST" = 0 ] && { SETTLED=1; break; }
+        sleep 0.05
+    done
+    HITX=0; HITY=0
+    if [ "$SETTLED" = 1 ]; then
+        # Search for the grid: walk DOWN three parallel columns until a card
+        # appears. A gap between cells is 3 px wide and the pitch is at least
+        # 12 px (the 9 px cell floor plus the gap), so two probes 8 px apart
+        # can never both land in a gap. From the settled hidden state any map
+        # that appears belongs to the position just sampled - absent positions
+        # never map - so this hit is the anchor cell. A probe that finds
+        # nothing within 100 ms parks the pointer on the corner until the tip
+        # has been hidden for three straight polls and tries the SAME position
+        # once more: a card that arrives late is that position's own card,
+        # never the next probe's.
+        DASHMX=$((X + WIDTH / 2))
+        for gy in $(seq "$Y" 8 $((Y + HEIGHT))); do
+            for dx in 0 8 -8; do
+                px=$((DASHMX + dx))
+                for try in 1 2; do
+                    xdotool mousemove "$px" "$gy" 2>/dev/null
+                    dl=$(( $(date +%s%N) + 100000000 ))
+                    while :; do
+                        tip_read
+                        [ "$TIP_ST" = 1 ] && break
+                        [ "$(date +%s%N)" -ge "$dl" ] && break
+                    done
+                    [ "$TIP_ST" = 1 ] && { HITX=$px; HITY=$gy; break; }
+                    xdotool mousemove $((X + 2)) $((Y + 2)) 2>/dev/null
+                    dl=$(( $(date +%s%N) + 2000000000 ))
+                    calm=0
+                    while :; do
+                        tip_read
+                        if [ "$TIP_ST" = 0 ]; then
+                            calm=$((calm + 1))
+                            [ "$calm" -ge 3 ] && break
+                        else
+                            calm=0
+                        fi
+                        [ "$(date +%s%N)" -ge "$dl" ] && { SETTLED=0; break; }
+                    done
+                    [ "$SETTLED" = 0 ] && break
+                done
+                [ "$HITY" != 0 ] && break
+                [ "$SETTLED" = 0 ] && break
+            done
+            [ "$HITY" != 0 ] && break
+            [ "$SETTLED" = 0 ] && break
+        done
+    fi
+    if [ "$SETTLED" = 0 ]; then
+        check "the heatmap's columns are day-aligned (the bar stopped answering the pointer)" 1
+    elif [ "$HITY" = 0 ]; then
+        check "the heatmap's columns are day-aligned (no card ever appeared)" 1
+    else
+        HOPX=$HITX; HOPY=$HITY
+        ANCHOR_G="$TIP_GX $TIP_GY $TIP_W $TIP_H"
+        # The grid's own geometry, observed along the two lines that cross it:
+        # the row through the anchor cell finds the columns, the column
+        # through it finds the rows. A 1 px step crosses every 3 px gap, so
+        # each cell shows up as one unbroken run of samples.
+        : > "$WORK/heatrow.txt"
+        for gx in $(seq "$X" 1 $((X + WIDTH))); do
+            tip_at "$gx" "$HOPY"; RC=$?
+            [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $gx,$HOPY"; exit 1; }
+            [ "$RC" -eq 0 ] && echo "$gx" >> "$WORK/heatrow.txt"
+        done
+        : > "$WORK/heatcol.txt"
+        for gy in $(seq "$Y" 1 $((Y + HEIGHT))); do
+            tip_at "$HOPX" "$gy"; RC=$?
+            [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $HOPX,$gy"; exit 1; }
+            [ "$RC" -eq 0 ] && echo "$gy" >> "$WORK/heatcol.txt"
+        done
+        # Runs of recorded samples, split where the jump between them exceeds
+        # the 3 px gap between cells; each run is one cell's extent.
+        bands() {
+            awk '{ x[NR] = $1 + 0 }
+                 END {
+                     if (NR == 0) exit
+                     for (a = 1; a <= NR; a++) for (b = a + 1; b <= NR; b++)
+                         if (x[b] < x[a]) { t = x[a]; x[a] = x[b]; x[b] = t }
+                     s = x[1]; last = x[1]
+                     for (a = 2; a <= NR; a++) {
+                         if (x[a] - last > 2) { print s, last; s = x[a] }
+                         last = x[a]
+                     }
+                     print s, last
+                 }' "$1"
+        }
+        # 0-based index of the run holding $1 on stdin.
+        band_index() {
+            awk -v v="$1" '
+                { s[NR] = $1; e[NR] = $2 }
+                END {
+                    for (a = 1; a <= NR; a++)
+                        if (v >= s[a] && v <= e[a]) { print a - 1; exit }
+                    print -1
+                }'
+        }
+        # The tall card, found by probing the centre of every observed cell.
+        # A run's centre always lies inside its cell (the runs come from
+        # samples inside the cell, and the layout's 9 px floor keeps a cell
+        # wider than the 8 px search step is long), and only the last column
+        # can hold a future (unhittable) cell - it sits to the RIGHT of every
+        # seeded day, so the indices still match.
+        COLS=$(bands "$WORK/heatrow.txt" | awk '{ print int(($1 + $2) / 2) }')
+        ROWS=$(bands "$WORK/heatcol.txt" | awk '{ print int(($1 + $2) / 2) }')
+        : > "$WORK/heattips.txt"
+        for cx in $COLS; do
+            for cy in $ROWS; do
+                tip_at "$cx" "$cy"; RC=$?
+                [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $cx,$cy"; exit 1; }
+                [ "$RC" -eq 0 ] && echo "$cx $cy ${TIP_W}x${TIP_H}" >> "$WORK/heattips.txt"
+            done
+        done
+        [ -s "$WORK/heattips.txt" ] || { echo "FAIL: no cell showed a card"; exit 1; }
+        read -r TX TY TSH <<<"$(awk '
+            { split($3, p, "x"); if (p[2] + 0 > best) { best = p[2] + 0; bx = $1; by = $2; bs = $3 } }
+            END { printf "%d %d %s", bx, by, bs }' "$WORK/heattips.txt")"
+        HEAT_COL=$(bands "$WORK/heatrow.txt" | band_index "$TX")
+        HEAT_ROW=$(bands "$WORK/heatcol.txt" | band_index "$TY")
+        # the expected pair, from today's weekday and the Sun-first formula
+        read -r WANT_COL WANT_ROW <<<"$(awk -v back="$HEAT_BACK" -v weeks=26 '
+            BEGIN {
+                "date +%u" | getline u
+                endDow = u % 7          # 0 = Sun, as SYSTEMTIME.wDayOfWeek
+                for (wk = 0; wk < weeks; wk++)
+                    for (dow = 0; dow < 7; dow++)
+                        if ((weeks - 1 - wk) * 7 + endDow - dow == back)
+                            printf "%d %d\n", wk, dow
+            }')"
+        [ "${HEAT_COL:-x}" = "$WANT_COL" ] && [ "${HEAT_ROW:-y}" = "$WANT_ROW" ]
+        check "the seeded day's cell is the Sun-first grid's column $WANT_COL row $WANT_ROW (got column ${HEAT_COL:-?} row ${HEAT_ROW:-?}, card ${TSH:-?})" $?
+        # and picking that day must not move the grid. The bug let the
+        # section's height run past the viewport, which dropped the heatmap
+        # out of it entirely: the cells that were under the pointer a moment
+        # ago were gone, while their hit rects kept firing from where they
+        # used to be. Same position, same card, same day.
+        tip_at "$TX" "$TY"; RC=$?
+        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
+        xdotool click 1
+        sleep 0.8
+        SEL_CARD="none"
+        tip_at "$TX" "$TY"; RC=$?
+        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
+        [ "$RC" -eq 0 ] && SEL_CARD="${TIP_W}x${TIP_H}"
+        [ "$SEL_CARD" = "$TSH" ]
+        check "picking a day leaves the heatmap's cells where they were (card $SEL_CARD, was $TSH)" $?
+    fi
+fi
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"

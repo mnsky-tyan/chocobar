@@ -14,13 +14,13 @@ above its top edge, so it reads as a strip along the top of that terminal.
 ```sh
 sudo apt install libx11-dev libxrender-dev libxfixes-dev libxcursor-dev \
                  libcairo2-dev libdbus-1-dev libfontconfig1-dev \
-                 libcurl4-openssl-dev
+                 libcurl4-openssl-dev libxinerama-dev
 bash linux/build.sh                 # -> linux/build/chocobar-linux
 ./linux/build/chocobar-linux        # reads ~/.wizbar/config.json
 ./linux/build/chocobar-linux --config /path/to/config.json
 ```
 
-The release asset (`chocobar-linux` on the next tag) is built on the
+The release asset (`chocobar-linux`) is built on the
 `ubuntu-latest` runner and linked dynamically, so it needs that image's glibc
 (2.39): Ubuntu 24.04, Debian 13 and up. An older distro loads nothing - the
 loader stops on `GLIBC_2.39 not found` - and building it here, against the local
@@ -79,6 +79,13 @@ chocobar-linux --install-geometry     # writes a KWin script and loads it
 chocobar-linux --remove-geometry      # unload and delete it
 ```
 
+Both refuse while the bar itself is running, because the running bar owns
+`org.chocobar.Geom` and owns the helper: a second process loading a copy is what
+stacks a second poller in KWin, and a second process cannot unload at all, so
+`--remove-geometry` leaves the script file in place rather than deleting it and
+reporting a removal that did not happen. Stop the service
+(`systemctl --user stop chocobar`) first.
+
 The helper (`linux/src/geomwatch.js`) is a KWin script that watches the active
 window and calls the bar over D-Bus with its `frameGeometry` in logical pixels.
 It recognises the terminal classes listed at the top of the script. Switching to
@@ -88,10 +95,12 @@ the bar. A stale report (the script stopped, KWin restarted) is ignored after
 edge) rather than pinning itself to a window that no longer exists. The bar
 never becomes narrower than its chips.
 
-Left-click the tokens chip for the dashboard, the pet chip to start or stop the
-pet. Right-click opens the menu (the two dashboards, the autostart toggle, edit
-the config, open its folder, the releases page, reload, quit - the Windows tray
-menu's items in the same order).
+Left-click the tokens chip for the dashboard (a second click closes it), the pet
+chip to start or stop the pet. Hovering a chip shows its title - except the pet
+chip, whose own on/off text is the message - and hovering a heatmap cell on the
+dashboard shows that day's totals and apps. Right-click opens the menu (the two
+dashboards, the autostart toggle, edit the config, open its folder, the releases
+page, reload, quit - the Windows tray menu's items in the same order).
 The menu opens on the button RELEASE, which is what Windows does
 (`WM_RBUTTONUP`): opening it on the press handed the menu its own opening
 release, which landed in its padding corner and dismissed it a few milliseconds
@@ -137,7 +146,7 @@ and does nothing when the exclusion is already in place.
 | memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
 | CPU, steady state | 0.2% of one core, 1 Hz repaint |
 | threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
-| binary | 875 KB, no runtime |
+| binary | 995 KB, no runtime |
 | token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
 | subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
@@ -184,8 +193,7 @@ properties neutralise.
 
 The bar is not draggable: its position is derived (x and width from the
 terminal via `bar.align`, y from the terminal's top edge and `bar.gap`), and a
-dragged position would break that contract. Left-click the tokens chip for the
-dashboard, the pet chip to toggle the pet, right-click for the menu.
+dragged position would break that contract.
 
 On a Wayland session the window is presented through XWayland, which is how most
 X11 applications still run on KDE. It is translucent for real: the window is on a
@@ -296,12 +304,19 @@ the menu picks no row, the bar asks for no blur hint, it rides above the reporte
 terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, and a
-right-group metric chip is inert.
+left click on a right-group metric chip does nothing (hovering one still shows
+its title). The helper-stack gate runs against a stub
+`org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded` and
+records every `unloadScript`/`loadScript` call, so the unload-before-load
+contract is observed on the bus rather than read off the source; the lock that
+keeps a second bar process out is exercised through the binary's own acquire
+(`--self-test-lock`), never a shell re-implementation of it.
 
 A missing tool (or the development headers the build needs - the bar's own
 X11/cairo ones, and `libxtst-dev` for the XTEST driver the suite compiles) skips
 the behaviour suite cleanly on a developer machine and fails it when `CI` is set,
-so the gate cannot become a silent no-op.
+so the gate cannot become a silent no-op. The KWin stub additionally needs
+`python3-dbus` and `python3-gi`.
 
 The executable token regressions (`scripts/token_regression.py`) are Windows-only;
 on Linux the scan is exercised by running the bar against a real store, which is

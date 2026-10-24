@@ -424,6 +424,46 @@ long long cbTokModelSum(int i) { return (i >= 0 && i < g_modelCount) ? tokAggSum
 int cbTokModelReqs(int i) { return (i >= 0 && i < g_modelCount) ? (int)g_modelAgg[i].req : 0; }
 
 int cbTokAppReqs(int i) { return (i >= 0 && i < g_appCount) ? (int)g_appAgg[i].req : 0; }
+// the MODEL table's own number columns. The Windows board reads g_modelAgg
+// directly; a front-end in its own translation unit needs these, or its model
+// table can only show a label and a lumped total while the app table shows the
+// real INPUT/OUTPUT/CACHE split - two tables on one board disagreeing about
+// what a token record is.
+long long cbTokModelIn(int i) { return (i >= 0 && i < g_modelCount) ? g_modelAgg[i].in : 0; }
+long long cbTokModelOut(int i) { return (i >= 0 && i < g_modelCount) ? g_modelAgg[i].out : 0; }
+long long cbTokModelCr(int i) { return (i >= 0 && i < g_modelCount) ? g_modelAgg[i].cr : 0; }
+long long cbTokModelCw(int i) { return (i >= 0 && i < g_modelCount) ? g_modelAgg[i].cw : 0; }
+// the per-day, per-app breakdown behind the heatmap's day-detail block
+// (g_dayApp on Windows). i indexes the APP, `daysBack` 0 = today; the row is
+// zero when that app recorded nothing that day, which is exactly what the
+// detail block skips.
+static int dayAggIndex(int daysBack) {
+    if (daysBack < 0 || daysBack >= DASH_MAX_DAYS) return -1;
+    return DASH_MAX_DAYS - 1 - daysBack;
+}
+long long cbTokDayAppIn(int daysBack, int i) {
+    int d = dayAggIndex(daysBack);
+    return (d >= 0 && i >= 0 && i < g_appCount) ? g_dayApp[d][i].in : 0;
+}
+long long cbTokDayAppOut(int daysBack, int i) {
+    int d = dayAggIndex(daysBack);
+    return (d >= 0 && i >= 0 && i < g_appCount) ? g_dayApp[d][i].out : 0;
+}
+long long cbTokDayAppCr(int daysBack, int i) {
+    int d = dayAggIndex(daysBack);
+    return (d >= 0 && i >= 0 && i < g_appCount) ? g_dayApp[d][i].cr : 0;
+}
+long long cbTokDayAppCw(int daysBack, int i) {
+    int d = dayAggIndex(daysBack);
+    return (d >= 0 && i >= 0 && i < g_appCount) ? g_dayApp[d][i].cw : 0;
+}
+int cbTokDayAppReqs(int daysBack, int i) {
+    int d = dayAggIndex(daysBack);
+    return (d >= 0 && i >= 0 && i < g_appCount) ? (int)g_dayApp[d][i].req : 0;
+}
+// the model table's row cap: p_agg's own DASH_MODEL_ROWS, so a front-end cannot
+// silently draw more rows than the Windows board reserves space for
+int cbTokModelRowCap(void) { return DASH_MODEL_ROWS; }
 long long cbTokAppIn(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].in : 0; }
 long long cbTokAppOut(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].out : 0; }
 long long cbTokAppCr(int i) { return (i >= 0 && i < g_appCount) ? g_appAgg[i].cr : 0; }
