@@ -9,7 +9,7 @@
 
 #define CB_VER_MAJOR 1
 #define CB_VER_MINOR 6
-#define CB_VER_PATCH 0
+#define CB_VER_PATCH 1
 #define CB_VER_STR   "1.6.1"
 
 #endif
