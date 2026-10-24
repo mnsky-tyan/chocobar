@@ -304,7 +304,8 @@ the menu picks no row, the bar asks for no blur hint, it rides above the reporte
 terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, and a
-right-group metric chip is inert. The helper-stack gate runs against a stub
+left click on a right-group metric chip does nothing (hovering one still shows
+its title). The helper-stack gate runs against a stub
 `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded` and
 records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that
