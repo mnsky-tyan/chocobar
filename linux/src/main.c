@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <spawn.h>
@@ -704,34 +705,13 @@ static time_t g_scriptCheckAt = 0;    // last isScriptLoaded probe
 // The reload path already unloads before loading, which makes the common case
 // safe. This lock closes the remaining window: two bar PROCESSES (the service
 // restarting while an old one is still alive, or a dev build next to the released
-// one) must not both decide to load it. The lock is a file under the runtime dir,
-// taken with O_EXCL and released on exit; a stale lock from a killed process is
-// detected by checking whether the pid it names is still alive.
-static char g_scriptLockPath[600];
-static int g_scriptLockHeld = 0;
-
-// TRUE when the lock's named owner is still a live chocobar process. A bare
-// kill(pid, 0) is not enough: pids are recycled, so a lock left behind by a
-// killed bar can name an unrelated long-running process for years, and that
-// would wedge the bar out of ever taking the helper back (the freeze this lock
-// exists to prevent, paid for as a permanently dead bar.align 1).
-static int lockOwnerAlive(long owner) {
-    if (owner <= 1) return 0;   // 1 is init, and the file may be empty or junk
-    if (kill((pid_t)owner, 0) != 0) return 0;
-    char path[64], comm[32];
-    snprintf(path, sizeof(path), "/proc/%ld/comm", owner);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return 1;      // a live process we cannot inspect: leave it alone
-    ssize_t r = read(fd, comm, sizeof(comm) - 1);
-    close(fd);
-    if (r <= 0) return 1;
-    comm[r] = 0;
-    char *nl = strchr(comm, '\n');
-    if (nl) *nl = 0;
-    // the install name varies (chocobar-linux from the build, whatever the
-    // user renamed it to when installing by hand), so match the prefix
-    return strncmp(comm, "chocobar", 8) == 0;
-}
+// one) must not both decide to load it. The lock is an flock(2) on a file under
+// the runtime dir, held for the process's whole life: the kernel grants it to
+// exactly one holder and releases it the moment the holder dies, SIGKILL
+// included - so a killed bar's lock is taken over by the next probe, a recycled
+// pid and a renamed binary can make nothing look stale or live wrongly, and
+// there is no pid bookkeeping to get wrong at all.
+static int g_scriptLockFd = -1;
 
 // The lock file's path: XDG_RUNTIME_DIR when set, else $HOME/.cache. One
 // definition, so the self-test and the bar agree on which file is the lock.
@@ -744,37 +724,25 @@ static int scriptLockPath(char *out, size_t cap) {
     return 1;
 }
 
-// Take the lock on `path`: O_EXCL first, and when a lock already exists, take
-// it over only if its owner is not a live bar. The held flag is this process's
-// own record, so a second call while we hold it succeeds without touching the
-// file. Returns 1 when this process holds the lock afterwards.
+// Take the lock on `path`: open (creating it) and flock it exclusively without
+// blocking. Returns 1 when this process holds the lock afterwards; a second
+// call while we hold it succeeds without touching the file. The pid line the
+// holder leaves in the file is a post-mortem record only - the flock is the
+// whole gate.
 static int scriptLockAcquireAt(const char *path) {
-    if (g_scriptLockHeld) return 1;
-    snprintf(g_scriptLockPath, sizeof(g_scriptLockPath), "%s", path);
-    for (int attempt = 0; attempt < 2; attempt++) {
-        int fd = open(g_scriptLockPath, O_CREAT | O_EXCL | O_WRONLY, 0600);
-        if (fd >= 0) {
-            char b[32];
-            int n = snprintf(b, sizeof(b), "%ld\n", (long)getpid());
-            if (write(fd, b, (size_t)n) != n) { /* the pid is advisory only */ }
-            close(fd);
-            g_scriptLockHeld = 1;
-            return 1;
-        }
-        // the lock exists: is its owner still a live bar?
-        int ofd = open(g_scriptLockPath, O_RDONLY);
-        long owner = 0;
-        if (ofd >= 0) {
-            char b[32];
-            ssize_t r = read(ofd, b, sizeof(b) - 1);
-            close(ofd);
-            if (r > 0) { b[r] = 0; owner = strtol(b, NULL, 10); }
-        }
-        if (lockOwnerAlive(owner)) return 0;   // a live bar owns it: do not load
-        // stale (the owner is gone, or it is not a bar any more): take it over
-        unlink(g_scriptLockPath);
+    if (g_scriptLockFd >= 0) return 1;
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) return 0;
+    int r;
+    do { r = flock(fd, LOCK_EX | LOCK_NB); } while (r != 0 && errno == EINTR);
+    if (r != 0) { close(fd); return 0; }
+    char b[32];
+    int n = snprintf(b, sizeof(b), "%ld\n", (long)getpid());
+    if (ftruncate(fd, (off_t)0) == 0 && n > 0) {
+        if (write(fd, b, (size_t)n) != n) { /* the pid line is a record only */ }
     }
-    return 0;
+    g_scriptLockFd = fd;
+    return 1;
 }
 
 static int scriptLockAcquire(void) {
@@ -783,37 +751,40 @@ static int scriptLockAcquire(void) {
     return scriptLockAcquireAt(path);
 }
 
+// The file is deliberately NOT unlinked on release: the flock is the gate, and
+// unlinking it while a concurrent bar is opening the path would let that bar
+// create a fresh file and hold a lock this process never granted. The file
+// stays behind as the last holder's record; the next holder rewrites it.
 static void scriptLockRelease(void) {
-    if (!g_scriptLockHeld) return;
-    unlink(g_scriptLockPath);
-    g_scriptLockHeld = 0;
+    if (g_scriptLockFd < 0) return;
+    flock(g_scriptLockFd, LOCK_UN);
+    close(g_scriptLockFd);
+    g_scriptLockFd = -1;
 }
 
-// The lock's self-test, driven by the behaviour suite against a lock file IT
-// seeds: a live bar's lock is refused, a dead owner's is taken over, and a lock
-// left by a killed bar whose pid has been RECYCLED by an unrelated process is
-// taken over too - that last case is the wedge, where the bar silently gives up
-// on bar.align 1 for the rest of its life. Exercising the real acquire is the
-// only way to prove the liveness judgement, so the suite never re-implements it.
-// argv: --self-test-lock <lockfile>. The pid the suite wants to seed is the
-// lock file's own content, so there is nothing else to pass.
+// The lock's self-test, driven by the behaviour suite. `--self-test-lock F`
+// runs the real acquire once: LOCK-OK when this process takes the lock,
+// LOCK-REFUSED when another process holds it. `--self-test-lock-hold F M S`
+// is how the suite creates a REAL holder: take the lock, prove it by writing
+// the marker file M, and hold for S seconds - so the refusal is observed
+// against an actual kernel lock, not a file the suite seeded with a pid. The
+// holder being SIGKILLed mid-hold is the killed-bar case: the kernel has
+// already released the flock, and the next acquirer must simply take over.
 static int scriptLockSelfTest(const char *path) {
-    int got = scriptLockAcquireAt(path);
-    long named = 0;
-    FILE *f = fopen(path, "r");
-    if (f) { if (fscanf(f, "%ld", &named) != 1) named = 0; fclose(f); }
-    if (got) {
-        // whatever the outcome, the lock must now name THIS process: a takeover
-        // that left the dead pid in place would pass the next probe as stale too
-        int ok = named == (long)getpid();
-        printf("took=%d named=%ld self=%ld\n", got, named, (long)getpid());
-        scriptLockRelease();
-        printf("%s\n", ok ? "LOCK-OK" : "LOCK-BAD");
-        return ok ? 0 : 1;
-    }
-    printf("took=0 named=%ld\n", named);
-    printf("%s\n", "LOCK-REFUSED");
-    return 1;
+    if (!scriptLockAcquireAt(path)) { printf("%s\n", "LOCK-REFUSED"); return 1; }
+    printf("took=1 self=%ld\n", (long)getpid());
+    scriptLockRelease();
+    printf("%s\n", "LOCK-OK");
+    return 0;
+}
+
+static int scriptLockSelfTestHold(const char *path, const char *marker, int secs) {
+    if (!scriptLockAcquireAt(path)) { printf("%s\n", "LOCK-REFUSED"); return 1; }
+    FILE *f = fopen(marker, "w");
+    if (f) { fprintf(f, "%ld\n", (long)getpid()); fclose(f); }
+    while (secs > 0) secs = (int)sleep((unsigned)secs);
+    scriptLockRelease();
+    return 0;
 }
 
 // Pull whatever the bus has. Reconnects with backoff: the session bus outlives the
@@ -2167,6 +2138,9 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--self-test-lock") && i + 1 < argc) {
             // the behaviour suite's way to exercise the REAL acquire logic
             return scriptLockSelfTest(argv[i + 1]);
+        } else if (!strcmp(argv[i], "--self-test-lock-hold") && i + 3 < argc) {
+            // the suite's real lock holder: take the lock, mark it, hold it
+            return scriptLockSelfTestHold(argv[i + 1], argv[i + 2], atoi(argv[i + 3]));
         } else if (!strcmp(argv[i], "--version")) {
             // the release workflow verifies the built asset the same way it
             // verifies the Windows exe: the binary itself must carry the tag
@@ -2181,7 +2155,9 @@ int main(int argc, char **argv) {
                    "                      (match the active terminal's width) work\n"
                    "  --remove-geometry   unload and delete that helper\n"
                    "  --version           print the version and exit\n"
-                   "  --self-test-lock F   (internal) exercise the helper lock on F\n");
+                   "  --self-test-lock F   (internal) exercise the helper lock on F\n"
+                   "  --self-test-lock-hold F M S\n"
+                   "                       (internal) hold the helper lock on F, mark M\n");
             return 0;
         }
     }

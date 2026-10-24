@@ -2157,56 +2157,44 @@ REM_OUT=$(HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" "$BIN" --remove-geometry 
 check "--remove-geometry refuses while another bar owns the name, and keeps the file" $?
 rm -f "$SCRIPT_FILE"
 
-# the lock: a SECOND process must be refused while a live bar holds it, a
-# stale lock must be taken over, and a lock left by a killed bar whose pid has
-# been RECYCLED by an unrelated process must ALSO be taken over (that last one
-# is the wedge: the bar silently gives up on bar.align 1 for the rest of its
-# life). All three are driven through the bar's OWN acquire
-# (main.c scriptLockAcquire, reached by --self-test-lock), never a shell
-# re-implementation of it: a bash noclobber test would pass even with the
-# liveness judgement deleted.
-# the bar puts its lock in XDG_RUNTIME_DIR when set, else $HOME/.cache; the
-# self-test takes the lock path as its argument, so the path is irrelevant here
+# the lock: a SECOND process must be refused while a live bar holds it, and a
+# lock whose holder DIED (SIGKILL: systemd timeout, OOM, a killed dev build)
+# must be taken over - that last one is the wedge: the bar silently gives up
+# on bar.align 1 for the rest of its life. Both run through the bar's OWN
+# acquire (main.c scriptLockAcquire, reached by --self-test-lock), and the
+# refusal is observed against a REAL holder: --self-test-lock-hold takes the
+# lock in a live process and marks it, so what is refused is an actual kernel
+# lock rather than a file the suite seeded with a pid. There is no stale-pid
+# case left to stage: the lock is an flock the kernel releases when the holder
+# dies, and the bar never reads the lock file's pid line.
 LOCK="$WORK/geom.lock"
 mkdir -p "$(dirname "$LOCK")"
 rm -f "$LOCK"
-# (a) a lock held by a live bar: refused, and the lock still names that bar
-if [ -n "${BAR_PID:-}" ] && kill -0 "$BAR_PID" 2>/dev/null; then
-    printf '%d\n' "$BAR_PID" > "$LOCK"
+HELD="$WORK/geom.lock.holder"
+rm -f "$HELD"
+"$BIN" --self-test-lock-hold "$LOCK" "$HELD" 30 >/dev/null 2>&1 &
+HOLDER=$!
+for _ in $(seq 1 50); do [ -s "$HELD" ] && break; sleep 0.1; done
+# (a) a lock held by a live process: refused, and the holder's own record in
+#     the file is left standing
+if [ -s "$HELD" ]; then
+    HELD_PID=$(cat "$HELD")
     OUT=$("$BIN" --self-test-lock "$LOCK"); RC=$?
     [ "$RC" -ne 0 ] && echo "$OUT" | grep -q LOCK-REFUSED &&
-        [ "$(cat "$LOCK")" = "$BAR_PID" ]
-    check "a live bar's lock is refused and left untouched ($OUT)" $?
-    rm -f "$LOCK"
+        [ "$(cat "$LOCK")" = "$HELD_PID" ]
+    check "a live holder's lock is refused and left untouched ($OUT)" $?
 else
-    check "a live bar's lock is refused and left untouched" 1
+    check "a live holder's lock is refused and left untouched" 1
 fi
-# (b) a stale lock (its owner is dead): taken over. LOCK-OK is the self-test's
-#     own verdict that the file named the taking process before it released it
-#     again - a takeover that left the dead pid in place would report LOCK-BAD
-#     and wedge every later probe.
-DEAD=$(( $(cat /proc/sys/kernel/pid_max) - 1 ))
-printf '%d\n' "$DEAD" > "$LOCK"
+# (b) the holder is SIGKILLed mid-hold - exactly how a bar dies under a
+#     systemd timeout or OOM - and the next acquirer takes over with nothing
+#     to judge: the kernel dropped the flock the moment the holder died
+kill -9 "$HOLDER" 2>/dev/null
+wait "$HOLDER" 2>/dev/null
 OUT=$("$BIN" --self-test-lock "$LOCK"); RC=$?
-[ "$RC" -eq 0 ] && echo "$OUT" | grep -q LOCK-OK && ! kill -0 "$DEAD" 2>/dev/null
-check "a dead owner's lock is taken over ($OUT)" $?
-rm -f "$LOCK"
-# (c) the recycled pid: a LIVE process that is not a bar at all, exactly what a
-#     lock from a SIGKILLed bar can name months later
-FOREIGN=""
-if command -v sleep >/dev/null; then
-    sleep 60 &
-    FOREIGN=$!
-    printf '%d\n' "$FOREIGN" > "$LOCK"
-    OUT=$("$BIN" --self-test-lock "$LOCK"); RC=$?
-    kill "$FOREIGN" 2>/dev/null
-    wait "$FOREIGN" 2>/dev/null
-    [ "$RC" -eq 0 ] && echo "$OUT" | grep -q LOCK-OK
-    check "a recycled pid's lock is taken over, not treated as a live owner ($OUT)" $?
-else
-    check "a recycled pid's lock is taken over, not treated as a live owner" 1
-fi
-rm -f "$LOCK"
+[ "$RC" -eq 0 ] && echo "$OUT" | grep -q LOCK-OK
+check "a killed holder's lock is taken over ($OUT)" $?
+rm -f "$LOCK" "$HELD"
 
 
 # ---------------------------------------------------------------------------
@@ -2284,92 +2272,243 @@ if [ -z "${HEATDASH:-}" ]; then
     check "the heatmap's columns are day-aligned (the dashboard never opened)" 1
 else
     eval "$(xdotool getwindowgeometry --shell "$HEATDASH")"
-    # TRUE when the heat card is showing at this screen position. Only MAPPED
-    # tips count: the shared tip window keeps its last geometry after tipHide
-    # unmaps it, which otherwise reads as a stale shape.
-    tip_at() { # tip_at <x> <y>
-        xdotool mousemove "$1" "$2" 2>/dev/null
-        sleep 0.004
-        TW=$(xwininfo -root -children 2>/dev/null |
-             awk '/chocobar-tip/ { print $1; exit }')
-        [ -z "${TW:-}" ] && return 1
-        xwininfo -id "$TW" 2>/dev/null | grep -qi "Map State: IsViewable"
+    # The bar's event loop is select-driven: a motion is handled some time
+    # AFTER xdotool's warp lands, and no fixed sleep bounds that, so every
+    # observation below polls the tip window until its state reflects the
+    # position being sampled. The pointer always enters a sample from a KNOWN
+    # mapped state (the anchor cell, or the previous sample's own card), which
+    # makes both outcomes decisive: a geometry other than the pre-move one can
+    # only be the sample's own card, and the tip disappearing can only be the
+    # sample's own motion hiding it. A stale card from an earlier position can
+    # therefore never be recorded, at any pointer latency.
+    TIP_TW=""; TIP_ST=0; TIP_GX=0; TIP_GY=0; TIP_W=0; TIP_H=0
+    HOPX=0; HOPY=0; ANCHOR_G="none"; LASTX=0; LASTY=0
+    tip_read() { # one X round trip -> TIP_ST plus the tip's placement and size
+        local out line
+        if [ -z "$TIP_TW" ]; then
+            TIP_TW=$(xwininfo -root -tree 2>/dev/null |
+                     awk '/chocobar-tip/ { print $1; exit }')
+            [ -z "$TIP_TW" ] && { TIP_ST=0; return 0; }
+        fi
+        out=$(xwininfo -id "$TIP_TW" 2>/dev/null) ||
+            { TIP_ST=0; TIP_TW=""; return 0; }
+        TIP_ST=0; TIP_GX=0; TIP_GY=0; TIP_W=0; TIP_H=0
+        while IFS= read -r line; do
+            case "$line" in
+                *"Map State: IsViewable"*) TIP_ST=1 ;;
+                *"Absolute upper-left X:"*) TIP_GX=$(( ${line##*: } )) ;;
+                *"Absolute upper-left Y:"*) TIP_GY=$(( ${line##*: } )) ;;
+                *"Width:"*) TIP_W=$(( ${line##*: } )) ;;
+                *"Height:"*) TIP_H=$(( ${line##*: } )) ;;
+            esac
+        done <<<"$out"
+        return 0
     }
-    # Sweep the board for the one tall card. An 8 px step is below the smallest
-    # cell the layout can produce (its own 9 * scale floor), so no cell falls
-    # between two samples.
-    : > "$WORK/heattips.txt"
-    for gy in $(seq "$Y" 8 $((Y + HEIGHT))); do
-        for gx in $(seq "$X" 8 $((X + WIDTH))); do
-            if tip_at "$gx" "$gy"; then
-                xdotool getwindowgeometry --shell "$TW" > "$WORK/hg.txt" 2>/dev/null
-                echo "$gx $gy $(awk -F= '/^WIDTH=/{w=$2} /^HEIGHT=/{h=$2}
-                                       END{print w"x"h}' "$WORK/hg.txt")" \
-                    >> "$WORK/heattips.txt"
+    # Put the tip back on the anchor cell - the one cell the search found - so
+    # the next sample always starts from a known mapped state. Already showing
+    # the anchor's geometry is the common case and costs nothing.
+    tip_anchor() { # 0 anchored, 1 the bar stopped answering
+        local pre="$TIP_GX $TIP_GY $TIP_W $TIP_H" preSt=$TIP_ST
+        local dl g
+        if [ "$preSt" = 1 ] && [ "$pre" = "$ANCHOR_G" ]; then return 0; fi
+        xdotool mousemove "$HOPX" "$HOPY" 2>/dev/null
+        dl=$(( $(date +%s%N) + 3000000000 ))
+        while :; do
+            tip_read
+            if [ "$TIP_ST" = 1 ]; then
+                g="$TIP_GX $TIP_GY $TIP_W $TIP_H"
+                if [ "$preSt" = 0 ] || [ "$g" != "$pre" ]; then
+                    ANCHOR_G="$g"
+                    LASTX=$HOPX; LASTY=$HOPY
+                    return 0
+                fi
             fi
+            [ "$(date +%s%N)" -ge "$dl" ] && return 1
         done
-    done
-    read -r TX TY TSH <<<"$(awk '
-        { split($3, p, "x"); if (p[2] + 0 > best) { best = p[2] + 0; bx = $1; by = $2; bs = $3 } }
-        END { printf "%d %d %s", bx, by, bs }' "$WORK/heattips.txt")"
-    # 0-based index of the band holding $2 among the sorted values in $1. The
-    # cells are separated by a 3 px gap, so a jump wider than 2 px starts the
-    # next cell; a 1 px sweep makes every boundary unambiguous.
-    band_index() { # band_index <file> <value>
-        awk -v v="$2" '
-            { x[NR] = $1 + 0 }
-            END {
-                for (a = 1; a <= NR; a++) for (b = a + 1; b <= NR; b++)
-                    if (x[b] < x[a]) { t = x[a]; x[a] = x[b]; x[b] = t }
-                c = -1; last = -1e9; found = -1
-                for (a = 1; a <= NR; a++) {
-                    if (x[a] - last > 2) c++
-                    last = x[a]
-                    if (x[a] == v + 0) found = c
-                }
-                print found
-            }' "$1"
     }
-    # the tall cell's own row and column, swept at 1 px so every cell boundary
-    # is crossed: only the last column can hold a future (unhittable) cell, and
-    # it sits to the RIGHT of every seeded day, so the indices still match
-    : > "$WORK/heatrow.txt"
-    for gx in $(seq "$X" 1 $((X + WIDTH))); do
-        tip_at "$gx" "$TY" && echo "$gx" >> "$WORK/heatrow.txt"
+    # 0 = the heat card for THIS screen position is showing, 1 = this
+    # position's own motion proved there is none, 2 = the bar stopped
+    # answering. Only the caller records anything, and it records the SAMPLE's
+    # position with the card's size, so a stale card can never be misfiled.
+    tip_at() { # tip_at <x> <y>
+        local x=$1 y=$2 pre dl
+        if [ "$TIP_ST" = 0 ] || { [ "$x" = "$LASTX" ] && [ "$y" = "$LASTY" ]; }; then
+            tip_anchor || return 2
+        fi
+        if [ "$x" = "$HOPX" ] && [ "$y" = "$HOPY" ]; then return 0; fi
+        pre="$TIP_GX $TIP_GY $TIP_W $TIP_H"
+        xdotool mousemove "$x" "$y" 2>/dev/null
+        dl=$(( $(date +%s%N) + 3000000000 ))
+        while :; do
+            tip_read
+            if [ "$TIP_ST" = 1 ]; then
+                if [ "$TIP_GX $TIP_GY $TIP_W $TIP_H" != "$pre" ]; then
+                    LASTX=$x; LASTY=$y
+                    return 0
+                fi
+            else
+                return 1
+            fi
+            [ "$(date +%s%N)" -ge "$dl" ] && return 2
+        done
+    }
+    # Settle on the board's empty top-left corner: the click loop ended on the
+    # bar, where the chip tooltip may still be mapped, and the corner is
+    # padding - it can never show a card - so once the pointer rests there the
+    # tip is hidden and stays hidden.
+    SETTLED=0
+    xdotool mousemove $((X + 2)) $((Y + 2)) 2>/dev/null
+    for _ in $(seq 1 60); do
+        tip_read
+        [ "$TIP_ST" = 0 ] && { SETTLED=1; break; }
+        sleep 0.05
     done
-    HEAT_COL=$(band_index "$WORK/heatrow.txt" "$TX")
-    : > "$WORK/heatcol.txt"
-    for gy in $(seq "$Y" 1 $((Y + HEIGHT))); do
-        tip_at "$TX" "$gy" && echo "$gy" >> "$WORK/heatcol.txt"
-    done
-    HEAT_ROW=$(band_index "$WORK/heatcol.txt" "$TY")
-    # the expected pair, from today's weekday and the Sun-first formula
-    read -r WANT_COL WANT_ROW <<<"$(awk -v back="$HEAT_BACK" -v weeks=26 '
-        BEGIN {
-            "date +%u" | getline u
-            endDow = u % 7          # 0 = Sun, as SYSTEMTIME.wDayOfWeek
-            for (wk = 0; wk < weeks; wk++)
-                for (dow = 0; dow < 7; dow++)
-                    if ((weeks - 1 - wk) * 7 + endDow - dow == back)
-                        printf "%d %d\n", wk, dow
-        }')"
-    [ "${HEAT_COL:-x}" = "$WANT_COL" ] && [ "${HEAT_ROW:-y}" = "$WANT_ROW" ]
-    check "the seeded day's cell is the Sun-first grid's column $WANT_COL row $WANT_ROW (got column ${HEAT_COL:-?} row ${HEAT_ROW:-?}, card ${TSH:-?})" $?
-    # and picking that day must not move the grid. The bug let the section's
-    # height run past the viewport, which dropped the heatmap out of it
-    # entirely: the cells that were under the pointer a moment ago were gone,\    # while their hit rects kept firing from where they used to be. Same
-    # position, same card, same day.
-    xdotool mousemove "$TX" "$TY"
-    sleep 0.2
-    xdotool click 1
-    sleep 0.8
-    SEL_CARD="none"
-    if tip_at "$TX" "$TY"; then
-        xdotool getwindowgeometry --shell "$TW" > "$WORK/hg2.txt" 2>/dev/null
-        SEL_CARD=$(awk -F= '/^WIDTH=/{w=$2} /^HEIGHT=/{h=$2} END{print w"x"h}' "$WORK/hg2.txt")
+    HITX=0; HITY=0
+    if [ "$SETTLED" = 1 ]; then
+        # Search for the grid: walk DOWN three parallel columns until a card
+        # appears. A gap between cells is 3 px wide and the pitch is at least
+        # 12 px (the 9 px cell floor plus the gap), so two probes 8 px apart
+        # can never both land in a gap. From the settled hidden state any map
+        # that appears belongs to the position just sampled - absent positions
+        # never map - so this hit is the anchor cell. A probe that finds
+        # nothing within 100 ms parks the pointer on the corner until the tip
+        # has been hidden for three straight polls and tries the SAME position
+        # once more: a card that arrives late is that position's own card,
+        # never the next probe's.
+        DASHMX=$((X + WIDTH / 2))
+        for gy in $(seq "$Y" 8 $((Y + HEIGHT))); do
+            for dx in 0 8 -8; do
+                px=$((DASHMX + dx))
+                for try in 1 2; do
+                    xdotool mousemove "$px" "$gy" 2>/dev/null
+                    dl=$(( $(date +%s%N) + 100000000 ))
+                    while :; do
+                        tip_read
+                        [ "$TIP_ST" = 1 ] && break
+                        [ "$(date +%s%N)" -ge "$dl" ] && break
+                    done
+                    [ "$TIP_ST" = 1 ] && { HITX=$px; HITY=$gy; break; }
+                    xdotool mousemove $((X + 2)) $((Y + 2)) 2>/dev/null
+                    dl=$(( $(date +%s%N) + 2000000000 ))
+                    calm=0
+                    while :; do
+                        tip_read
+                        if [ "$TIP_ST" = 0 ]; then
+                            calm=$((calm + 1))
+                            [ "$calm" -ge 3 ] && break
+                        else
+                            calm=0
+                        fi
+                        [ "$(date +%s%N)" -ge "$dl" ] && { SETTLED=0; break; }
+                    done
+                    [ "$SETTLED" = 0 ] && break
+                done
+                [ "$HITY" != 0 ] && break
+                [ "$SETTLED" = 0 ] && break
+            done
+            [ "$HITY" != 0 ] && break
+            [ "$SETTLED" = 0 ] && break
+        done
     fi
-    [ "$SEL_CARD" = "$TSH" ]
-    check "picking a day leaves the heatmap's cells where they were (card $SEL_CARD, was $TSH)" $?
+    if [ "$SETTLED" = 0 ]; then
+        check "the heatmap's columns are day-aligned (the bar stopped answering the pointer)" 1
+    elif [ "$HITY" = 0 ]; then
+        check "the heatmap's columns are day-aligned (no card ever appeared)" 1
+    else
+        HOPX=$HITX; HOPY=$HITY
+        ANCHOR_G="$TIP_GX $TIP_GY $TIP_W $TIP_H"
+        # The grid's own geometry, observed along the two lines that cross it:
+        # the row through the anchor cell finds the columns, the column
+        # through it finds the rows. A 1 px step crosses every 3 px gap, so
+        # each cell shows up as one unbroken run of samples.
+        : > "$WORK/heatrow.txt"
+        for gx in $(seq "$X" 1 $((X + WIDTH))); do
+            tip_at "$gx" "$HOPY"; RC=$?
+            [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $gx,$HOPY"; exit 1; }
+            [ "$RC" -eq 0 ] && echo "$gx" >> "$WORK/heatrow.txt"
+        done
+        : > "$WORK/heatcol.txt"
+        for gy in $(seq "$Y" 1 $((Y + HEIGHT))); do
+            tip_at "$HOPX" "$gy"; RC=$?
+            [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $HOPX,$gy"; exit 1; }
+            [ "$RC" -eq 0 ] && echo "$gy" >> "$WORK/heatcol.txt"
+        done
+        # Runs of recorded samples, split where the jump between them exceeds
+        # the 3 px gap between cells; each run is one cell's extent.
+        bands() {
+            awk '{ x[NR] = $1 + 0 }
+                 END {
+                     if (NR == 0) exit
+                     for (a = 1; a <= NR; a++) for (b = a + 1; b <= NR; b++)
+                         if (x[b] < x[a]) { t = x[a]; x[a] = x[b]; x[b] = t }
+                     s = x[1]; last = x[1]
+                     for (a = 2; a <= NR; a++) {
+                         if (x[a] - last > 2) { print s, last; s = x[a] }
+                         last = x[a]
+                     }
+                     print s, last
+                 }' "$1"
+        }
+        # 0-based index of the run holding $1 on stdin.
+        band_index() {
+            awk -v v="$1" '
+                { s[NR] = $1; e[NR] = $2 }
+                END {
+                    for (a = 1; a <= NR; a++)
+                        if (v >= s[a] && v <= e[a]) { print a - 1; exit }
+                    print -1
+                }'
+        }
+        # The tall card, found by probing the centre of every observed cell.
+        # A run's centre always lies inside its cell (the runs come from
+        # samples inside the cell, and the layout's 9 px floor keeps a cell
+        # wider than the 8 px search step is long), and only the last column
+        # can hold a future (unhittable) cell - it sits to the RIGHT of every
+        # seeded day, so the indices still match.
+        COLS=$(bands "$WORK/heatrow.txt" | awk '{ print int(($1 + $2) / 2) }')
+        ROWS=$(bands "$WORK/heatcol.txt" | awk '{ print int(($1 + $2) / 2) }')
+        : > "$WORK/heattips.txt"
+        for cx in $COLS; do
+            for cy in $ROWS; do
+                tip_at "$cx" "$cy"; RC=$?
+                [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $cx,$cy"; exit 1; }
+                [ "$RC" -eq 0 ] && echo "$cx $cy ${TIP_W}x${TIP_H}" >> "$WORK/heattips.txt"
+            done
+        done
+        [ -s "$WORK/heattips.txt" ] || { echo "FAIL: no cell showed a card"; exit 1; }
+        read -r TX TY TSH <<<"$(awk '
+            { split($3, p, "x"); if (p[2] + 0 > best) { best = p[2] + 0; bx = $1; by = $2; bs = $3 } }
+            END { printf "%d %d %s", bx, by, bs }' "$WORK/heattips.txt")"
+        HEAT_COL=$(bands "$WORK/heatrow.txt" | band_index "$TX")
+        HEAT_ROW=$(bands "$WORK/heatcol.txt" | band_index "$TY")
+        # the expected pair, from today's weekday and the Sun-first formula
+        read -r WANT_COL WANT_ROW <<<"$(awk -v back="$HEAT_BACK" -v weeks=26 '
+            BEGIN {
+                "date +%u" | getline u
+                endDow = u % 7          # 0 = Sun, as SYSTEMTIME.wDayOfWeek
+                for (wk = 0; wk < weeks; wk++)
+                    for (dow = 0; dow < 7; dow++)
+                        if ((weeks - 1 - wk) * 7 + endDow - dow == back)
+                            printf "%d %d\n", wk, dow
+            }')"
+        [ "${HEAT_COL:-x}" = "$WANT_COL" ] && [ "${HEAT_ROW:-y}" = "$WANT_ROW" ]
+        check "the seeded day's cell is the Sun-first grid's column $WANT_COL row $WANT_ROW (got column ${HEAT_COL:-?} row ${HEAT_ROW:-?}, card ${TSH:-?})" $?
+        # and picking that day must not move the grid. The bug let the
+        # section's height run past the viewport, which dropped the heatmap
+        # out of it entirely: the cells that were under the pointer a moment
+        # ago were gone, while their hit rects kept firing from where they
+        # used to be. Same position, same card, same day.
+        tip_at "$TX" "$TY"; RC=$?
+        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
+        xdotool click 1
+        sleep 0.8
+        SEL_CARD="none"
+        tip_at "$TX" "$TY"; RC=$?
+        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
+        [ "$RC" -eq 0 ] && SEL_CARD="${TIP_W}x${TIP_H}"
+        [ "$SEL_CARD" = "$TSH" ]
+        check "picking a day leaves the heatmap's cells where they were (card $SEL_CARD, was $TSH)" $?
+    fi
 fi
 
 echo
