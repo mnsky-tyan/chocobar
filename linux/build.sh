@@ -122,7 +122,9 @@ APP_CFLAGS=(
   -DCHOCOBAR_PORTABLE=1
   -Inative/src -Inative/vendor -Ilinux/src
 )
-PKGS=(x11 xrender xfixes xcursor cairo dbus-1 fontconfig libcurl)
+PKGS=(x11 xrender xfixes xcursor cairo dbus-1 fontconfig libcurl xinerama)
+# xinerama: the dashboard's content fit asks which head the board is on so it
+# never grows past a screen's bottom edge (dash.c dashFitToContent)
 
 echo "compiling the core + POSIX adapter..."
 gcc "${CORE_CFLAGS[@]}" -c "$CORE_TU" -o "$OUT/core.o"
@@ -138,10 +140,11 @@ gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags dbus-1) -c linux/src/geomdbus.c -o 
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags dbus-1) -c linux/src/selfheal.c -o "$OUT/selfheal.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/menu.c -o "$OUT/menu.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/dash.c -o "$OUT/dash.o"
+gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/tooltip.c -o "$OUT/tooltip.o"
 
 echo "linking..."
 gcc -o "$OUT/chocobar-linux" \
-  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" "$OUT/menu.o" "$OUT/dash.o" \
+  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" "$OUT/menu.o" "$OUT/dash.o" "$OUT/tooltip.o" \
   "$OUT/core.o" "$OUT/adapter.o" \
   $(pkg-config --libs "${PKGS[@]}") -lm -lpthread
 

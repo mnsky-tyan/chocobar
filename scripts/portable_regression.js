@@ -412,8 +412,13 @@ function check(name, ok, detail) {
     cursorSize.test(menu2) && cursorSize.test(dash2) &&
     /cbCursorBaseSize/.test(svg2) && /cbCursorScale/.test(svg2),
     'three windows each guessing the size is how two of them shrink while one does not');
+  // p_ui.c WM_SETCURSOR: chipClickable(chipAt(p)) picks IDC_HAND vs IDC_ARROW.
+  // onMotion computes the same thing into `pill` (the hovered chip when it is
+  // clickable, else -1) and hands THAT to cursorUpdate, so the hand appears on
+  // exactly the chips a click does something on.
   check('linux: the hand cursor follows the clickable chip like Windows',
-    /loadCursor\("hand2"\)/.test(lx2) && /cursorUpdate\(hit >= 0\)/.test(lx2),
+    /loadCursor\("hand2"\)/.test(lx2) && /cursorUpdate\(pill >= 0\)/.test(lx2) &&
+    /int pill = \(hit >= 0 && chipClickable\(&g_chips\[hit\]\)\)/.test(lx2),
     'p_ui.c switches IDC_HAND/IDC_ARROW on WM_MOUSEMOVE; the Linux bar must mean the same thing');
 
   // the FONT SLANT: Segoe Print on Windows is a hand-written face whose letters
@@ -470,10 +475,16 @@ function check(name, ok, detail) {
     /dbus_bus_add_match\(g_conn, rule, &err\);\s*\n\s*if \(dbus_error_is_set\(&err\)\) \{[\s\S]*?closeConn\(\);\s*\n\s*return 0;/.test(geom),
     'without the match rule no Report call is ever delivered, so success must not be a lie');
 
-  // the heatmap columns: (back + todayDow)/7 is only Monday-aligned on a Thursday.
-  check('linux: the heatmap aligns columns on Monday',
-    /weeksBack = \(back \+ 6 - todayDow\) \/ 7/.test(dash),
-    'the wrong offset makes the grid read as diagonal streaks on every day but Thursday');
+  // The heatmap columns are SUN-first, exactly like the Windows board: p_ui.c
+  // takes endDow = wDayOfWeek (0 = Sun) and puts the dow=0 cell of column wk at
+  // (weeks - 1 - wk) * 7 + endDow days back, then walks dow upward. Any other
+  // offset - a Monday-based (back + todayDow)/7 included - shifts the rows
+  // against each other and the grid reads as diagonal streaks.
+  check('linux: the heatmap columns are Sun-first, like the Windows board',
+    /int endDow = nowSt\.tm_wday;/.test(dash) &&
+    /daysBack0 = \(weeks - 1 - wk\) \* 7 \+ endDow/.test(dash) &&
+    /"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"/.test(dash),
+    'the wrong offset makes the grid read as diagonal streaks');
 }
 
 // --- the subs port: one definition, one thread, one fetch ------------------------

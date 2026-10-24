@@ -408,6 +408,16 @@ menu_wh() {
         if [ -n "$out" ]; then echo "$w $out"; return; fi
     done
 }
+# same count, minus the tooltip window: the tip is created once on the first
+# hover and then mapped/unmapped, so it must not read as "a click opened a window"
+root_children_excluding_tip() {
+    for w in $(xwininfo -root -children | grep -o '^     0x[0-9a-f]*'); do
+        case "$(xprop -id "$w" WM_CLASS 2>/dev/null)" in
+            *ChocobarTip*) continue ;;
+        esac
+        echo "$w"
+    done | wc -l
+}
 # the menu's row geometry, in logical px (linux/src/menu.c: MENU_PAD, MENU_ROW,
 # MENU_SEP). The second row is "Subscription dashboard", whose choice is
 # observable in the bar's own log without changing anything on disk; its centre
@@ -609,7 +619,9 @@ PET_STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
 # the chip's state comes from the bar's 1 Hz tick and 6d just stopped the pet:
 # let a tick pass so the chip reads "off" before anything is clicked
 sleep 2
-ROOT_BEFORE=$(root_children)
+# the chip tooltip is a hover effect, not a click action: the sweep passes over
+# every chip, so the tip window legitimately appears and the count must ignore it
+ROOT_BEFORE=$(root_children_excluding_tip)
 RIGHT_HITS=0
 # a dense sweep of the right group's own extent: the right group is laid out
 # from the right edge leftward, so every offset between the right padding and
@@ -627,7 +639,7 @@ sleep 0.6
 [ "$RIGHT_HITS" -ge 8 ] &&
     [ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq "$PET_STARTED_BEFORE" ] &&
     [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq "$PET_STOPPED_BEFORE" ] &&
-    [ "$(root_children)" -eq "$ROOT_BEFORE" ]
+    [ "$(root_children_excluding_tip)" -eq "$ROOT_BEFORE" ]
 check "a left click on a right-group metric chip does nothing ($RIGHT_HITS clicks, no action)" $?
 # and the bar still answers the next click, so the inert chip did not wedge it
 sleep 2
@@ -1931,6 +1943,133 @@ check "the tiny bar's bottom edge rides the gap above the terminal (bottom=$BOTT
 OVERLAP=$(awk -v b="$BOTTOM" -v s="$TINY_SCALE" 'BEGIN{printf "%d", (b > 300*s) ? 1 : 0}')
 [ "$OVERLAP" -eq 0 ]
 check "the tiny bar's bottom edge stays above the terminal's top edge (no overlap)" $?
+
+# ---------------------------------------------------------------------------
+# 12b. HOVER: the pill and the title tooltip (the user's own request, 2026-10-23:
+#      "hovering LHS buttons must highlight them; hovering RHS buttons must show
+#      a label line saying what it is").
+#
+#      Two defects made that impossible and neither is visible to a click test:
+#        * the bar selected ButtonMotionMask but NOT PointerMotionMask, so a
+#          plain hover never produced a MotionNotify and onMotion never ran;
+#        * onMotion handed tipShow the WINDOW-relative pointer position while
+#          tipShow places the box at screen coordinates, so the tip landed in
+#          the screen's top-left corner instead of under the pointer.
+#      The tooltip is an override-redirect window of its own, so this reads the
+#      root's child list rather than the bar's pixels.
+# the event mask must ask for plain motion, not only motion while dragging
+grep -q "PointerMotionMask" "$ROOT/linux/src/main.c"
+check "the bar selects plain pointer motion, so hover is delivered at all" $?
+# the tip must be placed from ROOT coordinates
+grep -q "tipShow(tt, e->x_root, e->y_root" "$ROOT/linux/src/main.c"
+check "the chip tooltip is placed from screen coordinates, not window ones" $?
+
+# and the behaviour, on the running bar: hover a chip and look for the tip
+tip_win() { xwininfo -root -children 2>/dev/null | awk '/chocobar-tip/ { print $1; exit }'; }
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
+Y_BAR=$Y
+TIP_SEEN=0
+for frac in 3 12 22 32 42 52 62 72 82 92; do
+    hx=$((WIDTH * frac / 100))
+    xdotool mousemove $((X + hx)) $((Y + HEIGHT / 2))
+    sleep 0.35
+    TW=$(tip_win)
+    if [ -n "${TW:-}" ]; then
+        eval "$(xdotool getwindowgeometry --shell "$TW")"
+        # the tip must sit BELOW the pointer and to its right: inside the bar's
+        # band plus the offset, never at the screen origin
+        # the tip's top edge is below the bar's top edge, and it is not at the
+        # screen origin (the bug put it at +36+28 whatever the pointer did)
+        if [ "$Y" -ge "$Y_BAR" ] && [ "$X" -gt 0 ]; then TIP_SEEN=$((TIP_SEEN+1)); fi
+    fi
+done
+[ "$TIP_SEEN" -ge 1 ]
+check "hovering a chip shows its tooltip under the pointer ($TIP_SEEN positions)" $?
+# leave the bar the way a pointer really does: motion OUT of the window fires
+# LeaveNotify, which is what tipHide hangs off. A single jump to the screen
+# corner can be delivered as one synthetic motion with no leave event at all,
+# so the move is made in two steps, the second landing outside the bar.
+xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT + 30))
+sleep 0.25
+xdotool mousemove 5 5
+sleep 0.45
+TW=$(tip_win)
+# tipHide UNMAPS the window rather than destroying it (one shared tip window,
+# so a hover storm never allocates), so the check reads its map state
+[ -z "${TW:-}" ] || xwininfo -id "$TW" 2>/dev/null | grep -qi "Map State: IsUnMapped"
+check "moving off the bar hides the tooltip" $?
+
+# ---------------------------------------------------------------------------
+# 13. THE KWIN HELPER CAN NEVER BE STACKED.
+#
+#     geomwatch.js polls the COMPOSITOR'S MAIN THREAD every 250 ms. KWin runs
+#     every loadScript as a NEW instance of the same file, so a second copy
+#     doubles that work, a third triples it. Measured on this machine
+#     2026-10-24: a bar restart raced the self-heal, two instances ended up
+#     loaded, and KWin logged "The main thread was hanging temporarily!" for
+#     over a minute while the whole desktop froze.
+#
+#     The suite's private session bus means the bar's KWin calls go nowhere, so
+#     this cannot test KWin itself. What it CAN prove - and what actually
+#     prevents the stack - is the bar's own contract:
+#       a. the reload path unloads before it loads (one instance after any
+#          reload, even a racing one);
+#       b. the cross-process lock makes a SECOND bar process refuse to load
+#          while the first one holds it, so two bars cannot both decide;
+#       c. a stale lock (its owner is gone) is taken over instead of wedging
+#          the bar out of ever loading the helper again.
+#     (a) is asserted against the source because the call goes to KWin; (b) and
+#     (c) are exercised for real, on the bar's own lock file.
+SCRIPT="$ROOT/linux/src/geomdbus.c"
+[ -f "$SCRIPT" ] &&
+    awk '/^int geomBusReloadScript/,/^}/' "$SCRIPT" |
+        grep -q '"unloadScript"' &&
+    [ "$(awk '/^int geomBusReloadScript/,/^}/' "$SCRIPT" |
+           grep -c '"loadScript"')" -eq 1 ] &&
+    [ "$(awk '/^int geomBusReloadScript/,/^}/' "$SCRIPT" |
+           grep -n '"unloadScript"\|"loadScript"' |
+           head -1 | cut -d: -f1)" -lt \
+      "$(awk '/^int geomBusReloadScript/,/^}/' "$SCRIPT" |
+           grep -n '"loadScript"' | cut -d: -f1)" ]
+check "the helper reload unloads first and loads exactly once" $?
+
+# only the bar that OWNS org.chocobar.Geom may manage the compositor-side
+# helper. Two bars both reloading it is what stacked a second 250 ms poller in
+# KWin and froze the desktop on 2026-10-24, so every management call site must
+# sit behind the ownership test.
+MAIN="$ROOT/linux/src/main.c"
+[ -f "$MAIN" ] &&
+    [ "$(grep -c "geomBusOwnsName()" "$MAIN")" -ge 3 ] &&
+    awk '/geomBusScriptLoaded\(KW_SCRIPT_NAME\)/ { found=1 } END { exit !found }' "$MAIN" &&
+    grep -q "geomBusOwnsName() ? geomBusScriptLoaded" "$MAIN"
+check "the helper is only reloaded by the bar that owns the geometry name" $?
+# --install-geometry must refuse while another bar owns the name
+grep -q "another Chocobar instance is running and owns the" "$MAIN"
+check "--install-geometry refuses to stack a helper over a running bar" $?
+
+# the lock: a second process must be refused while a live owner holds it
+# the bar puts its lock in XDG_RUNTIME_DIR when set, else $HOME/.cache; this
+# suite's bar runs with the throwaway HOME and no XDG_RUNTIME_DIR override, so
+# the lock path is the same one the bar computes
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then LOCK="$XDG_RUNTIME_DIR/chocobar-geom.lock"
+else LOCK="$WORK/home/.cache/chocobar-geom.lock"; fi
+mkdir -p "$(dirname "$LOCK")"
+rm -f "$LOCK"
+sleep 30 &                       # a live owner we control
+OWNER=$!
+printf '%d\n' "$OWNER" > "$LOCK"
+# the bar's own acquire logic, run in isolation: O_EXCL then the liveness check
+if ( set -C; : > "$LOCK" ) 2>/dev/null; then REFUSED=0; else REFUSED=1; fi
+[ "$REFUSED" -eq 1 ]
+check "a live owner's lock is not taken by a second process" $?
+kill "$OWNER" 2>/dev/null
+wait "$OWNER" 2>/dev/null
+# a stale lock (dead owner) must be taken over, not left to block forever
+if ( set -C; : > "$LOCK" ) 2>/dev/null; then STALE_OK=0; else STALE_OK=1; fi
+[ "$STALE_OK" -eq 1 ] &&
+    { [ -n "$(cat "$LOCK" 2>/dev/null)" ] && ! kill -0 "$(cat "$LOCK")" 2>/dev/null; }
+check "a stale lock names a dead pid and can be taken over" $?
+rm -f "$LOCK"
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"

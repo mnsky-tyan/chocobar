@@ -66,6 +66,7 @@
 #include "geomdbus.h"
 #include "menu.h"
 #include "dash.h"
+#include "tooltip.h"
 #include "linux_svg.h"
 #include "selfheal.h"
 
@@ -189,6 +190,10 @@ static int g_dashPending = 0;   // 1 = token dashboard, 2 = subscriptions
 
 static LinuxMetrics g_m;
 static time_t g_lastScan = 0;
+// the subscription chip's rotating tooltip ("<plan> <window> N% left"), produced
+// by the shared formatter on every rebuild and read by chipTitle() on hover -
+// the Linux twin of p_ui.c's g_subsRotTip
+static char g_subsTip[96];
 static long long g_tokToday = -1;
 static int g_tokReady = 0;
 
@@ -372,6 +377,7 @@ static void setChipIconColor(int index, Rgb col) {
 
 static void buildChips(void) {
     g_chipCount = 0;
+    g_subsTip[0] = 0;
     Rgb fg = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
     Rgb dim = hexRgb(cbCfgFgDim(), (Rgb){0.35, 0.32, 0.27});
     Rgb warn = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
@@ -413,11 +419,12 @@ static void buildChips(void) {
             lstrcpynW(txt, L"stale", 16);
             col = dim;
         } else {
-            // the tooltip text ("<plan> <window> N% left") is produced by the
-            // shared formatter but there is no tooltip surface on the Linux bar
-            // yet - the chip shows the same percentage the Windows bar shows.
+            // the tooltip ("<plan> <window> N% left") is produced by the shared
+            // formatter and shown on hover, exactly as on Windows (p_ui.c
+            // stores it in the chip's tipOverride and chipTitle returns it)
             wchar_t tip[96];
             rem = cbSubsChipRotated(&txt[0], 16, tip, 96);
+            wideToUtf8(tip, g_subsTip, sizeof(g_subsTip));
             // the Windows thresholds: >70 good, >30 dim, else warn
             col = rem > 70 ? good : rem > 30 ? dim : warn;
         }
@@ -687,6 +694,66 @@ static GeomBus g_bus = { -1 };       // -1 = not connected (a zero struct would 
 static time_t g_busRetryAt = 0;
 static time_t g_scriptCheckAt = 0;    // last isScriptLoaded probe
 
+// ---- one KWin helper, ever ---------------------------------------------------------
+// KWin runs every loadScript as a NEW instance of the same file, and geomwatch.js
+// polls the compositor's main thread every 250 ms. Two instances therefore double
+// the compositor's per-tick work, three triple it - measured on 2026-10-24, when a
+// bar restart raced the self-heal and the desktop froze for over a minute with
+// KWin logging "The main thread was hanging temporarily!".
+//
+// The reload path already unloads before loading, which makes the common case
+// safe. This lock closes the remaining window: two bar PROCESSES (the service
+// restarting while an old one is still alive, or a dev build next to the released
+// one) must not both decide to load it. The lock is a file under the runtime dir,
+// taken with O_EXCL and released on exit; a stale lock from a killed process is
+// detected by checking whether the pid it names is still alive.
+static char g_scriptLockPath[600];
+static int g_scriptLockHeld = 0;
+
+static int scriptLockAcquire(void) {
+    if (g_scriptLockHeld) return 1;
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    char dir[512];
+    if (!rt || !*rt) {
+        const char *home = getenv("HOME");
+        if (!home || !*home) return 0;
+        snprintf(dir, sizeof(dir), "%s/.cache", home);
+    } else {
+        snprintf(dir, sizeof(dir), "%s", rt);
+    }
+    snprintf(g_scriptLockPath, sizeof(g_scriptLockPath), "%s/chocobar-geom.lock", dir);
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = open(g_scriptLockPath, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        if (fd >= 0) {
+            char b[32];
+            int n = snprintf(b, sizeof(b), "%ld\n", (long)getpid());
+            if (write(fd, b, (size_t)n) != n) { /* the pid is advisory only */ }
+            close(fd);
+            g_scriptLockHeld = 1;
+            return 1;
+        }
+        // the lock exists: is its owner still alive?
+        int ofd = open(g_scriptLockPath, O_RDONLY);
+        long owner = 0;
+        if (ofd >= 0) {
+            char b[32];
+            ssize_t r = read(ofd, b, sizeof(b) - 1);
+            close(ofd);
+            if (r > 0) { b[r] = 0; owner = strtol(b, NULL, 10); }
+        }
+        if (owner > 1 && kill((pid_t)owner, 0) == 0) return 0;   // a live owner: do not load
+        // stale (the owner is gone, or the file is unreadable): take it over
+        unlink(g_scriptLockPath);
+    }
+    return 0;
+}
+
+static void scriptLockRelease(void) {
+    if (!g_scriptLockHeld) return;
+    unlink(g_scriptLockPath);
+    g_scriptLockHeld = 0;
+}
+
 // Pull whatever the bus has. Reconnects with backoff: the session bus outlives the
 // bar, but KWin may be restarting, and a tight reconnect loop would spin.
 static void geomPump(time_t now) {
@@ -705,16 +772,33 @@ static void geomPump(time_t now) {
     // SELF-HEAL: anything that unloads the KWin helper (a KWin restart, another
     // tool calling unloadScript) drops bar.align 1 WITHOUT telling the bar, and
     // it used to stay lost for the rest of the bar's life - measured three times
-    // on this machine. Probe occasionally and reload when it is gone. The probe
-    // is one small D-Bus call every 30 s, not a hot loop.
+    // on this machine. Probe occasionally and reload ONLY when it is really gone.
+    //
+    // The `loaded == 0` test is what keeps this from stacking copies. KWin runs
+    // every loadScript as a NEW instance of the same file, and the helper polls
+    // the compositor's main thread every 250 ms, so a reload on a script that is
+    // already loaded doubles the compositor's work - two copies froze the whole
+    // desktop for a minute on 2026-10-24. A reload is therefore only ever issued
+    // for a script KWin says is NOT loaded, and geomBusReloadScript unloads
+    // first so even a race between two bar processes ends with one instance.
+    // The probe is one small D-Bus call every 30 s, not a hot loop.
     if (now >= g_scriptCheckAt) {
         g_scriptCheckAt = now + 30;
-        int loaded = geomBusScriptLoaded(KW_SCRIPT_NAME);
+        // Only the bar that owns org.chocobar.Geom may manage the helper. A
+        // second bar (a dev build beside the released one, or a service restart
+        // overlapping the old process) must not install, reload or unload a
+        // compositor-side script that belongs to the other bar's session: two
+        // pollers stacked in KWin is exactly what froze the desktop for a minute
+        // on 2026-10-24. Such a bar reports it once and stays out of the way.
+        int loaded = geomBusOwnsName() ? geomBusScriptLoaded(KW_SCRIPT_NAME) : -1;
         if (loaded == 0) {
             char sp[600];
-            if (kwScriptPath(sp, sizeof(sp))) {
-                geomBusReloadScript(sp, KW_SCRIPT_NAME);
-                dbg("kwin script was unloaded; reloaded it");
+            if (kwScriptPath(sp, sizeof(sp)) && scriptLockAcquire()) {
+                // re-check under the lock: another bar process may have loaded it
+                // between the probe above and the lock being taken
+                if (geomBusScriptLoaded(KW_SCRIPT_NAME) == 0 &&
+                    geomBusReloadScript(sp, KW_SCRIPT_NAME))
+                    dbg("kwin script was unloaded; reloaded it (one instance)");
             }
         }
     }
@@ -929,8 +1013,15 @@ static void onButton(XButtonEvent *e) {
         // draggable
         int hit = chipAt(e->x);
         if (hit >= 0 && chipClickable(&g_chips[hit])) {
-            if (g_chips[hit].icon == SVG_DIAMOND) g_dashPending = 1;
-            else if (g_chips[hit].icon == SVG_BOW) petToggle();
+            if (g_chips[hit].icon == SVG_DIAMOND) {
+                // TOGGLE, the Windows dashToggle behaviour: a second click on
+                // the tokens chip closes the board instead of opening a second
+                // one. This is the "I can open so many dashboards and they
+                // crash" report: the bar had no toggle at all, so every click
+                // mapped another window.
+                if (dashWin() != None) { dashClose(); paint(); }
+                else g_dashPending = 1;
+            } else if (g_chips[hit].icon == SVG_BOW) petToggle();
         }
     }
     // A button-3 PRESS does nothing here: the menu opens on the RELEASE, the
@@ -970,19 +1061,62 @@ static void onButtonRelease(XButtonEvent *e) {
     g_menuY = e->y_root;
 }
 
+// The chip's hover TITLE, the Windows bar's chipTitle() (p_ui.c:3064) ported
+// one for one: every metric chip names itself ("CPU usage", "GPU usage",
+// "Memory usage", "Volume", "Battery", "Local time", "CPU temperature"), the
+// tokens chip says "Token usage today", the subscription chip says what its
+// rotating window is, and the pet chip has no title (as on Windows, where
+// CT_PET returns NULL - the chip's own on/off text is the whole message).
+// The Linux front-end cannot ask the core for these strings, so the table is
+// spelled here; it is the same list in the same order as p_ui.c's switch.
+static const char *chipTitle(int idx) {
+    if (idx < 0 || idx >= g_chipCount) return NULL;
+    const Chip *c = &g_chips[idx];
+    if (c->align == CHIP_LEFT) {
+        if (c->icon == SVG_DIAMOND) return "Token usage today";
+        if (c->icon == SVG_GAUGE) return g_subsTip[0] ? g_subsTip : "Subscription plan remaining";
+        if (c->icon == SVG_BOW) return NULL;   // the pet chip's own text says it
+        return NULL;
+    }
+    switch (c->icon) {
+        case SVG_GPU: return "GPU usage";
+        case SVG_CPU: return "CPU usage";
+        case SVG_TEMP: return "CPU temperature";
+        case SVG_RAM: return "Memory usage";
+        case SVG_VOL:
+        case SVG_MUTE: return "Volume";
+        case SVG_BAT: return "Battery";
+        case SVG_CLOCK: return "Local time";
+        default: return NULL;
+    }
+}
+
 static void onMotion(XMotionEvent *e) {
     // hover tracking only: the bar is not draggable, so motion never moves it.
-    // Only a chip that repaints differently needs a repaint.
     int hit = chipAt(e->x);
-    if (hit >= 0 && !chipClickable(&g_chips[hit])) hit = -1;
-    if (hit != g_hover) { g_hover = hit; paint(); }
+    // the hover PILL belongs to the clickable left-group chips only, so only
+    // those repaint on hover (a right-group metric has no pill to draw)
+    int pill = (hit >= 0 && chipClickable(&g_chips[hit])) ? hit : -1;
+    if (pill != g_hover) { g_hover = pill; paint(); }
+    // every chip gets its title tooltip, exactly as on Windows: the metric
+    // labels on the right group are what tell a user "this number is the GPU"
+    // (the user's own report: hovering a right-group chip must say what it is)
+    // ROOT coordinates, not window ones: p_ui.c passes GetCursorPos (screen
+    // space) and tipShow places the box 6 px right / 16 px below that point.
+    // Handing it e->x/e->y put the tip at the window-relative offset measured
+    // from the screen origin - it appeared in the top-left corner of the screen
+    // instead of under the pointer.
+    const char *tt = chipTitle(hit);
+    if (tt) tipShow(tt, e->x_root, e->y_root, "", 12.0, 0);
+    else tipHide();
     // the hand over the clickable chip, the arrow everywhere else (p_ui.c
     // WM_MOUSEMOVE does the same with LoadCursor(IDC_HAND/IDC_ARROW))
-    cursorUpdate(hit >= 0);
+    cursorUpdate(pill >= 0);
 }
 
 static void onLeave(void) {
     if (g_hover != -1) { g_hover = -1; paint(); }
+    tipHide();
     cursorUpdate(0);
 }
 
@@ -1019,7 +1153,7 @@ static void createWindow(void) {
     swa.border_pixel = 0;
     swa.colormap = g_cmap;
     swa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
-                     ButtonMotionMask |
+                     ButtonMotionMask | PointerMotionMask |
                      LeaveWindowMask | KeyPressMask | StructureNotifyMask;
     // MANAGED, not override-redirect: KWin composites override-redirect windows in
     // its top layer no matter what hints they set (measured on Plasma 6.6), so an
@@ -1341,8 +1475,19 @@ static void runDashboard(void) {
     Visual *dvis = DefaultVisual(g_dpy, g_screen);
     Colormap dcmap = DefaultColormap(g_dpy, g_screen);
     int ddepth = DefaultDepth(g_dpy, g_screen);
+    Rgb pinkc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
+    Rgb pinkdc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
+    Rgb warnc = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
+    Rgb goodc = hexRgb(cbCfgGood(), (Rgb){0, 0.39, 0});
+    Rgb yellowc = hexRgb(cbCfgYellow(), (Rgb){0.72, 0.66, 0.42});
+    double pink3[3] = { pinkc.r, pinkc.g, pinkc.b };
+    double pinkd3[3] = { pinkdc.r, pinkdc.g, pinkdc.b };
+    double warn3[3] = { warnc.r, warnc.g, warnc.b };
+    double good3[3] = { goodc.r, goodc.g, goodc.b };
+    double yellow3[3] = { yellowc.r, yellowc.g, yellowc.b };
     dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
-             g_fontFamily, page, card, fg, dim, div, ramp);
+             g_fontFamily, page, card, fg, dim, div, ramp,
+             pink3, pinkd3, warn3, good3, yellow3, (long long)g_lastScan);
 }
 
 // Reap every child of the bar that has exited. The pet and the detached spawns
@@ -1784,7 +1929,12 @@ static void autoStartSet(int on) {
 static void handleMenuChoice(int choice) {
     dbg("menu choice = %d", choice);
     switch (choice) {
-        case MENU_TOKEN_DASH: g_dashPending = 1; break;
+        case MENU_TOKEN_DASH:
+            // the menu toggles too, exactly like the chip (Windows dashToggle is
+            // reached from both the chip and the tray item)
+            if (dashWin() != None) { dashClose(); paint(); }
+            else g_dashPending = 1;
+            break;
         case MENU_SUBS_DASH:
             fprintf(stderr, "chocobar: the subscription board is not ported to Linux yet\n");
             break;
@@ -1869,17 +2019,30 @@ static int installGeometry(void) {
     fputs(g_geomScript, f);
     fclose(f);
     printf("installed %s\n", path);
-    // tell KWin to load and start it. -a (unload) first, so a reinstall replaces
-    // the running copy instead of stacking a second poller.
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd),
-        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript %s >/dev/null 2>&1; "
-        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript %s %s >/dev/null 2>&1; "
-        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start >/dev/null 2>&1",
-        KW_SCRIPT_NAME, path, KW_SCRIPT_NAME);
-    int rc = system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "chocobar: could not talk to KWin over D-Bus (qdbus6).\n"
+    // Tell KWin to load and start it. This goes through geomBusReloadScript so
+    // the reinstall takes the SAME path as the self-heal: unload first, then
+    // load, then start - exactly one instance, never a stacked second poller.
+    // (A stack of copies doubles and triples the compositor's main-thread work;
+    // two copies froze the desktop for a minute on 2026-10-24.)
+    GeomBus bus = { -1 };
+    int ok = 0;
+    if (geomBusConnect(&bus)) {
+        // a bar that is already running owns org.chocobar.Geom and owns the
+        // helper too; loading a second copy from here would stack a poller in
+        // KWin and double the compositor's per-tick work
+        if (!geomBusOwnsName()) {
+            geomBusClose(&bus);
+            fprintf(stderr,
+                    "chocobar: another Chocobar instance is running and owns the "
+                    "geometry helper.\n  Stop it first (systemctl --user stop chocobar), "
+                    "then re-run --install-geometry.\n");
+            return 1;
+        }
+        ok = geomBusReloadScript(path, KW_SCRIPT_NAME);
+        geomBusClose(&bus);
+    }
+    if (!ok) {
+        fprintf(stderr, "chocobar: could not talk to KWin over D-Bus.\n"
                         "  The script is installed; enable it in System Settings > Window Management > KWin Scripts,\n"
                         "  or log out and back in.\n");
         return 1;
@@ -1891,12 +2054,14 @@ static int installGeometry(void) {
 static int removeGeometry(void) {
     char path[600];
     if (!kwScriptPath(path, sizeof(path))) return 1;
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd),
-        "qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript %s >/dev/null 2>&1",
-        KW_SCRIPT_NAME);
-    int rc = system(cmd);
-    (void)rc;   // best-effort cleanup; the qdbus call is advisory
+    // unload over the same bus path the loader uses (best effort: the file is
+    // removed either way, and a KWin that is not listening simply keeps its
+    // copy of a script whose file is gone)
+    GeomBus bus = { -1 };
+    if (geomBusConnect(&bus)) {
+        if (geomBusOwnsName()) geomBusUnloadScript(KW_SCRIPT_NAME);
+        geomBusClose(&bus);
+    }
     unlink(path);
     printf("removed %s\n", path);
     return 0;
@@ -1994,6 +2159,8 @@ int main(int argc, char **argv) {
 
     detectScale();
     svgInitPaths();            // p_svg.c's shared path data, flattened once
+    // the tooltip surface draws on the same display/visual as the bar and menu
+    tipInit(g_dpy, g_screen, g_visual, g_cmap, g_depth, g_scale);
     // initial metrics so the very first paint has real numbers
     linuxMetricsPrime();
     linuxMetricsPoll(&g_m);
@@ -2060,6 +2227,10 @@ int main(int argc, char **argv) {
             // the board's events go to the board, everything else to the bar:
             // two windows, one queue, one pump (Windows dispatches both the same
             // way through its single GetMessage loop)
+            // the tooltip is an override-redirect window with no event mask, so
+            // the only events it can produce are Expose (it never takes input);
+            // ignore them rather than letting them fall through to the bar
+            if (tipWin() != None && ev.xany.window == tipWin()) continue;
             if (dashWin() != None && ev.xany.window == dashWin()) {
                 if (dashEvent(&ev)) { dashClose(); paint(); }
                 continue;
@@ -2158,6 +2329,8 @@ int main(int argc, char **argv) {
             paint();
         }
     }
+    tipFree();
+    scriptLockRelease();
     geomBusClose(&g_bus);
     if (g_region) XFixesDestroyRegion(g_dpy, g_region);
     if (g_pic) XRenderFreePicture(g_dpy, g_pic);
