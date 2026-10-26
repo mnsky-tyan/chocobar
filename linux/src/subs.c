@@ -27,7 +27,6 @@
 #include <X11/extensions/Xinerama.h>
 #include <X11/extensions/shape.h>
 #include <cairo/cairo-xlib.h>
-#include <fontconfig/fontconfig.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,13 +34,14 @@
 #include <time.h>
 
 #include "linux_shape.h"
+#include "linux_text.h"
 #include "linux_svg.h"
 #include "svg_geometry.h"
 #include "chocobar_core.h"
 
-// The board's own window corner radius, in CSS px: Windows 11's
-// DWMWCP_ROUND_NATIVE for a normal window. p_ui.c dashRoundCorners asks for
-// exactly that, so the shape below uses the same number.
+// The board's window corner radius is BOARD_RADIUS_CSS from linux_shape.h:
+// Windows 11's DWMWCP_ROUND_NATIVE for a normal window, one definition for both
+// boards.
 
 #define SUBS_HM_MAX 8 // MAX_SUBS in the shared core; a board never shows more
 
@@ -83,38 +83,21 @@ static int g_open = 0;
 
 // ---- small helpers ---------------------------------------------------------------
 
-// p_utils.c fmtNum: M and k tiers only (no B), values rounded. The Windows
-// board prints the credits with these tiers, so the port must too.
+static void paint(Subs *d);
+
+// p_utils.c fmtNum, through the shared core's seam: M and k tiers only (no B),
+// values rounded. The Windows board prints the credits with these tiers, so the
+// port must too - and one formatter means the two cannot disagree.
 static void fmtNum(long long n, char *out, size_t cap) {
-    if (n < 0) { snprintf(out, cap, "\u2014"); return; }
-    if (n >= 1000000LL) snprintf(out, cap, "%.1fM", n / 1e6);
-    else if (n >= 1000LL) snprintf(out, cap, "%.1fk", n / 1e3);
-    else snprintf(out, cap, "%lld", n);
+    wchar_t w[32];
+    cbSubsFmtNum(n, w, 32);
+    wideToUtf8(w, out, cap);
 }
 
 // p_ui.c subsWinUpper: the panel head shows the window label uppercased.
-// Uppercase the label and convert it to UTF-8. The old version narrowed each
-// wchar_t with a (char) cast, so a config label of "\u5468" (a week label in
-// any non-Latin script) rendered as the byte 0x68 ("h") - the label is user
-// text from the shared core, not a byte string.
-static void wideToUtf8(const wchar_t *w, char *out, size_t cap) {
-    if (!w) { if (cap) out[0] = 0; return; }
-    size_t i = 0;
-    for (; *w && i + 1 < cap; w++) {
-        unsigned cp = (unsigned)*w;
-        if (cp < 0x80) out[i++] = (char)cp;
-        else if (cp < 0x800 && i + 2 < cap) {
-            out[i++] = (char)(0xC0 | (cp >> 6));
-            out[i++] = (char)(0x80 | (cp & 0x3F));
-        } else if (i + 3 < cap) {
-            out[i++] = (char)(0xE0 | (cp >> 12));
-            out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-            out[i++] = (char)(0x80 | (cp & 0x3F));
-        } else break;
-    }
-    out[i] = 0;
-}
-
+// Uppercase the label and convert it to UTF-8. The label is user text from the
+// shared core, not a byte string, so it goes through the shared converter every
+// other wide string the bar paints uses.
 static void winUpper(const wchar_t *label, char *out, size_t cap) {
     wchar_t tmp[64];
     size_t i = 0;
@@ -252,10 +235,11 @@ static void reshape(Subs *d) {
 // ---- content fit (dashFitToContent) ----------------------------------------------
 // Same contract as the token board: the painted content's height, clamped to
 // 45% of the configured height and to the screen minus a margin, with the board
-// moved up so it never runs past the bottom edge.
-static void fitToContent(void) {
+// moved up so it never runs past the bottom edge. Returns 1 when the window was
+// resized (the surface is new, so the caller repaints), 0 when it already fit.
+static int fitToContent(void) {
     Subs *d = &g_subs;
-    if (!d->win || d->contentH <= 0) return;
+    if (!d->win || d->contentH <= 0) return 0;
     int want = d->contentH;
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (want < lo) want = lo;
@@ -276,7 +260,7 @@ static void fitToContent(void) {
             XFree(xi);
         }
     }
-    if (hi <= 0) return;
+    if (hi <= 0) return 0;
     if (want > hi) want = hi;
     if (d->h != want) {
         d->h = want;
@@ -288,6 +272,25 @@ static void fitToContent(void) {
         }
         XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
         reshape(d);
+        return 1;
+    }
+    return 0;
+}
+
+// Paint the live board and then latch it to the height it just painted. The
+// panels' stack IS the content, and it changes while the board is up - a fetch
+// landing, a config reload enabling another provider - so every live paint goes
+// through here; fitting only on open left the extra panels clipped in a window
+// that could never grow. The fit must stay OUTSIDE paint(), which would destroy
+// the context mid-draw.
+static void paintAndFit(Subs *d) {
+    paint(d);
+    cairo_surface_flush(d->surf);
+    XFlush(d->dpy);
+    if (fitToContent()) {
+        paint(d);
+        cairo_surface_flush(d->surf);
+        XFlush(d->dpy);
     }
 }
 
@@ -653,28 +656,9 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
                                           CAIRO_FONT_WEIGHT_NORMAL);
     d->ffBold = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_NORMAL,
                                            CAIRO_FONT_WEIGHT_BOLD);
-    // the close glyph's face: the display family has no U+2715, and cairo does
-    // not fall back, so resolve a symbol-capable family through fontconfig
-    // (the same resolution dash.c does for its close button)
-    {
-        char symFam[64] = "DejaVu Sans";
-        FcPattern *pat = FcNameParse((const FcChar8 *)":charset=2715");
-        if (pat) {
-            FcConfigSubstitute(NULL, pat, FcMatchPattern);
-            FcDefaultSubstitute(pat);
-            FcResult res = FcResultNoMatch;
-            FcPattern *m = FcFontMatch(NULL, pat, &res);
-            if (m && res == FcResultMatch) {
-                FcChar8 *fam = NULL;
-                if (FcPatternGetString(m, FC_FAMILY, 0, &fam) == FcResultMatch && fam)
-                    snprintf(symFam, sizeof(symFam), "%s", (const char *)fam);
-            }
-            if (m) FcPatternDestroy(m);
-            FcPatternDestroy(pat);
-        }
-        d->ffSymbol = cairo_toy_font_face_create(symFam, CAIRO_FONT_SLANT_NORMAL,
-                                                 CAIRO_FONT_WEIGHT_NORMAL);
-    }
+    // the close glyph's face comes from the shared lookup (the display family
+    // has no U+2715 and cairo does not fall back)
+    d->ffSymbol = symbolFontFace();
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
@@ -719,9 +703,7 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     reshape(d);
 
     // paint, fit, then map (p_ui.c paints while hidden so the board appears once)
-    paint(d);
-    cairo_surface_flush(d->surf);
-    fitToContent();
+    paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
     XMapWindow(dpy, d->win);
     XFlush(dpy);
@@ -733,9 +715,7 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 // Repaints the board after a fetch lands (the bar calls this on the subs epoch).
 void subsRepaint(void) {
     if (!g_open || !g_subs.cr) return;
-    paint(&g_subs);
-    cairo_surface_flush(g_subs.surf);
-    XFlush(g_subs.dpy);
+    paintAndFit(&g_subs);
 }
 
 // Returns 1 when the board wants to close (Esc, q, middle/right click, WM close).
@@ -745,9 +725,7 @@ int subsEvent(XEvent *ev) {
     switch (ev->type) {
     case Expose:
         if (ev->xexpose.count != 0) break;
-        paint(d);
-        cairo_surface_flush(d->surf);
-        XFlush(d->dpy);
+        paintAndFit(d);
         break;
     case ConfigureNotify:
         if (ev->xconfigure.width != d->w || ev->xconfigure.height != d->h) {
@@ -760,9 +738,9 @@ int subsEvent(XEvent *ev) {
             d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
             d->cr = cairo_create(d->surf);
             reshape(d);
-            paint(d);
-            cairo_surface_flush(d->surf);
-            XFlush(d->dpy);
+            // the board is content-sized (p_ui.c re-fits on every paint), so a
+            // foreign resize is answered by the fit, not kept
+            paintAndFit(d);
         }
         break;
     case KeyPress: {
@@ -778,18 +756,14 @@ int subsEvent(XEvent *ev) {
         int b = buttonAt(d, ev->xmotion.x, ev->xmotion.y);
         if (b != d->btnHover) {
             d->btnHover = b;
-            paint(d);
-            cairo_surface_flush(d->surf);
-            XFlush(d->dpy);
+            paintAndFit(d);
         }
         break;
     }
     case LeaveNotify:
         if (d->btnHover) {
             d->btnHover = 0;
-            paint(d);
-            cairo_surface_flush(d->surf);
-            XFlush(d->dpy);
+            paintAndFit(d);
         }
         break;
     case ButtonRelease:
@@ -807,13 +781,9 @@ int subsEvent(XEvent *ev) {
                 d->busyEpoch = cbSubsFetchedEpochMs();
                 d->busyUntilMs = now + 12000;
                 d->busy = 1;
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
                 cbSubsRefetchNow();
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
         }
         break;

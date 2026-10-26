@@ -41,11 +41,11 @@
 #include <X11/extensions/Xinerama.h>
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/shape.h>
-#include <fontconfig/fontconfig.h>
 #include "linux_svg.h"
 
 #include "dash.h"
 #include "linux_shape.h"
+#include "linux_text.h"
 #include "tooltip.h"
 #include "svg_geometry.h"  // native/src: the shared icon ids (SVG_DIAMOND, ...)
 
@@ -132,7 +132,7 @@ typedef struct {
     // cross). Windows falls back through GDI's font linking to Segoe UI Symbol;
     // cairo's toy API does NOT fall back - a missing glyph renders as a tofu
     // box, which is exactly what the close button showed before this face.
-    // Resolved through fontconfig once at open, like the bar's own family.
+    // Resolved through fontconfig (linux_text.c symbolFontFace) once at open.
     cairo_font_face_t *ffSymbol;
     int cfgH;                  // the CONFIG height in CSS px (content-fit measures against it)
     int x, y;                  // window position: content fit keeps the board on screen
@@ -142,15 +142,13 @@ typedef struct {
 static Dash g_dash;
 static int g_boardOpen = 0;
 
-// The board's own window corner radius, in CSS px: Windows 11's DWMWCP_ROUND_NATIVE
-// for a normal (non-maximized) window. p_ui.c dashRoundCorners asks for exactly
-// that, so the Linux board's shape uses the same number.
+// The board's own window corner radius lives in linux_shape.h (BOARD_RADIUS_CSS):
+// Windows 11's DWMWCP_ROUND_NATIVE for a normal (non-maximized) window, one
+// definition for both boards so they cannot drift apart.
 
 // ---- small helpers ---------------------------------------------------------------
 
-// p_agg.c hands out UTF-8 names; cairo wants UTF-8, so nothing to convert. The
-// bar's own wideToUtf8 lives in main.c (a front-end file); the board only needs
-// the ASCII-ish label helpers below.
+// p_agg.c hands out UTF-8 names; cairo wants UTF-8, so nothing to convert here.
 
 // p_ui.c fmtTokens: the stat-card abbreviation
 static void fmtTok(long long n, char *out, size_t cap) {
@@ -1040,30 +1038,11 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
                                           CAIRO_FONT_WEIGHT_NORMAL);
     d->ffBold = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_NORMAL,
                                            CAIRO_FONT_WEIGHT_BOLD);
-    // The symbol face: whatever fontconfig resolves for a family that carries
-    // U+2715. DejaVu Sans is on every desktop this bar runs on and has it; the
-    // lookup is the same FcNameParse path resolveFontFamily uses in main.c, so
-    // a machine without DejaVu still gets a real match instead of tofu.
-    {
-        char symFam[128] = "DejaVu Sans";
-        FcPattern *pat = FcNameParse((const FcChar8 *)"DejaVu Sans");
-        if (pat) {
-            FcPatternAddDouble(pat, FC_SIZE, 12.0);
-            FcConfigSubstitute(NULL, pat, FcMatchPattern);
-            FcDefaultSubstitute(pat);
-            FcResult res = FcResultNoMatch;
-            FcPattern *m = FcFontMatch(NULL, pat, &res);
-            if (m && res == FcResultMatch) {
-                FcChar8 *fam = NULL;
-                if (FcPatternGetString(m, FC_FAMILY, 0, &fam) == FcResultMatch && fam)
-                    snprintf(symFam, sizeof(symFam), "%s", (const char *)fam);
-            }
-            if (m) FcPatternDestroy(m);
-            FcPatternDestroy(pat);
-        }
-        d->ffSymbol = cairo_toy_font_face_create(symFam, CAIRO_FONT_SLANT_NORMAL,
-                                                 CAIRO_FONT_WEIGHT_NORMAL);
-    }
+    // The symbol face comes from the shared lookup: whatever fontconfig
+    // resolves for a family that carries U+2715. DejaVu Sans is on every
+    // desktop this bar runs on and has it, so a machine without DejaVu still
+    // gets a real match instead of tofu.
+    d->ffSymbol = symbolFontFace();
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
@@ -1252,6 +1231,7 @@ int dashEvent(XEvent *ev) {
                 d->w = ev->xconfigure.width;
                 d->h = ev->xconfigure.height;
                 cairo_xlib_surface_set_size(d->surf, d->w, d->h);
+                dashReshape(d);
                 paint(d);
                 cairo_surface_flush(d->surf);
                 XFlush(d->dpy);

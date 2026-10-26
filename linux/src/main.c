@@ -52,9 +52,10 @@
 #include <X11/Xcursor/Xcursor.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #include "linux_shape.h"
-#include <X11/Xutil.h>
+#include "linux_text.h"
 #include <X11/extensions/Xrender.h>
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/shape.h>
@@ -238,23 +239,6 @@ static void paint(void);
 #define ICON_BOX 12.0
 
 // ---- config helpers --------------------------------------------------------------
-static void wideToUtf8(const wchar_t *w, char *out, size_t cap) {
-    if (!w) { if (cap) out[0] = 0; return; }
-    size_t i = 0;
-    for (; *w && i + 1 < cap; w++) {
-        unsigned cp = (unsigned)*w;
-        if (cp < 0x80) out[i++] = (char)cp;
-        else if (cp < 0x800 && i + 2 < cap) {
-            out[i++] = (char)(0xC0 | (cp >> 6));
-            out[i++] = (char)(0x80 | (cp & 0x3F));
-        } else if (i + 3 < cap) {
-            out[i++] = (char)(0xE0 | (cp >> 12));
-            out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-            out[i++] = (char)(0x80 | (cp & 0x3F));
-        }
-    }
-    out[i] = 0;
-}
 
 // ---- font ------------------------------------------------------------------------
 // The config's fontFamily is a CSS font STACK ("'Segoe Print', cursive"). cairo's
@@ -1555,11 +1539,16 @@ static void runDashboard(int kind) {
         // page colour the way p_ui.c's dashResolveTheme does (card = blend(bg,
         // white, 25%), head = blend(card, white, 25%)) - the raw theme.pink
         // made every panel a pink block with a head band the same colour as
-        // its body
+        // its body.
+        //
+        // The epoch is sampled BEFORE the paint: a fetch landing mid-paint would
+        // otherwise be recorded as already shown, and the bar's poll would never
+        // repaint it (p_ui.c samples before the draw and records after)
+        long long shownEpoch = cbSubsFetchedEpochMs();
         subsOpen(g_dpy, g_screen, dvis, dcmap, ddepth, sw, sh2, g_scale,
                  g_fontFamily, page, NULL, NULL, fg, dim, div, ramp,
                  pink3, pinkd3, warn3, good3, yellow3, icon3);
-        g_subsEpochShown = cbSubsFetchedEpochMs();
+        g_subsEpochShown = shownEpoch;
     } else {
         dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
                  g_fontFamily, page, card, fg, dim, div, ramp,
