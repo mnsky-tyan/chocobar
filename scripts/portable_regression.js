@@ -443,21 +443,70 @@ function check(name, ok, detail) {
     /CAIRO_FONT_SLANT_NORMAL/.test(dashU) && !/CAIRO_FONT_SLANT_ITALIC/.test(dashU),
     'the board with a synthesized oblique reads nothing like the Windows board');
 
-  // the subscription board (subs.c) - same invariants the token board carries
+  // the subscription board (subs.c) - the invariants the token board carries.
+  // The behaviour layer (behaviour.sh) proves the board opens, closes and
+  // toggles through the real binary; what it cannot see is a pixel, an ORDER
+  // or a font, so those stay here.
   const subs = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'subs.c'), 'utf8');
   const tip = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'tooltip.c'), 'utf8');
+  const shapeH = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'linux_shape.h'), 'utf8');
   check('linux: the subs board draws the same upright face',
     /CAIRO_FONT_SLANT_NORMAL/.test(subs) && !/CAIRO_FONT_SLANT_ITALIC/.test(subs),
     'the board with a synthesized oblique reads nothing like the Windows board');
-  check('linux: the tooltip maps before it paints, in the SAME call',
+  // the percent sign was misplaced entirely: nw was measured with the stale
+  // pill font (10 px) but painted with the donut's 18 px face
+  check('linux: the subs board measures each string with the face it paints with',
+    /setFont\(d, cr, pieD >= 56 \* S \? 18 : \(pieD >= 38 \* S \? 13 : 10\), 1\);\n\s*double nw = textW\(cr, pct\);/.test(subs) &&
+    /setFont\(d, cr, 10, 0\);\n\s*double inkW = unk \? nw/.test(subs),
+    'measuring nw with a stale font misplaces the percent sign entirely');
+  // GDI draws from the line-box TOP, cairo from the BASELINE: the ported
+  // coordinates are GDI tops, so every text() goes through the ascent helper
+  check('linux: the subs board converts GDI tops to cairo baselines',
+    /static double bl\(cairo_t \*cr, double gdiTop\)/.test(subs) &&
+    subs.split('bl(cr,').length - 1 >= 8,
+    'cairo puts the baseline at y, GDI the line-box top: unconverted coordinates put the ink one ascent too high');
+  // a user-supplied window label is wide text: narrowing it with (char)ch
+  // turned any non-ASCII label into a different ASCII byte
+  check('linux: the subs board converts window labels through UTF-8, not a cast',
+    /static void wideToUtf8\(const wchar_t \*w, char \*out, size_t cap\)/.test(subs) &&
+    !/\(char\)ch;/.test(subs) && !/wcstombs/.test(subs),
+    'the (char) cast turned a label like U+5468 into the byte 0x68; wcstombs fails outright under LC_CTYPE=C');
+  // the refresh button must clear its busy state when the fetch lands, or it
+  // reads "..." forever after one click
+  check('linux: the subs board clears the refresh busy state on the new epoch',
+    /if \(d->busy\) \{[\s\S]{0,220}?cbSubsFetchedEpochMs\(\)[\s\S]{0,80}?d->busyEpoch[\s\S]{0,120}?d->busy = 0;/.test(subs),
+    'p_ui.c clears g_btnBusyUntil when the epoch moves; the port kept the debounce and dropped the clear');
+  // a board destroyed from outside must clear its open state, or subsWin()
+  // hands back a dead id and the epoch poll paints into a dead drawable
+  check('linux: the subs board clears its state on DestroyNotify',
+    /case DestroyNotify:[\s\S]{0,240}?subsClose\(\);\n\s*return 1;/.test(subs),
+    'g_open stayed 1 after an external destroy: the next activation only closed a ghost');
+  // the tooltip painted before it mapped, and a pre-map RENDER draw on a
+  // 32-bit ARGB window never lands (measured on Xvfb: the mapped tip came up
+  // black). The map must precede the paint in the same call.
+  check('linux: the tooltip maps before it paints',
     /XMoveResizeWindow\(g_tip\.dpy, g_tip\.win, x, y, \(unsigned\)w, \(unsigned\)h\);\n\s*XMapRaised\(g_tip\.dpy, g_tip\.win\);\n\s*\/\/ paint/.test(tip),
-    'the painted-then-mapped tip came up black on Xvfb: a pre-map RENDER draw on a 32-bit visual never lands');
+    'the painted-then-mapped tip came up black: a pre-map RENDER draw on a 32-bit visual never lands');
+  // the tip sits 6 px right and 16 px below the pointer, so the pointer's next
+  // move lands on the tip itself; with no input shape the board below stops
+  // hearing the pointer (the heat card froze the moment the pointer entered it)
   check('linux: the tooltip window is click-through (an empty INPUT shape)',
     /XFixesSetWindowShapeRegion\(g_tip\.dpy, g_tip\.win, ShapeInput, 0, 0, empty\)/.test(tip),
-    'the tip sits 6 px right and 16 px below the pointer: with no input shape it swallows the pointer next motion and the board below stops hearing it - the heat card froze the moment the pointer entered the card');
-  check('linux: a board consumes its own events, never falls through to the bar',
-    /if \(dashWin\(\) != None && ev\.xany\.window == dashWin\(\)\) \{\n\s*if \(dashEvent\(&ev\)\) \{ dashClose\(\); paint\(\); \}\n\s*continue;\n\s*\}/.test(lx),
-    'a board MotionNotify reaching onMotion made chipAt read board coords as bar ones and the chip tip overwrote the heat card');
+    'with no input shape the tip swallows the pointer next motion and the board below never hears it');
+  // the boards round their corners AND fit their content: the region must be
+  // rebuilt whenever the built geometry changes, or the open-time region clips
+  // every panel that grew past it (and the shrink keeps square bottom corners)
+  check('linux: one shared board shape rebuilds on any geometry change',
+    /int boardShapeApply\(Display \*dpy, Window win, int w, int h, double radius,\n\s*double scale, XserverRegion \*held,\n\s*int \*heldW, int \*heldH, int \*heldR\);/.test(shapeH) &&
+    /boardShapeApply\(d->dpy, d->win, d->w, d->h, BOARD_RADIUS_CSS/.test(subs) &&
+    /boardShapeApply\(d->dpy, d->win, d->w, d->h, BOARD_RADIUS_CSS/.test(dashU) &&
+    !/d->shapeR == \(int\)r\) return;/.test(subs) && !/d->shapeR == \(int\)r\) return;/.test(dashU),
+    'the radius-only guard kept the open-time region: a board that grows clips its last panel, one that shrinks keeps square corners');
+  // the subscription chip is clickable on Linux exactly as on Windows (the
+  // gauge opens the board; before this it was an inert label)
+  check('linux: the subscription gauge chip opens the board',
+    /c->icon == SVG_GAUGE/.test(lx) && /g_dashPending = 2;/.test(lx),
+    'the gauge was an inert label while the Windows bar opens the plan board from it');
   check('linux: the subs board measures each string with the face it paints with',
     /measure with the face each string is PAINTED with/.test(subs) &&
     /double nw = textW\(cr, pct\);\n/.test(subs) &&

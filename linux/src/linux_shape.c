@@ -5,6 +5,7 @@
 // truncating float that left a 1 px hole the shape clipped away.
 
 #include <math.h>
+#include <string.h>
 
 #include "linux_shape.h"
 
@@ -65,4 +66,45 @@ int roundedRectScanlines(XRectangle *rects, int maxRects, int w, int h, double r
         nr++;
     }
     return nr;
+}
+
+// ---- the boards' rounded window shape ------------------------------------------
+//
+// One definition for both boards. The rebuild key is the geometry the region was
+// built for (w, h, r): a board that fits its content resizes on open and again
+// on every repaint that changes the content height, and the old radius-only
+// guard kept the open-time region forever, clipping whatever grew past it.
+int boardShapeApply(Display *dpy, Window win, int w, int h, double radius,
+                    double scale, XserverRegion *held,
+                    int *heldW, int *heldH, int *heldR) {
+    if (!dpy || !win || w <= 0 || h <= 0) return 0;
+    double r = radius * scale;
+    if (r < 0) r = 0;
+    if (r > w / 2.0) r = w / 2.0;
+    if (r > h / 2.0) r = h / 2.0;
+    int ri = (int)r;
+    if (held && *held &&
+        (!heldW || *heldW == w) && (!heldH || *heldH == h) &&
+        (!heldR || *heldR == ri)) return 0;   // geometry unchanged: keep it
+    XRectangle rects[80];
+    int nr = roundedRectScanlines(rects, 80, w, h, r);
+    if (nr <= 0) return 0;
+    if (held && *held) XFixesDestroyRegion(dpy, *held);
+    XserverRegion reg = XFixesCreateRegion(dpy, rects, nr);
+    if (!reg) return 0;
+    XFixesSetWindowShapeRegion(dpy, win, ShapeBounding, 0, 0, reg);
+    if (held) *held = reg; else XFixesDestroyRegion(dpy, reg);
+    if (heldW) *heldW = w;
+    if (heldH) *heldH = h;
+    if (heldR) *heldR = ri;
+    return 1;
+}
+
+void boardShapeFree(Display *dpy, XserverRegion *held,
+                    int *heldW, int *heldH, int *heldR) {
+    if (dpy && held && *held) XFixesDestroyRegion(dpy, *held);
+    if (held) *held = 0;
+    if (heldW) *heldW = 0;
+    if (heldH) *heldH = 0;
+    if (heldR) *heldR = 0;
 }

@@ -126,7 +126,7 @@ typedef struct {
     cairo_surface_t *surf;
     cairo_t *cr;
     XserverRegion shape;        // the window's rounded shape (DWM round-native twin)
-    int shapeR;                 // the radius the shape was built with (device px)
+    int shapeW, shapeH, shapeR; // the geometry that region was built for
     cairo_font_face_t *ffReg, *ffBold;
     // Glyphs the display family does not carry (the titlebar's U+2715 close
     // cross). Windows falls back through GDI's font linking to Segoe UI Symbol;
@@ -145,7 +145,6 @@ static int g_boardOpen = 0;
 // The board's own window corner radius, in CSS px: Windows 11's DWMWCP_ROUND_NATIVE
 // for a normal (non-maximized) window. p_ui.c dashRoundCorners asks for exactly
 // that, so the Linux board's shape uses the same number.
-#define DASH_WIN_RADIUS 8.0
 
 // ---- small helpers ---------------------------------------------------------------
 
@@ -366,7 +365,7 @@ static void paint(Dash *d) {
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, d->bg.r, d->bg.g, d->bg.b, 1.0);
-    roundedPath(cr, 0, 0, d->w, d->h, DASH_WIN_RADIUS * d->scale);
+    roundedPath(cr, 0, 0, d->w, d->h, BOARD_RADIUS_CSS * d->scale);
     cairo_fill(cr);
     cairo_restore(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
@@ -925,19 +924,12 @@ static void paint(Dash *d) {
 // staircase the bar and the menu use. Called after any resize, because a stale
 // shape clips the new size.
 static void dashReshape(Dash *d) {
-    if (!d->dpy || !d->win) return;
-    double r = DASH_WIN_RADIUS * d->scale;
-    if (r < 0) r = 0;
-    if (r > d->w / 2.0) r = d->w / 2.0;
-    if (r > d->h / 2.0) r = d->h / 2.0;
-    if (d->shape && d->shapeR == (int)r) return;
-    XRectangle rects[80];
-    int nr = roundedRectScanlines(rects, 80, d->w, d->h, r);
-    if (nr <= 0) return;
-    if (d->shape) XFixesDestroyRegion(d->dpy, d->shape);
-    d->shape = XFixesCreateRegion(d->dpy, rects, nr);
-    XFixesSetWindowShapeRegion(d->dpy, d->win, ShapeBounding, 0, 0, d->shape);
-    d->shapeR = (int)r;
+    // the shared helper rebuilds the region whenever the built geometry (w, h,
+    // r) changes - this board fits its content too, and the old radius-only
+    // guard kept the open-time region, clipping whatever grew past it (the
+    // ConfigureNotify path could never fix it either: same guard)
+    boardShapeApply(d->dpy, d->win, d->w, d->h, BOARD_RADIUS_CSS, d->scale,
+                    &d->shape, &d->shapeW, &d->shapeH, &d->shapeR);
 }
 
 // ---- content fit ---------------------------------------------------------------
@@ -1336,7 +1328,7 @@ void dashClose(void) {
     tipHide();   // the board's own heat card must not outlive the board
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }
     if (d->surf) { cairo_surface_destroy(d->surf); d->surf = NULL; }
-    if (d->shape) { XFixesDestroyRegion(d->dpy, d->shape); d->shape = 0; }
+    boardShapeFree(d->dpy, &d->shape, &d->shapeW, &d->shapeH, &d->shapeR);
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }
     if (d->ffBold) { cairo_font_face_destroy(d->ffBold); d->ffBold = NULL; }
     if (d->ffSymbol) { cairo_font_face_destroy(d->ffSymbol); d->ffSymbol = NULL; }

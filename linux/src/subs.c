@@ -42,7 +42,6 @@
 // The board's own window corner radius, in CSS px: Windows 11's
 // DWMWCP_ROUND_NATIVE for a normal window. p_ui.c dashRoundCorners asks for
 // exactly that, so the shape below uses the same number.
-#define DASH_WIN_RADIUS 8.0
 
 #define SUBS_HM_MAX 8 // MAX_SUBS in the shared core; a board never shows more
 
@@ -67,7 +66,7 @@ typedef struct {
     cairo_t *cr;
     cairo_font_face_t *ffReg, *ffBold;
     XserverRegion shape;       // the window's rounded shape (DWM round-native twin)
-    int shapeR;
+    int shapeW, shapeH, shapeR;   // the geometry that region was built for
     /* titlebar buttons (device px), hover state: the Windows board draws
      * [refresh] [close] on BOTH boards (p_ui.c), so this one does too */
     int btnRefreshL, btnRefreshR, btnRefreshT, btnRefreshB;
@@ -94,13 +93,37 @@ static void fmtNum(long long n, char *out, size_t cap) {
 }
 
 // p_ui.c subsWinUpper: the panel head shows the window label uppercased.
-static void winUpper(const wchar_t *label, char *out, size_t cap) {
+// Uppercase the label and convert it to UTF-8. The old version narrowed each
+// wchar_t with a (char) cast, so a config label of "\u5468" (a week label in
+// any non-Latin script) rendered as the byte 0x68 ("h") - the label is user
+// text from the shared core, not a byte string.
+static void wideToUtf8(const wchar_t *w, char *out, size_t cap) {
+    if (!w) { if (cap) out[0] = 0; return; }
     size_t i = 0;
-    for (; label[i] && i + 1 < cap; i++) {
-        wchar_t ch = label[i];
-        out[i] = (ch >= L'a' && ch <= L'z') ? (char)(ch - 32) : (char)ch;
+    for (; *w && i + 1 < cap; w++) {
+        unsigned cp = (unsigned)*w;
+        if (cp < 0x80) out[i++] = (char)cp;
+        else if (cp < 0x800 && i + 2 < cap) {
+            out[i++] = (char)(0xC0 | (cp >> 6));
+            out[i++] = (char)(0x80 | (cp & 0x3F));
+        } else if (i + 3 < cap) {
+            out[i++] = (char)(0xE0 | (cp >> 12));
+            out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[i++] = (char)(0x80 | (cp & 0x3F));
+        } else break;
     }
     out[i] = 0;
+}
+
+static void winUpper(const wchar_t *label, char *out, size_t cap) {
+    wchar_t tmp[64];
+    size_t i = 0;
+    for (; label[i] && i + 1 < 64; i++) {
+        wchar_t ch = label[i];
+        tmp[i] = (ch >= L'a' && ch <= L'z') ? ch - 32 : ch;
+    }
+    tmp[i] = 0;
+    wideToUtf8(tmp, out, cap);
 }
 
 // p_ui.c fmtReset: relative countdown to the window reset. resetAt is a true
@@ -218,18 +241,12 @@ static void donut(cairo_t *cr, double cx, double cy, double r, double penW,
 
 // Rebuild the window shape from the current size (dashRoundCorners twin).
 static void reshape(Subs *d) {
-    if (!d->dpy || !d->win) return;
-    double r = DASH_WIN_RADIUS * d->scale;
-    if (r > d->w / 2.0) r = d->w / 2.0;
-    if (r > d->h / 2.0) r = d->h / 2.0;
-    if (d->shape && d->shapeR == (int)r) return;
-    XRectangle rects[80];
-    int nr = roundedRectScanlines(rects, 80, d->w, d->h, r);
-    if (nr <= 0) return;
-    if (d->shape) XFixesDestroyRegion(d->dpy, d->shape);
-    d->shape = XFixesCreateRegion(d->dpy, rects, nr);
-    XFixesSetWindowShapeRegion(d->dpy, d->win, ShapeBounding, 0, 0, d->shape);
-    d->shapeR = (int)r;
+    // the shared helper rebuilds the region whenever the built geometry (w, h,
+    // r) changes - this board fits its content on open AND on every repaint
+    // that changes the content height, so a radius-only guard kept the
+    // open-time region and clipped the panels that grew past it
+    boardShapeApply(d->dpy, d->win, d->w, d->h, BOARD_RADIUS_CSS, d->scale,
+                    &d->shape, &d->shapeW, &d->shapeH, &d->shapeR);
 }
 
 // ---- content fit (dashFitToContent) ----------------------------------------------
@@ -305,11 +322,20 @@ static void paint(Subs *d) {
     double S = d->scale;
     cairo_t *cr = d->cr;
 
+    // the busy "..." clears when the fetch lands (the epoch moved) or the 12 s
+    // click-debounce floor expires - the same rule p_ui.c's WM_TIMER applies
+    // (g_btnBusyUntil / g_subsBusyEpoch). Without this the button read "..."
+    // forever after one refresh click.
+    if (d->busy) {
+        long long ep = cbSubsFetchedEpochMs();
+        if (ep != d->busyEpoch || nowMs() >= d->busyUntilMs) d->busy = 0;
+    }
+
     // page: opaque inside the rounded shape, transparent corners
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, d->bg.r, d->bg.g, d->bg.b, 1.0);
-    roundedPath(cr, 0, 0, d->w, d->h, DASH_WIN_RADIUS * d->scale);
+    roundedPath(cr, 0, 0, d->w, d->h, BOARD_RADIUS_CSS * d->scale);
     cairo_fill(cr);
     cairo_restore(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
@@ -411,8 +437,7 @@ static void paint(Subs *d) {
         char label[64];
         wchar_t wl[64];
         cbSubsProvLabel(i, wl, 64);
-        wcstombs(label, wl, sizeof(label));
-        label[sizeof(label) - 1] = 0;
+        wideToUtf8(wl, label, sizeof(label));
 
         SubsWin wins[SUBS_HM_MAX * 4];
         int wn = cbSubsProvWins(i, wins, (int)(sizeof(wins) / sizeof(wins[0])));
@@ -434,8 +459,7 @@ static void paint(Subs *d) {
         char plan[64];
         wchar_t wplan[64];
         cbSubsProvPlan(i, wplan, 64);
-        wcstombs(plan, wplan, sizeof(plan));
-        plan[sizeof(plan) - 1] = 0;
+        wideToUtf8(wplan, plan, sizeof(plan));
         if (!plan[0]) snprintf(plan, sizeof(plan), "\u2014");
         double lw = textW(cr, label);
         setFont(d, cr, 10, 0);
@@ -599,8 +623,19 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     d->scale = scale > 0 ? scale : 1.0;
     snprintf(d->fontFamily, sizeof(d->fontFamily), "%s", fontFamily ? fontFamily : "sans");
     d->bg = (Rgb3){ page[0], page[1], page[2] };
-    d->card = (Rgb3){ card[0], card[1], card[2] };
-    d->head = (Rgb3){ head[0], head[1], head[2] };
+    // card and head are DERIVED from the page colour, not the theme's pink:
+    // p_ui.c's dashResolveTheme computes card = blend(bg, white, 25%) and
+    // head = blend(card, white, 25%), so the panels stay near-white with a
+    // lighter stacked head band. (The card/head arguments are still accepted
+    // so the caller can override, but nothing passes them any more.)
+    if (card) d->card = (Rgb3){ card[0], card[1], card[2] };
+    else d->card = (Rgb3){ d->bg.r + (1 - d->bg.r) * 0.25,
+                           d->bg.g + (1 - d->bg.g) * 0.25,
+                           d->bg.b + (1 - d->bg.b) * 0.25 };
+    if (head) d->head = (Rgb3){ head[0], head[1], head[2] };
+    else d->head = (Rgb3){ d->card.r + (1 - d->card.r) * 0.25,
+                           d->card.g + (1 - d->card.g) * 0.25,
+                           d->card.b + (1 - d->card.b) * 0.25 };
     d->fg = (Rgb3){ fg[0], fg[1], fg[2] };
     d->dim = (Rgb3){ dim[0], dim[1], dim[2] };
     d->divider = (Rgb3){ divider[0], divider[1], divider[2] };
@@ -786,6 +821,12 @@ int subsEvent(XEvent *ev) {
         // middle/right click closes the board (the Windows dashProc does)
         if (ev->xbutton.button != 1) return 1;
         break;
+    case DestroyNotify:
+        // the window is gone from outside (xkill, a compositor restart): the
+        // bar's epoch poll would keep painting into a dead drawable and the
+        // next activation would only call subsClose() on a ghost
+        subsClose();
+        return 1;
     case ClientMessage:
         if ((Atom)ev->xclient.data.l[0] == XInternAtom(d->dpy, "WM_DELETE_WINDOW", False))
             return 1;
@@ -800,7 +841,7 @@ void subsClose(void) {
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }
     if (d->surf) { cairo_surface_destroy(d->surf); d->surf = NULL; }
     if (d->win) { XDestroyWindow(d->dpy, d->win); d->win = None; }
-    if (d->shape) { XFixesDestroyRegion(d->dpy, d->shape); d->shape = 0; }
+    boardShapeFree(d->dpy, &d->shape, &d->shapeW, &d->shapeH, &d->shapeR);
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }
     if (d->ffBold) { cairo_font_face_destroy(d->ffBold); d->ffBold = NULL; }
     if (d->ffSymbol) { cairo_font_face_destroy(d->ffSymbol); d->ffSymbol = NULL; }

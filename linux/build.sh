@@ -145,7 +145,7 @@ gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/subs.c -
 
 echo "linking..."
 gcc -o "$OUT/chocobar-linux" \
-  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" $OUT/menu.o "$OUT/dash.o" "$OUT/tooltip.o" "$OUT/subs.o" \
+  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" "$OUT/menu.o" "$OUT/dash.o" "$OUT/tooltip.o" "$OUT/subs.o" \
   "$OUT/core.o" "$OUT/adapter.o" \
   $(pkg-config --libs "${PKGS[@]}") -lm -lpthread
 

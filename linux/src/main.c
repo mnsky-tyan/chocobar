@@ -1036,7 +1036,12 @@ static void petToggle(void);
 // shape all ask this function, so a right-group metric can never become a
 // button by any one of those paths drifting. Right-group metrics are labels.
 static int chipClickable(const Chip *c) {
-    return c->align == CHIP_LEFT && (c->icon == SVG_DIAMOND || c->icon == SVG_BOW);
+    // the gauge chip opens the subscription board, the diamond the token board
+    // and the bow toggles the pet - the same three clickable left chips p_ui.c
+    // wires (SVG_GAUGE -> dashToggle(1) at p_ui.c:3115, SVG_DIAMOND ->
+    // dashToggle(0), SVG_BOW -> the pet toggle)
+    return c->align == CHIP_LEFT &&
+           (c->icon == SVG_DIAMOND || c->icon == SVG_BOW || c->icon == SVG_GAUGE);
 }
 
 static void onButton(XButtonEvent *e) {
@@ -1051,7 +1056,12 @@ static void onButton(XButtonEvent *e) {
         // draggable
         int hit = chipAt(e->x);
         if (hit >= 0 && chipClickable(&g_chips[hit])) {
-            if (g_chips[hit].icon == SVG_DIAMOND) {
+            if (g_chips[hit].icon == SVG_GAUGE) {
+                // the subscription chip, the Windows bar's SVG_GAUGE wiring
+                if (dashWin() != None) { dashClose(); paint(); }
+                else if (subsWin() != None) { subsClose(); paint(); }
+                else g_dashPending = 2;
+            } else if (g_chips[hit].icon == SVG_DIAMOND) {
                 // TOGGLE, the Windows dashToggle behaviour: a second click on
                 // the tokens chip closes the board instead of opening a second
                 // one. This is the "I can open so many dashboards and they
@@ -1535,16 +1545,19 @@ static void runDashboard(int kind) {
         int sh2 = cbCfgSubsH() > 0 ? cbCfgSubsH() : 580;
         Rgb warnc = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
         Rgb goodc = hexRgb(cbCfgGood(), (Rgb){0, 0.39, 0});
-        Rgb headc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
         // the board's icons use the same icon colour the bar's chips use
         Rgb iconc = hexRgb(cbCfgIconColor() && *cbCfgIconColor() ? cbCfgIconColor() : cbCfgPinkDeep(),
                            (Rgb){0.83, 0.58, 0.67});
         double icon3[3] = { iconc.r, iconc.g, iconc.b };
         double warn3[3] = { warnc.r, warnc.g, warnc.b };
         double good3[3] = { goodc.r, goodc.g, goodc.b };
-        double head3[3] = { headc.r, headc.g, headc.b };
+        // card and head are passed as NULL so the board derives them from the
+        // page colour the way p_ui.c's dashResolveTheme does (card = blend(bg,
+        // white, 25%), head = blend(card, white, 25%)) - the raw theme.pink
+        // made every panel a pink block with a head band the same colour as
+        // its body
         subsOpen(g_dpy, g_screen, dvis, dcmap, ddepth, sw, sh2, g_scale,
-                 g_fontFamily, page, card, head3, fg, dim, div, ramp,
+                 g_fontFamily, page, NULL, NULL, fg, dim, div, ramp,
                  pink3, pinkd3, warn3, good3, yellow3, icon3);
         g_subsEpochShown = cbSubsFetchedEpochMs();
     } else {

@@ -287,8 +287,11 @@ The chip shows the selected plan's WEEKLY remaining percentage and advances to
 the next enabled provider every `rotateSec` seconds. `>70%` is green, `>30%`
 dim, below that red - the Windows thresholds. `stale` means every provider
 failed its last fetch; an em dash means nothing has ever succeeded. The board
-(Subscription dashboard in the right-click menu) is Windows/mac only for now -
-the menu item says so rather than pretending.
+(Subscription dashboard in the right-click menu, or a click on the gauge chip)
+is the Windows board ported: one full-width panel per enabled provider, one
+donut per plan window with the credits left and the reset countdown, and the
+cycle's fetched time in the foot. Its `refresh` re-fetches the providers and
+its close button ends it, exactly as on Windows.
 
 ## Tests
 
