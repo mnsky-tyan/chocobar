@@ -39,6 +39,8 @@
 #include <X11/keysym.h>
 #include <X11/Xcursor/Xcursor.h>
 #include <X11/extensions/Xinerama.h>
+#include <X11/extensions/Xfixes.h>
+#include <X11/extensions/shape.h>
 #include <fontconfig/fontconfig.h>
 #include "linux_svg.h"
 
@@ -123,6 +125,8 @@ typedef struct {
        surface and toy font faces per frame would be an allocation per pixel */
     cairo_surface_t *surf;
     cairo_t *cr;
+    XserverRegion shape;        // the window's rounded shape (DWM round-native twin)
+    int shapeR;                 // the radius the shape was built with (device px)
     cairo_font_face_t *ffReg, *ffBold;
     // Glyphs the display family does not carry (the titlebar's U+2715 close
     // cross). Windows falls back through GDI's font linking to Segoe UI Symbol;
@@ -137,6 +141,11 @@ typedef struct {
 
 static Dash g_dash;
 static int g_boardOpen = 0;
+
+// The board's own window corner radius, in CSS px: Windows 11's DWMWCP_ROUND_NATIVE
+// for a normal (non-maximized) window. p_ui.c dashRoundCorners asks for exactly
+// that, so the Linux board's shape uses the same number.
+#define DASH_WIN_RADIUS 8.0
 
 // ---- small helpers ---------------------------------------------------------------
 
@@ -349,12 +358,16 @@ static void paint(Dash *d) {
     double S = d->scale;
     cairo_t *cr = d->cr;
 
-    // page: an OPAQUE fill first (the board is a solid panel, not a translucent
-    // bar; CAIRO_OPERATOR_SOURCE with an opaque colour writes alpha = 1)
+    // page: an OPAQUE fill inside the window's rounded shape (the board is a
+    // solid panel, not a translucent bar; CAIRO_OPERATOR_SOURCE with an opaque
+    // colour writes alpha = 1). The corners stay transparent so the shape's
+    // staircase anti-aliases instead of clipping hard edges - the X11 twin of
+    // Windows' DWMWCP_ROUND_NATIVE.
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, d->bg.r, d->bg.g, d->bg.b, 1.0);
-    cairo_paint(cr);
+    roundedPath(cr, 0, 0, d->w, d->h, DASH_WIN_RADIUS * d->scale);
+    cairo_fill(cr);
     cairo_restore(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
     cairo_new_path(cr);
@@ -907,6 +920,26 @@ static void paint(Dash *d) {
 
 // ---- window lifetime ---------------------------------------------------------------
 
+// Rebuild the window shape from the current size. p_ui.c dashRoundCorners asks
+// DWM for DWMWCP_ROUND_NATIVE; this is the X11 twin, using the same shared
+// staircase the bar and the menu use. Called after any resize, because a stale
+// shape clips the new size.
+static void dashReshape(Dash *d) {
+    if (!d->dpy || !d->win) return;
+    double r = DASH_WIN_RADIUS * d->scale;
+    if (r < 0) r = 0;
+    if (r > d->w / 2.0) r = d->w / 2.0;
+    if (r > d->h / 2.0) r = d->h / 2.0;
+    if (d->shape && d->shapeR == (int)r) return;
+    XRectangle rects[80];
+    int nr = roundedRectScanlines(rects, 80, d->w, d->h, r);
+    if (nr <= 0) return;
+    if (d->shape) XFixesDestroyRegion(d->dpy, d->shape);
+    d->shape = XFixesCreateRegion(d->dpy, rects, nr);
+    XFixesSetWindowShapeRegion(d->dpy, d->win, ShapeBounding, 0, 0, d->shape);
+    d->shapeR = (int)r;
+}
+
 // ---- content fit ---------------------------------------------------------------
 // p_ui.c dashFitToContent: after a paint, the window takes the painted content's
 // height, clamped to 45% of the configured height (a board that is shorter than
@@ -971,6 +1004,7 @@ static void dashFitToContent(void) {
             d->cr = cairo_create(d->surf);
         }
         XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
+        dashReshape(d);
     }
 }
 
@@ -1004,14 +1038,15 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     d->cfgH = cssH;
     d->lastScanAt = lastScanAt;
 
-    // the board's two faces: the configured display family (italic, like the
-    // bar) and its bold. The Windows board draws with the same family at
-    // FW_NORMAL/FW_BOLD, and its CSS-600 elements are the Regular face because
-    // the family has no true semibold - so the bold face here is the real bold,
-    // used only where the Windows board asks for FW_BOLD.
-    d->ffReg = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_ITALIC,
+    // the board's two faces: the configured display family, UPRIGHT (p_ui.c's
+    // dashFont passes lfItalic = FALSE - Segoe Print's lean is in the glyphs),
+    // and its bold. The CSS-600 elements are the Regular face because the
+    // family has no true semibold - so the bold face here is the real bold,
+    // used only where the Windows board asks for FW_BOLD. The port used to ask
+    // for Italic, which cairo synthesizes into an oblique for an upright face.
+    d->ffReg = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_NORMAL,
                                           CAIRO_FONT_WEIGHT_NORMAL);
-    d->ffBold = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_ITALIC,
+    d->ffBold = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_NORMAL,
                                            CAIRO_FONT_WEIGHT_BOLD);
     // The symbol face: whatever fontconfig resolves for a family that carries
     // U+2715. DejaVu Sans is on every desktop this bar runs on and has it; the
@@ -1089,6 +1124,7 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // persistent paint state: the board repaints on every hover move
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
     d->cr = cairo_create(d->surf);
+    dashReshape(d);
 
     // p_ui.c paints while the window is still hidden and fits BEFORE ShowWindow,
     // because resizing after the board is on screen reads as "bolted together"
@@ -1300,6 +1336,7 @@ void dashClose(void) {
     tipHide();   // the board's own heat card must not outlive the board
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }
     if (d->surf) { cairo_surface_destroy(d->surf); d->surf = NULL; }
+    if (d->shape) { XFixesDestroyRegion(d->dpy, d->shape); d->shape = 0; }
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }
     if (d->ffBold) { cairo_font_face_destroy(d->ffBold); d->ffBold = NULL; }
     if (d->ffSymbol) { cairo_font_face_destroy(d->ffSymbol); d->ffSymbol = NULL; }

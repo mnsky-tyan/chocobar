@@ -640,6 +640,10 @@ const wchar_t *cbCfgGood(void) { return g_cfg.good; }
 const wchar_t *cbCfgYellow(void) { return g_cfg.yellow; }
 const wchar_t *cbCfgDivider(void) { return g_cfg.divider; }
 int cbCfgDashW(void) { return g_cfg.dashW; }
+// the subscription board's own configured size (subs.width / subs.height);
+// Windows reads the same two keys for its own board window
+int cbCfgSubsW(void) { return g_cfg.subsW; }
+int cbCfgSubsH(void) { return g_cfg.subsH; }
 int cbCfgDashH(void) { return g_cfg.dashH; }
 const wchar_t *cbCfgPinkBg(void) { return g_cfg.pinkBg; }
 // theme.heatmap[5]: the daily-heatmap ramp, light to dark

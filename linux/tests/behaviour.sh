@@ -547,17 +547,56 @@ check "a right-press released OFF the bar opens nothing" $?
 sleep 0.6
 "$XCLICK" $((X-100)) $((Y+10+ROW2_Y)) 1 full
 sleep 0.8
-! menu_open && ! grep -q "subscription board is not ported" "$WORK/bar.log" &&
+! menu_open && ! xwininfo -root -children 2>/dev/null | grep -q "Subscriptions" &&
     xwininfo -id "$BARWIN" | grep -q "Map State: IsViewable"
 check "a click OUTSIDE the menu picks no row and leaves the bar running" $?
 
-# 5e. a click INSIDE a row picks that row: the bar acts on the choice it logs
+# 5e. a click INSIDE a row picks that row: the Subscription row opens the
+#     real board window now (named "Chocobar - Subscriptions"), replacing the
+#     old "not ported" log line. menu_open() cannot be reused here: it counts
+#     root children, and the board IS one.
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.6
 "$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
-sleep 0.8
-! menu_open && grep -q "subscription board is not ported" "$WORK/bar.log"
-check "a click INSIDE a menu row picks that row" $?
+sleep 1.2
+SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
+[ -n "${SUBSWIN:-}" ]
+check "a click INSIDE the Subscription row opens the board" $?
+
+# 5f. the close button ends the board: the titlebar's ✕ (subs.c btnClose, the
+#     same frame geometry dash.c uses: right edge - padL, 20*S tall from ty-3*S).
+#     The board's geometry is read into its OWN variables: X/Y stay the BAR's,
+#     which 5g still needs.
+if [ -n "${SUBSWIN:-}" ]; then
+    read -r BX BY BW BH <<EOF
+$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X:/{x=$4} /Absolute upper-left Y:/{y=$4} /Width:/{w=$2} /Height:/{h=$2} END{print x, y, w, h}')
+EOF
+    "$XCLICK" $((BX + BW - 23)) $((BY + 21)) 1 full
+    sleep 1.0
+    ! xwininfo -root -children 2>/dev/null | grep -q "Subscriptions"
+    check "the board's close button closes it" $?
+else
+    check "the board's close button closes it" 1
+fi
+
+# 5g. activating the row again while the board is open closes it (a toggle,
+#     never a leak): open once more, then pick the same row again
+"$XCLICK" $((X+40)) $((Y+10)) 3 full
+sleep 0.6
+"$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+sleep 1.2
+SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
+if [ -n "${SUBSWIN:-}" ]; then
+    "$XCLICK" $((X+40)) $((Y+10)) 3 full
+    sleep 0.6
+    "$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+    sleep 1.2
+    N=$(xwininfo -root -children 2>/dev/null | grep -c "Subscriptions")
+    [ "$N" -eq 0 ]
+    check "a second activation closes the board, not a second window" $?
+else
+    check "a second activation closes the board, not a second window" 1
+fi
 
 # 6. the autostart state is honest: the failure text reaches the log
 grep -q "autostart state unknown" "$WORK/bar.log"

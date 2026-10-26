@@ -141,10 +141,11 @@ gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags dbus-1) -c linux/src/selfheal.c -o 
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/menu.c -o "$OUT/menu.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/dash.c -o "$OUT/dash.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/tooltip.c -o "$OUT/tooltip.o"
+gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/subs.c -o "$OUT/subs.o"
 
 echo "linking..."
 gcc -o "$OUT/chocobar-linux" \
-  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" "$OUT/menu.o" "$OUT/dash.o" "$OUT/tooltip.o" \
+  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" $OUT/menu.o "$OUT/dash.o" "$OUT/tooltip.o" "$OUT/subs.o" \
   "$OUT/core.o" "$OUT/adapter.o" \
   $(pkg-config --libs "${PKGS[@]}") -lm -lpthread
 

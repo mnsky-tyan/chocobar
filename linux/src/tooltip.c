@@ -30,6 +30,8 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/Xfixes.h>
+#include <X11/extensions/shape.h>
 
 #include "tooltip.h"
 
@@ -176,11 +178,27 @@ void tipShow(const char *text, int cx, int cy, const char *family, double cssPx,
             cairo_font_face_destroy(fBold);
             return;
         }
-        // never accept input: a tooltip under the pointer must not eat a click
+        // never accept input: a tooltip under the pointer must not eat a click.
+        // An empty event mask is NOT enough - the tip is placed 6 px right and
+        // 16 px BELOW the pointer, so the pointer's next move lands on the tip
+        // itself; with no input shape the X server delivers that motion to the
+        // tip (which ignores it) and the window UNDERNEATH never sees it, which
+        // froze the heatmap card the moment the pointer entered the card. An
+        // EMPTY INPUT SHAPE is the X11 click-through: events pass through to
+        // the board below, exactly as the WS_EX_TRANSPARENT Windows tooltip
+        // does. The shape is window-relative and empty, so it survives every
+        // resize without re-setting.
         XSetWindowAttributes ia;
         memset(&ia, 0, sizeof(ia));
         ia.event_mask = 0;
         XChangeWindowAttributes(g_tip.dpy, g_tip.win, CWEventMask, &ia);
+        {
+            XserverRegion empty = XFixesCreateRegion(g_tip.dpy, NULL, 0);
+            if (empty) {
+                XFixesSetWindowShapeRegion(g_tip.dpy, g_tip.win, ShapeInput, 0, 0, empty);
+                XFixesDestroyRegion(g_tip.dpy, empty);
+            }
+        }
         // the tip must not be a taskbar/Alt-Tab citizen
         {
             XClassHint *ch = XAllocClassHint();
@@ -197,6 +215,24 @@ void tipShow(const char *text, int cx, int cy, const char *family, double cssPx,
     g_tip.w = w;
     g_tip.h = h;
 
+    // placement: 6 px right / 16 px below the pointer, flipped and clamped so
+    // the box always lands on the screen (p_ui.c tipShow's tail)
+    int sw = DisplayWidth(g_tip.dpy, g_tip.screen);
+    int sh = DisplayHeight(g_tip.dpy, g_tip.screen);
+    int x = cx + (int)(6 * S);
+    int y = cy + (int)(16 * S);
+    if (x + w > sw) x = cx - w - (int)(6 * S);
+    if (y + h > sh) y = cy - h - (int)(14 * S);
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    // place and MAP first, then paint: a pre-map RENDER draw on a 32-bit ARGB
+    // window never lands (measured on Xvfb - the painted-then-mapped tip came
+    // up black, the mapped-then-painted one keeps every pixel; the bar only
+    // works because its Expose-driven repaints happen after the map). The tip
+    // paints once per show, so its paint must follow the map.
+    XMoveResizeWindow(g_tip.dpy, g_tip.win, x, y, (unsigned)w, (unsigned)h);
+    XMapRaised(g_tip.dpy, g_tip.win);
     // paint
     cairo_surface_t *surf = cairo_xlib_surface_create(g_tip.dpy, g_tip.win,
                                                       g_tip.visual, w, h);
@@ -244,19 +280,6 @@ void tipShow(const char *text, int cx, int cy, const char *family, double cssPx,
     cairo_font_face_destroy(fReg);
     cairo_font_face_destroy(fBold);
 
-    // placement: 6 px right / 16 px below the pointer, flipped and clamped so
-    // the box always lands on the screen (p_ui.c tipShow's tail)
-    int sw = DisplayWidth(g_tip.dpy, g_tip.screen);
-    int sh = DisplayHeight(g_tip.dpy, g_tip.screen);
-    int x = cx + (int)(6 * S);
-    int y = cy + (int)(16 * S);
-    if (x + w > sw) x = cx - w - (int)(6 * S);
-    if (y + h > sh) y = cy - h - (int)(14 * S);
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-
-    XMoveResizeWindow(g_tip.dpy, g_tip.win, x, y, (unsigned)w, (unsigned)h);
-    XMapRaised(g_tip.dpy, g_tip.win);
     XRaiseWindow(g_tip.dpy, g_tip.win);
     XFlush(g_tip.dpy);
     g_tip.shown = 1;

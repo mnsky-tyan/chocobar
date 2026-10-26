@@ -67,6 +67,7 @@
 #include "geomdbus.h"
 #include "menu.h"
 #include "dash.h"
+#include "subs.h"
 #include "tooltip.h"
 #include "linux_svg.h"
 #include "selfheal.h"
@@ -90,6 +91,8 @@ extern long long cbTokToday(void);
 extern long long cbTokWeek(void);
 extern long long cbTokMonth(void);
 extern int cbCfgDashW(void);
+extern int cbCfgSubsW(void);
+extern int cbCfgSubsH(void);
 extern int cbCfgDashH(void);
 extern const wchar_t *cbCfgPinkBg(void);
 extern const wchar_t *cbCfgHeat(int i);
@@ -187,6 +190,7 @@ static int g_menuPending = 0;
 static int g_menuX = 0, g_menuY = 0;
 static int g_swallowRelease = 0;   // the menu's dismissing gesture: eat its release
 static int g_dashPending = 0;   // 1 = token dashboard, 2 = subscriptions
+static long long g_subsEpochShown = 0;   // the subs epoch the board already painted
 
 
 static LinuxMetrics g_m;
@@ -525,13 +529,14 @@ static void paint(void) {
     // API's select_font_face ignores everything but the family name.
     //
     // The slant is ITALIC, not NORMAL. Segoe Print on Windows is a hand-
-    // written face whose letters already lean; the closest installed family
-    // (Comic Neue) offers the same lean as its Italic face, and the config's
-    // "fontFamily" names that face by intent. Rendered upright the bar reads
-    // as a different font than the reference screenshot, even though every
-    // metric matches.
+    // UPRIGHT, exactly like the Windows board: p_ui.c's CreateFontW passes
+    // lfItalic = FALSE, so Segoe Print's lean lives in the GLYPHS, not in the
+    // slant request. The port used to ask cairo for the Italic face because
+    // Comic Neue (the substitute back then) only carried the lean as an italic,
+    // but cairo SYNTHESIZES an oblique for an upright face with no italic - and
+    // a synthetic slant on top of handwriting reads nothing like Segoe Print.
     cairo_font_face_t *ff = cairo_toy_font_face_create(g_fontFamily,
-                                                      CAIRO_FONT_SLANT_ITALIC,
+                                                      CAIRO_FONT_SLANT_NORMAL,
                                                       CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_face(g_cr, ff);
     cairo_font_face_destroy(ff);
@@ -670,7 +675,7 @@ static int textWidthPx(const wchar_t *s) {
     // the SAME face paint() uses, slant included: measuring with a different
     // slant gives a different advance width, and the chips then overlap
     cairo_font_face_t *ff = cairo_toy_font_face_create(g_fontFamily,
-                                                      CAIRO_FONT_SLANT_ITALIC,
+                                                      CAIRO_FONT_SLANT_NORMAL,
                                                       CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_face(g_cr, ff);
     cairo_font_face_destroy(ff);
@@ -1052,7 +1057,10 @@ static void onButton(XButtonEvent *e) {
                 // one. This is the "I can open so many dashboards and they
                 // crash" report: the bar had no toggle at all, so every click
                 // mapped another window.
+                // toggle: a second activation closes the board that is open
+                // (either one), and neither open can leak a second window
                 if (dashWin() != None) { dashClose(); paint(); }
+                else if (subsWin() != None) { subsClose(); paint(); }
                 else g_dashPending = 1;
             } else if (g_chips[hit].icon == SVG_BOW) petToggle();
         }
@@ -1487,7 +1495,7 @@ static void configReload(void) {
 // dispatching the bar and the board while the bar's WM_TIMER keeps ticking).
 // A nested event loop here would freeze the bar's clock for as long as the
 // board stays open.
-static void runDashboard(void) {
+static void runDashboard(int kind) {
     Rgb bgc = hexRgb(cbCfgPinkBg(), (Rgb){0.996, 0.969, 0.976});
     Rgb cardc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
     Rgb fgc = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
@@ -1505,18 +1513,45 @@ static void runDashboard(void) {
     double div[3] = { divc.r, divc.g, divc.b };
     int cw = cbCfgDashW() > 0 ? cbCfgDashW() : 900;
     int chh = cbCfgDashH() > 0 ? cbCfgDashH() : 520;
-    Visual *dvis = DefaultVisual(g_dpy, g_screen);
-    Colormap dcmap = DefaultColormap(g_dpy, g_screen);
-    int ddepth = DefaultDepth(g_dpy, g_screen);
+    // The bar's OWN 32-bit ARGB visual, not the default one: the board paints
+    // its page inside a rounded shape with the corners left transparent, exactly
+    // as the bar does, because p_ui.c rounds the Windows board's corners with
+    // DwmSetWindowAttribute(DWMWCP_ROUND_NATIVE) and a square-cornered board on
+    // Linux reads as a different window. The default visual has no alpha, so the
+    // shape below would clip hard edges instead of anti-aliasing them.
+    Visual *dvis = g_visual;
+    Colormap dcmap = g_cmap;
+    int ddepth = g_depth;
     Rgb pinkc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
     Rgb pinkdc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
     Rgb yellowc = hexRgb(cbCfgYellow(), (Rgb){0.72, 0.66, 0.42});
     double pink3[3] = { pinkc.r, pinkc.g, pinkc.b };
     double pinkd3[3] = { pinkdc.r, pinkdc.g, pinkdc.b };
     double yellow3[3] = { yellowc.r, yellowc.g, yellowc.b };
-    dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
-             g_fontFamily, page, card, fg, dim, div, ramp,
-             pink3, pinkd3, yellow3, (long long)g_lastScan);
+    if (kind == 2) {
+        // the subscription board: its own window and its own size (subs.width /
+        // subs.height), the same palette, and the ramp entry per provider index
+        int sw = cbCfgSubsW() > 0 ? cbCfgSubsW() : 880;
+        int sh2 = cbCfgSubsH() > 0 ? cbCfgSubsH() : 580;
+        Rgb warnc = hexRgb(cbCfgWarn(), (Rgb){0.63, 0, 0});
+        Rgb goodc = hexRgb(cbCfgGood(), (Rgb){0, 0.39, 0});
+        Rgb headc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
+        // the board's icons use the same icon colour the bar's chips use
+        Rgb iconc = hexRgb(cbCfgIconColor() && *cbCfgIconColor() ? cbCfgIconColor() : cbCfgPinkDeep(),
+                           (Rgb){0.83, 0.58, 0.67});
+        double icon3[3] = { iconc.r, iconc.g, iconc.b };
+        double warn3[3] = { warnc.r, warnc.g, warnc.b };
+        double good3[3] = { goodc.r, goodc.g, goodc.b };
+        double head3[3] = { headc.r, headc.g, headc.b };
+        subsOpen(g_dpy, g_screen, dvis, dcmap, ddepth, sw, sh2, g_scale,
+                 g_fontFamily, page, card, head3, fg, dim, div, ramp,
+                 pink3, pinkd3, warn3, good3, yellow3, icon3);
+        g_subsEpochShown = cbSubsFetchedEpochMs();
+    } else {
+        dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
+                 g_fontFamily, page, card, fg, dim, div, ramp,
+                 pink3, pinkd3, yellow3, (long long)g_lastScan);
+    }
 }
 
 // Reap every child of the bar that has exited. The pet and the detached spawns
@@ -1962,10 +1997,15 @@ static void handleMenuChoice(int choice) {
             // the menu toggles too, exactly like the chip (Windows dashToggle is
             // reached from both the chip and the tray item)
             if (dashWin() != None) { dashClose(); paint(); }
+            else if (subsWin() != None) { subsClose(); paint(); }
             else g_dashPending = 1;
             break;
         case MENU_SUBS_DASH:
-            fprintf(stderr, "chocobar: the subscription board is not ported to Linux yet\n");
+            // the subscription board is a window like the token board, so it is
+            // opened the same way (a toggle: the menu item closes an open one)
+            if (dashWin() != None) { dashClose(); paint(); }
+            else if (subsWin() != None) { subsClose(); paint(); }
+            else g_dashPending = 2;
             break;
         case MENU_AUTO_START: {
             // the menu IS the control, like the Windows Run value: the config
@@ -2290,8 +2330,17 @@ int main(int argc, char **argv) {
             // the only events it can produce are Expose (it never takes input);
             // ignore them rather than letting them fall through to the bar
             if (tipWin() != None && ev.xany.window == tipWin()) continue;
+            // BOTH boards consume their events: without the continue the
+            // board's MotionNotify fell through to the bar's onMotion, whose
+            // chipAt() read BOARD coordinates as bar ones - the tokens chip
+            // "hit" at x=60 and its title tip overwrote the heat card on every
+            // hover, so the heatmap tooltip could never be seen at all.
             if (dashWin() != None && ev.xany.window == dashWin()) {
                 if (dashEvent(&ev)) { dashClose(); paint(); }
+                continue;
+            }
+            if (subsWin() != None && ev.xany.window == subsWin()) {
+                if (subsEvent(&ev)) { subsClose(); paint(); }
                 continue;
             }
             switch (ev.type) {
@@ -2339,8 +2388,15 @@ int main(int argc, char **argv) {
             if (g_petPipe >= 0) clock_gettime(CLOCK_MONOTONIC, &g_petPipeAt);
         }
         if (g_dashPending) {
+            runDashboard(g_dashPending);
             g_dashPending = 0;
-            runDashboard();
+        }
+        // a fetch that landed while the subs board is open must repaint it: the
+        // shared core stamps the epoch, so comparing it is exact (no timer
+        // guessing, and no repaint storm while nothing changed)
+        if (subsWin() != None) {
+            long long ep = cbSubsFetchedEpochMs();
+            if (ep != g_subsEpochShown) { g_subsEpochShown = ep; subsRepaint(); }
         }
         petHandshakeDrain();
         reapChildren();
@@ -2389,6 +2445,7 @@ int main(int argc, char **argv) {
         }
     }
     tipFree();
+    subsClose();
     scriptLockRelease();
     geomBusClose(&g_bus);
     if (g_region) XFixesDestroyRegion(g_dpy, g_region);
