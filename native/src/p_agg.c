@@ -673,5 +673,9 @@ int cbCfgTempWarnAt(void) { return g_cfg.tempWarnAt; }
 // advances to the next provider. p_subs.c owns the rotation; the front-end
 // pushes this in after every config load.
 int cbCfgSubsRotateSec(void) { return g_cfg.subsRotateSec; }
+// general.debug: the same key the Windows board gates its panels-fit log line
+// on (p_ui.c); the Linux subs board reads it before printing its own, so the
+// documented skip diagnostic exists on both platforms.
+int cbCfgDebug(void) { return g_cfg.debug; }
 
 #endif // CHOCOBAR_PORTABLE

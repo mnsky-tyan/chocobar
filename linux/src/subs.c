@@ -40,6 +40,10 @@
 #include "svg_geometry.h"
 #include "chocobar_core.h"
 
+// general.debug through the shared core's config seam (p_agg.c), the same
+// key the Windows board gates its panels-fit diagnostic on
+extern int cbCfgDebug(void);
+
 // The board's window corner radius is BOARD_RADIUS_CSS from linux_shape.h:
 // Windows 11's DWMWCP_ROUND_NATIVE for a normal window, one definition for both
 // boards.
@@ -444,7 +448,17 @@ static void paint(Subs *d) {
     int shown = 0;
     for (int i = 0; i < pn; i++) {
         if (!cbSubsEnabled() || !cbSubsProvEnabled(i)) continue;
-        if (shown >= maxPanels) break;
+        if (shown >= maxPanels) {
+            // the same diagnostic p_ui.c logs under general.debug when
+            // panels are skipped (the README documents the line); silent when
+            // debug is off
+            if (cbCfgDebug())
+                fprintf(stderr,
+                        "[wizbar] subs board: %d of %d panels fit the screen (%d px body)\n",
+                        maxPanels, pn,
+                        DisplayHeight(d->dpy, DefaultScreen(d->dpy)) - 40 - (int)y - (int)(24 * S));
+            break;
+        }
 
         char label[64];
         wchar_t wl[64];

@@ -290,7 +290,7 @@ tool stores a plain token you would rather not keep on disk at all, `auth` accep
 | `terminal.title` | `""` | Optional title substring a followed window must contain (case-insensitive). Empty = any window of a probed class qualifies. |
 | `general.showTray` | `true` | Show the tray icon. |
 | `general.autoStart` | `true` | **First-run only** default for the `Start with Windows` menu item (writes the HKCU Run value). After the first run the menu is the control. If you later move the exe, the bar repoints the Run value to the path you are actually running - so "start with Windows" follows the file. |
-| `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`. |
+| `general.debug` | `false` | Verbose `[wizbar]` logging to `~/.wizbar/native.log`; on Linux the subs board's panels-fit line prints to stderr. |
 | `general.checkUpdates` | `false` | **Reports only** (never downloads or installs). On startup, one request to the GitHub releases API compares the running version with the latest release; when you are behind, one `[wizbar]` log line and the tray tooltip say so. Leave it off and the bar makes no network request of its own. |
 
 ### Keys the native build ignores
