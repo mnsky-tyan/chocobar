@@ -416,6 +416,10 @@ int cbTokSourceCount(void) { return g_cfg.tokSrcCount; }
 long long cbTokToday(void) { return g_tokensToday; }
 long long cbTokWeek(void) { return g_tokWeek; }
 long long cbTokMonth(void) { return g_tokMonth; }
+// the scan-completion counter the Windows dashboard's WM_TIMER compares
+// (g_tokDataVersion != g_dashTokVersion): a front-end polling it repaints
+// exactly when a scan applied new records, never on a timer guess.
+unsigned long long cbTokDataVersion(void) { return g_tokDataVersion; }
 
 int cbTokModelCount(void) { return g_modelCount; }
 // the display label is the raw model id first seen for this "app|model" key
@@ -640,6 +644,10 @@ const wchar_t *cbCfgGood(void) { return g_cfg.good; }
 const wchar_t *cbCfgYellow(void) { return g_cfg.yellow; }
 const wchar_t *cbCfgDivider(void) { return g_cfg.divider; }
 int cbCfgDashW(void) { return g_cfg.dashW; }
+// the subscription board's own configured size (subs.width / subs.height);
+// Windows reads the same two keys for its own board window
+int cbCfgSubsW(void) { return g_cfg.subsW; }
+int cbCfgSubsH(void) { return g_cfg.subsH; }
 int cbCfgDashH(void) { return g_cfg.dashH; }
 const wchar_t *cbCfgPinkBg(void) { return g_cfg.pinkBg; }
 // theme.heatmap[5]: the daily-heatmap ramp, light to dark
@@ -665,5 +673,9 @@ int cbCfgTempWarnAt(void) { return g_cfg.tempWarnAt; }
 // advances to the next provider. p_subs.c owns the rotation; the front-end
 // pushes this in after every config load.
 int cbCfgSubsRotateSec(void) { return g_cfg.subsRotateSec; }
+// general.debug: the same key the Windows board gates its panels-fit log line
+// on (p_ui.c); the Linux subs board reads it before printing its own, so the
+// documented skip diagnostic exists on both platforms.
+int cbCfgDebug(void) { return g_cfg.debug; }
 
 #endif // CHOCOBAR_PORTABLE

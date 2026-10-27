@@ -134,6 +134,7 @@ gcc "${APP_CFLAGS[@]}" -x c -c macos/src/adapter.m -o "$OUT/adapter.o"
 echo "compiling the bar..."
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/main.c -o "$OUT/main.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/linux_shape.c -o "$OUT/linux_shape.o"
+gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags cairo fontconfig) -c linux/src/linux_text.c -o "$OUT/linux_text.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/icons_cairo.c -o "$OUT/icons_cairo.o"
 gcc "${APP_CFLAGS[@]}" -c linux/src/p_metrics_linux.c -o "$OUT/p_metrics_linux.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags dbus-1) -c linux/src/geomdbus.c -o "$OUT/geomdbus.o"
@@ -141,10 +142,11 @@ gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags dbus-1) -c linux/src/selfheal.c -o 
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/menu.c -o "$OUT/menu.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/dash.c -o "$OUT/dash.o"
 gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/tooltip.c -o "$OUT/tooltip.o"
+gcc "${APP_CFLAGS[@]}" $(pkg-config --cflags "${PKGS[@]}") -c linux/src/subs.c -o "$OUT/subs.o"
 
 echo "linking..."
 gcc -o "$OUT/chocobar-linux" \
-  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" "$OUT/menu.o" "$OUT/dash.o" "$OUT/tooltip.o" \
+  "$OUT/main.o" "$OUT/linux_shape.o" "$OUT/linux_text.o" "$OUT/icons_cairo.o" "$OUT/p_metrics_linux.o" "$OUT/geomdbus.o" "$OUT/selfheal.o" "$OUT/menu.o" "$OUT/dash.o" "$OUT/tooltip.o" "$OUT/subs.o" \
   "$OUT/core.o" "$OUT/adapter.o" \
   $(pkg-config --libs "${PKGS[@]}") -lm -lpthread
 

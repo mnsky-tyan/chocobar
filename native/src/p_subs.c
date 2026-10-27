@@ -2165,5 +2165,9 @@ int cbSubsProvWins(int i, SubsWin *out, int max) { return subsProvWins(i, out, m
 // seconds since the last completed fetch cycle, 0 = never
 long long cbSubsFetchedEpochMs(void) { return subsFetchedEpochMs(); }
 void cbSubsRefetchNow(void) { subsRefetchNow(); }
+// the credit formatter (p_utils.c fmtNum), wide like the rest of the seam so a
+// front-end in its own translation unit formats the same tiers the Windows
+// board does instead of growing a second copy that drifts
+void cbSubsFmtNum(long long n, wchar_t *out, int cb) { fmtNum(n, out, cb); }
 
 #endif // CHOCOBAR_PORTABLE

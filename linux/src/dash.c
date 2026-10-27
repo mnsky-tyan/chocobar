@@ -39,11 +39,13 @@
 #include <X11/keysym.h>
 #include <X11/Xcursor/Xcursor.h>
 #include <X11/extensions/Xinerama.h>
-#include <fontconfig/fontconfig.h>
+#include <X11/extensions/Xfixes.h>
+#include <X11/extensions/shape.h>
 #include "linux_svg.h"
 
 #include "dash.h"
 #include "linux_shape.h"
+#include "linux_text.h"
 #include "tooltip.h"
 #include "svg_geometry.h"  // native/src: the shared icon ids (SVG_DIAMOND, ...)
 
@@ -90,6 +92,10 @@ extern const wchar_t *cbCfgYellow(void);
 #define DASH_HM_WEEKS 26          // p_ui.c HM_WEEKS: fixed heatmap width in weeks
 #define DASH_MAX_DAYS 190         // p_agg.c's per-day window (about 27 weeks)
 #define DASH_DAY_DETAIL_ROWS 6    // p_ui.c ddRows cap
+// The board's minimum, CSS px: the PMinSize hint and dashFitToContent's floor
+// are the same number, so no fit ever requests a height the WM would constrain
+// back up against the hint the window itself declares.
+#define DASH_MIN_CSS 380
 // the MODEL table's row cap is NOT defined here: it is p_agg's own
 // DASH_MODEL_ROWS, reached through cbTokModelRowCap() so the two boards cannot
 // disagree about how many rows the same store shows
@@ -123,12 +129,14 @@ typedef struct {
        surface and toy font faces per frame would be an allocation per pixel */
     cairo_surface_t *surf;
     cairo_t *cr;
+    XserverRegion shape;        // the window's rounded shape (DWM round-native twin)
+    int shapeW, shapeH, shapeR; // the geometry that region was built for
     cairo_font_face_t *ffReg, *ffBold;
     // Glyphs the display family does not carry (the titlebar's U+2715 close
     // cross). Windows falls back through GDI's font linking to Segoe UI Symbol;
     // cairo's toy API does NOT fall back - a missing glyph renders as a tofu
     // box, which is exactly what the close button showed before this face.
-    // Resolved through fontconfig once at open, like the bar's own family.
+    // Resolved through fontconfig (linux_text.c symbolFontFace) once at open.
     cairo_font_face_t *ffSymbol;
     int cfgH;                  // the CONFIG height in CSS px (content-fit measures against it)
     int x, y;                  // window position: content fit keeps the board on screen
@@ -138,11 +146,13 @@ typedef struct {
 static Dash g_dash;
 static int g_boardOpen = 0;
 
+// The board's own window corner radius lives in linux_shape.h (BOARD_RADIUS_CSS):
+// Windows 11's DWMWCP_ROUND_NATIVE for a normal (non-maximized) window, one
+// definition for both boards so they cannot drift apart.
+
 // ---- small helpers ---------------------------------------------------------------
 
-// p_agg.c hands out UTF-8 names; cairo wants UTF-8, so nothing to convert. The
-// bar's own wideToUtf8 lives in main.c (a front-end file); the board only needs
-// the ASCII-ish label helpers below.
+// p_agg.c hands out UTF-8 names; cairo wants UTF-8, so nothing to convert here.
 
 // p_ui.c fmtTokens: the stat-card abbreviation
 static void fmtTok(long long n, char *out, size_t cap) {
@@ -349,12 +359,16 @@ static void paint(Dash *d) {
     double S = d->scale;
     cairo_t *cr = d->cr;
 
-    // page: an OPAQUE fill first (the board is a solid panel, not a translucent
-    // bar; CAIRO_OPERATOR_SOURCE with an opaque colour writes alpha = 1)
+    // page: an OPAQUE fill inside the window's rounded shape (the board is a
+    // solid panel, not a translucent bar; CAIRO_OPERATOR_SOURCE with an opaque
+    // colour writes alpha = 1). The corners stay transparent so the shape's
+    // staircase anti-aliases instead of clipping hard edges - the X11 twin of
+    // Windows' DWMWCP_ROUND_NATIVE.
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, d->bg.r, d->bg.g, d->bg.b, 1.0);
-    cairo_paint(cr);
+    roundedPath(cr, 0, 0, d->w, d->h, BOARD_RADIUS_CSS * d->scale);
+    cairo_fill(cr);
     cairo_restore(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
     cairo_new_path(cr);
@@ -408,7 +422,7 @@ static void paint(Dash *d) {
             // baseline: centre the ink block (ascent + descent) in the frame
             double tyOff = (b - t) / 2.0 + (fe.ascent - fe.descent) / 2.0;
             if (d->btnHover == bi) {
-                card(d, cr, l, t, r - l, b - t, 4 * S, d->bg, 1.0, d->pink);
+                card(d, cr, l, t, r - l, b - t, 10 * S, d->bg, 1.0, d->pink);
                 text(cr, l + txOff, t + tyOff, tx, d->pinkDeep, 1.0);
             } else {
                 text(cr, l + txOff, t + tyOff, tx, d->dim, 1.0);
@@ -901,28 +915,45 @@ static void paint(Dash *d) {
         double fy = y;
         if (fy > d->h - 16 * S) fy = d->h - 16 * S;
         textR(cr, d->w - padL, fy + 9 * S, fl, d->dim, 0.9);
-        d->contentH = (int)(fy + 10 * S + 12 * S);
+        d->contentH = (int)(y + 10 * S + 12 * S);
     }
 }
 
 // ---- window lifetime ---------------------------------------------------------------
 
+// Rebuild the window shape from the current size. p_ui.c dashRoundCorners asks
+// DWM for DWMWCP_ROUND_NATIVE; this is the X11 twin, using the same shared
+// staircase the bar and the menu use. Called after any resize, because a stale
+// shape clips the new size.
+static void dashReshape(Dash *d) {
+    // the shared helper rebuilds the region whenever the built geometry (w, h,
+    // r) changes - this board fits its content too, and the old radius-only
+    // guard kept the open-time region, clipping whatever grew past it (the
+    // ConfigureNotify path could never fix it either: same guard)
+    boardShapeApply(d->dpy, d->win, d->w, d->h, BOARD_RADIUS_CSS, d->scale,
+                    &d->shape, &d->shapeW, &d->shapeH, &d->shapeR);
+}
+
 // ---- content fit ---------------------------------------------------------------
 // p_ui.c dashFitToContent: after a paint, the window takes the painted content's
 // height, clamped to 45% of the configured height (a board that is shorter than
 // that reads as a stub) and to the screen minus a margin (no scrollbar, no size
-// grip: a panel pushed past the bottom edge is unreachable). The height only
-// ever shrinks here, so the shrink cannot drop a row and oscillate - which is
-// why every fit decision in the paint measures against d->cfgH, not d->h.
+// grip: a panel pushed past the bottom edge is unreachable). The painted
+// content is a pure function of the data, not of the window's height - the
+// footer's clamp only moves the stamp text inside a short window, never the
+// measured height - so a fit can neither drop a row nor oscillate, which is why
+// every fit decision in the paint measures against d->cfgH, not d->h.
 //
 // Windows does it before ShowWindow so the board never appears at the wrong
 // height; on X the equivalent is to paint before the map, which is what the
 // open path does below.
-static void dashFitToContent(void) {
+static int dashFitToContent(void) {
     Dash *d = &g_dash;
-    if (!d->win || d->contentH <= 0) return;
+    if (!d->win || d->contentH <= 0) return 0;
     int want = d->contentH;
+    int minH = (int)(DASH_MIN_CSS * d->scale);
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
+    if (lo < minH) lo = minH;
     if (want < lo) want = lo;
     // the containing head's work-area bottom, in device px: Xinerama-aware,
     // because the board can live on any head. Both the height clamp and the
@@ -943,25 +974,32 @@ static void dashFitToContent(void) {
             XFree(xi);
         }
     }
-    if (headBottom <= 0) return;
+    if (headBottom <= 0) return 0;
     // keep the whole board on screen: p_ui.c moves the window up to the head's
     // work-area bottom before sizing it, so a board whose content reaches the
     // clamp still shows its last row (and the "last scan" footer) instead of
     // having it clipped off the bottom edge. The move MUST come before the
     // clamp: clamping to the room at the OLD position would make the move below
     // unreachable, which is the bug this order fixes.
+    int yWas = d->y, xWas = d->x;
     if (d->y + want > headBottom) {
         d->y = headBottom - want;
         if (d->y < 0) d->y = 0;
     }
     int hi = headBottom - d->y;
-    if (hi <= 0) return;
+    if (hi <= 0) return 0;
     if (want > hi) want = hi;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
         int sw = DisplayWidth(d->dpy, scr);
         if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
     }
+    // the move-up and the x-clamp are real moves on every path that reaches
+    // here: only the open path follows with its own XMoveResizeWindow, so a
+    // later fit that changed the position must move the window itself or the
+    // struct's position would drift away from the window's
+    if ((d->y != yWas || d->x != xWas) && d->dpy)
+        XMoveWindow(d->dpy, d->win, d->x, d->y);
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -971,6 +1009,25 @@ static void dashFitToContent(void) {
             d->cr = cairo_create(d->surf);
         }
         XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
+        dashReshape(d);
+        return 1;
+    }
+    return 0;
+}
+
+// Paint the live board and then latch it to the height it just painted - the
+// same pattern the subs board paints through. The painted stack IS the content
+// and it changes while the board is up: a scan applying new records, a heatmap
+// cell opening its day-detail block. The fit must stay OUTSIDE paint(), which
+// would destroy the context mid-draw.
+static void paintAndFit(Dash *d) {
+    paint(d);
+    cairo_surface_flush(d->surf);
+    XFlush(d->dpy);
+    if (dashFitToContent()) {
+        paint(d);
+        cairo_surface_flush(d->surf);
+        XFlush(d->dpy);
     }
 }
 
@@ -1004,39 +1061,21 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     d->cfgH = cssH;
     d->lastScanAt = lastScanAt;
 
-    // the board's two faces: the configured display family (italic, like the
-    // bar) and its bold. The Windows board draws with the same family at
-    // FW_NORMAL/FW_BOLD, and its CSS-600 elements are the Regular face because
-    // the family has no true semibold - so the bold face here is the real bold,
-    // used only where the Windows board asks for FW_BOLD.
-    d->ffReg = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_ITALIC,
+    // the board's two faces: the configured display family, UPRIGHT (p_ui.c's
+    // dashFont passes lfItalic = FALSE - Segoe Print's lean is in the glyphs),
+    // and its bold. The CSS-600 elements are the Regular face because the
+    // family has no true semibold - so the bold face here is the real bold,
+    // used only where the Windows board asks for FW_BOLD. The port used to ask
+    // for Italic, which cairo synthesizes into an oblique for an upright face.
+    d->ffReg = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_NORMAL,
                                           CAIRO_FONT_WEIGHT_NORMAL);
-    d->ffBold = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_ITALIC,
+    d->ffBold = cairo_toy_font_face_create(d->fontFamily, CAIRO_FONT_SLANT_NORMAL,
                                            CAIRO_FONT_WEIGHT_BOLD);
-    // The symbol face: whatever fontconfig resolves for a family that carries
-    // U+2715. DejaVu Sans is on every desktop this bar runs on and has it; the
-    // lookup is the same FcNameParse path resolveFontFamily uses in main.c, so
-    // a machine without DejaVu still gets a real match instead of tofu.
-    {
-        char symFam[128] = "DejaVu Sans";
-        FcPattern *pat = FcNameParse((const FcChar8 *)"DejaVu Sans");
-        if (pat) {
-            FcPatternAddDouble(pat, FC_SIZE, 12.0);
-            FcConfigSubstitute(NULL, pat, FcMatchPattern);
-            FcDefaultSubstitute(pat);
-            FcResult res = FcResultNoMatch;
-            FcPattern *m = FcFontMatch(NULL, pat, &res);
-            if (m && res == FcResultMatch) {
-                FcChar8 *fam = NULL;
-                if (FcPatternGetString(m, FC_FAMILY, 0, &fam) == FcResultMatch && fam)
-                    snprintf(symFam, sizeof(symFam), "%s", (const char *)fam);
-            }
-            if (m) FcPatternDestroy(m);
-            FcPatternDestroy(pat);
-        }
-        d->ffSymbol = cairo_toy_font_face_create(symFam, CAIRO_FONT_SLANT_NORMAL,
-                                                 CAIRO_FONT_WEIGHT_NORMAL);
-    }
+    // The symbol face comes from the shared lookup: whatever fontconfig
+    // resolves for a family that carries U+2715. DejaVu Sans is on every
+    // desktop this bar runs on and has it, so a machine without DejaVu still
+    // gets a real match instead of tofu.
+    d->ffSymbol = symbolFontFace();
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
@@ -1083,19 +1122,18 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     memset(&sh, 0, sizeof(sh));
     sh.flags = PMinSize;
     sh.min_width = (int)(520 * d->scale);
-    sh.min_height = (int)(380 * d->scale);
+    sh.min_height = (int)(DASH_MIN_CSS * d->scale);
     XSetWMNormalHints(dpy, d->win, &sh);
 
     // persistent paint state: the board repaints on every hover move
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
     d->cr = cairo_create(d->surf);
+    dashReshape(d);
 
     // p_ui.c paints while the window is still hidden and fits BEFORE ShowWindow,
     // because resizing after the board is on screen reads as "bolted together"
     // (the top appears, then the lower part lags in). X keeps the same ordering.
-    paint(d);
-    cairo_surface_flush(d->surf);
-    dashFitToContent();
+    paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
     XMapWindow(dpy, d->win);
     XFlush(dpy);
@@ -1106,6 +1144,16 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
 Window dashWin(void) {
     return g_boardOpen ? g_dash.win : None;
+}
+
+// Repaints the board after a scan applied new records while it was open (the
+// bar's loop calls this when the shared core's scan version moves past what
+// the board painted). A scan just completed, so the footer's "last scan"
+// stamp moves with the numbers.
+void dashRepaint(void) {
+    if (!g_boardOpen || !g_dash.cr) return;
+    g_dash.lastScanAt = time(NULL);
+    paintAndFit(&g_dash);
 }
 
 // The board wants to close: Esc, q, a non-left click, the WM's close button, or
@@ -1214,28 +1262,25 @@ int dashEvent(XEvent *ev) {
     switch (ev->type) {
         case Expose:
             if (ev->xexpose.count == 0) {
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             break;
         case ConfigureNotify:
+            d->x = ev->xconfigure.x;
+            d->y = ev->xconfigure.y;
             if (ev->xconfigure.width != d->w || ev->xconfigure.height != d->h) {
                 d->w = ev->xconfigure.width;
                 d->h = ev->xconfigure.height;
                 cairo_xlib_surface_set_size(d->surf, d->w, d->h);
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                dashReshape(d);
+                paintAndFit(d);
             }
             break;
         case MotionNotify: {
             int b = buttonAt(d, ev->xmotion.x, ev->xmotion.y);
             if (b != d->btnHover) {
                 d->btnHover = b;
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             // the heat card, the board's own tooltip (p_ui.c dashTipCell on every
             // WM_MOUSEMOVE): the weekday/date, that day's token total and its
@@ -1247,9 +1292,7 @@ int dashEvent(XEvent *ev) {
         case LeaveNotify:
             if (d->btnHover) {
                 d->btnHover = 0;
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             tipHide();
             break;
@@ -1263,15 +1306,11 @@ int dashEvent(XEvent *ev) {
                     // refresh: the Windows button re-scans the token cache
                     extern long long cbScanTokens(void);
                     d->busy = 1;
-                    paint(d);
-                    cairo_surface_flush(d->surf);
-                    XFlush(d->dpy);
+                    paintAndFit(d);
                     cbScanTokens();
                     d->busy = 0;
                     d->lastScanAt = time(NULL);
-                    paint(d);
-                    cairo_surface_flush(d->surf);
-                    XFlush(d->dpy);
+                    paintAndFit(d);
                 }
             }
             break;
@@ -1282,9 +1321,7 @@ int dashEvent(XEvent *ev) {
                 int back = heatCellAt(d, ev->xbutton.x, ev->xbutton.y);
                 if (back != d->daySel) {
                     d->daySel = back;
-                    paint(d);
-                    cairo_surface_flush(d->surf);
-                    XFlush(d->dpy);
+                    paintAndFit(d);
                 }
             }
             break;
@@ -1300,6 +1337,7 @@ void dashClose(void) {
     tipHide();   // the board's own heat card must not outlive the board
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }
     if (d->surf) { cairo_surface_destroy(d->surf); d->surf = NULL; }
+    boardShapeFree(d->dpy, &d->shape, &d->shapeW, &d->shapeH, &d->shapeR);
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }
     if (d->ffBold) { cairo_font_face_destroy(d->ffBold); d->ffBold = NULL; }
     if (d->ffSymbol) { cairo_font_face_destroy(d->ffSymbol); d->ffSymbol = NULL; }

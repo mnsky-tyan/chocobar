@@ -330,6 +330,7 @@ void cbSubsProvPlan(int i, wchar_t *out, int cb);
 int cbSubsProvWins(int i, SubsWin *out, int max);
 long long cbSubsFetchedEpochMs(void);
 void cbSubsRefetchNow(void);
+void cbSubsFmtNum(long long n, wchar_t *out, int cb);
 #endif // CHOCOBAR_PORTABLE
 
 #endif // CHOCOBAR_CORE_H

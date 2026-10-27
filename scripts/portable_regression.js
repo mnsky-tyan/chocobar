@@ -330,9 +330,14 @@ function check(name, ok, detail) {
   check('linux: the cairo context is destroyed before its surface',
     /if \(g_cr\) \{ cairo_destroy\(g_cr\); g_cr = NULL; \}\s*\n\s*if \(g_surf\) \{ cairo_surface_destroy\(g_surf\); g_surf = NULL; \}/.test(lx),
     'a context outliving its surface raised thousands of RenderBadPicture errors');
-  check('linux: the dashboard uses the default visual, not the bar ARGB one',
-    /Visual \*dvis = DefaultVisual\(g_dpy, g_screen\)/.test(lx),
-    'an ARGB visual with depth 24 makes XCreateWindow fail silently: no window at all');
+  // BOTH boards ride the bar's own 32-bit ARGB visual (pass 2: the rounded
+  // corners shape anti-aliases only on a 32-bit surface). The old check pinned
+  // DefaultVisual because depth 24 + ARGB visual failed XCreateWindow; the
+  // bar's visual is created WITH depth 32, so that failure mode is gone and
+  // the invariant to guard is "same visual + depth as the bar".
+  check('linux: both boards use the bar ARGB visual and depth, not a mismatched one',
+    /Visual \*dvis = g_visual;/.test(lx) && /int ddepth = g_depth;/.test(lx),
+    'a depth-24 default visual makes the rounded-corner shape aliased and an ARGB/depth mismatch fails XCreateWindow silently');
   check('linux: the menu does not close on FocusOut',
     /case FocusOut:[\s\S]{0,600}?break;/.test(menu) && !/case FocusOut:\s*\n\s*\/\/[^\n]*\n\s*done = 1;/.test(menu),
     'an immediate FocusOut closed the menu a millisecond after it opened');
@@ -422,19 +427,40 @@ function check(name, ok, detail) {
     /loadCursor\("hand2"\)/.test(lx2) && /cursorUpdate\(pill >= 0\)/.test(lx2),
     'p_ui.c switches IDC_HAND/IDC_ARROW on WM_MOUSEMOVE; the Linux bar must mean the same thing');
 
-  // the FONT SLANT: Segoe Print on Windows is a hand-written face whose letters
-  // already lean, and the closest installed family (Comic Neue) carries the
-  // same lean as its Italic face. Rendered upright the bar read as a different
-  // font than the reference even though every metric matched.
-  // The DRAW and the MEASURE must use the same face: a different slant gives
-  // a different advance width, and the chips then overlap.
-  check('linux: the bar text leans, like the Windows font',
-    /CAIRO_FONT_SLANT_ITALIC/.test(lx2),
-    'upright text does not look like the Segoe Print the config asks for');
+  // the FONT SLANT: p_ui.c's CreateFontW passes lfItalic = FALSE, so Segoe
+  // Print's lean lives in the GLYPHS and the port must ask cairo for the
+  // UPRIGHT face. Asking for Italic makes cairo SYNTHESIZE an oblique for an
+  // upright handwriting face, which reads nothing like Segoe Print - measured
+  // against the board screenshots on 2026-10-26.
+  check('linux: the bar text is upright, like the Windows font',
+    /CAIRO_FONT_SLANT_NORMAL/.test(lx2) && !/CAIRO_FONT_SLANT_ITALIC/.test(lx2),
+    'a synthesized italic does not look like the Segoe Print the config names');
   check('linux: the text is measured with the face it is painted with',
-    (lx2.match(/CAIRO_FONT_SLANT_ITALIC/g) || []).length === 2 &&
-    (lx2.match(/CAIRO_FONT_SLANT_NORMAL/g) || []).length === 0,
-    'painting italic but measuring upright makes the chip widths wrong');
+    (lx2.match(/CAIRO_FONT_SLANT_NORMAL/g) || []).length === 2,
+    'measuring with a different slant than the paint makes the chip widths wrong');
+  const dashU = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
+  check('linux: the dashboard draws the same upright face',
+    /CAIRO_FONT_SLANT_NORMAL/.test(dashU) && !/CAIRO_FONT_SLANT_ITALIC/.test(dashU),
+    'the board with a synthesized oblique reads nothing like the Windows board');
+
+  // the subscription board (subs.c): its behaviour is proven by
+  // linux/tests/behaviour.sh, which drives the real binary - the menu row opens
+  // the board, its close button closes it, and a second activation toggles it
+  // shut. Only the invariants a running window cannot show stay below.
+  const subs = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'subs.c'), 'utf8');
+  const tip = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'tooltip.c'), 'utf8');
+  // the tooltip painted before it mapped, and a pre-map RENDER draw on a
+  // 32-bit ARGB window never lands (measured on Xvfb: the mapped tip came up
+  // black). The map must precede the paint in the same call.
+  check('linux: the tooltip maps before it paints',
+    /XMoveResizeWindow\(g_tip\.dpy, g_tip\.win, x, y, \(unsigned\)w, \(unsigned\)h\);\n\s*XMapRaised\(g_tip\.dpy, g_tip\.win\);\n\s*\/\/ paint/.test(tip),
+    'the painted-then-mapped tip came up black: a pre-map RENDER draw on a 32-bit visual never lands');
+  // the tip sits 6 px right and 16 px below the pointer, so the pointer's next
+  // move lands on the tip itself; with no input shape the board below stops
+  // hearing the pointer (the heat card froze the moment the pointer entered it)
+  check('linux: the tooltip window is click-through (an empty INPUT shape)',
+    /XFixesSetWindowShapeRegion\(g_tip\.dpy, g_tip\.win, ShapeInput, 0, 0, empty\)/.test(tip),
+    'with no input shape the tip swallows the pointer next motion and the board below never hears it');
 
   // layout: the demo has TWO groups - left-pinned chips (tokens) and right-aligned
   // metrics, with an empty run between them. A single right-aligned loop packs every

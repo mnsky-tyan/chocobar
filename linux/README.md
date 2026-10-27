@@ -146,7 +146,7 @@ and does nothing when the exclusion is already in place.
 | memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
 | CPU, steady state | 0.2% of one core, 1 Hz repaint |
 | threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
-| binary | 995 KB, no runtime |
+| binary | 1080 KB, no runtime |
 | token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
 | subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
@@ -171,6 +171,7 @@ Per-OS parts, written fresh for Linux:
 | metrics | `p_metrics.c` (PDH, Core Audio, HWiNFO) | `linux/src/p_metrics_linux.c` (`/proc`, `/sys`, `pactl`) |
 | icons | `p_icons.c` (GDI+) | `linux/src/icons_cairo.c` (cairo) - same geometry from `p_svg.c` |
 | window/paint | `p_ui.c` (layered GDI window) | `linux/src/main.c` (managed X11 window + cairo) |
+| shared X helpers | - | `linux/src/linux_shape.c` (the rounded window region), `linux/src/linux_text.c` (wide-to-UTF-8, the symbol face) |
 | subscriptions | `p_subs.c` (WinHTTP) | the SAME `p_subs.c`: its HTTP is a libcurl body under `CHOCOBAR_PORTABLE` |
 
 ## Why a managed X11 window in the lower layer
@@ -287,8 +288,11 @@ The chip shows the selected plan's WEEKLY remaining percentage and advances to
 the next enabled provider every `rotateSec` seconds. `>70%` is green, `>30%`
 dim, below that red - the Windows thresholds. `stale` means every provider
 failed its last fetch; an em dash means nothing has ever succeeded. The board
-(Subscription dashboard in the right-click menu) is Windows/mac only for now -
-the menu item says so rather than pretending.
+(Subscription dashboard in the right-click menu, or a click on the gauge chip)
+is the Windows board ported: one full-width panel per enabled provider, one
+donut per plan window with the credits left and the reset countdown, and the
+cycle's fetched time in the foot. Its `refresh` re-fetches the providers and
+its close button ends it, exactly as on Windows.
 
 ## Tests
 
@@ -303,11 +307,12 @@ button release and does not bounce, a press alone opens nothing, a click outside
 the menu picks no row, the bar asks for no blur hint, it rides above the reported
 terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
-reads its state once per open and refuses to flip an unreadable unit, and a
-left click on a right-group metric chip does nothing (hovering one still shows
-its title). The helper-stack gate runs against a stub
-`org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded` and
-records every `unloadScript`/`loadScript` call, so the unload-before-load
+reads its state once per open and refuses to flip an unreadable unit, the
+Subscription row opens the real board (its close button ends it, a second
+activation toggles it shut), and a left click on a right-group metric chip does
+nothing (hovering one still shows its title). The helper-stack gate runs against
+a stub `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded`
+and records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that
 keeps a second bar process out is exercised through the binary's own acquire
 (`--self-test-lock`), never a shell re-implementation of it.
