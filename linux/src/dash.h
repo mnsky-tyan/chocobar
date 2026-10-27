@@ -36,4 +36,8 @@ void dashClose(void);
 // The board window's id, None when no board is open.
 Window dashWin(void);
 
+// Repaint after a scan applied new records while the board was open (a new
+// scan-completion version on the shared core).
+void dashRepaint(void);
+
 #endif

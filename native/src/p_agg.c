@@ -416,6 +416,10 @@ int cbTokSourceCount(void) { return g_cfg.tokSrcCount; }
 long long cbTokToday(void) { return g_tokensToday; }
 long long cbTokWeek(void) { return g_tokWeek; }
 long long cbTokMonth(void) { return g_tokMonth; }
+// the scan-completion counter the Windows dashboard's WM_TIMER compares
+// (g_tokDataVersion != g_dashTokVersion): a front-end polling it repaints
+// exactly when a scan applied new records, never on a timer guess.
+unsigned long long cbTokDataVersion(void) { return g_tokDataVersion; }
 
 int cbTokModelCount(void) { return g_modelCount; }
 // the display label is the raw model id first seen for this "app|model" key

@@ -78,6 +78,7 @@ extern long long cbTokDayAppOut(int daysBack, int i);
 extern long long cbTokDayAppCr(int daysBack, int i);
 extern long long cbTokDayAppCw(int daysBack, int i);
 extern int cbTokDayAppReqs(int daysBack, int i);
+extern unsigned long long cbTokDataVersion(void);
 extern int cbCfgTokensEnabled(void);
 extern int cbCfgSubsRotateSec(void);
 extern const wchar_t *cbCfgIconColor(void);
@@ -92,6 +93,10 @@ extern const wchar_t *cbCfgYellow(void);
 #define DASH_HM_WEEKS 26          // p_ui.c HM_WEEKS: fixed heatmap width in weeks
 #define DASH_MAX_DAYS 190         // p_agg.c's per-day window (about 27 weeks)
 #define DASH_DAY_DETAIL_ROWS 6    // p_ui.c ddRows cap
+// The board's minimum, CSS px: the PMinSize hint and dashFitToContent's floor
+// are the same number, so no fit ever requests a height the WM would constrain
+// back up against the hint the window itself declares.
+#define DASH_MIN_CSS 380
 // the MODEL table's row cap is NOT defined here: it is p_agg's own
 // DASH_MODEL_ROWS, reached through cbTokModelRowCap() so the two boards cannot
 // disagree about how many rows the same store shows
@@ -934,18 +939,22 @@ static void dashReshape(Dash *d) {
 // p_ui.c dashFitToContent: after a paint, the window takes the painted content's
 // height, clamped to 45% of the configured height (a board that is shorter than
 // that reads as a stub) and to the screen minus a margin (no scrollbar, no size
-// grip: a panel pushed past the bottom edge is unreachable). The height only
-// ever shrinks here, so the shrink cannot drop a row and oscillate - which is
-// why every fit decision in the paint measures against d->cfgH, not d->h.
+// grip: a panel pushed past the bottom edge is unreachable). The painted
+// content is a pure function of the data, not of the window's height - only the
+// footer's clamp reads d->h, and it saturates - so a fit can neither drop a row
+// nor oscillate, which is why every fit decision in the paint measures against
+// d->cfgH, not d->h.
 //
 // Windows does it before ShowWindow so the board never appears at the wrong
 // height; on X the equivalent is to paint before the map, which is what the
 // open path does below.
-static void dashFitToContent(void) {
+static int dashFitToContent(void) {
     Dash *d = &g_dash;
-    if (!d->win || d->contentH <= 0) return;
+    if (!d->win || d->contentH <= 0) return 0;
     int want = d->contentH;
+    int minH = (int)(DASH_MIN_CSS * d->scale);
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
+    if (lo < minH) lo = minH;
     if (want < lo) want = lo;
     // the containing head's work-area bottom, in device px: Xinerama-aware,
     // because the board can live on any head. Both the height clamp and the
@@ -966,25 +975,32 @@ static void dashFitToContent(void) {
             XFree(xi);
         }
     }
-    if (headBottom <= 0) return;
+    if (headBottom <= 0) return 0;
     // keep the whole board on screen: p_ui.c moves the window up to the head's
     // work-area bottom before sizing it, so a board whose content reaches the
     // clamp still shows its last row (and the "last scan" footer) instead of
     // having it clipped off the bottom edge. The move MUST come before the
     // clamp: clamping to the room at the OLD position would make the move below
     // unreachable, which is the bug this order fixes.
+    int yWas = d->y, xWas = d->x;
     if (d->y + want > headBottom) {
         d->y = headBottom - want;
         if (d->y < 0) d->y = 0;
     }
     int hi = headBottom - d->y;
-    if (hi <= 0) return;
+    if (hi <= 0) return 0;
     if (want > hi) want = hi;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
         int sw = DisplayWidth(d->dpy, scr);
         if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
     }
+    // the move-up and the x-clamp are real moves on every path that reaches
+    // here: only the open path follows with its own XMoveResizeWindow, so a
+    // later fit that changed the position must move the window itself or the
+    // struct's position would drift away from the window's
+    if ((d->y != yWas || d->x != xWas) && d->dpy)
+        XMoveWindow(d->dpy, d->win, d->x, d->y);
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -995,6 +1011,24 @@ static void dashFitToContent(void) {
         }
         XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
         dashReshape(d);
+        return 1;
+    }
+    return 0;
+}
+
+// Paint the live board and then latch it to the height it just painted - the
+// same pattern the subs board paints through. The painted stack IS the content
+// and it changes while the board is up: a scan applying new records, a heatmap
+// cell opening its day-detail block. The fit must stay OUTSIDE paint(), which
+// would destroy the context mid-draw.
+static void paintAndFit(Dash *d) {
+    paint(d);
+    cairo_surface_flush(d->surf);
+    XFlush(d->dpy);
+    if (dashFitToContent()) {
+        paint(d);
+        cairo_surface_flush(d->surf);
+        XFlush(d->dpy);
     }
 }
 
@@ -1089,7 +1123,7 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     memset(&sh, 0, sizeof(sh));
     sh.flags = PMinSize;
     sh.min_width = (int)(520 * d->scale);
-    sh.min_height = (int)(380 * d->scale);
+    sh.min_height = (int)(DASH_MIN_CSS * d->scale);
     XSetWMNormalHints(dpy, d->win, &sh);
 
     // persistent paint state: the board repaints on every hover move
@@ -1100,9 +1134,7 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // p_ui.c paints while the window is still hidden and fits BEFORE ShowWindow,
     // because resizing after the board is on screen reads as "bolted together"
     // (the top appears, then the lower part lags in). X keeps the same ordering.
-    paint(d);
-    cairo_surface_flush(d->surf);
-    dashFitToContent();
+    paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
     XMapWindow(dpy, d->win);
     XFlush(dpy);
@@ -1113,6 +1145,16 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
 Window dashWin(void) {
     return g_boardOpen ? g_dash.win : None;
+}
+
+// Repaints the board after a scan applied new records while it was open (the
+// bar's loop calls this when the shared core's scan version moves past what
+// the board painted). A scan just completed, so the footer's "last scan"
+// stamp moves with the numbers.
+void dashRepaint(void) {
+    if (!g_boardOpen || !g_dash.cr) return;
+    g_dash.lastScanAt = time(NULL);
+    paintAndFit(&g_dash);
 }
 
 // The board wants to close: Esc, q, a non-left click, the WM's close button, or
@@ -1221,9 +1263,7 @@ int dashEvent(XEvent *ev) {
     switch (ev->type) {
         case Expose:
             if (ev->xexpose.count == 0) {
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             break;
         case ConfigureNotify:
@@ -1232,18 +1272,14 @@ int dashEvent(XEvent *ev) {
                 d->h = ev->xconfigure.height;
                 cairo_xlib_surface_set_size(d->surf, d->w, d->h);
                 dashReshape(d);
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             break;
         case MotionNotify: {
             int b = buttonAt(d, ev->xmotion.x, ev->xmotion.y);
             if (b != d->btnHover) {
                 d->btnHover = b;
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             // the heat card, the board's own tooltip (p_ui.c dashTipCell on every
             // WM_MOUSEMOVE): the weekday/date, that day's token total and its
@@ -1255,9 +1291,7 @@ int dashEvent(XEvent *ev) {
         case LeaveNotify:
             if (d->btnHover) {
                 d->btnHover = 0;
-                paint(d);
-                cairo_surface_flush(d->surf);
-                XFlush(d->dpy);
+                paintAndFit(d);
             }
             tipHide();
             break;
@@ -1271,15 +1305,11 @@ int dashEvent(XEvent *ev) {
                     // refresh: the Windows button re-scans the token cache
                     extern long long cbScanTokens(void);
                     d->busy = 1;
-                    paint(d);
-                    cairo_surface_flush(d->surf);
-                    XFlush(d->dpy);
+                    paintAndFit(d);
                     cbScanTokens();
                     d->busy = 0;
                     d->lastScanAt = time(NULL);
-                    paint(d);
-                    cairo_surface_flush(d->surf);
-                    XFlush(d->dpy);
+                    paintAndFit(d);
                 }
             }
             break;
@@ -1290,9 +1320,7 @@ int dashEvent(XEvent *ev) {
                 int back = heatCellAt(d, ev->xbutton.x, ev->xbutton.y);
                 if (back != d->daySel) {
                     d->daySel = back;
-                    paint(d);
-                    cairo_surface_flush(d->surf);
-                    XFlush(d->dpy);
+                    paintAndFit(d);
                 }
             }
             break;

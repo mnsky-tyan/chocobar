@@ -91,6 +91,7 @@ extern int cbCfgAlign(void);
 extern long long cbTokToday(void);
 extern long long cbTokWeek(void);
 extern long long cbTokMonth(void);
+extern unsigned long long cbTokDataVersion(void);
 extern int cbCfgDashW(void);
 extern int cbCfgSubsW(void);
 extern int cbCfgSubsH(void);
@@ -192,6 +193,7 @@ static int g_menuX = 0, g_menuY = 0;
 static int g_swallowRelease = 0;   // the menu's dismissing gesture: eat its release
 static int g_dashPending = 0;   // 1 = token dashboard, 2 = subscriptions
 static long long g_subsEpochShown = 0;   // the subs epoch the board already painted
+static unsigned long long g_dashTokShown = 0;   // the scan version the token board already painted
 
 
 static LinuxMetrics g_m;
@@ -1544,9 +1546,14 @@ static void runDashboard(int kind) {
                  pink3, pinkd3, warn3, good3, yellow3, icon3);
         g_subsEpochShown = shownEpoch;
     } else {
+        // The scan version is sampled BEFORE the paint, the same order the subs
+        // epoch uses: a scan landing mid-paint would otherwise be recorded
+        // as already shown, and the loop's poll would never repaint it.
+        unsigned long long shownTok = cbTokDataVersion();
         dashOpen(g_dpy, g_screen, dvis, dcmap, ddepth, cw, chh, g_scale,
                  g_fontFamily, page, card, fg, dim, div, ramp,
                  pink3, pinkd3, yellow3, (long long)g_lastScan);
+        g_dashTokShown = shownTok;
     }
 }
 
@@ -2393,6 +2400,12 @@ int main(int argc, char **argv) {
         if (subsWin() != None) {
             long long ep = cbSubsFetchedEpochMs();
             if (ep != g_subsEpochShown) { g_subsEpochShown = ep; subsRepaint(); }
+        }
+        // the token board: the same poll keyed on the scan version (p_ui.c's
+        // WM_TIMER compares g_tokDataVersion)
+        if (dashWin() != None) {
+            unsigned long long tv = cbTokDataVersion();
+            if (tv != g_dashTokShown) { g_dashTokShown = tv; dashRepaint(); }
         }
         petHandshakeDrain();
         reapChildren();

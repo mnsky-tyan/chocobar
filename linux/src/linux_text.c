@@ -19,8 +19,13 @@ void wideToUtf8(const wchar_t *w, char *out, size_t cap) {
         else if (cp < 0x800 && i + 2 < cap) {
             out[i++] = (char)(0xC0 | (cp >> 6));
             out[i++] = (char)(0x80 | (cp & 0x3F));
-        } else if (i + 3 < cap) {
+        } else if (cp < 0x10000 && i + 3 < cap) {
             out[i++] = (char)(0xE0 | (cp >> 12));
+            out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[i++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x110000 && i + 4 < cap) {
+            out[i++] = (char)(0xF0 | (cp >> 18));
+            out[i++] = (char)(0x80 | ((cp >> 12) & 0x3F));
             out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
             out[i++] = (char)(0x80 | (cp & 0x3F));
         }
