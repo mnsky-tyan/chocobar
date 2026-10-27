@@ -18,7 +18,7 @@
 // subsClose() destroys it.
 Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 int cssW, int cssH, double scale, const char *fontFamily,
-                const double page[3], const double card[3], const double head[3],
+                const double page[3],
                 const double fg[3], const double dim[3], const double divider[3],
                 const double ramp[5][3], const double pink[3], const double pinkDeep[3],
                 const double warn[3], const double good[3], const double yellow[3],

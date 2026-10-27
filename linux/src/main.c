@@ -1535,18 +1535,12 @@ static void runDashboard(int kind) {
         double icon3[3] = { iconc.r, iconc.g, iconc.b };
         double warn3[3] = { warnc.r, warnc.g, warnc.b };
         double good3[3] = { goodc.r, goodc.g, goodc.b };
-        // card and head are passed as NULL so the board derives them from the
-        // page colour the way p_ui.c's dashResolveTheme does (card = blend(bg,
-        // white, 25%), head = blend(card, white, 25%)) - the raw theme.pink
-        // made every panel a pink block with a head band the same colour as
-        // its body.
-        //
         // The epoch is sampled BEFORE the paint: a fetch landing mid-paint would
         // otherwise be recorded as already shown, and the bar's poll would never
         // repaint it (p_ui.c samples before the draw and records after)
         long long shownEpoch = cbSubsFetchedEpochMs();
         subsOpen(g_dpy, g_screen, dvis, dcmap, ddepth, sw, sh2, g_scale,
-                 g_fontFamily, page, NULL, NULL, fg, dim, div, ramp,
+                 g_fontFamily, page, fg, dim, div, ramp,
                  pink3, pinkd3, warn3, good3, yellow3, icon3);
         g_subsEpochShown = shownEpoch;
     } else {

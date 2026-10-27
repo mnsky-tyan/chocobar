@@ -418,7 +418,7 @@ static void paint(Dash *d) {
             // baseline: centre the ink block (ascent + descent) in the frame
             double tyOff = (b - t) / 2.0 + (fe.ascent - fe.descent) / 2.0;
             if (d->btnHover == bi) {
-                card(d, cr, l, t, r - l, b - t, 4 * S, d->bg, 1.0, d->pink);
+                card(d, cr, l, t, r - l, b - t, 10 * S, d->bg, 1.0, d->pink);
                 text(cr, l + txOff, t + tyOff, tx, d->pinkDeep, 1.0);
             } else {
                 text(cr, l + txOff, t + tyOff, tx, d->dim, 1.0);

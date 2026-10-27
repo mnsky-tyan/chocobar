@@ -571,7 +571,9 @@ if [ -n "${SUBSWIN:-}" ]; then
     read -r BX BY BW BH <<EOF
 $(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X:/{x=$4} /Absolute upper-left Y:/{y=$4} /Width:/{w=$2} /Height:/{h=$2} END{print x, y, w, h}')
 EOF
-    "$XCLICK" $((BX + BW - 23)) $((BY + 21)) 1 full
+    CLOSE_X=$(awk -v s="$SCALE" -v bw="$BW" 'BEGIN{printf "%.0f", bw - 27*s}')
+    CLOSE_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", 21*s}')
+    "$XCLICK" $((BX + CLOSE_X)) $((BY + CLOSE_Y)) 1 full
     sleep 1.0
     ! xwininfo -root -children 2>/dev/null | grep -q "Subscriptions"
     check "the board's close button closes it" $?

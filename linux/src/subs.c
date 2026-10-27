@@ -54,7 +54,7 @@ typedef struct {
     int w, h;
     double scale;
     char fontFamily[128];
-    Rgb3 bg, card, head, zebra, fg, dim, divider, pinkDeep, pink, warn, good, yellow;
+    Rgb3 bg, card, head, fg, dim, divider, pinkDeep, pink, warn, good, yellow;
     Rgb3 iconCol;
     Rgb3 ramp[5];
     cairo_font_face_t *ffSymbol;   // the close glyph's face (U+2715, see below)
@@ -393,15 +393,15 @@ static void paint(Subs *d) {
             double txOff = ((r - l) - textW(cr, tx)) / 2.0;
             double tyOff = (b - t) / 2.0 + (fe.ascent - fe.descent) / 2.0;
             if (d->btnHover == bi) {
-                card(d, cr, l, t, r - l, b - t, 4 * S, d->bg, 1.0, d->pink);
+                card(d, cr, l, t, r - l, b - t, 10 * S, d->bg, 1.0, d->pink);
                 text(cr, l + txOff, t + tyOff, tx, d->pinkDeep, 1.0);
             } else {
                 text(cr, l + txOff, t + tyOff, tx, d->dim, 1.0);
             }
         }
         d->tbBottom = (int)(d->btnRefreshB + 10 * S + 1);
+        hairline(cr, padL, d->w - padL, d->tbBottom, d->divider);
         y = d->tbBottom + gap;
-        hairline(cr, padL, d->w - padL, y, d->divider);
     }
 
     double innerW = d->w - 2 * padL;
@@ -450,7 +450,7 @@ static void paint(Subs *d) {
         double px2 = padL, py2 = y + shown * (panelH + gap);
         // panel card, then the head band (opaque fill, dashed underline)
         card(d, cr, px2, py2, innerW, panelH, 8 * S, d->card, 0.85, d->divider);
-        card(d, cr, px2, py2, innerW, headH, 0, d->head, 1.0, (Rgb3){ -1, 0, 0 });
+        card(d, cr, px2, py2, innerW, headH, 8 * S, d->head, 1.0, (Rgb3){ -1, 0, 0 });
         dotted(cr, px2, px2 + innerW, py2 + headH, d->divider);
 
         // provider dot + label, plan name beside it (p_ui.c)
@@ -488,7 +488,7 @@ static void paint(Subs *d) {
                 double pw = textW(cr, ps) + 16 * S;
                 double ph = 18 * S;
                 double plx = px2 + innerW - 14 * S - pw;
-                card(d, cr, plx, py2 + (headH - ph) / 2, pw, ph, 0, pbg, 1.0, pc);
+                card(d, cr, plx, py2 + (headH - ph) / 2, pw, ph, 10 * S, pbg, 1.0, pc);
                 // centre the ink block in the frame on both axes (p_ui.c uses
                 // DT_VCENTER; the equivalent is the ascent-descent midpoint)
                 cairo_font_extents_t pfe;
@@ -584,13 +584,16 @@ static void paint(Subs *d) {
         // panel foot: dashed top + the cycle's fetched time, right-aligned
         double fy = py2 + panelH - footH;
         dotted(cr, px2 + 14 * S, px2 + innerW - 14 * S, fy, d->divider);
+        // panel foot: dashed top + the cycle's fetched time, right-aligned.
+        // The stamp is the wall clock in p_utils.c's UTC-labelled frame (the
+        // dashFmtTime contract), so it reads back through gmtime_r.
         char ftim[16] = "\u2014";
         long long fepoch = cbSubsFetchedEpochMs();
         if (fepoch) {
             time_t t = (time_t)(fepoch / 1000);
-            struct tm lt;
-            localtime_r(&t, &lt);
-            snprintf(ftim, sizeof(ftim), "%02d:%02d:%02d", lt.tm_hour, lt.tm_min, lt.tm_sec);
+            struct tm utc;
+            gmtime_r(&t, &utc);
+            snprintf(ftim, sizeof(ftim), "%02d:%02d:%02d", utc.tm_hour, utc.tm_min, utc.tm_sec);
         }
         setFont(d, cr, 10, 0);
         textR(cr, px2 + innerW - 14 * S, bl(cr, fy + 6 * S), ftim, d->dim, 1.0);
@@ -613,7 +616,7 @@ static void paint(Subs *d) {
 
 Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 int cssW, int cssH, double scale, const char *fontFamily,
-                const double page[3], const double card[3], const double head[3],
+                const double page[3],
                 const double fg[3], const double dim[3], const double divider[3],
                 const double ramp[5][3], const double pink[3],
                 const double pinkDeep[3], const double warn[3],
@@ -629,16 +632,13 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // card and head are DERIVED from the page colour, not the theme's pink:
     // p_ui.c's dashResolveTheme computes card = blend(bg, white, 25%) and
     // head = blend(card, white, 25%), so the panels stay near-white with a
-    // lighter stacked head band. (The card/head arguments are still accepted
-    // so the caller can override, but nothing passes them any more.)
-    if (card) d->card = (Rgb3){ card[0], card[1], card[2] };
-    else d->card = (Rgb3){ d->bg.r + (1 - d->bg.r) * 0.25,
-                           d->bg.g + (1 - d->bg.g) * 0.25,
-                           d->bg.b + (1 - d->bg.b) * 0.25 };
-    if (head) d->head = (Rgb3){ head[0], head[1], head[2] };
-    else d->head = (Rgb3){ d->card.r + (1 - d->card.r) * 0.25,
-                           d->card.g + (1 - d->card.g) * 0.25,
-                           d->card.b + (1 - d->card.b) * 0.25 };
+    // lighter stacked head band.
+    d->card = (Rgb3){ d->bg.r + (1 - d->bg.r) * 0.25,
+                      d->bg.g + (1 - d->bg.g) * 0.25,
+                      d->bg.b + (1 - d->bg.b) * 0.25 };
+    d->head = (Rgb3){ d->card.r + (1 - d->card.r) * 0.25,
+                      d->card.g + (1 - d->card.g) * 0.25,
+                      d->card.b + (1 - d->card.b) * 0.25 };
     d->fg = (Rgb3){ fg[0], fg[1], fg[2] };
     d->dim = (Rgb3){ dim[0], dim[1], dim[2] };
     d->divider = (Rgb3){ divider[0], divider[1], divider[2] };
