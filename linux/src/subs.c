@@ -8,7 +8,7 @@
 // layout constants, same per-window donut + meta text, same status pill and
 // footer stamp, reading the SAME records through p_subs.c's cbSubs* seam.
 //
-// SHARED-CORE RULE (see docs/AGENTS.md): the numbers come from the shared core
+// SHARED-CORE RULE: the numbers come from the shared core
 // (p_subs.c), which fetches them on its own thread exactly as on Windows. This
 // file only paints; it never re-fetches or re-derives anything. Where the
 // Windows branch formats something (the uppercased window label, the relative
@@ -44,6 +44,11 @@
 // boards.
 
 #define SUBS_HM_MAX 8 // MAX_SUBS in the shared core; a board never shows more
+
+// The board's minimum, CSS px: the PMinSize hint and fitToContent's floor are
+// the same number, so no fit ever requests a height the WM would constrain
+// back up against the hint the window itself declares.
+#define SUBS_MIN_CSS 280
 
 typedef struct { double r, g, b; } Rgb3;
 
@@ -193,10 +198,11 @@ static void dotted(cairo_t *cr, double x0, double x1, double y, Rgb3 c) {
     cairo_set_dash(cr, NULL, 0, 0);
 }
 
-// blendCr: GDI+ writes a colour as a fraction toward another. The board uses it
-// for the pill's background (head tinted by the status colour).
-static Rgb3 blend(Rgb3 a, Rgb3 b, int pct) {
-    double t = (double)pct / 100.0;
+// blend: two opaque colours, num/256 of the way toward the second - num is
+// p_ui.c blendCr's 0-255 scale (31 is a 12% tint), not a percentage. The subs
+// board's pill background and donut track carry p_ui.c's 31/20 constants.
+static Rgb3 blend(Rgb3 a, Rgb3 b, int num) {
+    double t = (double)num / 256.0;
     Rgb3 o = { a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t };
     return o;
 }
@@ -241,7 +247,9 @@ static int fitToContent(void) {
     Subs *d = &g_subs;
     if (!d->win || d->contentH <= 0) return 0;
     int want = d->contentH;
+    int minH = (int)(SUBS_MIN_CSS * d->scale);
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
+    if (lo < minH) lo = minH;
     if (want < lo) want = lo;
     int hi = 0;
     if (d->dpy) {
@@ -581,7 +589,6 @@ static void paint(Subs *d) {
             text(cr, mx, bl(cr, ky + (int)(pieD * 0.69f)), rst, d->dim, 1.0);
         }
 
-        // panel foot: dashed top + the cycle's fetched time, right-aligned
         double fy = py2 + panelH - footH;
         dotted(cr, px2 + 14 * S, px2 + innerW - 14 * S, fy, d->divider);
         // panel foot: dashed top + the cycle's fetched time, right-aligned.
@@ -630,15 +637,12 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     snprintf(d->fontFamily, sizeof(d->fontFamily), "%s", fontFamily ? fontFamily : "sans");
     d->bg = (Rgb3){ page[0], page[1], page[2] };
     // card and head are DERIVED from the page colour, not the theme's pink:
-    // p_ui.c's dashResolveTheme computes card = blend(bg, white, 25%) and
-    // head = blend(card, white, 25%), so the panels stay near-white with a
+    // p_ui.c's dashResolveTheme computes card = blendCr(bg, white, 64) and
+    // head = blendCr(card, white, 64), so the panels stay near-white with a
     // lighter stacked head band.
-    d->card = (Rgb3){ d->bg.r + (1 - d->bg.r) * 0.25,
-                      d->bg.g + (1 - d->bg.g) * 0.25,
-                      d->bg.b + (1 - d->bg.b) * 0.25 };
-    d->head = (Rgb3){ d->card.r + (1 - d->card.r) * 0.25,
-                      d->card.g + (1 - d->card.g) * 0.25,
-                      d->card.b + (1 - d->card.b) * 0.25 };
+    Rgb3 white = { 1.0, 1.0, 1.0 };
+    d->card = blend(d->bg, white, 64);
+    d->head = blend(d->card, white, 64);
     d->fg = (Rgb3){ fg[0], fg[1], fg[2] };
     d->dim = (Rgb3){ dim[0], dim[1], dim[2] };
     d->divider = (Rgb3){ divider[0], divider[1], divider[2] };
@@ -694,8 +698,8 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     XSizeHints sh;
     memset(&sh, 0, sizeof(sh));
     sh.flags = PMinSize;
-    sh.min_width = (int)(280 * d->scale);
-    sh.min_height = (int)(280 * d->scale);
+    sh.min_width = (int)(SUBS_MIN_CSS * d->scale);
+    sh.min_height = (int)(SUBS_MIN_CSS * d->scale);
     XSetWMNormalHints(dpy, d->win, &sh);
 
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
