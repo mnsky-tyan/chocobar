@@ -1148,6 +1148,14 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
     XMapRaised(dpy, d->win);
+    // Take the keyboard while the board is up. An override-redirect window is
+    // never activated by KWin, so without this the pointer still reaches it but
+    // input focus stays with the terminal and its Esc/q close never fires - the
+    // menu does the same for the same reason. p_ui.c parity: clicking the Windows
+    // board activates it, and Esc closes it. AFTER the map: SetInputFocus on an
+    // unmapped window is a BadMatch (not viewable), which is exactly what a
+    // dropped map request looks like from the error handler.
+    XSetInputFocus(dpy, d->win, RevertToParent, CurrentTime);
     XFlush(dpy);
 
     g_boardOpen = 1;
@@ -1168,10 +1176,11 @@ void dashRepaint(void) {
     paintAndFit(&g_dash);
 }
 
-// The board wants to close: Esc, q, a non-left click, the WM's close button, or
-// the window already being gone. Returns 1 and lets the caller call dashClose().
+// The board wants to close: Esc, q, a non-left click, or the window already
+// being gone. Returns 1 and lets the caller call dashClose(). (No WM close
+// message: the board is override-redirect, so there is no protocol to arrive
+// on - its own X button and the menu toggle are the close paths.)
 static int boardClose(XEvent *ev) {
-    Dash *d = &g_dash;
     switch (ev->type) {
         case KeyPress: {
             KeySym ks = XLookupKeysym(&ev->xkey, 0);

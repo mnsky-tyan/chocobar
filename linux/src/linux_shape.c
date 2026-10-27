@@ -20,10 +20,10 @@ void boardCenterOnHead(Display *dpy, int screen, int w, int h, int *ox, int *oy)
     Window root, child;
     int rx = 0, ry = 0, wx, wy;
     unsigned int mask = 0;
-    int px = -1, py = -1, havePtr = 0;
+    int px = -1, py = -1;
     if (XQueryPointer(dpy, RootWindow(dpy, screen), &root, &child,
                       &rx, &ry, &wx, &wy, &mask)) {
-        px = rx; py = ry; havePtr = 1;
+        px = rx; py = ry;
     }
     int hx = 0, hy = 0;
     int hw = DisplayWidth(dpy, screen), hh = DisplayHeight(dpy, screen);
@@ -41,7 +41,6 @@ void boardCenterOnHead(Display *dpy, int screen, int w, int h, int *ox, int *oy)
                 break;
             }
         }
-        (void)havePtr;
     }
     if (xi) XFree(xi);
     int x = hx + (hw - w) / 2, y = hy + (hh - h) / 2;

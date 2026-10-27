@@ -477,18 +477,21 @@ menu_open
 check "the right-RELEASE opens the menu" $?
 
 # 3b. the menu the user sees is the Windows item table rendered: 8 rows and 3
-#     separators (p_ui.c kMenuItems) inside MENU_PAD, i.e. 279 logical px tall
-#     for a 236 logical px wide menu. The ratio is scale-free, so it needs no
-#     DPI assumption, and a missing or extra item changes the height. (No click
-#     can observe this parity: the last row quits the bar.)
+#     separators (p_ui.c kMenuItems) inside MENU_PAD, i.e. 2*4 + 8*21 + 3*5 =
+#     191 logical px tall (menu.c: MENU_PAD 4, MENU_ROW 21, MENU_SEP 5 - the
+#     Windows WM_MEASUREITEM values). The row count is what this proves: a
+#     missing or extra item changes the height. ALL conditions must land in ONE
+#     status, or a trailing bare test overwrites $? and the check silently passes
+#     on a window it never measured.
 read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
 $(menu_wh)
 EOF
 MENU_WIN=${MENU_WIN:-0}; MENU_W_DEV=${MENU_W_DEV:-0}; MENU_H_DEV=${MENU_H_DEV:-0}
-WANT_MENU_H=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (2*4+9*21+3*5)*s}')
-[ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ]
-[ "$MENU_W_DEV" -gt 0 ]
-check "the menu renders the Windows item set (${MENU_W_DEV}x${MENU_H_DEV}, want h~$WANT_MENU_H)" $?
+WANT_MENU_H=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (2*4+8*21+3*5)*s}')
+rc=0
+[ "$MENU_W_DEV" -gt 0 ] || rc=1
+[ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ] || rc=1
+check "the menu renders the Windows item set (${MENU_W_DEV}x${MENU_H_DEV}, want h~$WANT_MENU_H)" "$rc"
 
 # 3c. opening the menu read the autostart mark exactly ONCE (one line in the
 #     fake systemctl's own call log), and the menu may then repaint - pointer
@@ -563,6 +566,17 @@ sleep 1.2
 SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
 [ -n "${SUBSWIN:-}" ]
 check "a click INSIDE the Subscription row opens the board" $?
+
+# 5e-bis. the board the user sees is a POPUP, not a desktop window: xwininfo on
+#     a real mapped override-redirect window prints 'Override Redirect State:
+#     yes'. This is the observable property (p_ui.c's owned WS_POPUP parity),
+#     not a source-text match - a decorated board or a dock entry fails here.
+if [ -n "${SUBSWIN:-}" ]; then
+    xwininfo -id "$SUBSWIN" | grep -q "Override Redirect State: yes"
+    check "the subscription board is an override-redirect popup (no titlebar, no dock entry)" $?
+else
+    check "the subscription board is an override-redirect popup (no titlebar, no dock entry)" 1
+fi
 
 # 5f. the close button ends the board: the titlebar's ✕ (subs.c btnClose, the
 #     same frame geometry dash.c uses: right edge - padL, 20*S tall from ty-3*S).
@@ -2099,6 +2113,14 @@ if command -v python3 >/dev/null && python3 -c 'import dbus, gi' 2>/dev/null; th
     [ -n "$KWADDR" ] || { echo "FAIL: the KWin stub bus has no address"; exit 1; }
     KWLOG="$WORK/kwin-calls.log"
     : > "$KWLOG"
+    # A private XDG_RUNTIME_DIR: the geometry lock lives there when it is set,
+    # and the LIVE user bar holds that lock for its whole lifetime after its own
+    # startup reload. Inheriting the real one makes the reload path refuse (the
+    # lock is taken) and the check below sees zero loads - an environment leak,
+    # not a product finding. HOME and DISPLAY were already private; this is the
+    # same rule for the third global.
+    STUBRUN="$WORK/run"
+    mkdir -p "$STUBRUN"
     # loaded=0: KWin says the helper is NOT loaded, which is the only situation
     # in which the bar is allowed to reload it
     python3 "$HERE/kwstub.py" "$KWADDR" "$KWLOG" 0 >"$WORK/kwstub.log" 2>&1 &
@@ -2115,6 +2137,7 @@ if command -v python3 >/dev/null && python3 -c 'import dbus, gi' 2>/dev/null; th
         sleep 0.1
     done
     HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+        XDG_RUNTIME_DIR="$STUBRUN" \
         DBUS_SESSION_BUS_ADDRESS="$KWADDR" "$BIN" >"$WORK/bar-kwin.log" 2>&1 &
     KWBAR=$!
     for _ in $(seq 1 60); do
@@ -2313,6 +2336,11 @@ done
 if [ -z "${HEATDASH:-}" ]; then
     check "the heatmap's columns are day-aligned (the dashboard never opened)" 1
 else
+    # The token board is a popup too: no titlebar, no dock entry (p_ui.c's owned
+    # WS_POPUP parity). xwininfo states it on a real mapped window, so this is
+    # the observable, not a source match.
+    xwininfo -id "$HEATDASH" | grep -q "Override Redirect State: yes"
+    check "the token dashboard is an override-redirect popup (no titlebar, no dock entry)" $?
     eval "$(xdotool getwindowgeometry --shell "$HEATDASH")"
     # The bar's event loop is select-driven: a motion is handled some time
     # AFTER xdotool's warp lands, and no fixed sleep bounds that, so every

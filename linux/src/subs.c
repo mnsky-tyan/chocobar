@@ -258,6 +258,7 @@ static int fitToContent(void) {
     if (want < lo) want = lo;
     // keep centred as the height follows content (p_ui.c opens centred and its
     // fit only resizes; see dash.c's dashFitToContent for the full note)
+    int xWas = d->x, yWas = d->y;
     if (d->dpy) {
         int cx = 0, cy = 0;
         boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
@@ -288,6 +289,11 @@ static int fitToContent(void) {
     int minRoom = (int)(SUBS_MIN_CSS * d->scale);
     if (room < minRoom) room = minRoom;
     if (want > room) want = room;
+    // The position is part of the fit: a re-centred top edge must reach the
+    // WINDOW, not just the struct. The struct alone drifting is the bug this
+    // branch fixes - the resize below used to be the only position applier on
+    // this window (subsOpen's single XMoveResizeWindow), so every later fit left
+    // the window where it opened while d->x/d->y moved under it.
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -296,10 +302,12 @@ static int fitToContent(void) {
             d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
             d->cr = cairo_create(d->surf);
         }
-        XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
+        XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
         reshape(d);
         return 1;
     }
+    if (d->x != xWas || d->y != yWas)
+        XMoveWindow(d->dpy, d->win, d->x, d->y);
     return 0;
 }
 
@@ -740,6 +748,12 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
     XMapRaised(dpy, d->win);
+    // Take the keyboard while the board is up: an override-redirect window is
+    // never activated by KWin, so without this Esc/q would go to the terminal
+    // instead of closing the board (p_ui.c parity: clicking the Windows board
+    // activates it, and Esc closes it). The menu does the same for the same
+    // reason.
+    XSetInputFocus(dpy, d->win, RevertToParent, CurrentTime);
     XFlush(dpy);
 
     g_open = 1;
