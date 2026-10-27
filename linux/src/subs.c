@@ -12,8 +12,9 @@
 // (p_subs.c), which fetches them on its own thread exactly as on Windows. This
 // file only paints; it never re-fetches or re-derives anything. Where the
 // Windows branch formats something (the uppercased window label, the relative
-// reset countdown, the M/k credit tiers), the helper is ported here from
-// p_ui.c / p_utils.c and kept identical, because a second copy would drift.
+// reset countdown), the helper is ported here from p_ui.c and kept identical;
+// the credit tiers are shared instead of copied - fmtNum calls cbSubsFmtNum,
+// the seam to p_utils.c's fmtNum, so the two boards cannot disagree.
 //
 // The window is driven by the BAR's loop like the token board: one connection,
 // two windows, one pump.

@@ -146,7 +146,7 @@ and does nothing when the exclusion is already in place.
 | memory (RSS) | 50 MB with the subs gauge and libcurl (15 MB was without) |
 | CPU, steady state | 0.2% of one core, 1 Hz repaint |
 | threads | 2 (main + the subs fetch cycle); one more per extra enabled provider |
-| binary | 995 KB, no runtime |
+| binary | 1080 KB, no runtime |
 | token scan, cold | ~1.5 s for 2,100 session records, then incremental |
 | token scan, warm | a few ms (per-file byte cursors) |
 | subs fetch | 147-184 ms per cycle for one provider (api.z.ai), every 2 min |
@@ -307,11 +307,12 @@ button release and does not bounce, a press alone opens nothing, a click outside
 the menu picks no row, the bar asks for no blur hint, it rides above the reported
 terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
-reads its state once per open and refuses to flip an unreadable unit, and a
-left click on a right-group metric chip does nothing (hovering one still shows
-its title). The helper-stack gate runs against a stub
-`org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded` and
-records every `unloadScript`/`loadScript` call, so the unload-before-load
+reads its state once per open and refuses to flip an unreadable unit, the
+Subscription row opens the real board (its close button ends it, a second
+activation toggles it shut), and a left click on a right-group metric chip does
+nothing (hovering one still shows its title). The helper-stack gate runs against
+a stub `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded`
+and records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that
 keeps a second bar process out is exercised through the binary's own acquire
 (`--self-test-lock`), never a shell re-implementation of it.
