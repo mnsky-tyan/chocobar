@@ -732,11 +732,11 @@ int subsEvent(XEvent *ev) {
         paintAndFit(d);
         break;
     case ConfigureNotify:
+        d->x = ev->xconfigure.x;
+        d->y = ev->xconfigure.y;
         if (ev->xconfigure.width != d->w || ev->xconfigure.height != d->h) {
             d->w = ev->xconfigure.width;
             d->h = ev->xconfigure.height;
-            d->x = ev->xconfigure.x;
-            d->y = ev->xconfigure.y;
             cairo_destroy(d->cr);
             cairo_surface_destroy(d->surf);
             d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);

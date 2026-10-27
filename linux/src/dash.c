@@ -78,7 +78,6 @@ extern long long cbTokDayAppOut(int daysBack, int i);
 extern long long cbTokDayAppCr(int daysBack, int i);
 extern long long cbTokDayAppCw(int daysBack, int i);
 extern int cbTokDayAppReqs(int daysBack, int i);
-extern unsigned long long cbTokDataVersion(void);
 extern int cbCfgTokensEnabled(void);
 extern int cbCfgSubsRotateSec(void);
 extern const wchar_t *cbCfgIconColor(void);
@@ -916,7 +915,7 @@ static void paint(Dash *d) {
         double fy = y;
         if (fy > d->h - 16 * S) fy = d->h - 16 * S;
         textR(cr, d->w - padL, fy + 9 * S, fl, d->dim, 0.9);
-        d->contentH = (int)(fy + 10 * S + 12 * S);
+        d->contentH = (int)(y + 10 * S + 12 * S);
     }
 }
 
@@ -940,10 +939,10 @@ static void dashReshape(Dash *d) {
 // height, clamped to 45% of the configured height (a board that is shorter than
 // that reads as a stub) and to the screen minus a margin (no scrollbar, no size
 // grip: a panel pushed past the bottom edge is unreachable). The painted
-// content is a pure function of the data, not of the window's height - only the
-// footer's clamp reads d->h, and it saturates - so a fit can neither drop a row
-// nor oscillate, which is why every fit decision in the paint measures against
-// d->cfgH, not d->h.
+// content is a pure function of the data, not of the window's height - the
+// footer's clamp only moves the stamp text inside a short window, never the
+// measured height - so a fit can neither drop a row nor oscillate, which is why
+// every fit decision in the paint measures against d->cfgH, not d->h.
 //
 // Windows does it before ShowWindow so the board never appears at the wrong
 // height; on X the equivalent is to paint before the map, which is what the
@@ -1267,6 +1266,8 @@ int dashEvent(XEvent *ev) {
             }
             break;
         case ConfigureNotify:
+            d->x = ev->xconfigure.x;
+            d->y = ev->xconfigure.y;
             if (ev->xconfigure.width != d->w || ev->xconfigure.height != d->h) {
                 d->w = ev->xconfigure.width;
                 d->h = ev->xconfigure.height;
