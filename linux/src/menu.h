@@ -38,8 +38,9 @@ enum {
 // the painter never read. startChecked is the autostart state read by the CALLER
 // (the bar owns the mechanism); the menu only draws the mark.
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
-            int atX, int atY, double scale, int fontPx, const char *fontFamily,
+            int atX, int atY, double scale, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double divider[3], const double accent[3], int startChecked);
+            const double divider[3], const double accent[3],
+            const double pink[3], int startChecked);
 
 #endif

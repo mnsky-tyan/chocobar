@@ -358,7 +358,11 @@ typedef struct {
 
 // the six field names a source uses, pre-quoted for the substring search. Built
 // once per scan (not per line) so the hot path stays a memcmp.
-typedef struct { char k[6][32]; int len[6]; int tsIso; const char *provList, *exclList; } TokKeys;
+// rec/recLen: the source's `record` needle, pre-wrapped in quotes ("X"), so
+// tokParseLine can gate a multi-shape store to one record type before any
+// field search runs (codex: token_usage_record rows only - the cumulative
+// token_count lines in the same file must never count).
+typedef struct { char k[6][32]; int len[6]; int tsIso; const char *provList, *exclList; char rec[66]; int recLen; } TokKeys;
 static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
     static const char *dflt[6] = { "input", "output", "cacheRead", "cacheWrite", "timestamp", "model" };
     const char *src[6];
@@ -371,6 +375,12 @@ static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
     tk->tsIso = s->tsIso;
     tk->provList = s->provList;
     tk->exclList = s->exclList;
+    tk->recLen = 0;
+    if (s->record[0]) {
+        // quotes around the bare value: the needle matches the discriminator
+        // string itself, never the same word appearing as data somewhere else
+        tk->recLen = sprintf(tk->rec, "\"%s\"", s->record);
+    }
 }
 
 // ISO-8601 to epoch ms, for a source whose timestamp is a string. The shape
@@ -449,6 +459,16 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     out->ts = 0; out->app = NULL; out->appLen = 0;
     out->in = out->out = out->cr = out->cw = 0; out->model = NULL; out->modelLen = 0;
     out->prov = NULL; out->provLen = 0;
+    // record-type gate first: a line that is not the wanted record type is
+    // skipped before any field is looked at (cheapest test, and the one that
+    // keeps cumulative summaries out of per-response stores)
+    if (tk->recLen > 0) {
+        int hit = 0;
+        for (int i = 0; i + tk->recLen <= len; i++) {
+            if (memcmp(ln + i, tk->rec, tk->recLen) == 0) { hit = 1; break; }
+        }
+        if (!hit) return 0;
+    }
     // cheap pre-filter: no input field = nothing to count
     const char *u = NULL;
     for (int i = 0; i + tk->len[0] <= len; i++) {

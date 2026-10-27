@@ -256,9 +256,18 @@ static int fitToContent(void) {
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (lo < minH) lo = minH;
     if (want < lo) want = lo;
+    // keep centred as the height follows content (p_ui.c opens centred and its
+    // fit only resizes; see dash.c's dashFitToContent for the full note)
+    if (d->dpy) {
+        int cx = 0, cy = 0;
+        boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
+        d->x = cx; d->y = cy;
+    }
     int hi = 0;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
+        // the head's ABSOLUTE work-area bottom (the centred top edge is y-aware,
+        // so the clamp has to be too)
         hi = DisplayHeight(d->dpy, scr) - 40;
         int n = 0;
         XineramaScreenInfo *xi = XineramaQueryScreens(d->dpy, &n);
@@ -266,7 +275,7 @@ static int fitToContent(void) {
             for (int i = 0; i < n; i++) {
                 if (xi[i].x_org <= d->x && d->x < xi[i].x_org + xi[i].width &&
                     xi[i].y_org <= d->y && d->y < xi[i].y_org + xi[i].height) {
-                    hi = xi[i].height - 40;
+                    hi = xi[i].y_org + xi[i].height - 40;
                     break;
                 }
             }
@@ -274,7 +283,11 @@ static int fitToContent(void) {
         }
     }
     if (hi <= 0) return 0;
-    if (want > hi) want = hi;
+    // the room under the centred top edge, never below the floor
+    int room = hi - d->y;
+    int minRoom = (int)(SUBS_MIN_CSS * d->scale);
+    if (room < minRoom) room = minRoom;
+    if (want > room) want = room;
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -681,25 +694,31 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
+    // p_ui.c dashToggle placement: centred on the screen, both axes, before the
+    // content fit adjusts the height.
+    boardCenterOnHead(dpy, screen, d->w, d->h, &d->x, &d->y);
 
     XSetWindowAttributes swa;
     memset(&swa, 0, sizeof(swa));
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = cmap;
+    swa.override_redirect = True;
     swa.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
                      ButtonReleaseMask | PointerMotionMask | StructureNotifyMask |
                      LeaveWindowMask;
-    d->x = 60; d->y = 60;
     d->win = XCreateWindow(dpy, RootWindow(dpy, screen), d->x, d->y,
                            (unsigned)d->w, (unsigned)d->h, 0, depth, InputOutput, visual,
-                           CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
+                           CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask,
+                           &swa);
     if (!d->win) return None;
+    // Debug-aid name only (no WM titles an override-redirect window), but
+    // xwininfo -root -children then names the board for tests and captures.
     XStoreName(dpy, d->win, "Chocobar - Subscriptions");
-    {
-        Atom wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
-        XSetWMProtocols(dpy, d->win, &wmDelete, 1);
-    }
+    // Override-redirect popup, exactly like the token board (see dash.c): the
+    // board is an owned WS_POPUP on Windows - no taskbar/dock entry, no
+    // Alt-Tab entry, no titlebar, no focus steal on open. Close is the board's
+    // own X button or the menu toggle.
     {
         XcursorImage *img = XcursorLibraryLoadImage("left_ptr", NULL,
                                                     (int)(cbCursorBaseSize() * cbCursorScale() + 0.5));
@@ -710,12 +729,8 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
             XcursorImageDestroy(img);
         }
     }
-    XSizeHints sh;
-    memset(&sh, 0, sizeof(sh));
-    sh.flags = PMinSize;
-    sh.min_width = (int)(SUBS_MIN_CSS * d->scale);
-    sh.min_height = (int)(SUBS_MIN_CSS * d->scale);
-    XSetWMNormalHints(dpy, d->win, &sh);
+    // No size hints: an override-redirect popup has no window manager to
+    // negotiate with; the content fit is the only sizer.
 
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
     d->cr = cairo_create(d->surf);
@@ -724,7 +739,7 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // paint, fit, then map (p_ui.c paints while hidden so the board appears once)
     paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
-    XMapWindow(dpy, d->win);
+    XMapRaised(dpy, d->win);
     XFlush(dpy);
 
     g_open = 1;
@@ -816,10 +831,6 @@ int subsEvent(XEvent *ev) {
         // next activation would only call subsClose() on a ghost
         subsClose();
         return 1;
-    case ClientMessage:
-        if ((Atom)ev->xclient.data.l[0] == XInternAtom(d->dpy, "WM_DELETE_WINDOW", False))
-            return 1;
-        break;
     }
     return 0;
 }

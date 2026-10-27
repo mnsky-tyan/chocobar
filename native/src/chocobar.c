@@ -91,6 +91,13 @@ typedef struct {
     int tsIso;              // timestampFormat: "iso" - the ts value is a string
     char provList[256];     // providers: include list (empty = all)
     char exclList[256];     // exclude: skip these providers (empty = none)
+    char record[64];        // record: a quoted JSON string the line must carry to
+                            // count (empty = every line). For stores that log
+                            // several record types in one file - codex rollouts
+                            // carry BOTH cumulative token_count summaries and
+                            // per-response token_usage_record rows; counting the
+                            // cumulative ones re-counts the whole session per
+                            // turn, so the source names "token_usage_record".
 } TokSource;
 
 // the longest provider/route name the matcher accepts, on BOTH sides: the
@@ -353,6 +360,14 @@ typedef struct {
     wchar_t *configPath;   // zai config.json
     wchar_t *vscdbPath;    // antigravity IDE fallback token store
     wchar_t *providerName; // zai provider key
+    wchar_t *planName;     // display name for the plan, overriding whatever the
+                           // fetch derives. The z.ai quota endpoint answers with
+                           // only a tier level ("lite"), while the ZCode desktop
+                           // app names the same subscription "GLM Coding Lite";
+                           // config.plan pins the board's head band to the name
+                           // the user actually recognises. Empty = keep the
+                           // fetched name, so nothing changes for providers that
+                           // report a real plan string (chatgpt plan_type).
     // ---- generic (type 3): a REST quota endpoint declared entirely in config
     wchar_t *url;          // https://host/path (http allowed with insecure)
     wchar_t *method;       // GET (default) or POST
@@ -732,6 +747,7 @@ static void freeConfig(Config *c) {
         wideFree(&sp->label); wideFree(&sp->authPath);
         wideFree(&sp->configPath); wideFree(&sp->vscdbPath);
         wideFree(&sp->providerName);
+        wideFree(&sp->planName);
         wideFree(&sp->clientId);
         wideFree(&sp->clientSecret);
         genFree(sp);
@@ -846,6 +862,17 @@ static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj)
     ts->provList[0] = ts->exclList[0] = 0;
     tokListCopy(ts->provList, sizeof(ts->provList), js, t, obj, "providers");
     tokListCopy(ts->exclList, sizeof(ts->exclList), js, t, obj, "exclude");
+    // record: the value is stored bare; the matcher wraps it in quotes so a
+    // needle like token_usage_record can never match a substring of another
+    // record's data (only the discriminator string itself carries the quotes)
+    ts->record[0] = 0;
+    {
+        int rk = jobjGet(js, t, obj, "record");
+        if (rk >= 0 && t[rk].type == JSMN_STRING) {
+            int rl = jsmnStrCopy(js, &t[rk], ts->record, sizeof(ts->record));
+            if (rl <= 0) ts->record[0] = 0;
+        }
+    }
     if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) return 1;
     wideFree(&ts->sessionsDir);
     return 0;
@@ -1193,6 +1220,7 @@ static void parseConfigInto(Config *c, const char *js, jsmntok_t *t, int root) {
                 sp->configPath   = jstrTok(js, t, jobjGet(js, t, k, "configPath"), L"");
                 sp->vscdbPath    = jstrTok(js, t, jobjGet(js, t, k, "vscdbPath"), L"");
                 sp->providerName = jstrTok(js, t, jobjGet(js, t, k, "provider"), L"");
+                sp->planName     = jstrTok(js, t, jobjGet(js, t, k, "plan"), L"");
                 if (sp->type == 3) genParse(sp, js, t, k);
                 c->subsProviderCount++;
             }

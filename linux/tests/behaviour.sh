@@ -431,12 +431,12 @@ root_children_excluding_tip() {
 # MENU_SEP). The second row is "Subscription dashboard", whose choice is
 # observable in the bar's own log without changing anything on disk; its centre
 # is MENU_PAD + MENU_ROW + MENU_ROW/2 from the menu's top edge.
-ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+30+15)*s}')
+ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (4+21+10)*s}')
 # the "Start on login" row centre, in logical px from the menu's top edge
 # (menu.c: MENU_PAD, two rows, MENU_SEP, then half of this row)
-ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+2*30+9+15)*s}')
+ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (4+2*21+5+10)*s}')
 # the "Check for updates" row centre: five rows and three separators down
-ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+5*30+3*9+15)*s}')
+ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (4+5*21+3*5+10)*s}')
 
 # the geometry report can go out two ways, and the difference decides WHEN it
 # lands: gdbus introspects its destination before it calls, and the bar never
@@ -485,8 +485,9 @@ read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
 $(menu_wh)
 EOF
 MENU_WIN=${MENU_WIN:-0}; MENU_W_DEV=${MENU_W_DEV:-0}; MENU_H_DEV=${MENU_H_DEV:-0}
-WANT_MENU_H=$(awk -v w="$MENU_W_DEV" 'BEGIN{printf "%.0f", w*279/236}')
-[ "$MENU_W_DEV" -gt 0 ] && [ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ]
+WANT_MENU_H=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (2*4+9*21+3*5)*s}')
+[ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ]
+[ "$MENU_W_DEV" -gt 0 ]
 check "the menu renders the Windows item set (${MENU_W_DEV}x${MENU_H_DEV}, want h~$WANT_MENU_H)" $?
 
 # 3c. opening the menu read the autostart mark exactly ONCE (one line in the

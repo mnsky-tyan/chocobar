@@ -2369,17 +2369,19 @@ int main(int argc, char **argv) {
             Rgb fgc = hexRgb(cbCfgFg(), (Rgb){0.03, 0.03, 0.03});
             Rgb divc = hexRgb(cbCfgDivider(), (Rgb){0.85, 0.80, 0.70});
             Rgb accc = hexRgb(cbCfgPinkDeep(), (Rgb){0.83, 0.58, 0.67});
+            Rgb pkc = hexRgb(cbCfgPink(), (Rgb){0.941, 0.871, 0.894});
             double bg3[3] = { bgc.r, bgc.g, bgc.b };
             double fg3[3] = { fgc.r, fgc.g, fgc.b };
             double dv3[3] = { divc.r, divc.g, divc.b };
             double ac3[3] = { accc.r, accc.g, accc.b };
+            double pk3[3] = { pkc.r, pkc.g, pkc.b };
             // no dim colour: the menu has no dim text (menu.h). The autostart
             // mark is read per open (not per paint): a subprocess per hover move
             // would be absurd, and the state cannot change while the menu is up.
             int startChecked = autoStartEnabled() == 1;
             int choice = menuRun(g_dpy, g_screen, g_visual, g_cmap, 32,
-                                 g_menuX, g_menuY, g_scale, (int)fontSizePx(),
-                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3,
+                                 g_menuX, g_menuY, g_scale,
+                                 g_fontFamily, bg3, 0.97, fg3, dv3, ac3, pk3,
                                  startChecked);
             if (choice == MENU_DISMISSED_BY_PRESS) {
                 // the button that closed the menu is still held: its release

@@ -57,4 +57,10 @@ int boardShapeApply(Display *dpy, Window win, int w, int h, double radius,
 void boardShapeFree(Display *dpy, XserverRegion *held,
                     int *heldW, int *heldH, int *heldR);
 
+// Top-left for a w x h board centred on the head the pointer is on (p_ui.c's
+// dashToggle placement: centred on the screen, both axes). The boards use this
+// at open and after every content-fit, so a fit that changed the height keeps
+// the board centred instead of drifting down.
+void boardCenterOnHead(Display *dpy, int screen, int w, int h, int *ox, int *oy);
+
 #endif

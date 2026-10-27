@@ -476,10 +476,17 @@ function check(name, ok, detail) {
   // XKillClient, which severs the shared connection and takes the bar with it.
   const dash = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
-  check('linux: the dashboard registers WM_DELETE_WINDOW',
-    /XSetWMProtocols\(dpy, d->win/.test(dash) && /WM_DELETE_WINDOW/.test(dash) &&
-    /ev->xclient\.data\.l\[0\] == d->wmDelete/.test(dash),
-    'a close button that kills the shared connection takes the whole bar down with it');
+  // The board is an override-redirect POPUP (p_ui.c registers ChocobarDash as
+  // an owned WS_POPUP: no taskbar button, no titlebar). With OR there is no
+  // window manager at all - no decorations, no dock entry, no focus steal, and
+  // no WM_DELETE protocol whose absence would let a WM fall back to
+  // XKillClient on the bar's SHARED display connection.
+  check('linux: the dashboard is an override-redirect popup (no titlebar, no dock entry, no WM close protocol)',
+    /swa\.override_redirect = True/.test(dash) && /CWOverrideRedirect/.test(dash) &&
+    !/XSetWMProtocols/.test(dash) && !/XSetWMNormalHints/.test(dash) &&
+    /swa\.override_redirect = True/.test(subs) && /CWOverrideRedirect/.test(subs) &&
+    !/XSetWMProtocols/.test(subs),
+    'no WM to talk to: no decorations, no dock entry, and no XKillClient path on the shared connection');
   // the board is driven by the bar's loop: one pump, two windows. A nested
   // event loop (dashRun's own while/XPending) froze the bar's clock for as
   // long as the board stayed open - Windows dispatches both windows from one

@@ -111,7 +111,6 @@ typedef struct {
     char fontFamily[128];
     Rgb3 bg, card, zebra, fg, dim, divider, pinkDeep, pink, yellow;
     Rgb3 ramp[5];
-    Atom wmDelete;             // WM_DELETE_WINDOW, registered on the window
     int contentH;              // painted content bottom (device px) -> content fit
     int tbBottom;              // titlebar bottom (device px)
     /* titlebar button rects (device px), hover state and the click areas */
@@ -975,6 +974,16 @@ static int dashFitToContent(void) {
         }
     }
     if (headBottom <= 0) return 0;
+    // keep the board centred as its height follows the content: p_ui.c opens
+    // the board centred (dashToggle) and its content-fit only resizes, so a
+    // Linux board that kept its top edge would drift downward every time it
+    // grew. Re-centred BEFORE the clamp below, which then still lifts the
+    // board off the head's bottom edge when the content is tall.
+    {
+        int cx = 0, cy = 0;
+        boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
+        d->x = cx; d->y = cy;
+    }
     // keep the whole board on screen: p_ui.c moves the window up to the head's
     // work-area bottom before sizing it, so a board whose content reaches the
     // clamp still shows its last row (and the "last scan" footer) instead of
@@ -1079,31 +1088,37 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
+    // p_ui.c dashToggle placement: centred on the screen, both axes. Before the
+    // fit, so the fit's clamps work from a sane position.
+    boardCenterOnHead(dpy, screen, d->w, d->h, &d->x, &d->y);
 
     XSetWindowAttributes swa;
     memset(&swa, 0, sizeof(swa));
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = cmap;
+    swa.override_redirect = True;
     swa.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
                      ButtonReleaseMask | PointerMotionMask | StructureNotifyMask |
                      LeaveWindowMask;
-    d->x = 60; d->y = 60;
     d->dpy = dpy;
     d->win = XCreateWindow(dpy, RootWindow(dpy, screen), d->x, d->y,
                            (unsigned)d->w, (unsigned)d->h, 0, depth, InputOutput, visual,
-                           CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
+                           CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask,
+                           &swa);
     if (!d->win) return None;
+    // The name is a debug aid only (an override-redirect window has no window
+    // manager to title it), but xwininfo -root -children then names the board,
+    // which is what the behaviour test and every screenshot session key on.
     XStoreName(dpy, d->win, "Chocobar - Token usage");
-    // WM_DELETE_WINDOW: without it a client message is never sent and KWin falls
-    // back to XKillClient, which severs the SHARED connection - the dashboard
-    // using the bar's Display means its close button would take the whole bar
-    // process down with it.
-    {
-        Atom wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
-        XSetWMProtocols(dpy, d->win, &wmDelete, 1);
-        d->wmDelete = wmDelete;
-    }
+    // Override-redirect: the board is a POPUP, not a desktop window (p_ui.c
+    // registers ChocobarDash as an owned WS_POPUP: no taskbar button, no
+    // Alt-Tab entry, no titlebar). With OR the window manager is never
+    // consulted - no decorations, no dock/taskbar entry, no WM_DELETE protocol
+    // (so no XKillClient path that could sever the bar's shared connection),
+    // and no focus steal on open (p_ui.c opens with SWP_NOACTIVATE: the
+    // keyboard stays with the terminal). Close is the board's own X button or
+    // the menu toggle, exactly like Windows.
     // The dashboard's own cursor, at the desktop's scaled size: without it the
     // pointer over the board shows Xwayland's root cursor at the raw
     // XCURSOR_SIZE and shrinks against the desktop's scaled one (the bar fixed
@@ -1118,12 +1133,9 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
             XcursorImageDestroy(img);
         }
     }
-    XSizeHints sh;
-    memset(&sh, 0, sizeof(sh));
-    sh.flags = PMinSize;
-    sh.min_width = (int)(520 * d->scale);
-    sh.min_height = (int)(DASH_MIN_CSS * d->scale);
-    XSetWMNormalHints(dpy, d->win, &sh);
+    // No size hints and no WM_PROTOCOLS: an override-redirect popup has no
+    // window manager to negotiate with. The content fit (dashFitToContent) is
+    // the only sizer, same as p_ui.c's content-fit path.
 
     // persistent paint state: the board repaints on every hover move
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
@@ -1135,7 +1147,7 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // (the top appears, then the lower part lags in). X keeps the same ordering.
     paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
-    XMapWindow(dpy, d->win);
+    XMapRaised(dpy, d->win);
     XFlush(dpy);
 
     g_boardOpen = 1;
@@ -1169,9 +1181,6 @@ static int boardClose(XEvent *ev) {
             // a middle/right click also closes the window (p_ui.c dashProc
             // WM_RBUTTONUP destroys the board)
             return ev->xbutton.button != 1;
-        case ClientMessage:
-            // the window manager's close button (see WM_DELETE_WINDOW above)
-            return (Atom)ev->xclient.data.l[0] == d->wmDelete;
         case DestroyNotify:
             g_boardOpen = 0;   // the window is already gone; do not touch it
             return 1;

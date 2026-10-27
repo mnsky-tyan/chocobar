@@ -1751,6 +1751,16 @@ static void subsProviderFetch(const Config *cfg, int i) {
         case 3:  subsFetchGeneric(cfg, i);    break;
         default: subsFetchAntigravity(cfg, i); break;
     }
+    // config.plan pins the head band's plan name to a string the user
+    // recognises (the z.ai quota endpoint only answers a tier level - "lite" -
+    // while the same subscription reads "GLM Coding Lite" in the ZCode desktop
+    // app). Applied after every cycle, success or not: a static config name
+    // cannot go stale, and re-stamping it keeps the board honest across a
+    // reload that changed the name.
+    {
+        const wchar_t *pn = cfg->subsProviders[i].planName;
+        if (pn && *pn) subsSetPlan(i, pn);
+    }
 }
 
 typedef struct { int idx; const Config *cfg; } SubsJob;

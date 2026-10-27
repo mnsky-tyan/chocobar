@@ -215,7 +215,11 @@ Right-click opens the menu on the button **release** (the Windows parity:
 `WM_RBUTTONUP`), and the button that dismisses the menu is consumed by the
 menu, not by the bar - Win32's `TrackPopupMenu` eats the dismissing click the
 same way, so the bar never sees a release for it. Without that, the dismissing
-right-click bounced the menu straight back open.
+right-click bounced the menu straight back open. The menu is drawn like the
+Windows tray menu too (p_ui.c's owner-draw): the bar family at 9 CSS px, 21 px
+rows, the widest label measuring the width, and the hovered row filled with
+the background blended toward pink with a pinkDeep edge marker and pinkDeep
+label - not a generic dark system popup.
 
 ## What each chip reads
 
@@ -292,7 +296,12 @@ failed its last fetch; an em dash means nothing has ever succeeded. The board
 is the Windows board ported: one full-width panel per enabled provider, one
 donut per plan window with the credits left and the reset countdown, and the
 cycle's fetched time in the foot. Its `refresh` re-fetches the providers and
-its close button ends it, exactly as on Windows.
+its close button ends it, exactly as on Windows. Both boards are
+override-redirect popups, which is what the Windows boards are too (owned
+`WS_POPUP` windows): no titlebar, no taskbar/dock entry, no Alt-Tab entry, and
+no focus steal on open - the keyboard stays with the terminal. They open
+centred on the screen, both axes, and re-centre as their content-fit changes
+the height.
 
 ## Tests
 
