@@ -32,7 +32,7 @@ enum {
 // and MENU_DISMISSED_BY_PRESS - the dismissing press is still holding the
 // button, its release is still in flight, and the caller MUST swallow that
 // release or its own release handler re-opens the menu with it.
-// scale/fontPx/fontFamily come from the config so the
+// scale/fontFamily come from the config so the
 // menu matches the bar; the colours are already resolved 0..1 triples. There is
 // no dim colour: the menu has no dim text, and passing one invited a parameter
 // the painter never read. startChecked is the autostart state read by the CALLER

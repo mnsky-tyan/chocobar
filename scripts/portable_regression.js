@@ -471,9 +471,6 @@ function check(name, ok, detail) {
     /double xl = padL;/.test(lx) && /xr = g_w - padR;/.test(lx) &&
     /align != CHIP_LEFT\) continue;/.test(lx) && /align != CHIP_RIGHT\) continue;/.test(lx),
     'a single right-aligned loop ignores the pinned group and breaks demo parity');
-  // the dashboard shares the bar's connection, so its close button MUST go through
-  // WM_DELETE_WINDOW: without the protocol the window manager falls back to
-  // XKillClient, which severs the shared connection and takes the bar with it.
   const dash = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
   // The board is an override-redirect POPUP (p_ui.c registers ChocobarDash as

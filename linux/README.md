@@ -171,7 +171,7 @@ Per-OS parts, written fresh for Linux:
 | metrics | `p_metrics.c` (PDH, Core Audio, HWiNFO) | `linux/src/p_metrics_linux.c` (`/proc`, `/sys`, `pactl`) |
 | icons | `p_icons.c` (GDI+) | `linux/src/icons_cairo.c` (cairo) - same geometry from `p_svg.c` |
 | window/paint | `p_ui.c` (layered GDI window) | `linux/src/main.c` (managed X11 window + cairo) |
-| shared X helpers | - | `linux/src/linux_shape.c` (the rounded window region), `linux/src/linux_text.c` (wide-to-UTF-8, the symbol face) |
+| shared X helpers | - | `linux/src/linux_shape.c` (the rounded window region, the boards' placement), `linux/src/linux_text.c` (wide-to-UTF-8, the symbol face) |
 | subscriptions | `p_subs.c` (WinHTTP) | the SAME `p_subs.c`: its HTTP is a libcurl body under `CHOCOBAR_PORTABLE` |
 
 ## Why a managed X11 window in the lower layer
