@@ -298,10 +298,13 @@ donut per plan window with the credits left and the reset countdown, and the
 cycle's fetched time in the foot. Its `refresh` re-fetches the providers and
 its close button ends it, exactly as on Windows. Both boards are
 override-redirect popups, which is what the Windows boards are too (owned
-`WS_POPUP` windows): no titlebar, no taskbar/dock entry, no Alt-Tab entry, and
-no focus steal on open - the keyboard stays with the terminal. They open
-centred on the screen, both axes, and re-centre as their content-fit changes
-the height.
+`WS_POPUP` windows): no titlebar, no taskbar/dock entry, no Alt-Tab entry.
+The keyboard diverges from Windows on purpose: Windows opens the board without
+activating it, but an override-redirect window on X is never activated by the
+window manager, so the board takes the keyboard itself while it is up - that
+is what makes Esc and q close it - and hands it back to the window that held
+it when the board closes. They open centred on the screen, both axes, and
+re-centre as their content-fit changes the height.
 
 ## Tests
 

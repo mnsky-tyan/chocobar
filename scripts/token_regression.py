@@ -231,6 +231,60 @@ def main():
         check("nested route names are element-matched, not substring-matched",
               lambda: verify(nested_cursor_real(), [(244, 3, 1, 1, False), (244, 3, 1, 1, True)]))
 
+        # The record-type gate: a source with `record` counts ONLY lines whose
+        # JSON `type` field equals the configured value. Codex rollouts log
+        # cumulative event_msg/token_count summaries (counting them re-counts
+        # the session on every turn), and a line may carry the discriminator
+        # string as DATA in an unrelated field - a whole-line substring gate
+        # counted exactly that. 100+40+10 + 80+20+10+5 = 265, two calls, one
+        # model; the cumulative line and the data mention contribute nothing.
+        def fixture_record(root, name):
+            profile = root / name
+            configdir = profile / ".wizbar"
+            sessions = profile / "sessions"
+            configdir.mkdir(parents=True)
+            sessions.mkdir()
+            now = int(time.time() * 1000)
+            fields = {"input": "input_tokens", "output": "output_tokens",
+                      "cacheRead": "cached_input_tokens",
+                      "cacheWrite": "cache_write_tokens",
+                      "timestamp": "at", "model": "model"}
+            config = {
+                "tokens": {"enabled": True, "sources": [
+                    {"app": "codex", "path": windows_path(sessions), "enabled": True,
+                     "fields": fields, "record": "token_usage_record"}]},
+                "subs": {"enabled": False},
+                "general": {"autoStart": False, "checkUpdates": False, "debug": False}}
+            (configdir / "config.json").write_text(dump(config), encoding="utf-8")
+            def rec(inp, out, cr, cw, at):
+                return {"type": "token_usage_record", "input_tokens": inp,
+                        "output_tokens": out, "cached_input_tokens": cr,
+                        "cache_write_tokens": cw, "at": at, "model": "Codex-M"}
+            rows = [rec(100, 40, 10, 0, now - 1000),
+                    rec(80, 20, 10, 5, now - 900),
+                    # the cumulative session summary: never counts
+                    {"type": "event_msg/token_count", "input_tokens": 99999,
+                     "output_tokens": 0, "cached_input_tokens": 0,
+                     "cache_write_tokens": 0, "at": now - 800, "model": "Codex-M"},
+                    # the discriminator string as another field's DATA: never counts
+                    {"type": "event_msg", "payload": {"note": "token_usage_record"},
+                     "input_tokens": 88888, "output_tokens": 0,
+                     "cached_input_tokens": 0, "cache_write_tokens": 0,
+                     "at": now - 700, "model": "Codex-M"}]
+            (sessions / "usage.jsonl").write_text("".join(dump(r) + "\n" for r in rows),
+                                                  encoding="utf-8")
+            (profile / "append-record.json").write_text(
+                dump(rec(50, 5, 0, 0, now - 600)) + "\n", encoding="utf-8")
+            return profile
+        recprof = fixture_record(root, "record-gate")
+        check("record gate counts only the typed records (cumulative and data mentions excluded)",
+              lambda: verify(run_child(exe, recprof),
+                             [(265, 2, 1, 1, False), (265, 2, 1, 1, True)]))
+        check("record gate append counts only a typed record",
+              lambda: verify(run_child(exe, recprof, "append"),
+                             [(265, 2, 1, 1, False), (320, 3, 1, 1, False),
+                              (320, 3, 1, 1, True)]))
+
         # A gateway that logs every call it serves (Magpie) and the client's
         # own session store BOTH hold the same request, so counting both
         # double-counts it. The routing is config: the gateway declares the

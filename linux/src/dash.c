@@ -144,6 +144,10 @@ typedef struct {
 
 static Dash g_dash;
 static int g_boardOpen = 0;
+// the window that held the X keyboard focus when the board took it, restored
+// on close so the terminal the user was typing in keeps its keys (p_ui.c on
+// Windows never needs this: SWP_NOACTIVATE leaves the keyboard alone entirely)
+static Window g_focusPrev = None;
 
 // The board's own window corner radius lives in linux_shape.h (BOARD_RADIUS_CSS):
 // Windows 11's DWMWCP_ROUND_NATIVE for a normal (non-maximized) window, one
@@ -954,9 +958,24 @@ static int dashFitToContent(void) {
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (lo < minH) lo = minH;
     if (want < lo) want = lo;
+    // keep the board centred as its height follows the content: p_ui.c opens
+    // the board centred (dashToggle) and its content-fit only resizes, so a
+    // Linux board that kept its top edge would drift downward every time it
+    // grew. Re-centre FIRST, before the head lookup below: the clamp that
+    // follows must read the head the board will actually sit on, not the head
+    // it opened on - a pointer that moved between heads would otherwise be
+    // clamped back onto the old head on every later fit (the bug this order
+    // fixes; subs.c's fitToContent runs the same lookup in this same order).
+    {
+        int cx = 0, cy = 0;
+        boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
+        d->x = cx; d->y = cy;
+    }
+    int yWas = d->y, xWas = d->x;
     // the containing head's work-area bottom, in device px: Xinerama-aware,
-    // because the board can live on any head. Both the height clamp and the
-    // move-up below read this one value.
+    // because the board can live on any head. Read from the POST-recentre
+    // d->x/d->y: the height clamp and the move-up below apply to the board's
+    // new position, so the head they consult has to be the new one.
     int headBottom = 0;
     if (d->dpy) {
         headBottom = DisplayHeight(d->dpy, DefaultScreen(d->dpy)) - 40;
@@ -974,23 +993,12 @@ static int dashFitToContent(void) {
         }
     }
     if (headBottom <= 0) return 0;
-    // keep the board centred as its height follows the content: p_ui.c opens
-    // the board centred (dashToggle) and its content-fit only resizes, so a
-    // Linux board that kept its top edge would drift downward every time it
-    // grew. Re-centred BEFORE the clamp below, which then still lifts the
-    // board off the head's bottom edge when the content is tall.
-    {
-        int cx = 0, cy = 0;
-        boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
-        d->x = cx; d->y = cy;
-    }
     // keep the whole board on screen: p_ui.c moves the window up to the head's
     // work-area bottom before sizing it, so a board whose content reaches the
     // clamp still shows its last row (and the "last scan" footer) instead of
     // having it clipped off the bottom edge. The move MUST come before the
     // clamp: clamping to the room at the OLD position would make the move below
     // unreachable, which is the bug this order fixes.
-    int yWas = d->y, xWas = d->x;
     if (d->y + want > headBottom) {
         d->y = headBottom - want;
         if (d->y < 0) d->y = 0;
@@ -1115,10 +1123,13 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // registers ChocobarDash as an owned WS_POPUP: no taskbar button, no
     // Alt-Tab entry, no titlebar). With OR the window manager is never
     // consulted - no decorations, no dock/taskbar entry, no WM_DELETE protocol
-    // (so no XKillClient path that could sever the bar's shared connection),
-    // and no focus steal on open (p_ui.c opens with SWP_NOACTIVATE: the
-    // keyboard stays with the terminal). Close is the board's own X button or
-    // the menu toggle, exactly like Windows.
+    // (so no XKillClient path that could sever the bar's shared connection).
+    // The keyboard: Windows opens the board SWP_NOACTIVATE and never holds the
+    // focus; on X an OR window is never activated by the WM, so the board
+    // takes the focus itself while it is up (that is what lets Esc/q close
+    // it), saves whatever held the focus first, and hands it back on close
+    // (dashClose). Close is the board's own X button or the menu toggle,
+    // exactly like Windows.
     // The dashboard's own cursor, at the desktop's scaled size: without it the
     // pointer over the board shows Xwayland's root cursor at the raw
     // XCURSOR_SIZE and shrinks against the desktop's scaled one (the bar fixed
@@ -1154,7 +1165,15 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // menu does the same for the same reason. p_ui.c parity: clicking the Windows
     // board activates it, and Esc closes it. AFTER the map: SetInputFocus on an
     // unmapped window is a BadMatch (not viewable), which is exactly what a
-    // dropped map request looks like from the error handler.
+    // dropped map request looks like from the error handler. The window that
+    // held the focus is remembered first and restored by dashClose, so the
+    // terminal the user was typing in gets its keys back.
+    {
+        Window pf = None;
+        int pr = 0;
+        XGetInputFocus(dpy, &pf, &pr);
+        g_focusPrev = pf;
+    }
     XSetInputFocus(dpy, d->win, RevertToParent, CurrentTime);
     XFlush(dpy);
 
@@ -1359,6 +1378,17 @@ void dashClose(void) {
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }
     if (d->ffBold) { cairo_font_face_destroy(d->ffBold); d->ffBold = NULL; }
     if (d->ffSymbol) { cairo_font_face_destroy(d->ffSymbol); d->ffSymbol = NULL; }
+    // While the board was up it held the X focus (taken right after the map).
+    // Destroying the focused window would leave the focus on the root and the
+    // user's keystrokes in limbo until the next click, so hand the keyboard
+    // back to the window that held it first - only while that window is still
+    // mapped (SetInputFocus on an unmapped window is a BadMatch).
+    if (g_focusPrev != None && d->dpy) {
+        XWindowAttributes at;
+        if (XGetWindowAttributes(d->dpy, g_focusPrev, &at) && at.map_state == IsViewable)
+            XSetInputFocus(d->dpy, g_focusPrev, RevertToParent, CurrentTime);
+        g_focusPrev = None;
+    }
     // DestroyNotify may have already taken the window; XDestroyWindow on a dead
     // window only raises BadWindow, which the error handler ignores.
     XDestroyWindow(d->dpy, d->win);

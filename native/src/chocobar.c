@@ -862,9 +862,10 @@ static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj)
     ts->provList[0] = ts->exclList[0] = 0;
     tokListCopy(ts->provList, sizeof(ts->provList), js, t, obj, "providers");
     tokListCopy(ts->exclList, sizeof(ts->exclList), js, t, obj, "exclude");
-    // record: the value is stored bare; the matcher wraps it in quotes so a
-    // needle like token_usage_record can never match a substring of another
-    // record's data (only the discriminator string itself carries the quotes)
+    // record: the value is stored bare; the matcher anchors it to the record
+    // key ("type":"<value>") when parsing, so a line whose type field equals
+    // the configured record counts and the same word appearing as another
+    // field's data does not
     ts->record[0] = 0;
     {
         int rk = jobjGet(js, t, obj, "record");

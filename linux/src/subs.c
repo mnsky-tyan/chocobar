@@ -90,6 +90,9 @@ typedef struct {
 
 static Subs g_subs;
 static int g_open = 0;
+// the window that held the X keyboard focus when the board took it, restored
+// on close (same pattern as the token board's g_focusPrev in dash.c)
+static Window g_focusPrev = None;
 
 // ---- small helpers ---------------------------------------------------------------
 
@@ -725,7 +728,9 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     XStoreName(dpy, d->win, "Chocobar - Subscriptions");
     // Override-redirect popup, exactly like the token board (see dash.c): the
     // board is an owned WS_POPUP on Windows - no taskbar/dock entry, no
-    // Alt-Tab entry, no titlebar, no focus steal on open. Close is the board's
+    // Alt-Tab entry, no titlebar. The keyboard diverges from Windows (which
+    // never activates the board): on X the board takes the focus while it is
+    // up so Esc/q close it, and hands it back on close. Close is the board's
     // own X button or the menu toggle.
     {
         XcursorImage *img = XcursorLibraryLoadImage("left_ptr", NULL,
@@ -752,7 +757,14 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // never activated by KWin, so without this Esc/q would go to the terminal
     // instead of closing the board (p_ui.c parity: clicking the Windows board
     // activates it, and Esc closes it). The menu does the same for the same
-    // reason.
+    // reason. The window that held the focus is remembered first and restored
+    // by subsClose, so the terminal the user was typing in keeps its keys.
+    {
+        Window pf = None;
+        int pr = 0;
+        XGetInputFocus(dpy, &pf, &pr);
+        g_focusPrev = pf;
+    }
     XSetInputFocus(dpy, d->win, RevertToParent, CurrentTime);
     XFlush(dpy);
 
@@ -852,6 +864,15 @@ int subsEvent(XEvent *ev) {
 void subsClose(void) {
     Subs *d = &g_subs;
     if (!g_open) return;
+    // hand the keyboard back before the focused window dies (same as dashClose;
+    // only while the saved window is still mapped - SetInputFocus on an
+    // unmapped window is a BadMatch)
+    if (g_focusPrev != None && d->dpy) {
+        XWindowAttributes at;
+        if (XGetWindowAttributes(d->dpy, g_focusPrev, &at) && at.map_state == IsViewable)
+            XSetInputFocus(d->dpy, g_focusPrev, RevertToParent, CurrentTime);
+        g_focusPrev = None;
+    }
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }
     if (d->surf) { cairo_surface_destroy(d->surf); d->surf = NULL; }
     if (d->win) { XDestroyWindow(d->dpy, d->win); d->win = None; }

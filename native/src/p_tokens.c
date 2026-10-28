@@ -377,9 +377,11 @@ static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
     tk->exclList = s->exclList;
     tk->recLen = 0;
     if (s->record[0]) {
-        // quotes around the bare value: the needle matches the discriminator
-        // string itself, never the same word appearing as data somewhere else
-        tk->recLen = sprintf(tk->rec, "\"%s\"", s->record);
+        // the BARE value: the parse-side gate anchors it to the record key
+        // ("type":"<value>") at the one place the key occurs, so the
+        // discriminator never matches the same word appearing as another
+        // field's data
+        tk->recLen = sprintf(tk->rec, "%s", s->record);
     }
 }
 
@@ -461,11 +463,22 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     out->prov = NULL; out->provLen = 0;
     // record-type gate first: a line that is not the wanted record type is
     // skipped before any field is looked at (cheapest test, and the one that
-    // keeps cumulative summaries out of per-response stores)
+    // keeps cumulative summaries out of per-response stores). The needle is
+    // anchored to the record KEY: the scan looks for "type": and then parses
+    // the quoted value that follows it, so a line whose NOTE field merely
+    // mentions the discriminator string is not counted - a bare whole-line
+    // substring search would count exactly that.
     if (tk->recLen > 0) {
+        static const char rk[] = "\"type\":";
         int hit = 0;
-        for (int i = 0; i + tk->recLen <= len; i++) {
-            if (memcmp(ln + i, tk->rec, tk->recLen) == 0) { hit = 1; break; }
+        for (int i = 0; i + (int)sizeof(rk) - 1 <= len; i++) {
+            if (memcmp(ln + i, rk, sizeof(rk) - 1) != 0) continue;
+            int j = i + (int)sizeof(rk) - 1;
+            while (j < len && (ln[j] == ' ' || ln[j] == '\t')) j++;
+            if (j >= len || ln[j] != '"') continue;
+            j++;
+            if (j + tk->recLen < len && memcmp(ln + j, tk->rec, tk->recLen) == 0 &&
+                ln[j + tk->recLen] == '"') { hit = 1; break; }
         }
         if (!hit) return 0;
     }

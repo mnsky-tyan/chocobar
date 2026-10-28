@@ -484,6 +484,19 @@ function check(name, ok, detail) {
     /swa\.override_redirect = True/.test(subs) && /CWOverrideRedirect/.test(subs) &&
     !/XSetWMProtocols/.test(subs),
     'no WM to talk to: no decorations, no dock entry, and no XKillClient path on the shared connection');
+  // The content-fit must consult the head the board will sit on, not the head
+  // it opened on: boardCenterOnHead (the re-centre) MUST run before the
+  // Xinerama head lookup whose bottom edge clamps the height. A pointer that
+  // moved to another head between fits otherwise gets clamped back onto the
+  // old head's bottom edge on every later fit - the order is the invariant,
+  // and it is checked in BOTH fits (dash.c had it backwards once).
+  for (const [fitFile, src] of [['dash.c', dash], ['subs.c', subs]]) {
+    const fit = src.match(/(?:dashFitToContent|static int fitToContent)\(void\) \{[\s\S]*?\n\}/);
+    check(`linux: ${fitFile}'s fit recentres before it reads the containing head`,
+      !!fit && fit[0].indexOf('boardCenterOnHead') >= 0 &&
+      fit[0].indexOf('boardCenterOnHead') < fit[0].indexOf('XineramaQueryScreens'),
+      'the head clamp must read the post-recentre head, or a pointer on another head gets pulled back');
+  }
   // the board is driven by the bar's loop: one pump, two windows. A nested
   // event loop (dashRun's own while/XPending) froze the bar's clock for as
   // long as the board stayed open - Windows dispatches both windows from one
