@@ -146,7 +146,8 @@ function check(name, ok, detail) {
   // estimate, whose rows are the only ones flagged as estimated
   check('estimator: only all-zero usage is estimated',
     /if \(sum > 0\) \{/.test(pt) && /else if \(estimating\) \{/.test(pt)
-    && /r\.model, r\.modelLen, 0\);/.test(pt) && /r\.model, r\.modelLen, 1\);/.test(pt),
+    && /r\.model, r\.modelLen, 0, tmask\);/.test(pt)
+    && /r\.model, r\.modelLen, 1, tmask\);/.test(pt),
     'a real row is never flagged, an estimated row always is');
 
   // on by default, with the constants in config and a sane floor
@@ -314,7 +315,7 @@ function check(name, ok, detail) {
     'a KWin script that stopped must not pin the bar to a window that is gone');
   check('linux: a file source is scanned, not silently skipped',
     /static void tokScanFileSource/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'))
-      || /tokScanDir\(parent, 0, s->app, &tk, cfg\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
+      || /tokScanDir\(parent, 0, s->app, &tk, cfg, s->totalMask, 1\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
     'magpie keeps ONE ledger file; the walk only enumerated directories, so that source contributed nothing');
 }
 
@@ -473,32 +474,74 @@ function check(name, ok, detail) {
     'a single right-aligned loop ignores the pinned group and breaks demo parity');
   const dash = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'dash.c'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
-  // The board is an override-redirect POPUP (p_ui.c registers ChocobarDash as
-  // an owned WS_POPUP: no taskbar button, no titlebar). With OR there is no
-  // window manager at all - no decorations, no dock entry, and no WM_DELETE
-  // protocol whose absence would let a WM fall back to XKillClient on the
-  // bar's SHARED display connection. Focus is a separate matter the boards
-  // handle themselves: they take the X keyboard while they are up and hand
-  // it back to the previous holder on close (dash.c/subs.c), the
+  // The board is a MANAGED popup (v1.6.4): p_ui.c registers ChocobarDash as an
+  // owned WS_POPUP - no taskbar button, no titlebar, HWND_TOP at open and
+  // coverable afterwards - and on X only a MANAGED window can be coverable and
+  // movable. An override-redirect board is composited in KWin's top layer and
+  // nothing translates it: v1.6.3 shipped both defects (stuck on top, could
+  // not be dragged). The popup properties now travel as WM-visible state
+  // (skip-taskbar, skip-pager, motif no-decorations) written by the shared
+  // helper both boards call, and the boards still install no WM_DELETE
+  // protocol (close stays the board's own X button or the menu toggle).
+  // Focus is separate: the boards take the X keyboard while they are up and
+  // hand it back to the previous holder on close (dash.c/subs.c), the
   // take-and-restore linux/README.md documents.
-  check('linux: the dashboard is an override-redirect popup (no titlebar, no dock entry, no WM close protocol)',
-    /swa\.override_redirect = True/.test(dash) && /CWOverrideRedirect/.test(dash) &&
-    !/XSetWMProtocols/.test(dash) && !/XSetWMNormalHints/.test(dash) &&
-    /swa\.override_redirect = True/.test(subs) && /CWOverrideRedirect/.test(subs) &&
-    !/XSetWMProtocols/.test(subs),
-    'no WM to talk to: no decorations, no dock entry, and no XKillClient path on the shared connection');
-  // The content-fit must consult the head the board will sit on, not the head
-  // it opened on: boardCenterOnHead (the re-centre) MUST run before the
-  // Xinerama head lookup whose bottom edge clamps the height. A pointer that
-  // moved to another head between fits otherwise gets clamped back onto the
-  // old head's bottom edge on every later fit - the order is the invariant,
-  // and it is checked in BOTH fits (dash.c had it backwards once).
+  const shape = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'linux_shape.c'), 'utf8');
+  check('linux: both boards are managed popups, not override-redirect (no titlebar, no dock entry, coverable)',
+    /boardMakeManaged\(dpy, d->win/.test(dash) && /boardMakeManaged\(dpy, d->win/.test(subs) &&
+    !/override_redirect = True/.test(dash) && !/override_redirect = True/.test(subs) &&
+    !/CWOverrideRedirect/.test(dash) && !/CWOverrideRedirect/.test(subs) &&
+    /_NET_WM_STATE_SKIP_TASKBAR/.test(shape) && /_NET_WM_STATE_SKIP_PAGER/.test(shape) &&
+    /_MOTIF_WM_HINTS/.test(shape) &&
+    !/XSetWMProtocols/.test(dash) && !/XSetWMProtocols/.test(subs),
+    'an OR board sits in the top layer and cannot be moved or covered; a decorated board or a dock entry is the other failure');
+  // The drag the managed board needs (Windows gets it free from WM_NCHITTEST
+  // returning HTCAPTION): a Button1 press in the title band starts it, motion
+  // re-applies the pointer offset, and the completing release must not also
+  // fire the button under the pointer.
+  check('linux: both boards drag from their title band',
+    /d->dragDx = ev->xbutton\.x_root - d->x;/.test(dash) &&
+    /d->dragDx = ev->xbutton\.x_root - d->x;/.test(subs) &&
+    // the motion must move the STRUCT first, then the window: the fit and its
+    // head clamp read d->x/d->y, so a window-only move leaves a stale position
+    // that snaps the board back on the next content resize
+    /d->x = ev->xmotion\.x_root - d->dragDx;/.test(dash) &&
+    /d->x = ev->xmotion\.x_root - d->dragDx;/.test(subs) &&
+    /XMoveWindow\(d->dpy, d->win, d->x, d->y\)/.test(dash) &&
+    /XMoveWindow\(d->dpy, d->win, d->x, d->y\)/.test(subs) &&
+    /if \(d->dragging\) \{ d->dragging = 0; break; \}/.test(dash) &&
+    /if \(d->dragging\) \{ d->dragging = 0; break; \}/.test(subs),
+    'a managed board is immovable without its own drag; Windows gets it from HTCAPTION');
+  // The open path clamps the size to the screen BEFORE it centres (p_ui.c's
+  // dashToggle does the same with dashMaxH()): a board taller than the screen
+  // would centre to a NEGATIVE y, and the fit's keep-position rule would then
+  // pin it to the top edge - over the bar (measured on the 400 px test screen).
+  check('linux: both boards clamp their open size to the screen before centring',
+    /if \(d->w > sw - 40\) d->w = sw - 40;/.test(dash) &&
+    /if \(d->w > sw - 40\) d->w = sw - 40;/.test(subs) &&
+    /if \(maxH > 0 && d->h > maxH\) d->h = maxH;/.test(dash) &&
+    /if \(maxH > 0 && d->h > maxH\) d->h = maxH;/.test(subs),
+    'a board taller than the screen centres to a negative y and the fit pins it over the bar');
+  // All-desktops rides a POST-map request: a pre-map _NET_WM_DESKTOP does not
+  // survive the map on KWin (it resolves to the current desktop), so the open
+  // path must call boardRequestAllDesktops right after XMapWindow - the bar's
+  // afterMap() learned the same lesson.
+  check('linux: both boards request all desktops right after the map',
+    /XMapWindow\(dpy, d->win\);\s*\n\s*boardRequestAllDesktops\(dpy, d->win\);/.test(dash) &&
+    /XMapWindow\(dpy, d->win\);\s*\n\s*boardRequestAllDesktops\(dpy, d->win\);/.test(subs),
+    'a board pinned to its opening desktop vanishes when the user switches desktops while it is open');
+  // The content-fit must NOT re-centre the board (v1.6.4): the user can drag
+  // it now, and a fit that recentred would snap the window back to centre on
+  // the next hover repaint. Windows' dashFitToContent keeps nx = dr.left,
+  // ny = dr.top and clamps only the bottom edge, so the Linux fit must keep
+  // the current position too and read the head the board is on NOW - the
+  // boardCenterOnHead call (the open-time centre) belongs OUTSIDE the fit.
   for (const [fitFile, src] of [['dash.c', dash], ['subs.c', subs]]) {
     const fit = src.match(/(?:dashFitToContent|static int fitToContent)\(void\) \{[\s\S]*?\n\}/);
-    check(`linux: ${fitFile}'s fit recentres before it reads the containing head`,
-      !!fit && fit[0].indexOf('boardCenterOnHead') >= 0 &&
-      fit[0].indexOf('boardCenterOnHead') < fit[0].indexOf('XineramaQueryScreens'),
-      'the head clamp must read the post-recentre head, or a pointer on another head gets pulled back');
+    check(`linux: ${fitFile}'s fit keeps the dragged position (no recentre)`,
+      !!fit && fit[0].indexOf('boardCenterOnHead') < 0 &&
+      fit[0].indexOf('XineramaQueryScreens') >= 0,
+      'a fit that recentred would snap a dragged board back to centre on the next repaint');
   }
   // the board is driven by the bar's loop: one pump, two windows. A nested
   // event loop (dashRun's own while/XPending) froze the bar's clock for as

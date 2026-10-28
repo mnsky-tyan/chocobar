@@ -86,6 +86,8 @@ typedef struct {
     long long busyUntilMs;     // the 12 s click debounce floor (p_ui.c)
     long long busyEpoch;       // the epoch the refresh started from
     int tbBottom;              // titlebar bottom (device px)
+    int dragging;              // 1 = a title-band Button1 drag is in progress
+    int dragDx, dragDy;        // pointer offset from the window's top-left
 } Subs;
 
 static Subs g_subs;
@@ -259,19 +261,15 @@ static int fitToContent(void) {
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (lo < minH) lo = minH;
     if (want < lo) want = lo;
-    // keep centred as the height follows content (p_ui.c opens centred and its
-    // fit only resizes; see dash.c's dashFitToContent for the full note)
-    int xWas = d->x, yWas = d->y;
-    if (d->dpy) {
-        int cx = 0, cy = 0;
-        boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
-        d->x = cx; d->y = cy;
-    }
+    // The fit KEEPS the position the board sits at (see dash.c's
+    // dashFitToContent): the user can drag the board now, and a re-centre on
+    // every repaint would snap it back to centre. The head lookup below reads
+    // the head the board is on now, so the clamp follows a dragged board.
     int hi = 0;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
-        // the head's ABSOLUTE work-area bottom (the centred top edge is y-aware,
-        // so the clamp has to be too)
+        // the head's ABSOLUTE work-area bottom (the board's top edge is
+        // y-aware, so the clamp has to be too)
         hi = DisplayHeight(d->dpy, scr) - 40;
         int n = 0;
         XineramaScreenInfo *xi = XineramaQueryScreens(d->dpy, &n);
@@ -287,16 +285,11 @@ static int fitToContent(void) {
         }
     }
     if (hi <= 0) return 0;
-    // the room under the centred top edge, never below the floor
+    // the room under the board's top edge, never below the floor
     int room = hi - d->y;
     int minRoom = (int)(SUBS_MIN_CSS * d->scale);
     if (room < minRoom) room = minRoom;
     if (want > room) want = room;
-    // The position is part of the fit: a re-centred top edge must reach the
-    // WINDOW, not just the struct. The struct alone drifting is the bug this
-    // branch fixes - the resize below used to be the only position applier on
-    // this window (subsOpen's single XMoveResizeWindow), so every later fit left
-    // the window where it opened while d->x/d->y moved under it.
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -309,8 +302,6 @@ static int fitToContent(void) {
         reshape(d);
         return 1;
     }
-    if (d->x != xWas || d->y != yWas)
-        XMoveWindow(d->dpy, d->win, d->x, d->y);
     return 0;
 }
 
@@ -705,6 +696,20 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
+    // p_ui.c dashToggle clamps the size to dashMaxH() (CYSCREEN-40) and
+    // sw-40 BEFORE it opens and centres: the content fit later shrinks the
+    // height to the content, but the OPEN position must already fit the
+    // screen. Without the clamp a board taller than the screen centres to a
+    // NEGATIVE y, and the fit's keep-position rule then pins it to the top
+    // edge - over the bar (measured on the 400 px test screen: the 580 css
+    // subs board opened at y=0 and covered the bar, eating the next clicks).
+    {
+        int sh = DisplayHeight(dpy, screen);
+        int sw = DisplayWidth(dpy, screen);
+        if (d->w > sw - 40) d->w = sw - 40;
+        int maxH = sh - 40;
+        if (maxH > 0 && d->h > maxH) d->h = maxH;
+    }
     // p_ui.c dashToggle placement: the board opens centred, both axes -
     // boardCenterOnHead centres it on the head the pointer is on - before the
     // content fit adjusts the height.
@@ -715,24 +720,30 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = cmap;
-    swa.override_redirect = True;
+    // MANAGED, not override-redirect (linux_shape.c boardMakeManaged for the
+    // full why): an OR window is composited in KWin's top layer and cannot be
+    // moved or covered - v1.6.3 shipped both defects. The managed popup keeps
+    // the popup properties (no titlebar, no taskbar entry, exact rectangle)
+    // and regains the Windows board's behaviour: HWND_TOP at open, coverable,
+    // draggable by its title band.
     swa.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
                      ButtonReleaseMask | PointerMotionMask | StructureNotifyMask |
                      LeaveWindowMask;
     d->win = XCreateWindow(dpy, RootWindow(dpy, screen), d->x, d->y,
                            (unsigned)d->w, (unsigned)d->h, 0, depth, InputOutput, visual,
-                           CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask,
+                           CWBackPixel | CWBorderPixel | CWColormap | CWEventMask,
                            &swa);
     if (!d->win) return None;
-    // Debug-aid name only (no WM titles an override-redirect window), but
-    // xwininfo -root -children then names the board for tests and captures.
-    XStoreName(dpy, d->win, "Chocobar - Subscriptions");
-    // Override-redirect popup, exactly like the token board (see dash.c): the
-    // board is an owned WS_POPUP on Windows - no taskbar/dock entry, no
-    // Alt-Tab entry, no titlebar. The keyboard diverges from Windows (which
-    // never activates the board): on X the board takes the focus while it is
-    // up so Esc/q close it, and hands it back on close. Close is the board's
-    // own X button or the menu toggle.
+    boardMakeManaged(dpy, d->win, "Chocobar - Subscriptions", "chocobar-subs",
+                     d->x, d->y, d->w, d->h);
+    // Managed popup: the properties written by boardMakeManaged keep this a
+    // popup as p_ui.c registers ChocobarDash - an owned WS_POPUP: no taskbar
+    // button, no Alt-Tab entry, no titlebar. The stacking (HWND_TOP at open,
+    // coverable afterwards) is the window manager's normal-layer behaviour
+    // instead of a hardcoded topmost bit. The keyboard diverges from Windows
+    // (which never activates the board): on X the board takes the focus while
+    // it is up so Esc/q close it, and hands it back on close. Close is the
+    // board's own X button or the menu toggle.
     {
         XcursorImage *img = XcursorLibraryLoadImage("left_ptr", NULL,
                                                     (int)(cbCursorBaseSize() * cbCursorScale() + 0.5));
@@ -743,8 +754,8 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
             XcursorImageDestroy(img);
         }
     }
-    // No size hints: an override-redirect popup has no window manager to
-    // negotiate with; the content fit is the only sizer.
+    // Size hints are set by boardMakeManaged (USPosition); the content fit is
+    // the only sizer.
 
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
     d->cr = cairo_create(d->surf);
@@ -753,11 +764,18 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // paint, fit, then map (p_ui.c paints while hidden so the board appears once)
     paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
-    XMapRaised(dpy, d->win);
-    // Take the keyboard while the board is up: an override-redirect window is
-    // never activated by KWin, so without this Esc/q would go to the terminal
-    // instead of closing the board (p_ui.c parity: clicking the Windows board
-    // activates it, and Esc closes it). The menu does the same for the same
+    // Plain map: the stacking is the window manager's now. A newly mapped
+    // window lands above the current stack (KWin), and the focus take below
+    // activates the board, which lifts it above the terminal - the Windows
+    // board's SetWindowPos(HWND_TOP) without a hardcoded topmost bit.
+    XMapWindow(dpy, d->win);
+    boardRequestAllDesktops(dpy, d->win);
+    // Take the keyboard while the board is up. The managed board CAN be
+    // activated by KWin, but only on a click; opening it from the bar's click
+    // would leave the keyboard with the terminal, so the board takes the focus
+    // itself (p_ui.c parity: clicking the Windows board activates it, and Esc
+    // closes it). The menu does the same for the same reason. AFTER the map:
+    // SetInputFocus on an unmapped window is a BadMatch (not viewable).
     // reason. The window that held the focus is remembered first and restored
     // by subsClose, so the terminal the user was typing in keeps its keys.
     {
@@ -766,8 +784,11 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
         XGetInputFocus(dpy, &pf, &pr);
         g_focusPrev = pf;
     }
-    XSetInputFocus(dpy, d->win, RevertToParent, CurrentTime);
-    XFlush(dpy);
+    // Ask the window manager to activate (raise above the window the user was
+    // in) with the timestamp of the click that opened the board, then focus
+    // directly as the WM-less fallback. Both steps live in boardActivate.
+    extern Time g_lastInputTime;
+    boardActivate(dpy, d->win, g_lastInputTime);
 
     g_open = 1;
     return d->win;
@@ -814,6 +835,21 @@ int subsEvent(XEvent *ev) {
         break;
     }
     case MotionNotify: {
+        // Title-band drag (p_ui.c WM_NCHITTEST returns HTCAPTION there, so
+        // Windows moves the window under a held left button with no extra
+        // code): on X the app does the move. The press recorded the pointer
+        // offset from the window's top-left; every motion re-applies it.
+        // Nothing else runs while dragging - the hover repaint would follow a
+        // pointer that is really just moving the window.
+        if (d->dragging) {
+            // d->x/d->y must track the drag: the content fit and its head
+            // clamp read them, so a stale position would move the board
+            // BACK to where the drag started on the next resize.
+            d->x = ev->xmotion.x_root - d->dragDx;
+            d->y = ev->xmotion.y_root - d->dragDy;
+            XMoveWindow(d->dpy, d->win, d->x, d->y);
+            break;
+        }
         int b = buttonAt(d, ev->xmotion.x, ev->xmotion.y);
         if (b != d->btnHover) {
             d->btnHover = b;
@@ -831,6 +867,10 @@ int subsEvent(XEvent *ev) {
         // the buttons act on the RELEASE inside their own rect (the bar's own
         // rule: a press that wandered off must not fire)
         if (ev->xbutton.button == 1) {
+            // a title-band drag ends silently: the release that completes a
+            // move must not also act as a click on whatever button the
+            // pointer ended over (Windows: HTCAPTION swallows the release)
+            if (d->dragging) { d->dragging = 0; break; }
             int b = buttonAt(d, ev->xbutton.x, ev->xbutton.y);
             if (b == 2) return 1;                    // close
             if (b == 1) {
@@ -849,6 +889,16 @@ int subsEvent(XEvent *ev) {
         }
         break;
     case ButtonPress:
+        // A left press in the title band starts the drag the Windows board
+        // gets from WM_NCHITTEST's HTCAPTION (p_ui.c 2739: any point above
+        // the titlebar bottom that is not a button).
+        if (ev->xbutton.button == 1 && ev->xbutton.y < d->tbBottom &&
+            !buttonAt(d, ev->xbutton.x, ev->xbutton.y)) {
+            d->dragging = 1;
+            d->dragDx = ev->xbutton.x_root - d->x;
+            d->dragDy = ev->xbutton.y_root - d->y;
+            break;
+        }
         // middle/right click closes the board (the Windows dashProc does)
         if (ev->xbutton.button != 1) return 1;
         break;

@@ -285,6 +285,116 @@ def main():
                              [(265, 2, 1, 1, False), (320, 3, 1, 1, False),
                               (320, 3, 1, 1, True)]))
 
+        # The totalFields mask: a tool whose headline usage EXCLUDES the cache
+        # columns (magpie's `usage` prints in+out as "tokens" and lists the
+        # cache columns beside it) must make the cards read the tool's number,
+        # not the sum of every column. The default fixture rows carry
+        # in+out+cr+cw = 100+40+10 and 80+20+10+5; masked to input,output the
+        # total is 240, not 265 - and the columns themselves keep the full
+        # breakdown (verified in the portable suite's column checks).
+        def fixture_masked(name, total_fields, seeded=False):
+            profile = fixture(root, name, seeded=seeded)
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if total_fields:
+                config["tokens"]["sources"][0]["totalFields"] = total_fields
+            path.write_text(dump(config), encoding="utf-8")
+            return profile
+        masked = fixture_masked("total-masked", "input,output")
+        check("totalFields input,output counts only input+output",
+              lambda: verify(run_child(exe, masked),
+                             [(240, 2, 2, 1, False), (240, 2, 2, 1, True)]))
+        check("totalFields append and warm scan keep the masked total",
+              lambda: verify(run_child(exe, masked, "append"),
+                             [(240, 2, 2, 1, False), (295, 3, 3, 1, False),
+                              (295, 3, 3, 1, True)]))
+        unmasked = fixture_masked("total-unmasked", None)
+        check("absent totalFields keeps the four-field total",
+              lambda: verify(run_child(exe, unmasked), warm265))
+        # an unknown field name rejects the WHOLE list and keeps all four: a
+        # typo must not silently narrow the total to one column (that reads
+        # exactly like the bug the option exists to fix). Trailing commas are
+        # tolerated, so "input,output," is a valid two-field list.
+        typo = fixture_masked("total-typo", "input,outp")
+        check("an unknown totalFields name keeps the four-field total",
+              lambda: verify(run_child(exe, typo), warm265))
+        comma = fixture_masked("total-trailing-comma", "input, output,")
+        check("a trailing comma in totalFields is tolerated",
+              lambda: verify(run_child(exe, comma),
+                             [(240, 2, 2, 1, False), (240, 2, 2, 1, True)]))
+
+        # A FILE source is a ledger: one line, one request. A row that parses
+        # but carries no usage is still a call (it billed nothing) - the CALLS
+        # column must read the ledger's own row count, the only number the user
+        # can check with wc -l. The estimator must not run on a ledger: it has
+        # no transcript to read, so its prompt math reads 0 and the row used to
+        # vanish from CALLS (measured: magpie's ledger held 3,507 zero-usage
+        # rows the board never counted). Tokens stay at the two real rows' sum.
+        ledger = root / "ledger-file-source"
+        (ledger / ".wizbar").mkdir(parents=True)
+        now = int(time.time() * 1000)
+        lfields = {"input": "in", "output": "out", "cacheRead": "cache_read",
+                   "cacheWrite": "cache_write", "timestamp": "at", "model": "model"}
+        lconfig = {
+            "tokens": {"enabled": True, "estimateMissingUsage": True, "sources": [
+                {"app": "ledger", "path": windows_path(ledger / "usage.jsonl"),
+                 "enabled": True, "recursive": False, "fields": lfields}]},
+            "subs": {"enabled": False},
+            "general": {"autoStart": False, "checkUpdates": False, "debug": False}}
+        (ledger / ".wizbar" / "config.json").write_text(dump(lconfig), encoding="utf-8")
+        lrows = [
+            {"in": 100, "out": 40, "cache_read": 10, "cache_write": 0,
+             "at": now - 1000, "model": "Model-A"},
+            {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
+             "at": now - 900, "model": "Model-A"},
+            {"in": 80, "out": 20, "cache_read": 10, "cache_write": 5,
+             "at": now - 800, "model": "Model-B"}]
+        (ledger / "usage.jsonl").write_text("".join(dump(r) + "\n" for r in lrows), encoding="utf-8")
+        check("a file source counts a zero-usage row as a call, not a token",
+              lambda: verify(run_child(exe, ledger),
+                             [(265, 3, 2, 1, False), (265, 3, 2, 1, True)]))
+
+        # The upgrade path: a cursor file written under the OLD accounting (no
+        # _scanVer key) sits at EOF, so the zero-usage rows behind it would
+        # never be re-read and CALLS would stay short for ever. The loader must
+        # detect the missing version and force ONE clean re-read (the drain
+        # resets the aggregates first, so nothing double counts): the totals
+        # come back identical and CALLS gains the zero rows.
+        cursor = ledger / ".wizbar" / "token-cursors.json"
+        old_cursor = cursor.read_text(encoding="utf-8")
+        stripped = "\n".join(l for l in old_cursor.splitlines() if "_scanVer" not in l) + "\n"
+        cursor.write_text(stripped, encoding="utf-8")
+        # the child always runs a warm second scan; scan 0 is the version-driven
+        # full re-read (bytes > 0, warm=False leaves it unchecked), scan 1 must
+        # be warm and byte-silent again
+        check("a v1 cursor file forces one clean re-read and the calls come back",
+              lambda: verify(run_child(exe, ledger),
+                             [(265, 3, 2, 1, False), (265, 3, 2, 1, True)]))
+
+        # The mask rides into the SEED half too: a seed record whose app label
+        # matches the masked source is masked exactly like the live scan, so
+        # the cached history and the live tail can never disagree on what a
+        # "token" is. Seed record: input 70, output 20, cacheRead 5 -> 90
+        # masked (95 unmasked); live rows: 240 masked (265 unmasked). Total
+        # 330 pins BOTH halves: an unmasked seed gives 335, unmasked live 355.
+        def masked_seed():
+            profile = fixture_masked("total-masked-seed", "input,output", seeded=True)
+            cache = profile / ".wizbar" / "token-cache.json"
+            seed = json.loads(cache.read_text(encoding="utf-8"))
+            seed[0][1]["app"] = "custom-cli"
+            seed[0][1]["cacheRead"] = 5
+            now = int(time.time() * 1000)
+            cache.write_text(dump(seed), encoding="utf-8")
+            os.utime(cache, ((now - 60000) / 1000, (now - 60000) / 1000))
+            nxt = json.loads((profile / "seed-next.json").read_text(encoding="utf-8"))
+            nxt[0][1]["app"] = "custom-cli"
+            nxt[0][1]["cacheRead"] = 5
+            (profile / "seed-next.json").write_text(dump(nxt), encoding="utf-8")
+            return profile
+        check("totalFields masks the seed cache by app label",
+              lambda: verify(run_child(exe, masked_seed()),
+                             [(330, 3, 3, 1, False), (330, 3, 3, 1, True)]))
+
         # A gateway that logs every call it serves (Magpie) and the client's
         # own session store BOTH hold the same request, so counting both
         # double-counts it. The routing is config: the gateway declares the

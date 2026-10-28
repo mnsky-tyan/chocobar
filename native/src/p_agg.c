@@ -77,11 +77,15 @@ static void tokScanFinishedNotify(void);
 #define DASH_MODEL_ROWS 13
 // token-cache record fields kept separately: the Electron dash shows the
 // input/output/cache R/cache W/calls table columns, not one lumped sum
-typedef struct { long long in, out, cr, cw, req; } TokAgg;
-// the total a row shows and ranks by: raw input+output plus the cache columns
-// (the token convention the README's "Token accounting" section states). One
-// home, so a fifth field cannot be added in eight places and missed in two.
-static long long tokAggSum(const TokAgg *a) { return a->in + a->out + a->cr + a->cw; }
+typedef struct { long long in, out, cr, cw, req; long long sum; } TokAgg;
+// the total a row shows and ranks by: the record's own masked total, staged
+// by the source that parsed it (tokPendPush). Default mask is all four fields
+// (in+out+cr+cw, the convention the README's "Token accounting" section
+// states); a source whose tool reports the headline usage without the cache
+// columns - magpie - stages in+out, so the cards read the tool's number while
+// the columns keep the full breakdown. One accumulation home per row, so a
+// sixth display cannot disagree with the cards.
+static long long tokAggSum(const TokAgg *a) { return a->sum; }
 static TokAgg g_appAgg[DASH_MAX_APPS];
 static char g_appName[DASH_MAX_APPS][20];
 // tokens.labels maps a raw source key to its dashboard display name (e.g.
@@ -130,7 +134,10 @@ static int aggDayIndex(long long ts, const long long *bnd) {
 
 static void aggRecord(const char *app, int alen, long long ts,
                       long long vin, long long vout, long long vcr, long long vcw,
-                      const char *model, int mlen, const long long *bnd) {
+                      long long vtotal, const char *model, int mlen, const long long *bnd) {
+    // vtotal is the record's masked total, staged by tokPendPush (which applied
+    // the source's totalFields mask). The columns above stay raw, so the
+    // breakdown the tables draw is never affected by the mask.
     if (alen <= 0) alen = 1;
     if (alen > 19) alen = 19;
     // tokens.appFilter: when set, only the listed harness apps are tracked
@@ -147,7 +154,6 @@ static void aggRecord(const char *app, int alen, long long ts,
         }
         if (!ok) return;
     }
-    long long sum = vin + vout + vcr + vcw;
     int ai = -1;
     for (int i = 0; i < g_appCount; i++)
         if (memcmp(g_appName[i], app, alen) == 0 && g_appName[i][alen] == 0) { ai = i; break; }
@@ -159,6 +165,7 @@ static void aggRecord(const char *app, int alen, long long ts,
     if (ai >= 0) {
         g_appAgg[ai].in += vin; g_appAgg[ai].out += vout;
         g_appAgg[ai].cr += vcr; g_appAgg[ai].cw += vcw;
+        g_appAgg[ai].sum += vtotal;
         g_appAgg[ai].req++;
     }
     // byModel: Electron keys are "app|lowercased model" (case-insensitive
@@ -190,6 +197,7 @@ static void aggRecord(const char *app, int alen, long long ts,
         if (mi >= 0) {
             g_modelAgg[mi].in += vin; g_modelAgg[mi].out += vout;
             g_modelAgg[mi].cr += vcr; g_modelAgg[mi].cw += vcw;
+            g_modelAgg[mi].sum += vtotal;
             g_modelAgg[mi].req++;
         }
     }
@@ -200,10 +208,11 @@ static void aggRecord(const char *app, int alen, long long ts,
     // legitimately disagree
     if (j >= 1) {
         int di = DASH_MAX_DAYS - j;
-        g_dayTot[di] += sum;
+        g_dayTot[di] += vtotal;
         if (ai >= 0) {
             g_dayApp[di][ai].in += vin; g_dayApp[di][ai].out += vout;
             g_dayApp[di][ai].cr += vcr; g_dayApp[di][ai].cw += vcw;
+            g_dayApp[di][ai].sum += vtotal;
             g_dayApp[di][ai].req++;
         }
     }
@@ -333,7 +342,8 @@ static void tokDrainPending(void) {
     }
     for (int i = 0; i < g_tokPendN; i++) {
         TokPend *r = &g_tokPend[i];
-        aggRecord(r->app, r->alen, r->ts, r->in, r->out, r->cr, r->cw, r->model, r->mlen, bnd);
+        aggRecord(r->app, r->alen, r->ts, r->in, r->out, r->cr, r->cw, r->total,
+                  r->model, r->mlen, bnd);
     }
     tokPendShrink(); // the applied scan's high-water mark is no longer needed
     if (g_tokInnerTodayValid) { g_tokensToday = g_tokInnerToday; g_tokInnerTodayValid = 0; }
@@ -398,6 +408,21 @@ static void tokMasterOffReset(void) {
 // them from its main thread only; cbScanTokens pins the config generation for
 // the walk exactly as the Windows worker does, so the day a scan moves off the
 // main thread the pinning is already right.
+
+// The totalFields mask of the source whose app label matches, for staged
+// records that have no source at hand - the Electron token-cache seed path
+// (p_ui.c) reads records keyed by app only. Unknown app = all four fields
+// (the old cache format predates masks and always counted all four).
+// NOT inside the CHOCOBAR_PORTABLE block below: the Windows bar itself calls
+// this from the seed path, so the symbol must exist in every build.
+unsigned cbTokTotalMask(const Config *cfg, const char *app, int alen) {
+    if (!cfg || !app || alen <= 0) return 0xF;
+    if (alen > 19) alen = 19;
+    for (int i = 0; i < cfg->tokSrcCount; i++)
+        if (memcmp(cfg->tokSrc[i].app, app, (size_t)alen) == 0 && cfg->tokSrc[i].app[alen] == 0)
+            return cfg->tokSrc[i].totalMask ? cfg->tokSrc[i].totalMask : 0xF;
+    return 0xF;
+}
 
 #ifdef CHOCOBAR_PORTABLE
 

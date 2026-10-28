@@ -192,6 +192,12 @@ static int g_menuPending = 0;
 static int g_menuX = 0, g_menuY = 0;
 static int g_swallowRelease = 0;   // the menu's dismissing gesture: eat its release
 static int g_dashPending = 0;   // 1 = token dashboard, 2 = subscriptions
+// The timestamp of the last real input this bar handled (bar clicks and menu
+// clicks both land here). A board opens from a click, and KWin's focus-stealing
+// prevention lets an activation through only when its timestamp matches the
+// user's last input - so the opening click's time travels to the board with it
+// (linux_shape.c boardActivate). Non-static: menu.c keeps it current too.
+Time g_lastInputTime = 0;
 static long long g_subsEpochShown = 0;   // the subs epoch the board already painted
 static unsigned long long g_dashTokShown = 0;   // the scan version the token board already painted
 
@@ -1032,6 +1038,7 @@ static int chipClickable(const Chip *c) {
 
 static void onButton(XButtonEvent *e) {
     dbg("ButtonPress button=%u x_root=%d y_root=%d", e->button, e->x_root, e->y_root);
+    if (e->time) g_lastInputTime = e->time;
     // any new press ends the gesture the menu may have marked for swallowing:
     // a fresh click is a fresh gesture, and its release must be honoured
     g_swallowRelease = 0;
@@ -1072,6 +1079,7 @@ static void onButton(XButtonEvent *e) {
 
 static void onButtonRelease(XButtonEvent *e) {
     dbg("ButtonRelease button=%u x=%d y=%d", e->button, e->x, e->y);
+    if (e->time) g_lastInputTime = e->time;
     // the release of the gesture that DISMISSED the menu never opens anything:
     // the menu returns MENU_DISMISSED_BY_PRESS for it (Win32's TrackPopupMenu
     // consumes the dismissing click the same way, so the Windows bar sees no

@@ -12,6 +12,7 @@
 #define CHOCOBAR_LINUX_SHAPE_H
 
 #include <cairo/cairo.h>
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/shape.h>
@@ -62,5 +63,48 @@ void boardShapeFree(Display *dpy, XserverRegion *held,
 // at open and after every content-fit, so a fit that changed the height keeps
 // the board centred instead of drifting down.
 void boardCenterOnHead(Display *dpy, int screen, int w, int h, int *ox, int *oy);
+
+// Turn a board window into a managed popup that behaves like p_ui.c's owned
+// WS_POPUP: no titlebar, no taskbar entry, an exact rectangle - but NORMAL
+// stacking, so another window can cover it, and movable by the app's own drag
+// (an override-redirect window is neither coverable nor movable: KWin composites
+// OR windows in the top layer and nothing ever translates them, which is how
+// v1.6.3 shipped both board defects at once). The properties are written BEFORE
+// the map: KWin reads window type, state and hints when it first manages the
+// window, so a property written after the map is a visible relayout.
+//
+// NOT in the state: _NET_WM_STATE_BELOW. The bar carries it (the bar must sit
+// under normal windows); a board is the opposite - HWND_TOP at open, coverable
+// but above the bar.
+//
+// The window keeps its input handling: unlike the bar, a board takes the
+// keyboard (Esc/q close it), so this sets no InputHint and no _NET_WM_USER_TIME
+// - the caller activates the window itself after the map, the same way it did
+// when the board was override-redirect.
+void boardMakeManaged(Display *dpy, Window win, const char *name,
+                      const char *resName, int x, int y, int w, int h);
+
+// Activate a just-mapped board the way Windows' SetWindowPos(HWND_TOP) does for
+// p_ui.c's board: raise it above the window the user was in, and give it the
+// keyboard (the Linux boards close on Esc/q, so the keyboard is the point).
+//
+// The EWMH request is what a window manager can honour: KWin's focus-stealing
+// prevention refuses an activation it cannot attribute to user activity, and a
+// board that maps with no request sits BEHIND the terminal - the exact "it
+// sinks behind my windows" bug the Windows board fixed with HWND_TOP. `when`
+// must be the timestamp of the click that opened the board (KWin compares it
+// with the last user input and lets a matching one through); 0 means no click
+// is known and only the direct focus is used.
+//
+// The direct XSetInputFocus stays as the fallback a WM-less display needs (the
+// behaviour suite's Xvfb): it is the same call the boards always made.
+// The post-map all-desktops request (EWMH _NET_WM_DESKTOP ClientMessage): a
+// pre-map statement of the desktop does not survive the map on KWin - it
+// resolves to the current desktop and writes the concrete number back (the bar
+// learned the same lesson; main.c afterMap() carries the bar's request). Call
+// right after XMapWindow.
+void boardRequestAllDesktops(Display *dpy, Window win);
+
+void boardActivate(Display *dpy, Window win, Time when);
 
 #endif

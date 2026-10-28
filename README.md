@@ -448,6 +448,18 @@ Every row is a per-store semantics note, not something you declare: the shipped 
 
 Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[]` declares in `native/src/p_tokens.c` (the needle scan and the per-file byte cursor; the `aggRecord` aggregation itself is `native/src/p_agg.c`'s, the part the macOS build shares), and every displayed total follows `rowTotal = input + output + cacheRead + cacheWrite`.
 
+#### Per-source totals: `tokens.sources[].totalFields`
+
+The convention above is the DEFAULT, applied per source: `totalFields` absent means all four fields feed the total. A store whose tool does NOT count the cache columns in its own headline number can name the subset - a comma-separated, case-insensitive list of `input`, `output`, `cacheRead`, `cacheWrite` - and the dashboard's cards, heatmap and app/model totals then read exactly what that tool prints, while the table columns keep the full four-field breakdown:
+
+```json
+{ "app": "magpie", "path": "~/.config/magpie/usage.jsonl", "totalFields": "input,output" }
+```
+
+Magpie's `usage` prints `in + out` as "tokens" and lists the cache columns beside it, so without the mask the dashboard read ~13x the tool's number on a cache-heavy day. The mask rides with the record everywhere: the live scan and the seed cache both apply the source's mask (matched by app label), estimated turns are masked too, and the columns above are never affected.
+
+A source whose `path` names a FILE (one ledger, one request per line - the case the file-source feature exists for) also counts differently in one column: a row that parses but carries **no usage at all is still a call** (the request happened and billed nothing), so CALLS reads the ledger's own row count - the only number you can check with `wc -l`. The estimator does not run on a ledger: it works from the transcript around a turn, and a ledger row has none, so a zero-usage row used to vanish from CALLS while the row count said otherwise. Session stores (a directory source) keep the estimator: there a zero row is a turn that may never have reached the API, and estimating it from the transcript is the point. Upgrading to a build with this rule re-reads every source once (the byte cursors record which accounting they were written under) - the totals come back the same and CALLS gains the rows.
+
 ### When a route reports no usage at all
 
 A route that is a real API answers with a usage block, so the numbers above are exact. A route that is a **local app or CLI driven through a bridge** - CodeBuddy reached through the workbuddy daemon, the MiMo desktop, the `agy` CLI - has no API to answer, so its turns arrive with an all-zero usage object. With `estimateMissingUsage: false`, those turns are dropped, exactly as if they never happened. That is the honest number, and it is why a bridged route otherwise shows nothing. With `true` (the default), the bar estimates those turns from the prompt and output text instead.
