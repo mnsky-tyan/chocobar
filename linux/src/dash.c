@@ -966,12 +966,12 @@ static int dashFitToContent(void) {
     // it opened on - a pointer that moved between heads would otherwise be
     // clamped back onto the old head on every later fit (the bug this order
     // fixes; subs.c's fitToContent runs the same lookup in this same order).
+    int yWas = d->y, xWas = d->x;
     {
         int cx = 0, cy = 0;
         boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
         d->x = cx; d->y = cy;
     }
-    int yWas = d->y, xWas = d->x;
     // the containing head's work-area bottom, in device px: Xinerama-aware,
     // because the board can live on any head. Read from the POST-recentre
     // d->x/d->y: the height clamp and the move-up below apply to the board's
@@ -1011,12 +1011,14 @@ static int dashFitToContent(void) {
         int sw = DisplayWidth(d->dpy, scr);
         if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
     }
-    // the move-up and the x-clamp are real moves on every path that reaches
-    // here: only the open path follows with its own XMoveResizeWindow, so a
-    // later fit that changed the position must move the window itself or the
-    // struct's position would drift away from the window's
-    if ((d->y != yWas || d->x != xWas) && d->dpy)
-        XMoveWindow(d->dpy, d->win, d->x, d->y);
+    // the position is part of the fit on every path that reaches here: the
+    // recentre, the move-up and the x-clamp all move d->x/d->y while the
+    // window sits where the open path left it, so the fit must apply the
+    // position itself or the struct's position would drift away from the
+    // window's (and ConfigureNotify would snap it back to the window's real
+    // place). A fit that resizes moves the window too, with XMoveResizeWindow;
+    // a fit that only moved the position reaches it through the trailing
+    // XMoveWindow - the same two-path contract subs.c's fitToContent runs.
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -1025,10 +1027,12 @@ static int dashFitToContent(void) {
             d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
             d->cr = cairo_create(d->surf);
         }
-        XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
+        XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
         dashReshape(d);
         return 1;
     }
+    if ((d->y != yWas || d->x != xWas) && d->dpy)
+        XMoveWindow(d->dpy, d->win, d->x, d->y);
     return 0;
 }
 

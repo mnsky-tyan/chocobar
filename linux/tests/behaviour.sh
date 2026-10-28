@@ -2563,21 +2563,27 @@ else
             }')"
         [ "${HEAT_COL:-x}" = "$WANT_COL" ] && [ "${HEAT_ROW:-y}" = "$WANT_ROW" ]
         check "the seeded day's cell is the Sun-first grid's column $WANT_COL row $WANT_ROW (got column ${HEAT_COL:-?} row ${HEAT_ROW:-?}, card ${TSH:-?})" $?
-        # and picking that day must not move the grid. The bug let the
-        # section's height run past the viewport, which dropped the heatmap
-        # out of it entirely: the cells that were under the pointer a moment
-        # ago were gone, while their hit rects kept firing from where they
-        # used to be. Same position, same card, same day.
+        # and picking that day must keep the grid answering. Picking a day
+        # grows the content (the day-detail block), and the board re-centres
+        # as its content-fit changes the height, so the grid moves WITH the
+        # window. The bug this check still guards against is the grid being
+        # dropped from the viewport while its hit rects kept firing from
+        # where they used to be - so the check reads the board's geometry
+        # again and probes the selected cell at its moved position: the same
+        # day, the same card, wherever the re-centre put it.
         tip_at "$TX" "$TY"; RC=$?
         [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
         xdotool click 1
         sleep 0.8
+        read -r DBX DBY DBW DBH <<EOF
+$(xwininfo -id "$HEATDASH" | awk '/Absolute upper-left X:/{x=$4} /Absolute upper-left Y:/{y=$4} /Width:/{w=$2} /Height:/{h=$2} END{print x, y, w, h}')
+EOF
         SEL_CARD="none"
-        tip_at "$TX" "$TY"; RC=$?
-        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
+        tip_at $((TX + DBX - X)) $((TY + DBY - Y)); RC=$?
+        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $((TX + DBX - X)),$((TY + DBY - Y))"; exit 1; }
         [ "$RC" -eq 0 ] && SEL_CARD="${TIP_W}x${TIP_H}"
         [ "$SEL_CARD" = "$TSH" ]
-        check "picking a day leaves the heatmap's cells where they were (card $SEL_CARD, was $TSH)" $?
+        check "picking a day keeps the selected day's card showing at the grid's moved position (card $SEL_CARD, was $TSH)" $?
     fi
 fi
 

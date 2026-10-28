@@ -289,6 +289,16 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     hints.input = True;
     XSetWMHints(dpy, m.win, &hints);
     XMapRaised(dpy, m.win);
+    // The menu takes the keyboard while it is up (Escape, Up/Down and Enter
+    // are its own input), and hands it back before the destroy below - the
+    // same take-and-restore the boards run. The window that held the focus is
+    // remembered first, so the terminal the user was typing in keeps its keys,
+    // and a board opened from this menu (its choice is consumed after menuRun
+    // returns) remembers the real previous holder, not the root the destroy
+    // would leave the focus on.
+    Window focusPrev = None;
+    int focusRevert = 0;
+    XGetInputFocus(dpy, &focusPrev, &focusRevert);
     XSetInputFocus(dpy, m.win, RevertToParent, CurrentTime);
     // persistent paint state, created once: the menu is static, so there is
     // nothing to resize and nothing to rebuild. Building a surface plus a toy
@@ -411,6 +421,16 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     cairo_destroy(m.cr);
     cairo_font_face_destroy(m.ff);
     cairo_surface_destroy(m.surf);
+    // Hand the keyboard back before the destroy, only while the previous
+    // holder is still mapped (SetInputFocus on an unmapped window is a
+    // BadMatch) - destroying the focused window would otherwise leave the
+    // focus on the root and the user's keystrokes in limbo until the next
+    // click, the same guarded restore dashClose and subsClose run.
+    if (focusPrev != None) {
+        XWindowAttributes at;
+        if (XGetWindowAttributes(dpy, focusPrev, &at) && at.map_state == IsViewable)
+            XSetInputFocus(dpy, focusPrev, RevertToParent, CurrentTime);
+    }
     XDestroyWindow(dpy, m.win);
     XFlush(dpy);
     return m.result;

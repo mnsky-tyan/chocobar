@@ -475,9 +475,12 @@ function check(name, ok, detail) {
   const main = fs.readFileSync(path.join(__dirname, '..', 'linux', 'src', 'main.c'), 'utf8');
   // The board is an override-redirect POPUP (p_ui.c registers ChocobarDash as
   // an owned WS_POPUP: no taskbar button, no titlebar). With OR there is no
-  // window manager at all - no decorations, no dock entry, no focus steal, and
-  // no WM_DELETE protocol whose absence would let a WM fall back to
-  // XKillClient on the bar's SHARED display connection.
+  // window manager at all - no decorations, no dock entry, and no WM_DELETE
+  // protocol whose absence would let a WM fall back to XKillClient on the
+  // bar's SHARED display connection. Focus is a separate matter the boards
+  // handle themselves: they take the X keyboard while they are up and hand
+  // it back to the previous holder on close (dash.c/subs.c), the
+  // take-and-restore linux/README.md documents.
   check('linux: the dashboard is an override-redirect popup (no titlebar, no dock entry, no WM close protocol)',
     /swa\.override_redirect = True/.test(dash) && /CWOverrideRedirect/.test(dash) &&
     !/XSetWMProtocols/.test(dash) && !/XSetWMNormalHints/.test(dash) &&
