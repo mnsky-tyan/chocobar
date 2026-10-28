@@ -705,7 +705,8 @@ Window subsOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
-    // p_ui.c dashToggle placement: centred on the screen, both axes, before the
+    // p_ui.c dashToggle placement: the board opens centred, both axes -
+    // boardCenterOnHead centres it on the head the pointer is on - before the
     // content fit adjusts the height.
     boardCenterOnHead(dpy, screen, d->w, d->h, &d->x, &d->y);
 

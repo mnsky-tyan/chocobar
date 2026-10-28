@@ -303,8 +303,8 @@ The keyboard diverges from Windows on purpose: Windows opens the board without
 activating it, but an override-redirect window on X is never activated by the
 window manager, so the board takes the keyboard itself while it is up - that
 is what makes Esc and q close it - and hands it back to the window that held
-it when the board closes. They open centred on the screen, both axes, and
-re-centre as their content-fit changes the height.
+it when the board closes. They open centred on the head the pointer is on,
+both axes, and re-centre as their content-fit changes the height.
 
 ## Tests
 
@@ -321,8 +321,10 @@ terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, the
 Subscription row opens the real board (its close button ends it, a second
-activation toggles it shut), and a left click on a right-group metric chip does
-nothing (hovering one still shows its title). The helper-stack gate runs against
+activation toggles it shut), both boards read as override-redirect popups to
+xwininfo on the mapped window (no titlebar, no dock entry), and a left click
+on a right-group metric chip does nothing (hovering one still shows its
+title). The helper-stack gate runs against
 a stub `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded`
 and records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that

@@ -1100,8 +1100,10 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
-    // p_ui.c dashToggle placement: centred on the screen, both axes. Before the
-    // fit, so the fit's clamps work from a sane position.
+    // p_ui.c dashToggle placement: the board opens centred, both axes - here
+    // boardCenterOnHead centres it on the head the pointer is on (the same
+    // screen centring on a single head). Before the fit, so the fit's clamps
+    // work from a sane position.
     boardCenterOnHead(dpy, screen, d->w, d->h, &d->x, &d->y);
 
     XSetWindowAttributes swa;
