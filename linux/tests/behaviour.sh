@@ -431,12 +431,12 @@ root_children_excluding_tip() {
 # MENU_SEP). The second row is "Subscription dashboard", whose choice is
 # observable in the bar's own log without changing anything on disk; its centre
 # is MENU_PAD + MENU_ROW + MENU_ROW/2 from the menu's top edge.
-ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+30+15)*s}')
+ROW2_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (4+21+10)*s}')
 # the "Start on login" row centre, in logical px from the menu's top edge
 # (menu.c: MENU_PAD, two rows, MENU_SEP, then half of this row)
-ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+2*30+9+15)*s}')
+ROW_AUTO_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (4+2*21+5+10)*s}')
 # the "Check for updates" row centre: five rows and three separators down
-ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (6+5*30+3*9+15)*s}')
+ROW_UPDATES_Y=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (4+5*21+3*5+10)*s}')
 
 # the geometry report can go out two ways, and the difference decides WHEN it
 # lands: gdbus introspects its destination before it calls, and the bar never
@@ -477,17 +477,21 @@ menu_open
 check "the right-RELEASE opens the menu" $?
 
 # 3b. the menu the user sees is the Windows item table rendered: 8 rows and 3
-#     separators (p_ui.c kMenuItems) inside MENU_PAD, i.e. 279 logical px tall
-#     for a 236 logical px wide menu. The ratio is scale-free, so it needs no
-#     DPI assumption, and a missing or extra item changes the height. (No click
-#     can observe this parity: the last row quits the bar.)
+#     separators (p_ui.c kMenuItems) inside MENU_PAD, i.e. 2*4 + 8*21 + 3*5 =
+#     191 logical px tall (menu.c: MENU_PAD 4, MENU_ROW 21, MENU_SEP 5 - the
+#     Windows WM_MEASUREITEM values). The row count is what this proves: a
+#     missing or extra item changes the height. ALL conditions must land in ONE
+#     status, or a trailing bare test overwrites $? and the check silently passes
+#     on a window it never measured.
 read -r MENU_WIN MENU_W_DEV MENU_H_DEV <<EOF
 $(menu_wh)
 EOF
 MENU_WIN=${MENU_WIN:-0}; MENU_W_DEV=${MENU_W_DEV:-0}; MENU_H_DEV=${MENU_H_DEV:-0}
-WANT_MENU_H=$(awk -v w="$MENU_W_DEV" 'BEGIN{printf "%.0f", w*279/236}')
-[ "$MENU_W_DEV" -gt 0 ] && [ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ]
-check "the menu renders the Windows item set (${MENU_W_DEV}x${MENU_H_DEV}, want h~$WANT_MENU_H)" $?
+WANT_MENU_H=$(awk -v s="$SCALE" 'BEGIN{printf "%.0f", (2*4+8*21+3*5)*s}')
+rc=0
+[ "$MENU_W_DEV" -gt 0 ] || rc=1
+[ "$MENU_H_DEV" -ge $((WANT_MENU_H-2)) ] && [ "$MENU_H_DEV" -le $((WANT_MENU_H+2)) ] || rc=1
+check "the menu renders the Windows item set (${MENU_W_DEV}x${MENU_H_DEV}, want h~$WANT_MENU_H)" "$rc"
 
 # 3c. opening the menu read the autostart mark exactly ONCE (one line in the
 #     fake systemctl's own call log), and the menu may then repaint - pointer
@@ -562,6 +566,17 @@ sleep 1.2
 SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
 [ -n "${SUBSWIN:-}" ]
 check "a click INSIDE the Subscription row opens the board" $?
+
+# 5e-bis. the board the user sees is a POPUP, not a desktop window: xwininfo on
+#     a real mapped override-redirect window prints 'Override Redirect State:
+#     yes'. This is the observable property (p_ui.c's owned WS_POPUP parity),
+#     not a source-text match - a decorated board or a dock entry fails here.
+if [ -n "${SUBSWIN:-}" ]; then
+    xwininfo -id "$SUBSWIN" | grep -q "Override Redirect State: yes"
+    check "the subscription board is an override-redirect popup (no titlebar, no dock entry)" $?
+else
+    check "the subscription board is an override-redirect popup (no titlebar, no dock entry)" 1
+fi
 
 # 5f. the close button ends the board: the titlebar's ✕ (subs.c btnClose, the
 #     same frame geometry dash.c uses: right edge - padL, 20*S tall from ty-3*S).
@@ -2098,6 +2113,14 @@ if command -v python3 >/dev/null && python3 -c 'import dbus, gi' 2>/dev/null; th
     [ -n "$KWADDR" ] || { echo "FAIL: the KWin stub bus has no address"; exit 1; }
     KWLOG="$WORK/kwin-calls.log"
     : > "$KWLOG"
+    # A private XDG_RUNTIME_DIR: the geometry lock lives there when it is set,
+    # and the LIVE user bar holds that lock for its whole lifetime after its own
+    # startup reload. Inheriting the real one makes the reload path refuse (the
+    # lock is taken) and the check below sees zero loads - an environment leak,
+    # not a product finding. HOME and DISPLAY were already private; this is the
+    # same rule for the third global.
+    STUBRUN="$WORK/run"
+    mkdir -p "$STUBRUN"
     # loaded=0: KWin says the helper is NOT loaded, which is the only situation
     # in which the bar is allowed to reload it
     python3 "$HERE/kwstub.py" "$KWADDR" "$KWLOG" 0 >"$WORK/kwstub.log" 2>&1 &
@@ -2114,6 +2137,7 @@ if command -v python3 >/dev/null && python3 -c 'import dbus, gi' 2>/dev/null; th
         sleep 0.1
     done
     HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+        XDG_RUNTIME_DIR="$STUBRUN" \
         DBUS_SESSION_BUS_ADDRESS="$KWADDR" "$BIN" >"$WORK/bar-kwin.log" 2>&1 &
     KWBAR=$!
     for _ in $(seq 1 60); do
@@ -2312,6 +2336,11 @@ done
 if [ -z "${HEATDASH:-}" ]; then
     check "the heatmap's columns are day-aligned (the dashboard never opened)" 1
 else
+    # The token board is a popup too: no titlebar, no dock entry (p_ui.c's owned
+    # WS_POPUP parity). xwininfo states it on a real mapped window, so this is
+    # the observable, not a source match.
+    xwininfo -id "$HEATDASH" | grep -q "Override Redirect State: yes"
+    check "the token dashboard is an override-redirect popup (no titlebar, no dock entry)" $?
     eval "$(xdotool getwindowgeometry --shell "$HEATDASH")"
     # The bar's event loop is select-driven: a motion is handled some time
     # AFTER xdotool's warp lands, and no fixed sleep bounds that, so every
@@ -2534,21 +2563,27 @@ else
             }')"
         [ "${HEAT_COL:-x}" = "$WANT_COL" ] && [ "${HEAT_ROW:-y}" = "$WANT_ROW" ]
         check "the seeded day's cell is the Sun-first grid's column $WANT_COL row $WANT_ROW (got column ${HEAT_COL:-?} row ${HEAT_ROW:-?}, card ${TSH:-?})" $?
-        # and picking that day must not move the grid. The bug let the
-        # section's height run past the viewport, which dropped the heatmap
-        # out of it entirely: the cells that were under the pointer a moment
-        # ago were gone, while their hit rects kept firing from where they
-        # used to be. Same position, same card, same day.
+        # and picking that day must keep the grid answering. Picking a day
+        # grows the content (the day-detail block), and the board re-centres
+        # as its content-fit changes the height, so the grid moves WITH the
+        # window. The bug this check still guards against is the grid being
+        # dropped from the viewport while its hit rects kept firing from
+        # where they used to be - so the check reads the board's geometry
+        # again and probes the selected cell at its moved position: the same
+        # day, the same card, wherever the re-centre put it.
         tip_at "$TX" "$TY"; RC=$?
         [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
         xdotool click 1
         sleep 0.8
+        read -r DBX DBY DBW DBH <<EOF
+$(xwininfo -id "$HEATDASH" | awk '/Absolute upper-left X:/{x=$4} /Absolute upper-left Y:/{y=$4} /Width:/{w=$2} /Height:/{h=$2} END{print x, y, w, h}')
+EOF
         SEL_CARD="none"
-        tip_at "$TX" "$TY"; RC=$?
-        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $TX,$TY"; exit 1; }
+        tip_at $((TX + DBX - X)) $((TY + DBY - Y)); RC=$?
+        [ "$RC" -eq 2 ] && { echo "FAIL: the bar stopped answering the pointer at $((TX + DBX - X)),$((TY + DBY - Y))"; exit 1; }
         [ "$RC" -eq 0 ] && SEL_CARD="${TIP_W}x${TIP_H}"
         [ "$SEL_CARD" = "$TSH" ]
-        check "picking a day leaves the heatmap's cells where they were (card $SEL_CARD, was $TSH)" $?
+        check "picking a day keeps the selected day's card showing at the grid's moved position (card $SEL_CARD, was $TSH)" $?
     fi
 fi
 

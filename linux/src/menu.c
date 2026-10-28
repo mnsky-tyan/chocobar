@@ -31,10 +31,12 @@
 #include "linux_shape.h"
 #include "menu.h"
 
-#define MENU_W 236.0        // CSS px
-#define MENU_ROW 30.0
-#define MENU_PAD 6.0
-#define MENU_SEP 9.0
+#define MENU_W_FLOOR 96.0   // CSS px, the Windows menuWidthPx floor
+#define MENU_ROW 21.0       // CSS px: p_ui.c WM_MEASUREITEM itemHeight DX(21)
+#define MENU_PAD 4.0
+#define MENU_SEP 5.0        // p_ui.c WM_MEASUREITEM separator height DX(5)
+#define MENU_FONT_CSS 9.0   // p_ui.c draws rows with dashFont(9) - the bar's
+                            // family at 9 CSS px, NOT the bar's chip size
 #define MENU_RADIUS 8.0     // corner radius, CSS px (one name, one place)
 
 typedef struct {
@@ -42,6 +44,13 @@ typedef struct {
     int id;
     int separator;          // 1 = draw a divider instead of a row
 } MenuItem;
+
+// row geometry in CSS px, straight from p_ui.c's WM_DRAWITEM: text sits 8 from
+// the left edge, and the autostart tick lives in an 18-wide gutter at the right
+// edge (the tick is centred in [right-18, right-6]).
+#define MENU_TEXT_L 8.0
+#define MENU_TICK_GUTTER 18.0
+#define MENU_TEXT_R_PAD 8.0
 
 // ids the bar acts on (menu.h). The order and the ids are p_ui.c's kMenuItems,
 // so the menus line up when compared side by side.
@@ -72,7 +81,7 @@ typedef struct {
     int fontPx;
     char fontFamily[128];
     /* palette, resolved by the caller from the config */
-    double bg[3], fg[3], divider[3], accent[3];
+    double bg[3], fg[3], divider[3], accent[3], pink[3];
     double bgAlpha;
     int startChecked;      // the autostart state, read by the caller; menu only draws it
     /* persistent paint state: the bar keeps one too, and building a surface
@@ -103,42 +112,54 @@ static void menuPaint(Menu *m) {
     cairo_set_font_face(cr, m->ff);
     cairo_set_font_size(cr, m->fontPx);
 
+    // the hovered row: p_ui.c's WM_DRAWITEM fills the WHOLE row with
+    // blendCr(bg, pink, 96) - a flat blend toward pink, not a translucent
+    // pill - and pins a 2-px pinkDeep marker to the left edge, 4 CSS px tall
+    // insets top and bottom. The label turns pinkDeep on hover too.
     double y = MENU_PAD * m->scale;
     for (int i = 0; i < NITEMS; i++) {
         if (g_items[i].separator) {
             double sy = y + MENU_SEP * m->scale / 2;
             cairo_set_source_rgba(cr, m->divider[0], m->divider[1], m->divider[2], 0.55);
             cairo_set_line_width(cr, 1.0);
-            cairo_move_to(cr, MENU_PAD * m->scale + 8 * m->scale, sy);
-            cairo_line_to(cr, m->w - (MENU_PAD + 8) * m->scale, sy);
+            cairo_move_to(cr, 10 * m->scale, sy);
+            cairo_line_to(cr, m->w - 10 * m->scale, sy);
             cairo_stroke(cr);
             y += MENU_SEP * m->scale;
             continue;
         }
         double rh = MENU_ROW * m->scale;
-        if (i == m->hover) {
-            // hover pill: the accent at 18%, rounded, inset like the Windows menu
-            double inset = 3 * m->scale, rr = 5 * m->scale;
-            double x0 = inset, y0 = y + 1, w0 = m->w - 2 * inset, h0 = rh - 2;
-            roundedPath(cr, x0, y0, w0, h0, rr);
-            cairo_set_source_rgba(cr, m->accent[0], m->accent[1], m->accent[2], 0.18);
+        int hovered = (i == m->hover);
+        if (hovered) {
+            // blendCr(bg, pink, 96): bg + (pink - bg) * 96/256, per channel
+            cairo_set_source_rgb(cr,
+                m->bg[0] + (m->pink[0] - m->bg[0]) * (96.0 / 256.0),
+                m->bg[1] + (m->pink[1] - m->bg[1]) * (96.0 / 256.0),
+                m->bg[2] + (m->pink[2] - m->bg[2]) * (96.0 / 256.0));
+            cairo_rectangle(cr, 0, y, m->w, rh);
+            cairo_fill(cr);
+            // the leading marker ties the row to the bar's own hover pill
+            cairo_set_source_rgb(cr, m->accent[0], m->accent[1], m->accent[2]);
+            cairo_rectangle(cr, 0, y + 4 * m->scale, 2 * m->scale, rh - 8 * m->scale);
             cairo_fill(cr);
         }
         cairo_text_extents_t ext;
         cairo_text_extents(cr, g_items[i].label, &ext);
-        cairo_set_source_rgba(cr, m->fg[0], m->fg[1], m->fg[2], 1.0);
-        cairo_move_to(cr, 14 * m->scale, y + (rh - ext.height) / 2 - ext.y_bearing);
+        if (hovered) cairo_set_source_rgba(cr, m->accent[0], m->accent[1], m->accent[2], 1.0);
+        else cairo_set_source_rgba(cr, m->fg[0], m->fg[1], m->fg[2], 1.0);
+        cairo_move_to(cr, MENU_TEXT_L * m->scale, y + (rh - ext.height) / 2 - ext.y_bearing);
         cairo_show_text(cr, g_items[i].label);
         cairo_new_path(cr);
         if (g_items[i].id == MENU_AUTO_START && m->startChecked) {
-            // the autostart tick, at the row's right edge like the Windows menu's
-            // U+2713. It is a stroked path, not a glyph: cairo's toy API has no
-            // font fallback, so a family without a check character would draw
-            // nothing. Two strokes read the same at this size.
+            // the autostart tick, in the right-edge gutter like the Windows
+            // menu's U+2713 (p_ui.c: right - DX(18) .. right - DX(6)). It is a
+            // stroked path, not a glyph: cairo's toy API has no font fallback,
+            // so a family without a check character would draw nothing. Two
+            // strokes read the same at this size.
             double cy = y + rh / 2;
-            double cx = m->w - 12 * m->scale;
-            cairo_set_source_rgba(cr, m->fg[0], m->fg[1], m->fg[2], 1.0);
-            cairo_set_line_width(cr, 1.6 * m->scale);
+            double cx = m->w - 11 * m->scale;   // Windows: centred in [right-18, right-6]
+            cairo_set_source_rgba(cr, m->accent[0], m->accent[1], m->accent[2], 1.0);
+            cairo_set_line_width(cr, 1.8 * m->scale);
             cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
             cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
             cairo_move_to(cr, cx - 5 * m->scale, cy);
@@ -184,18 +205,20 @@ static int menuInside(const Menu *m, int px, int py) {
 static int menuClickButton(unsigned int button) { return button == 1; }
 
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
-            int atX, int atY, double scale, int fontPx, const char *fontFamily,
+            int atX, int atY, double scale, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double divider[3], const double accent[3], int startChecked) {
+            const double divider[3], const double accent[3],
+            const double pink[3], int startChecked) {
     Menu m;
     memset(&m, 0, sizeof(m));
     m.dpy = dpy; m.visual = visual; m.cmap = cmap;
-    m.scale = scale; m.fontPx = fontPx;
+    m.scale = scale; m.fontPx = (int)(MENU_FONT_CSS * scale + 0.5);
     snprintf(m.fontFamily, sizeof(m.fontFamily), "%s", fontFamily ? fontFamily : "sans");
     memcpy(m.bg, bg, sizeof(m.bg)); m.bgAlpha = bgAlpha;
     memcpy(m.fg, fg, sizeof(m.fg));
     memcpy(m.divider, divider, sizeof(m.divider));
     memcpy(m.accent, accent, sizeof(m.accent));
+    memcpy(m.pink, pink, sizeof(m.pink));
     m.hover = -1;
     m.result = 0;
     m.startChecked = startChecked;
@@ -204,7 +227,30 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     double hh = MENU_PAD * 2;
     for (int i = 0; i < NITEMS; i++)
         hh += g_items[i].separator ? MENU_SEP : MENU_ROW;
-    m.w = (int)(MENU_W * scale + 0.5);
+
+    // width: p_ui.c's menuWidthPx - the widest label's advance in the 9-px
+    // face, plus 8 + 18 + 8 CSS px (left gutter + tick gutter + right pad),
+    // floored at 96 CSS px. Measured with the face the rows are drawn with,
+    // so a family change at the same DPI re-measures naturally.
+    {
+        cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+        cairo_t *tcr = cairo_create(tmp);
+        cairo_select_font_face(tcr, m.fontFamily, CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(tcr, m.fontPx);
+        double mx = 0;
+        for (int i = 0; i < NITEMS; i++) {
+            if (g_items[i].separator) continue;
+            cairo_text_extents_t ex;
+            cairo_text_extents(tcr, g_items[i].label, &ex);
+            if (ex.x_advance > mx) mx = ex.x_advance;
+        }
+        cairo_destroy(tcr);
+        cairo_surface_destroy(tmp);
+        double wcss = mx / scale + MENU_TEXT_L + MENU_TICK_GUTTER + MENU_TEXT_R_PAD;
+        if (wcss < MENU_W_FLOOR) wcss = MENU_W_FLOOR;
+        m.w = (int)(wcss * scale + 0.5);
+    }
     m.h = (int)(hh * scale + 0.5);
 
     // keep it on screen: flip up/left when it would fall off an edge
@@ -243,6 +289,16 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     hints.input = True;
     XSetWMHints(dpy, m.win, &hints);
     XMapRaised(dpy, m.win);
+    // The menu takes the keyboard while it is up (Escape, Up/Down and Enter
+    // are its own input), and hands it back before the destroy below - the
+    // same take-and-restore the boards run. The window that held the focus is
+    // remembered first, so the terminal the user was typing in keeps its keys,
+    // and a board opened from this menu (its choice is consumed after menuRun
+    // returns) remembers the real previous holder, not the root the destroy
+    // would leave the focus on.
+    Window focusPrev = None;
+    int focusRevert = 0;
+    XGetInputFocus(dpy, &focusPrev, &focusRevert);
     XSetInputFocus(dpy, m.win, RevertToParent, CurrentTime);
     // persistent paint state, created once: the menu is static, so there is
     // nothing to resize and nothing to rebuild. Building a surface plus a toy
@@ -365,6 +421,16 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
     cairo_destroy(m.cr);
     cairo_font_face_destroy(m.ff);
     cairo_surface_destroy(m.surf);
+    // Hand the keyboard back before the destroy, only while the previous
+    // holder is still mapped (SetInputFocus on an unmapped window is a
+    // BadMatch) - destroying the focused window would otherwise leave the
+    // focus on the root and the user's keystrokes in limbo until the next
+    // click, the same guarded restore dashClose and subsClose run.
+    if (focusPrev != None) {
+        XWindowAttributes at;
+        if (XGetWindowAttributes(dpy, focusPrev, &at) && at.map_state == IsViewable)
+            XSetInputFocus(dpy, focusPrev, RevertToParent, CurrentTime);
+    }
     XDestroyWindow(dpy, m.win);
     XFlush(dpy);
     return m.result;

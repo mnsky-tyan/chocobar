@@ -1,4 +1,4 @@
-// linux_shape.c - the two shape helpers, defined once.
+// linux_shape.c - the shape and board-placement helpers, defined once.
 //
 // See linux_shape.h for why this exists: the rounded path and the scanline
 // staircase were three copies with divergent caps, and one of them had a
@@ -6,8 +6,48 @@
 
 #include <math.h>
 #include <string.h>
+#include <X11/extensions/Xinerama.h>
 
 #include "linux_shape.h"
+
+// Top-left for a w x h board centred on the head the POINTER is on. p_ui.c
+// centres a board on the primary screen (x = (SM_CXSCREEN - w)/2,
+// y = (CYSCREEN - h)/2 - dashMaxH() is CYSCREEN-40, and
+// (dashMaxH() + 40 - h)/2 folds back to plain vertical centring). On X the
+// pointer's head is the one the user is looking at, which centres on the same
+// screen on a single-head desktop and on the right one on a multi-head one.
+void boardCenterOnHead(Display *dpy, int screen, int w, int h, int *ox, int *oy) {
+    Window root, child;
+    int rx = 0, ry = 0, wx, wy;
+    unsigned int mask = 0;
+    int px = -1, py = -1;
+    if (XQueryPointer(dpy, RootWindow(dpy, screen), &root, &child,
+                      &rx, &ry, &wx, &wy, &mask)) {
+        px = rx; py = ry;
+    }
+    int hx = 0, hy = 0;
+    int hw = DisplayWidth(dpy, screen), hh = DisplayHeight(dpy, screen);
+    int n = 0;
+    XineramaScreenInfo *xi = XineramaQueryScreens(dpy, &n);
+    if (xi && n > 0) {
+        // fall back to the first head when the pointer answers nothing or sits
+        // off every head (a detached head in the layout)
+        hx = xi[0].x_org; hy = xi[0].y_org; hw = xi[0].width; hh = xi[0].height;
+        for (int i = 0; i < n; i++) {
+            if (px >= xi[i].x_org && px < xi[i].x_org + xi[i].width &&
+                py >= xi[i].y_org && py < xi[i].y_org + xi[i].height) {
+                hx = xi[i].x_org; hy = xi[i].y_org;
+                hw = xi[i].width; hh = xi[i].height;
+                break;
+            }
+        }
+    }
+    if (xi) XFree(xi);
+    int x = hx + (hw - w) / 2, y = hy + (hh - h) / 2;
+    if (x < hx) x = hx;
+    if (y < hy) y = hy;
+    *ox = x; *oy = y;
+}
 
 void roundedPath(cairo_t *cr, double x, double y, double w, double h, double r) {
     if (r < 0) r = 0;

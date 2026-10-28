@@ -32,14 +32,15 @@ enum {
 // and MENU_DISMISSED_BY_PRESS - the dismissing press is still holding the
 // button, its release is still in flight, and the caller MUST swallow that
 // release or its own release handler re-opens the menu with it.
-// scale/fontPx/fontFamily come from the config so the
+// scale/fontFamily come from the config so the
 // menu matches the bar; the colours are already resolved 0..1 triples. There is
 // no dim colour: the menu has no dim text, and passing one invited a parameter
 // the painter never read. startChecked is the autostart state read by the CALLER
 // (the bar owns the mechanism); the menu only draws the mark.
 int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
-            int atX, int atY, double scale, int fontPx, const char *fontFamily,
+            int atX, int atY, double scale, const char *fontFamily,
             const double bg[3], double bgAlpha, const double fg[3],
-            const double divider[3], const double accent[3], int startChecked);
+            const double divider[3], const double accent[3],
+            const double pink[3], int startChecked);
 
 #endif

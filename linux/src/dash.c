@@ -111,7 +111,6 @@ typedef struct {
     char fontFamily[128];
     Rgb3 bg, card, zebra, fg, dim, divider, pinkDeep, pink, yellow;
     Rgb3 ramp[5];
-    Atom wmDelete;             // WM_DELETE_WINDOW, registered on the window
     int contentH;              // painted content bottom (device px) -> content fit
     int tbBottom;              // titlebar bottom (device px)
     /* titlebar button rects (device px), hover state and the click areas */
@@ -145,6 +144,10 @@ typedef struct {
 
 static Dash g_dash;
 static int g_boardOpen = 0;
+// the window that held the X keyboard focus when the board took it, restored
+// on close so the terminal the user was typing in keeps its keys (p_ui.c on
+// Windows never needs this: SWP_NOACTIVATE leaves the keyboard alone entirely)
+static Window g_focusPrev = None;
 
 // The board's own window corner radius lives in linux_shape.h (BOARD_RADIUS_CSS):
 // Windows 11's DWMWCP_ROUND_NATIVE for a normal (non-maximized) window, one
@@ -955,9 +958,24 @@ static int dashFitToContent(void) {
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (lo < minH) lo = minH;
     if (want < lo) want = lo;
+    // keep the board centred as its height follows the content: p_ui.c opens
+    // the board centred (dashToggle) and its content-fit only resizes, so a
+    // Linux board that kept its top edge would drift downward every time it
+    // grew. Re-centre FIRST, before the head lookup below: the clamp that
+    // follows must read the head the board will actually sit on, not the head
+    // it opened on - a pointer that moved between heads would otherwise be
+    // clamped back onto the old head on every later fit (the bug this order
+    // fixes; subs.c's fitToContent runs the same lookup in this same order).
+    int yWas = d->y, xWas = d->x;
+    {
+        int cx = 0, cy = 0;
+        boardCenterOnHead(d->dpy, DefaultScreen(d->dpy), d->w, want, &cx, &cy);
+        d->x = cx; d->y = cy;
+    }
     // the containing head's work-area bottom, in device px: Xinerama-aware,
-    // because the board can live on any head. Both the height clamp and the
-    // move-up below read this one value.
+    // because the board can live on any head. Read from the POST-recentre
+    // d->x/d->y: the height clamp and the move-up below apply to the board's
+    // new position, so the head they consult has to be the new one.
     int headBottom = 0;
     if (d->dpy) {
         headBottom = DisplayHeight(d->dpy, DefaultScreen(d->dpy)) - 40;
@@ -981,7 +999,6 @@ static int dashFitToContent(void) {
     // having it clipped off the bottom edge. The move MUST come before the
     // clamp: clamping to the room at the OLD position would make the move below
     // unreachable, which is the bug this order fixes.
-    int yWas = d->y, xWas = d->x;
     if (d->y + want > headBottom) {
         d->y = headBottom - want;
         if (d->y < 0) d->y = 0;
@@ -994,12 +1011,14 @@ static int dashFitToContent(void) {
         int sw = DisplayWidth(d->dpy, scr);
         if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
     }
-    // the move-up and the x-clamp are real moves on every path that reaches
-    // here: only the open path follows with its own XMoveResizeWindow, so a
-    // later fit that changed the position must move the window itself or the
-    // struct's position would drift away from the window's
-    if ((d->y != yWas || d->x != xWas) && d->dpy)
-        XMoveWindow(d->dpy, d->win, d->x, d->y);
+    // the position is part of the fit on every path that reaches here: the
+    // recentre, the move-up and the x-clamp all move d->x/d->y while the
+    // window sits where the open path left it, so the fit must apply the
+    // position itself or the struct's position would drift away from the
+    // window's (and ConfigureNotify would snap it back to the window's real
+    // place). A fit that resizes moves the window too, with XMoveResizeWindow;
+    // a fit that only moved the position reaches it through the trailing
+    // XMoveWindow - the same two-path contract subs.c's fitToContent runs.
     if (d->h != want) {
         d->h = want;
         if (d->surf) {
@@ -1008,10 +1027,12 @@ static int dashFitToContent(void) {
             d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
             d->cr = cairo_create(d->surf);
         }
-        XResizeWindow(d->dpy, d->win, (unsigned)d->w, (unsigned)d->h);
+        XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
         dashReshape(d);
         return 1;
     }
+    if ((d->y != yWas || d->x != xWas) && d->dpy)
+        XMoveWindow(d->dpy, d->win, d->x, d->y);
     return 0;
 }
 
@@ -1079,31 +1100,42 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
 
     d->w = (int)(cssW * d->scale + 0.5);
     d->h = (int)(cssH * d->scale + 0.5);
+    // p_ui.c dashToggle placement: the board opens centred, both axes - here
+    // boardCenterOnHead centres it on the head the pointer is on (the same
+    // screen centring on a single head). Before the fit, so the fit's clamps
+    // work from a sane position.
+    boardCenterOnHead(dpy, screen, d->w, d->h, &d->x, &d->y);
 
     XSetWindowAttributes swa;
     memset(&swa, 0, sizeof(swa));
     swa.background_pixel = 0;
     swa.border_pixel = 0;
     swa.colormap = cmap;
+    swa.override_redirect = True;
     swa.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
                      ButtonReleaseMask | PointerMotionMask | StructureNotifyMask |
                      LeaveWindowMask;
-    d->x = 60; d->y = 60;
     d->dpy = dpy;
     d->win = XCreateWindow(dpy, RootWindow(dpy, screen), d->x, d->y,
                            (unsigned)d->w, (unsigned)d->h, 0, depth, InputOutput, visual,
-                           CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
+                           CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask,
+                           &swa);
     if (!d->win) return None;
+    // The name is a debug aid only (an override-redirect window has no window
+    // manager to title it), but xwininfo -root -children then names the board,
+    // which is what the behaviour test and every screenshot session key on.
     XStoreName(dpy, d->win, "Chocobar - Token usage");
-    // WM_DELETE_WINDOW: without it a client message is never sent and KWin falls
-    // back to XKillClient, which severs the SHARED connection - the dashboard
-    // using the bar's Display means its close button would take the whole bar
-    // process down with it.
-    {
-        Atom wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
-        XSetWMProtocols(dpy, d->win, &wmDelete, 1);
-        d->wmDelete = wmDelete;
-    }
+    // Override-redirect: the board is a POPUP, not a desktop window (p_ui.c
+    // registers ChocobarDash as an owned WS_POPUP: no taskbar button, no
+    // Alt-Tab entry, no titlebar). With OR the window manager is never
+    // consulted - no decorations, no dock/taskbar entry, no WM_DELETE protocol
+    // (so no XKillClient path that could sever the bar's shared connection).
+    // The keyboard: Windows opens the board SWP_NOACTIVATE and never holds the
+    // focus; on X an OR window is never activated by the WM, so the board
+    // takes the focus itself while it is up (that is what lets Esc/q close
+    // it), saves whatever held the focus first, and hands it back on close
+    // (dashClose). Close is the board's own X button or the menu toggle,
+    // exactly like Windows.
     // The dashboard's own cursor, at the desktop's scaled size: without it the
     // pointer over the board shows Xwayland's root cursor at the raw
     // XCURSOR_SIZE and shrinks against the desktop's scaled one (the bar fixed
@@ -1118,12 +1150,9 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
             XcursorImageDestroy(img);
         }
     }
-    XSizeHints sh;
-    memset(&sh, 0, sizeof(sh));
-    sh.flags = PMinSize;
-    sh.min_width = (int)(520 * d->scale);
-    sh.min_height = (int)(DASH_MIN_CSS * d->scale);
-    XSetWMNormalHints(dpy, d->win, &sh);
+    // No size hints and no WM_PROTOCOLS: an override-redirect popup has no
+    // window manager to negotiate with. The content fit (dashFitToContent) is
+    // the only sizer, same as p_ui.c's content-fit path.
 
     // persistent paint state: the board repaints on every hover move
     d->surf = cairo_xlib_surface_create(dpy, d->win, visual, d->w, d->h);
@@ -1135,7 +1164,23 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // (the top appears, then the lower part lags in). X keeps the same ordering.
     paintAndFit(d);
     XMoveResizeWindow(dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
-    XMapWindow(dpy, d->win);
+    XMapRaised(dpy, d->win);
+    // Take the keyboard while the board is up. An override-redirect window is
+    // never activated by KWin, so without this the pointer still reaches it but
+    // input focus stays with the terminal and its Esc/q close never fires - the
+    // menu does the same for the same reason. p_ui.c parity: clicking the Windows
+    // board activates it, and Esc closes it. AFTER the map: SetInputFocus on an
+    // unmapped window is a BadMatch (not viewable), which is exactly what a
+    // dropped map request looks like from the error handler. The window that
+    // held the focus is remembered first and restored by dashClose, so the
+    // terminal the user was typing in gets its keys back.
+    {
+        Window pf = None;
+        int pr = 0;
+        XGetInputFocus(dpy, &pf, &pr);
+        g_focusPrev = pf;
+    }
+    XSetInputFocus(dpy, d->win, RevertToParent, CurrentTime);
     XFlush(dpy);
 
     g_boardOpen = 1;
@@ -1156,10 +1201,11 @@ void dashRepaint(void) {
     paintAndFit(&g_dash);
 }
 
-// The board wants to close: Esc, q, a non-left click, the WM's close button, or
-// the window already being gone. Returns 1 and lets the caller call dashClose().
+// The board wants to close: Esc, q, a non-left click, or the window already
+// being gone. Returns 1 and lets the caller call dashClose(). (No WM close
+// message: the board is override-redirect, so there is no protocol to arrive
+// on - its own X button and the menu toggle are the close paths.)
 static int boardClose(XEvent *ev) {
-    Dash *d = &g_dash;
     switch (ev->type) {
         case KeyPress: {
             KeySym ks = XLookupKeysym(&ev->xkey, 0);
@@ -1169,9 +1215,6 @@ static int boardClose(XEvent *ev) {
             // a middle/right click also closes the window (p_ui.c dashProc
             // WM_RBUTTONUP destroys the board)
             return ev->xbutton.button != 1;
-        case ClientMessage:
-            // the window manager's close button (see WM_DELETE_WINDOW above)
-            return (Atom)ev->xclient.data.l[0] == d->wmDelete;
         case DestroyNotify:
             g_boardOpen = 0;   // the window is already gone; do not touch it
             return 1;
@@ -1341,6 +1384,17 @@ void dashClose(void) {
     if (d->ffReg) { cairo_font_face_destroy(d->ffReg); d->ffReg = NULL; }
     if (d->ffBold) { cairo_font_face_destroy(d->ffBold); d->ffBold = NULL; }
     if (d->ffSymbol) { cairo_font_face_destroy(d->ffSymbol); d->ffSymbol = NULL; }
+    // While the board was up it held the X focus (taken right after the map).
+    // Destroying the focused window would leave the focus on the root and the
+    // user's keystrokes in limbo until the next click, so hand the keyboard
+    // back to the window that held it first - only while that window is still
+    // mapped (SetInputFocus on an unmapped window is a BadMatch).
+    if (g_focusPrev != None && d->dpy) {
+        XWindowAttributes at;
+        if (XGetWindowAttributes(d->dpy, g_focusPrev, &at) && at.map_state == IsViewable)
+            XSetInputFocus(d->dpy, g_focusPrev, RevertToParent, CurrentTime);
+        g_focusPrev = None;
+    }
     // DestroyNotify may have already taken the window; XDestroyWindow on a dead
     // window only raises BadWindow, which the error handler ignores.
     XDestroyWindow(d->dpy, d->win);

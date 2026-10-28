@@ -171,7 +171,7 @@ Per-OS parts, written fresh for Linux:
 | metrics | `p_metrics.c` (PDH, Core Audio, HWiNFO) | `linux/src/p_metrics_linux.c` (`/proc`, `/sys`, `pactl`) |
 | icons | `p_icons.c` (GDI+) | `linux/src/icons_cairo.c` (cairo) - same geometry from `p_svg.c` |
 | window/paint | `p_ui.c` (layered GDI window) | `linux/src/main.c` (managed X11 window + cairo) |
-| shared X helpers | - | `linux/src/linux_shape.c` (the rounded window region), `linux/src/linux_text.c` (wide-to-UTF-8, the symbol face) |
+| shared X helpers | - | `linux/src/linux_shape.c` (the rounded window region, the boards' placement), `linux/src/linux_text.c` (wide-to-UTF-8, the symbol face) |
 | subscriptions | `p_subs.c` (WinHTTP) | the SAME `p_subs.c`: its HTTP is a libcurl body under `CHOCOBAR_PORTABLE` |
 
 ## Why a managed X11 window in the lower layer
@@ -215,7 +215,11 @@ Right-click opens the menu on the button **release** (the Windows parity:
 `WM_RBUTTONUP`), and the button that dismisses the menu is consumed by the
 menu, not by the bar - Win32's `TrackPopupMenu` eats the dismissing click the
 same way, so the bar never sees a release for it. Without that, the dismissing
-right-click bounced the menu straight back open.
+right-click bounced the menu straight back open. The menu is drawn like the
+Windows tray menu too (p_ui.c's owner-draw): the bar family at 9 CSS px, 21 px
+rows, the widest label measuring the width, and the hovered row filled with
+the background blended toward pink with a pinkDeep edge marker and pinkDeep
+label - not a generic dark system popup.
 
 ## What each chip reads
 
@@ -292,7 +296,15 @@ failed its last fetch; an em dash means nothing has ever succeeded. The board
 is the Windows board ported: one full-width panel per enabled provider, one
 donut per plan window with the credits left and the reset countdown, and the
 cycle's fetched time in the foot. Its `refresh` re-fetches the providers and
-its close button ends it, exactly as on Windows.
+its close button ends it, exactly as on Windows. Both boards are
+override-redirect popups, which is what the Windows boards are too (owned
+`WS_POPUP` windows): no titlebar, no taskbar/dock entry, no Alt-Tab entry.
+The keyboard diverges from Windows on purpose: Windows opens the board without
+activating it, but an override-redirect window on X is never activated by the
+window manager, so the board takes the keyboard itself while it is up - that
+is what makes Esc and q close it - and hands it back to the window that held
+it when the board closes. They open centred on the head the pointer is on,
+both axes, and re-centre as their content-fit changes the height.
 
 ## Tests
 
@@ -309,8 +321,10 @@ terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, the
 Subscription row opens the real board (its close button ends it, a second
-activation toggles it shut), and a left click on a right-group metric chip does
-nothing (hovering one still shows its title). The helper-stack gate runs against
+activation toggles it shut), both boards read as override-redirect popups to
+xwininfo on the mapped window (no titlebar, no dock entry), and a left click
+on a right-group metric chip does nothing (hovering one still shows its
+title). The helper-stack gate runs against
 a stub `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded`
 and records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that

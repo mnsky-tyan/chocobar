@@ -358,7 +358,11 @@ typedef struct {
 
 // the six field names a source uses, pre-quoted for the substring search. Built
 // once per scan (not per line) so the hot path stays a memcmp.
-typedef struct { char k[6][32]; int len[6]; int tsIso; const char *provList, *exclList; } TokKeys;
+// rec/recLen: the source's `record` needle, pre-wrapped in quotes ("X"), so
+// tokParseLine can gate a multi-shape store to one record type before any
+// field search runs (codex: token_usage_record rows only - the cumulative
+// token_count lines in the same file must never count).
+typedef struct { char k[6][32]; int len[6]; int tsIso; const char *provList, *exclList; char rec[66]; int recLen; } TokKeys;
 static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
     static const char *dflt[6] = { "input", "output", "cacheRead", "cacheWrite", "timestamp", "model" };
     const char *src[6];
@@ -371,6 +375,14 @@ static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
     tk->tsIso = s->tsIso;
     tk->provList = s->provList;
     tk->exclList = s->exclList;
+    tk->recLen = 0;
+    if (s->record[0]) {
+        // the BARE value: the parse-side gate anchors it to the record key
+        // ("type":"<value>") at the one place the key occurs, so the
+        // discriminator never matches the same word appearing as another
+        // field's data
+        tk->recLen = sprintf(tk->rec, "%s", s->record);
+    }
 }
 
 // ISO-8601 to epoch ms, for a source whose timestamp is a string. The shape
@@ -449,6 +461,27 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     out->ts = 0; out->app = NULL; out->appLen = 0;
     out->in = out->out = out->cr = out->cw = 0; out->model = NULL; out->modelLen = 0;
     out->prov = NULL; out->provLen = 0;
+    // record-type gate first: a line that is not the wanted record type is
+    // skipped before any field is looked at (cheapest test, and the one that
+    // keeps cumulative summaries out of per-response stores). The needle is
+    // anchored to the record KEY: the scan looks for "type": and then parses
+    // the quoted value that follows it, so a line whose NOTE field merely
+    // mentions the discriminator string is not counted - a bare whole-line
+    // substring search would count exactly that.
+    if (tk->recLen > 0) {
+        static const char rk[] = "\"type\":";
+        int hit = 0;
+        for (int i = 0; i + (int)sizeof(rk) - 1 <= len; i++) {
+            if (memcmp(ln + i, rk, sizeof(rk) - 1) != 0) continue;
+            int j = i + (int)sizeof(rk) - 1;
+            while (j < len && (ln[j] == ' ' || ln[j] == '\t')) j++;
+            if (j >= len || ln[j] != '"') continue;
+            j++;
+            if (j + tk->recLen < len && memcmp(ln + j, tk->rec, tk->recLen) == 0 &&
+                ln[j + tk->recLen] == '"') { hit = 1; break; }
+        }
+        if (!hit) return 0;
+    }
     // cheap pre-filter: no input field = nothing to count
     const char *u = NULL;
     for (int i = 0; i + tk->len[0] <= len; i++) {
