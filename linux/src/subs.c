@@ -265,9 +265,7 @@ static int fitToContent(void) {
     // dashFitToContent contract, and dash.c's fit now runs the same shape): a
     // repaint whose content height is unchanged must not touch the window at
     // all, so a board the user dragged partly off the work area STAYS there
-    // across every hover and fetch repaint. The height below is limited to the
-    // room at the kept position, so a resize can never hang past the head's
-    // bottom edge either.
+    // across every hover and fetch repaint.
     int hi = 0;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);

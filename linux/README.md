@@ -315,8 +315,9 @@ timestamp, which is what KWin's focus-stealing prevention accepts), so it
 lifts above the terminal the way the Windows board's
 `SetWindowPos(HWND_TOP)` does, other windows can cover it afterwards, and a
 left press in its title band drags it (the same band WM_NCHITTEST answers
-`HTCAPTION` on Windows); the release that completes a drag never fires the
-button under the pointer.
+`HTCAPTION` on Windows); the drag holds a pointer grab so fast motion cannot
+escape to underlying windows, and the release that completes a drag ungrabs and
+never fires the button under the pointer.
 The keyboard diverges from Windows on purpose: Windows opens the board without
 activating it, but the board takes the keyboard itself while it is up - that
 is what makes Esc and q close it - and hands it back to the window that held
@@ -346,7 +347,8 @@ skip-pager set, motif decorations cleared - no titlebar, no dock entry,
 coverable), and a left click
 on a right-group metric chip does nothing (hovering one still shows its
 title). The board's drag is asserted too: a title-band press-and-move
-relocates the board and the reverse drag restores it. The helper-stack gate runs against
+relocates the board and the reverse drag restores it, and an escaping drag
+ends cleanly without teleporting the board on the next hover. The helper-stack gate runs against
 a stub `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded`
 and records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that

@@ -21,7 +21,9 @@ import uuid
 def windows_path(path):
     if os.name == "nt":
         return str(path)
-    return subprocess.check_output(["wslpath", "-w", str(path)], text=True, timeout=5).strip()
+    if shutil.which("wslpath"):
+        return subprocess.check_output(["wslpath", "-w", str(path)], text=True, timeout=5).strip()
+    return subprocess.check_output(["winepath", "-w", str(path)], text=True, timeout=5).strip()
 
 
 def dump(value):
@@ -79,10 +81,10 @@ def run_exe(args):
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         command = args
-    else:
-        if not shutil.which("win-run-hidden"):
-            raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
+    elif shutil.which("win-run-hidden"):
         command = ["win-run-hidden", "--stdout", "--timeout", "25"] + args
+    else:
+        command = ["wine"] + args
     return subprocess.run(command, **kwargs)
 
 
