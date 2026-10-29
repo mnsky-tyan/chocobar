@@ -417,6 +417,24 @@ menu_wh() {
         if [ -n "$out" ]; then echo "$w $out"; return; fi
     done
 }
+# the row pick must click by the MENU WINDOW's own top-left, not by the bar
+# click's offsets: the menu flips UPWARD when the bar sits low (menu.c clamps
+# it on screen), and a click at pointer+ROW2_Y then lands two rows low - the
+# measured failure returned "Start on login" (id 5) instead of the
+# Subscription row (id 11). Echos the menu's absolute left and top. The menu
+# may need a beat to appear (and a stale bar coordinate can miss it entirely),
+# so this retries briefly; silence means the menu never opened and the caller
+# sees an empty pick instead of a wrong-row click.
+menu_abs() {
+    local w xy i
+    for i in 1 2 3 4 5; do
+        w=$(menu_wh | awk '{print $1}')
+        [ -n "$w" ] || { sleep 0.3; continue; }
+        xy=$(xwininfo -id "$w" | awk '/Absolute upper-left X/{x=$4} /Absolute upper-left Y/{y=$4} END{printf "%d %d", x, y}')
+        [ -n "$xy" ] && { echo "$xy"; return; }
+        sleep 0.3
+    done
+}
 # same count, minus the tooltip window: the tip is created once on the first
 # hover and then mapped/unmapped, so it must not read as "a click opened a window"
 root_children_excluding_tip() {
@@ -561,21 +579,73 @@ check "a click OUTSIDE the menu picks no row and leaves the bar running" $?
 #     root children, and the board IS one.
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.6
-"$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+read -r MENUX MENUY <<EOF
+$(menu_abs)
+EOF
+"$XCLICK" $((MENUX+40)) $((MENUY+ROW2_Y)) 1 full
 sleep 1.2
 SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
 [ -n "${SUBSWIN:-}" ]
 check "a click INSIDE the Subscription row opens the board" $?
 
-# 5e-bis. the board the user sees is a POPUP, not a desktop window: xwininfo on
-#     a real mapped override-redirect window prints 'Override Redirect State:
-#     yes'. This is the observable property (p_ui.c's owned WS_POPUP parity),
-#     not a source-text match - a decorated board or a dock entry fails here.
+# 5e-bis. the board the user sees is a POPUP, not a desktop window, and a
+#     MANAGED one (v1.6.4): the popup properties are the WM-visible ones -
+#     skip-taskbar + skip-pager (no dock/taskbar entry, p_ui.c's owned
+#     WS_POPUP parity) and _MOTIF_WM_HINTS with the decorations bit cleared
+#     (no titlebar) - while the window is NOT override-redirect, so KWin
+#     stacks it in the normal layer (coverable) instead of the top layer.
+#     Read from the live properties, not source text: a decorated board, a
+#     dock entry, or a regression back to OR all fail here.
+board_is_managed_popup() {
+    local id="$1"
+    xwininfo -id "$id" | grep -q "Override Redirect State: no" || return 1
+    xprop -id "$id" _NET_WM_STATE | grep -q "_NET_WM_STATE_SKIP_TASKBAR" || return 1
+    xprop -id "$id" _NET_WM_STATE | grep -q "_NET_WM_STATE_SKIP_PAGER" || return 1
+    # MWM_HINTS_DECORATIONS (flags bit 2) with decorations 0 = no titlebar.
+    # xprop versions differ: some name the five fields ("flags = 2,
+    # decorations = 0"), some print the raw words ("= 0x2, 0x0, 0x0, ...").
+    # Accept the named spelling when present, else the raw one; both were
+    # measured on this box's xprop (raw) and the documented format (named).
+    local mwm
+    mwm=$(xprop -id "$id" _MOTIF_WM_HINTS)
+    if echo "$mwm" | grep -q "decorations = 0"; then
+        echo "$mwm" | grep -qE "flags = (0x)?2(,|$)" || return 1
+    else
+        echo "$mwm" | grep -qE "= 0x2, 0x0, 0x0(,|$)" || return 1
+    fi
+    return 0
+}
 if [ -n "${SUBSWIN:-}" ]; then
-    xwininfo -id "$SUBSWIN" | grep -q "Override Redirect State: yes"
-    check "the subscription board is an override-redirect popup (no titlebar, no dock entry)" $?
+    board_is_managed_popup "$SUBSWIN"
+    check "the subscription board is a managed popup (no titlebar, no dock entry, coverable)" $?
+    # sticky on every desktop, like the bar it floats over: on a WM-less Xvfb
+    # the pre-map _NET_WM_STATE property IS the observable (the WM that would
+    # normalise it is absent)
+    xprop -id "$SUBSWIN" _NET_WM_STATE | grep -q "_NET_WM_STATE_STICKY"
+    check "the subscription board sits on every desktop like the bar (sticky)" $?
+    # the board must never hang off the screen: the open size is clamped to the
+    # screen BEFORE it centres (p_ui.c's dashMaxH parity), so on this short
+    # 400 px screen a board that used to centre to a negative y pinned itself
+    # to the top edge - over the bar - and the next clicks landed on the board
+    eval "$(xdotool getwindowgeometry --shell "$SUBSWIN")"
+    # the screen's real height, not the default 400: CHOCOBAR_TEST_XVFB_ARGS
+    # can replace the server geometry, and a taller screen legitimately lets
+    # the clamped board open lower
+    SCREEN_H=$(xdpyinfo | sed -n 's/^ *dimensions: *\([0-9]*\)x\([0-9]*\) pixels.*/\2/p' | head -1)
+    BOTTOM=$((Y + HEIGHT))
+    [ "$BOTTOM" -le "$SCREEN_H" ] && [ "$Y" -ge 0 ]
+    check "the subscription board opens inside the screen ($X,$Y ${WIDTH}x$HEIGHT on a ${SCREEN_H} px screen)" $?
+    # the post-map all-desktops request: the ClientMessage monitor records the
+    # BAR's request at startup, and the board's must appear after its map (a
+    # board pinned to its opening desktop vanishes when the user switches
+    # desktops). Only the bar's own id has messages at this point in the suite
+    # (the log is truncated at startup and the boards open later), so the
+    # board's decimal id cannot collide with an earlier sender's.
+    SUBSWIN_DEC=$(printf '%d' "$SUBSWIN")
+    grep -q "^$SUBSWIN_DEC _NET_WM_DESKTOP 4294967295$" "$CLIENTMSG"
+    check "the subscription board requests all desktops after its map" $?
 else
-    check "the subscription board is an override-redirect popup (no titlebar, no dock entry)" 1
+    check "the subscription board is a managed popup (no titlebar, no dock entry, coverable)" 1
 fi
 
 # 5f. the close button ends the board: the titlebar's ✕ (subs.c btnClose, the
@@ -597,16 +667,70 @@ else
 fi
 
 # 5g. activating the row again while the board is open closes it (a toggle,
-#     never a leak): open once more, then pick the same row again
+#     never a leak): open once more, then pick the same row again. The fake
+#     terminal's geom reports keep moving the bar, so read its position NOW -
+#     a stale X/Y right-clicks off the bar and no menu ever opens.
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.6
-"$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+read -r MENUX MENUY <<EOF
+$(menu_abs)
+EOF
+"$XCLICK" $((MENUX+40)) $((MENUY+ROW2_Y)) 1 full
 sleep 1.2
 SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
 if [ -n "${SUBSWIN:-}" ]; then
+    # The board may COVER the bar (a short screen pins the clamped board to the
+    # top edge - Windows' dashMaxH places it the same way), so drag it clear by
+    # its title band first: the toggle below needs the bar's right-click, and a
+    # right-click on the board would close it instead of opening the menu. The
+    # drag itself is the managed-board feature under test in 5e-bis.
+    SUBX=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBY=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    "$XCLICK" $((SUBX+40)) $((SUBY+12)) 1 drag $((SUBX+40+300)) $((SUBY+12+180))
+    sleep 0.6
+    SUBX2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBY2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    [ "$SUBX2" != "$SUBX" ] || [ "$SUBY2" != "$SUBY" ]
+    check "the drag clears the subs board off the bar ($SUBX,$SUBY -> $SUBX2,$SUBY2)" $?
+    # The drag holds a POINTER GRAB (the same contract the token dashboard
+    # asserts above): press in the title band, fling the pointer far outside
+    # the board, release OUT there, then hover the title band - the geometry
+    # must not move. Without the grab the release is lost to whatever is
+    # under the pointer, dragging stays set, and the hover teleports the
+    # window.
+    xdotool mousemove --window "$SUBSWIN" 100 12
+    xdotool mousedown 1
+    xdotool mousemove_relative --sync 4000 4000 2>/dev/null
+    xdotool mouseup 1
+    sleep 0.4
+    SUBEX=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBEY=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    xdotool mousemove --window "$SUBSWIN" 100 12
+    sleep 0.5
+    SUBEX2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBEY2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    [ "$SUBEX2" = "$SUBEX" ] && [ "$SUBEY2" = "$SUBEY" ]
+    check "a subs drag that escapes the board ends cleanly - no teleport on the next hover" $?
+    # Drag it back clear of the bar (the toggle below right-clicks the bar at
+    # its LEFT end; the fling parked the board at the screen's bottom-right
+    # corner, which does not cover that point). The move doubles as the
+    # "the release was delivered" check.
+    xdotool mousemove --window "$SUBSWIN" 100 12
+    xdotool mousedown 1
+    xdotool mousemove $((SUBX2 + 100)) $((SUBY2 + 12))
+    xdotool mouseup 1
+    sleep 0.4
+    SUBBX=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBBY=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    [ "$SUBBX" = "$SUBX2" ] && [ "$SUBBY" = "$SUBY2" ]
+    check "after an escaped release the subs board still drags, and lands exactly where it is told ($SUBBX,$SUBBY)" $?
     "$XCLICK" $((X+40)) $((Y+10)) 3 full
     sleep 0.6
-    "$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+    read -r MENUX MENUY <<EOF
+$(menu_abs)
+EOF
+    "$XCLICK" $((MENUX+40)) $((MENUY+ROW2_Y)) 1 full
     sleep 1.2
     N=$(xwininfo -root -children 2>/dev/null | grep -c "Subscriptions")
     [ "$N" -eq 0 ]
@@ -2336,11 +2460,70 @@ done
 if [ -z "${HEATDASH:-}" ]; then
     check "the heatmap's columns are day-aligned (the dashboard never opened)" 1
 else
-    # The token board is a popup too: no titlebar, no dock entry (p_ui.c's owned
-    # WS_POPUP parity). xwininfo states it on a real mapped window, so this is
-    # the observable, not a source match.
-    xwininfo -id "$HEATDASH" | grep -q "Override Redirect State: yes"
-    check "the token dashboard is an override-redirect popup (no titlebar, no dock entry)" $?
+    # The token board is a managed popup too: no titlebar, no dock entry, and
+    # NOT override-redirect (v1.6.4 - an OR board was stuck in KWin's top
+    # layer and could not be moved or covered). Observable properties only.
+    board_is_managed_popup "$HEATDASH"
+    check "the token dashboard is a managed popup (no titlebar, no dock entry, coverable)" $?
+    # The board is MOVABLE (v1.6.4): a left press in the title band and a move
+    # must relocate the window exactly as p_ui.c's HTCAPTION drag does on
+    # Windows, and the reverse drag must put it back. The press point y=12 is
+    # inside the title band at every scale (tbBottom is >= 34 device px); the
+    # move is a screen-space delta so the dragged window sliding under the
+    # pointer cannot skew the arithmetic. Geometry is the observable.
+    if command -v xdotool >/dev/null 2>&1; then
+        dash_geom() {
+            xwininfo -id "$HEATDASH" | awk '/Absolute upper-left X:/{x=$4} /Absolute upper-left Y:/{y=$4} END{print x, y}'
+        }
+        DG0=$(dash_geom)
+        xdotool mousemove --window "$HEATDASH" 120 12
+        xdotool mousedown 1
+        xdotool mousemove_relative --sync 40 24
+        xdotool mouseup 1
+        sleep 0.4
+        DG1=$(dash_geom)
+        xdotool mousemove --window "$HEATDASH" 120 12
+        xdotool mousedown 1
+        xdotool mousemove_relative --sync -- -40 -24
+        xdotool mouseup 1
+        sleep 0.4
+        DG2=$(dash_geom)
+        [ "$DG1" != "$DG0" ] && [ "$DG2" = "$DG0" ]
+        check "a title-band drag moves the token dashboard and the reverse drag restores it ($DG0 -> $DG1 -> $DG2)" $?
+        # The drag holds a POINTER GRAB: a fast drag outruns the async
+        # XMoveWindow, the pointer crosses OUT of the board, and without the
+        # grab the motion and the release go to whatever window is underneath
+        # - dragging stays set and the next hover TELEPORTS the window to the
+        # stale grab offset with no button held. Driven for real: press in the
+        # title band, fling the pointer far outside the board, release OUT
+        # there, then hover the title band - the geometry must not move. A
+        # WM-less Xvfb makes the release point decisive: nothing but the grab
+        # can route it back to the board.
+        read -r EGX0 EGY0 <<EOF
+$DG0
+EOF
+        xdotool mousemove --window "$HEATDASH" 100 12
+        xdotool mousedown 1
+        xdotool mousemove_relative --sync 4000 4000 2>/dev/null
+        xdotool mouseup 1
+        sleep 0.4
+        EG1=$(dash_geom)
+        xdotool mousemove --window "$HEATDASH" 100 12
+        sleep 0.5
+        EG2=$(dash_geom)
+        [ "$EG2" = "$EG1" ]
+        check "a drag that escapes the board ends cleanly - no teleport on the next hover ($EG1 -> $EG2)" $?
+        # The release was delivered, so the board must drag normally again and
+        # land EXACTLY back where it started (the drag is a pure translation).
+        xdotool mousemove --window "$HEATDASH" 100 12
+        xdotool mousedown 1
+        xdotool mousemove $((EGX0 + 100)) $((EGY0 + 12))
+        xdotool mouseup 1
+        sleep 0.4
+        EG3=$(dash_geom)
+        [ "$EG3" = "$EGX0 $EGY0" ]
+        check "after an escaped release the board still drags, and lands exactly where it is told ($EG1 -> $EG3)" $?
+    fi
     eval "$(xdotool getwindowgeometry --shell "$HEATDASH")"
     # The bar's event loop is select-driven: a motion is handled some time
     # AFTER xdotool's warp lands, and no fixed sleep bounds that, so every

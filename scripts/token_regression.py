@@ -21,7 +21,9 @@ import uuid
 def windows_path(path):
     if os.name == "nt":
         return str(path)
-    return subprocess.check_output(["wslpath", "-w", str(path)], text=True, timeout=5).strip()
+    if shutil.which("wslpath"):
+        return subprocess.check_output(["wslpath", "-w", str(path)], text=True, timeout=5).strip()
+    return subprocess.check_output(["winepath", "-w", str(path)], text=True, timeout=5).strip()
 
 
 def dump(value):
@@ -79,10 +81,10 @@ def run_exe(args):
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         command = args
-    else:
-        if not shutil.which("win-run-hidden"):
-            raise RuntimeError("WSL requires win-run-hidden; no visible-process fallback")
+    elif shutil.which("win-run-hidden"):
         command = ["win-run-hidden", "--stdout", "--timeout", "25"] + args
+    else:
+        command = ["wine"] + args
     return subprocess.run(command, **kwargs)
 
 
@@ -284,6 +286,147 @@ def main():
               lambda: verify(run_child(exe, recprof, "append"),
                              [(265, 2, 1, 1, False), (320, 3, 1, 1, False),
                               (320, 3, 1, 1, True)]))
+
+        # The totalFields mask: a tool whose headline usage EXCLUDES the cache
+        # columns (magpie's `usage` prints in+out as "tokens" and lists the
+        # cache columns beside it) must make the cards read the tool's number,
+        # not the sum of every column. The default fixture rows carry
+        # in+out+cr+cw = 100+40+10 and 80+20+10+5; masked to input,output the
+        # total is 240, not 265 - and the columns themselves keep the full
+        # breakdown (verified in the portable suite's column checks).
+        def fixture_masked(name, total_fields, seeded=False):
+            profile = fixture(root, name, seeded=seeded)
+            path = profile / ".wizbar" / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if total_fields:
+                config["tokens"]["sources"][0]["totalFields"] = total_fields
+            path.write_text(dump(config), encoding="utf-8")
+            return profile
+        masked = fixture_masked("total-masked", "input,output")
+        check("totalFields input,output counts only input+output",
+              lambda: verify(run_child(exe, masked),
+                             [(240, 2, 2, 1, False), (240, 2, 2, 1, True)]))
+        check("totalFields append and warm scan keep the masked total",
+              lambda: verify(run_child(exe, masked, "append"),
+                             [(240, 2, 2, 1, False), (295, 3, 3, 1, False),
+                              (295, 3, 3, 1, True)]))
+        unmasked = fixture_masked("total-unmasked", None)
+        check("absent totalFields keeps the four-field total",
+              lambda: verify(run_child(exe, unmasked), warm265))
+        # an unknown field name rejects the WHOLE list and keeps all four: a
+        # typo must not silently narrow the total to one column (that reads
+        # exactly like the bug the option exists to fix). Trailing commas are
+        # tolerated, so "input,output," is a valid two-field list.
+        typo = fixture_masked("total-typo", "input,outp")
+        check("an unknown totalFields name keeps the four-field total",
+              lambda: verify(run_child(exe, typo), warm265))
+        comma = fixture_masked("total-trailing-comma", "input, output,")
+        check("a trailing comma in totalFields is tolerated",
+              lambda: verify(run_child(exe, comma),
+                             [(240, 2, 2, 1, False), (240, 2, 2, 1, True)]))
+
+        # A LEDGER source (tokens.sources[].ledger: one parsed row = one
+        # request) counts a row that parses but carries no usage as a CALL - it
+        # billed nothing - so CALLS reads the ledger's own row count, the only
+        # number the user can check with wc -l. The estimator must not run on a
+        # ledger: it has no transcript to read, so its prompt math reads 0 and
+        # the row used to vanish from CALLS (measured: magpie's ledger held
+        # 3,507 zero-usage rows the board never counted). Tokens stay at the
+        # two real rows' sum. The flag is per source, NOT the path's shape, so
+        # both spellings below must agree.
+        def ledger_fixture(name, flag, path_is_file, seed_ts=None):
+            prof = root / name
+            (prof / ".wizbar").mkdir(parents=True)
+            now = int(time.time() * 1000)
+            lfields = {"input": "in", "output": "out", "cacheRead": "cache_read",
+                       "cacheWrite": "cache_write", "timestamp": "at", "model": "model"}
+            src = {"app": "ledger", "enabled": True, "recursive": False,
+                   "fields": lfields}
+            if flag:
+                src["ledger"] = True
+            target = prof / "ledger-dir"
+            if not path_is_file:
+                target.mkdir()
+            src["path"] = windows_path(prof / "usage.jsonl") if path_is_file \
+                else windows_path(target)
+            lconfig = {
+                "tokens": {"enabled": True, "estimateMissingUsage": True,
+                            "sources": [src]},
+                "subs": {"enabled": False},
+                "general": {"autoStart": False, "checkUpdates": False,
+                             "debug": False}}
+            (prof / ".wizbar" / "config.json").write_text(dump(lconfig), encoding="utf-8")
+            lrows = [
+                {"in": 100, "out": 40, "cache_read": 10, "cache_write": 0,
+                 "at": now - 1000, "model": "Model-A"},
+                {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
+                 "at": now - 900, "model": "Model-A"},
+                {"in": 80, "out": 20, "cache_read": 10, "cache_write": 5,
+                 "at": now - 800, "model": "Model-B"}]
+            rows_path = (prof / "usage.jsonl") if path_is_file else (target / "usage.jsonl")
+            rows_path.write_text("".join(dump(r) + "\n" for r in lrows), encoding="utf-8")
+            if seed_ts is not None:
+                # A legacy seed whose newest record is NEWER than some ledger
+                # rows: the boundary drops those rows (their usage lives in
+                # the seed's aggregates) - see the seeded case below.
+                cache = prof / ".wizbar" / "token-cache.json"
+                cache.write_text(dump([["seed1", {"app": "ledger", "ts": seed_ts,
+                                                  "input": 30, "output": 10,
+                                                  "cacheRead": 0, "cacheWrite": 0,
+                                                  "model": "Seed-Model"}]]),
+                                encoding="utf-8")
+                os.utime(cache, ((now - 60000) / 1000, (now - 60000) / 1000))
+            return prof
+        check("a ledger source counts a zero-usage row as a call, not a token",
+              lambda: verify(run_child(exe, ledger_fixture("ledger-file", True, True)),
+                             [(265, 3, 2, 1, False), (265, 3, 2, 1, True)]))
+        check("a ledger flag on a directory-spelled store counts the same way",
+              lambda: verify(run_child(exe, ledger_fixture("ledger-dir", True, False)),
+                             [(265, 3, 2, 1, False), (265, 3, 2, 1, True)]))
+        # without the flag the store is a transcript: the zero row is a turn
+        # that may never have reached the API, and the estimator (which cannot
+        # read a ledger) leaves it out - two calls, not three
+        check("without the ledger flag a zero-usage row is not a call",
+              lambda: verify(run_child(exe, ledger_fixture("ledger-absent", False, True)),
+                             [(265, 2, 2, 1, False), (265, 2, 2, 1, True)]))
+        # ... and the seed boundary must not eat a ledger's CALLS either: the
+        # boundary exists to stop the live scan re-adding usage the seed's
+        # aggregates already hold, but the Electron seed never counted an
+        # aborted ledger request, so a zero-usage row below the boundary is
+        # still staged - no usage can be double-counted, and CALLS keeps
+        # reading the ledger's own row count. Boundary at now-850: the
+        # now-1000 row drops (usage in the seed), the now-800 row stages, the
+        # zero row at now-900 stages as a call. Seed 40 + Model-B row 115 =
+        # 155 tokens; calls = seed 1 + zero 1 + live 1 = 3.
+        check("a ledger's zero-usage row below the seed boundary still counts as a call",
+              lambda: verify(run_child(exe, ledger_fixture(
+                                 "ledger-seeded", True, True,
+                                 seed_ts=int(time.time() * 1000) - 850)),
+                             [(155, 3, 3, 1, False), (155, 3, 3, 1, True)]))
+
+        # The mask rides into the SEED half too: a seed record whose app label
+        # matches the masked source is masked exactly like the live scan, so
+        # the cached history and the live tail can never disagree on what a
+        # "token" is. Seed record: input 70, output 20, cacheRead 5 -> 90
+        # masked (95 unmasked); live rows: 240 masked (265 unmasked). Total
+        # 330 pins BOTH halves: an unmasked seed gives 335, unmasked live 355.
+        def masked_seed():
+            profile = fixture_masked("total-masked-seed", "input,output", seeded=True)
+            cache = profile / ".wizbar" / "token-cache.json"
+            seed = json.loads(cache.read_text(encoding="utf-8"))
+            seed[0][1]["app"] = "custom-cli"
+            seed[0][1]["cacheRead"] = 5
+            now = int(time.time() * 1000)
+            cache.write_text(dump(seed), encoding="utf-8")
+            os.utime(cache, ((now - 60000) / 1000, (now - 60000) / 1000))
+            nxt = json.loads((profile / "seed-next.json").read_text(encoding="utf-8"))
+            nxt[0][1]["app"] = "custom-cli"
+            nxt[0][1]["cacheRead"] = 5
+            (profile / "seed-next.json").write_text(dump(nxt), encoding="utf-8")
+            return profile
+        check("totalFields masks the seed cache by app label",
+              lambda: verify(run_child(exe, masked_seed()),
+                             [(330, 3, 3, 1, False), (330, 3, 3, 1, True)]))
 
         # A gateway that logs every call it serves (Magpie) and the client's
         # own session store BOTH hold the same request, so counting both

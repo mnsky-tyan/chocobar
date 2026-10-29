@@ -28,6 +28,11 @@
 #include <X11/Xcursor/Xcursor.h>
 #include "linux_svg.h"
 
+// main.c: the timestamp of the last real input, so a board opened from a menu
+// row still carries a user timestamp into KWin's activation (see
+// linux_shape.c boardActivate).
+extern Time g_lastInputTime;
+
 #include "linux_shape.h"
 #include "menu.h"
 
@@ -357,6 +362,7 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 if (m.hover != -1) { m.hover = -1; menuPaint(&m); }
                 break;
             case ButtonPress:
+                if (ev.xbutton.time) g_lastInputTime = ev.xbutton.time;
                 // a press outside the window (the grab delivers it) closes; the
                 // closing gesture's release is still coming, so mark it for the
                 // bar to swallow - otherwise its own onButtonRelease re-opens
@@ -372,6 +378,7 @@ int menuRun(Display *dpy, int screen, Visual *visual, Colormap cmap, int depth,
                 }
                 break;
             case ButtonRelease: {
+                if (ev.xbutton.time) g_lastInputTime = ev.xbutton.time;
                 if (ev.xbutton.window != m.win) { done = 1; break; }
                 // only the left button may choose a row: a wheel notch ends
                 // with a release like any other click, and it must dismiss the

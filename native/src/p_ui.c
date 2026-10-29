@@ -530,14 +530,14 @@ static void scanTokenCacheInner(const Config *cfg) {
         const char *next = findStr(tsp + 5, end, "\"app\":\"");
         const char *recEnd = next ? next : end;
         // per-field breakdown (the dash table columns); Electron rowTotal =
-        // input + output + cacheRead + cacheWrite
+        // input + output + cacheRead + cacheWrite, which the source's
+        // totalFields mask may narrow for the totals (see cbTokTotalMask)
         const char *keys[4] = { "\"input\":", "\"output\":", "\"cacheRead\":", "\"cacheWrite\":" };
         int lens[4] = { 8, 9, 12, 13 };
         long long fld[4] = { 0, 0, 0, 0 };
-        long long sum = 0;
         for (int k = 0; k < 4; k++) {
             const char *f = findStr(ae, recEnd, keys[k]);
-            if (f) { fld[k] = parseLL(f + lens[k], recEnd); sum += fld[k]; }
+            if (f) { fld[k] = parseLL(f + lens[k], recEnd); }
         }
         const char *mp = findStr(tsp + 5, recEnd, "\"model\":\"");
         const char *mv = NULL; int mlen = 0;
@@ -550,10 +550,18 @@ static void scanTokenCacheInner(const Config *cfg) {
             // de-sync BY MODEL from every other section
             if (me > mv) mlen = (int)(me - mv);
         }
-        if (ts >= midnight) total += sum;
         // est=0: these come from the seed cache, which holds PROVIDER-REPORTED
-        // numbers, so nothing here is ever an estimate.
-        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, 0);
+        // numbers, so nothing here is ever an estimate. The mask lookup is by
+        // app label: a seed record's app is the same key the live source
+        // declares, so a source whose tool reports the headline usage without
+        // the cache columns (magpie) masks the seed the same way it masks the
+        // live scan - the seed half and the live half can never disagree.
+        unsigned tm = cbTokTotalMask(cfg, p, alen);
+        if (ts >= midnight) {
+            total += (tm & 1 ? fld[0] : 0) + (tm & 2 ? fld[1] : 0)
+                   + (tm & 4 ? fld[2] : 0) + (tm & 8 ? fld[3] : 0);
+        }
+        tokPendPush(p, alen, ts, fld[0], fld[1], fld[2], fld[3], mv, mlen, 0, tm);
         if (ts > tsScanMax) tsScanMax = ts;
         p = next ? next : end;
     }
@@ -3633,7 +3641,11 @@ static const char *g_template =
     "    // adding an entry - nothing is compiled in. app = the aggregation key (and the\r\n"
     "    // labels key); path = the store; recursive descends into per-project subdirectories\r\n"
     "    // (default on, harmless for a flat store); fields renames the usage keys for a\r\n"
-    "    // harness that spells them differently. Shipped off: set tokens.enabled and the\r\n"
+    "    // harness that spells them differently. ledger = the store is a ledger of\r\n"
+    "    // requests, not a transcript: every parsed row is one call and the estimator\r\n"
+    "    // never runs; totalFields = which usage fields feed the totals (the default\r\n"
+    "    // all four; a tool that reports cache beside its headline usage names the\r\n"
+    "    // subset, e.g. \"input,output\"). Shipped off: set tokens.enabled and the\r\n"
     "    // source you want - nothing is read until you do.\r\n"
     "    \"sources\": [\r\n"
     "      { \"app\": \"pi\",   \"path\": \"~/.pi/agent/sessions\", \"enabled\": false, \"recursive\": true },\r\n"

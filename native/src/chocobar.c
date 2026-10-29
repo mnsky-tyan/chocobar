@@ -98,6 +98,22 @@ typedef struct {
                             // per-response token_usage_record rows; counting the
                             // cumulative ones re-counts the whole session per
                             // turn, so the source names "token_usage_record".
+    unsigned totalMask;     // which fields feed the TOTAL the cards, the heatmap
+                            // and the route cards rank by: bit1 input, bit2
+                            // output, bit4 cacheRead, bit8 cacheWrite. Default
+                            // all four (the pi/zai convention). A tool that
+                            // reports cache separately from its headline usage -
+                            // magpie's `usage` prints in+out as "tokens" and lists
+                            // the cache columns beside it - names the subset, so
+                            // the dashboard's number is the tool's number.
+    unsigned ledger;        // this source is a LEDGER of requests (one parsed
+                            // row = one call), not a session transcript: a row
+                            // with no usage is still a call that billed nothing,
+                            // and the estimator never runs (it needs transcript
+                            // text around the turn, which a ledger row has none
+                            // of). Set per source: a gateway store spelled as a
+                            // directory and one spelled as a single file are the
+                            // same kind of store.
 } TokSource;
 
 // the longest provider/route name the matcher accepts, on BOTH sides: the
@@ -832,6 +848,7 @@ static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj)
     // recursion defaults ON: a flat store has no subdirectories to descend
     // into, a nested one needs it
     ts->recursive = jboolDefault(js, t, jobjGet(js, t, obj, "recursive"), 1);
+    ts->ledger = jboolDefault(js, t, jobjGet(js, t, obj, "ledger"), 0);
     int fl = jobjGet(js, t, obj, "fields");
     if (fl >= 0 && t[fl].type == JSMN_OBJECT) {
         tokFieldCopy(ts->kIn,    sizeof(ts->kIn),    js, t, fl, "input",     "input");
@@ -872,6 +889,48 @@ static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj)
         if (rk >= 0 && t[rk].type == JSMN_STRING) {
             int rl = jsmnStrCopy(js, &t[rk], ts->record, sizeof(ts->record));
             if (rl <= 0) ts->record[0] = 0;
+        }
+    }
+    // totalFields: the subset of the four usage fields that feeds the TOTAL
+    // (input, output, cacheRead, cacheWrite - comma-separated, case-insensitive,
+    // empty or absent = all four). A store whose tool reports the headline
+    // usage WITHOUT the cache columns (magpie's `usage` prints in+out as
+    // "tokens" and lists the cache columns beside it) names "input,output",
+    // so the dashboard's cards read the same number the tool prints while the
+    // table columns keep the full breakdown. Same split rule as the provider
+    // lists: exact comma-delimited elements, never substrings.
+    //
+    // An UNKNOWN name rejects the whole list and keeps all four: a typo like
+    // "input,outp" would otherwise silently narrow the total to one column and
+    // under-report by an order of magnitude, which reads exactly like the bug
+    // this option exists to fix. Empty segments (a trailing comma) are skipped.
+    ts->totalMask = 0xF;
+    {
+        int tfk = jobjGet(js, t, obj, "totalFields");
+        if (tfk >= 0 && t[tfk].type == JSMN_STRING) {
+            char v[80];
+            int vl = jsmnStrCopy(js, &t[tfk], v, sizeof(v));
+            if (vl > 0) {
+                unsigned m = 0;
+                int bad = 0;
+                const char *p2 = v;
+                while (*p2) {
+                    const char *e = strchr(p2, ',');
+                    const char *se = e ? e : p2 + strlen(p2);
+                    while (p2 < se && *p2 == ' ') p2++;
+                    while (se > p2 && se[-1] == ' ') se--;
+                    int sl = (int)(se - p2);
+                    if (sl == 0) { if (!e) break; p2 = e + 1; continue; } // trailing/empty segment
+                    if (sl == 5 && tokNIeq(p2, "input", sl)) m |= 1;
+                    else if (sl == 6 && tokNIeq(p2, "output", sl)) m |= 2;
+                    else if (sl == 9 && tokNIeq(p2, "cacheRead", sl)) m |= 4;
+                    else if (sl == 10 && tokNIeq(p2, "cacheWrite", sl)) m |= 8;
+                    else bad = 1;
+                    if (!e) break;
+                    p2 = e + 1;
+                }
+                if (m && !bad) ts->totalMask = m;
+            }
         }
     }
     if (ts->sessionsDir && *ts->sessionsDir && ts->app[0]) return 1;

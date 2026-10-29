@@ -6,6 +6,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <X11/Xutil.h>
 #include <X11/extensions/Xinerama.h>
 
 #include "linux_shape.h"
@@ -147,4 +148,111 @@ void boardShapeFree(Display *dpy, XserverRegion *held,
     if (heldW) *heldW = 0;
     if (heldH) *heldH = 0;
     if (heldR) *heldR = 0;
+}
+
+// The managed-popup recipe, shared by both boards (main.c carries the bar's own
+// variant, whose differences are deliberate: the bar wants BELOW + no input;
+// a board wants the normal layer and takes the keyboard). The 32-bit long is
+// the format-32 property width, not a platform choice: on 64-bit Xlib the
+// CARDINAL/ATOM arrays must be `long`.
+typedef struct { unsigned long flags, functions, decorations; long inputMode;
+                 unsigned long status; } BoardMotifHints;
+#define BOARD_MWM_HINTS_DECORATIONS 2UL
+
+void boardMakeManaged(Display *dpy, Window win, const char *name,
+                      const char *resName, int x, int y, int w, int h) {
+    // USPosition: KWin honours a user-specified position instead of running its
+    // placement policy (which would centre the board and land it somewhere the
+    // pointer's head never asked for). The bar does the same before every map.
+    XSizeHints sh;
+    memset(&sh, 0, sizeof(sh));
+    sh.flags = USPosition | PPosition | USSize | PSize;
+    sh.x = x; sh.y = y; sh.width = w; sh.height = h;
+    XSetWMNormalHints(dpy, win, &sh);
+    // no titlebar, no frame: _MOTIF_WM_HINTS with only the decorations bit, 0
+    BoardMotifHints mh = { BOARD_MWM_HINTS_DECORATIONS, 0, 0, 0, 0 };
+    XChangeProperty(dpy, win, XInternAtom(dpy, "_MOTIF_WM_HINTS", False),
+                    XInternAtom(dpy, "_MOTIF_WM_HINTS", False), 32, PropModeReplace,
+                    (unsigned char *)&mh, 5);
+    // normal window type: DOCK/UTILITY would pin the board to a special layer
+    // or tie it to another window; NORMAL is the layer Windows' HWND_TOP sits in
+    Atom typeNormal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False),
+                    XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&typeNormal, 1);
+    // Out of the taskbar and the pager, like the Windows owned popup (no
+    // taskbar button, no Alt-Tab entry), and STICKY - on all desktops, so the
+    // board stays over the bar when the user switches desktops while it is up
+    // (the bar is on every desktop; KWin's all-desktops state is STICKY - it
+    // normalises _NET_WM_DESKTOP to the concrete number and keeps the STICKY
+    // state, which is exactly how the bar reads back). Pre-map properties, not
+    // client messages: nothing is managing the window yet.
+    Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
+                       XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False),
+                       XInternAtom(dpy, "_NET_WM_STATE_STICKY", False) };
+    XChangeProperty(dpy, win, XInternAtom(dpy, "_NET_WM_STATE", False),
+                    XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)states, 3);
+    // NOT set here: _NET_WM_DESKTOP. The board should sit on all desktops like
+    // the bar it floats over, but a pre-map statement of that desktop does not
+    // survive the map - KWin resolves it to the current desktop and writes the
+    // concrete number back (measured, and main.c's afterMap() documents the
+    // same fact for the bar). The working request is the post-map ClientMessage,
+    // which the open paths send through boardRequestAllDesktops().
+    XStoreName(dpy, win, name);
+    XClassHint cls = { (char *)resName, "Chocobar" };
+    XSetClassHint(dpy, win, &cls);
+    // WM_DELETE_WINDOW is REQUIRED now that the board is managed and takes the
+    // keyboard: a closeable-but-not-closeable active window (Alt+F4, the
+    // window menu's Close) makes a WM fall back to XKillClient, and the boards
+    // share the bar's ONE Display connection - that kill takes the whole bar
+    // down. The protocol turns the close request into a ClientMessage the
+    // board's own event loop answers by closing the board (dash.c/subs.c),
+    // exactly what the override-redirect era never had to advertise.
+    Atom delwin = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(dpy, win, &delwin, 1);
+}
+
+// The post-map all-desktops request (EWMH _NET_WM_DESKTOP ClientMessage). The
+// pre-map STICKY state above is what KWin keys on; this message is the EWMH-correct
+// request on top of it (a pre-map _NET_WM_DESKTOP statement itself is dropped -
+// KWin resolves it to the current desktop and writes the number back, which
+// main.c's afterMap() documents for the bar). Sent right after XMapWindow.
+void boardRequestAllDesktops(Display *dpy, Window win) {
+    XEvent cm;
+    memset(&cm, 0, sizeof(cm));
+    cm.xclient.type = ClientMessage;
+    cm.xclient.window = win;
+    cm.xclient.message_type = XInternAtom(dpy, "_NET_WM_DESKTOP", False);
+    cm.xclient.format = 32;
+    cm.xclient.data.l[0] = 0xFFFFFFFF;   // all desktops
+    cm.xclient.data.l[1] = 1;            // source: normal application
+    XSendEvent(dpy, RootWindow(dpy, DefaultScreen(dpy)), False,
+               SubstructureNotifyMask | SubstructureRedirectMask, &cm);
+    XFlush(dpy);
+}
+
+void boardActivate(Display *dpy, Window win, Time when) {
+    if (when != 0) {
+        // source indication 1 = application (EWMH 1.4, _NET_ACTIVE_WINDOW
+        // data.l[0]): the board is the app's own window, and KWin's
+        // focus-stealing prevention allows an application-sourced activation
+        // whose timestamp matches the last user input - which the click that
+        // opened the board provides. Claiming "pager" would be a lie about who
+        // asked.
+        XEvent cm;
+        memset(&cm, 0, sizeof(cm));
+        cm.xclient.type = ClientMessage;
+        cm.xclient.window = win;
+        cm.xclient.message_type = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+        cm.xclient.format = 32;
+        cm.xclient.data.l[0] = 1;                 // source: application
+        cm.xclient.data.l[1] = (long)when;        // the click's timestamp
+        cm.xclient.data.l[2] = 0;                 // currently active window
+        XSendEvent(dpy, RootWindow(dpy, DefaultScreen(dpy)), False,
+                   SubstructureRedirectMask | SubstructureNotifyMask, &cm);
+    }
+    // fallback (and confirmation): the direct focus a WM-less display needs
+    XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+    XFlush(dpy);
 }

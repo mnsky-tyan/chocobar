@@ -251,7 +251,8 @@ To count magpie's traffic and API-key usage under one name:
   "labels": { "pi": "pi" },
   "sources": [
     { "app": "pi", "path": "~/.config/magpie/usage.jsonl", "enabled": true,
-      "recursive": false, "timestampFormat": "iso",
+      "recursive": false, "timestampFormat": "iso", "ledger": true,
+      "totalFields": "input,output",
       "fields": { "input": "in", "output": "out", "cacheRead": "cache_read",
                   "cacheWrite": "cache_write", "timestamp": "t" },
       "providers": ["workbuddy-ai", "workbuddy", "opencode-zen-free", "cline",
@@ -296,15 +297,34 @@ failed its last fetch; an em dash means nothing has ever succeeded. The board
 is the Windows board ported: one full-width panel per enabled provider, one
 donut per plan window with the credits left and the reset countdown, and the
 cycle's fetched time in the foot. Its `refresh` re-fetches the providers and
-its close button ends it, exactly as on Windows. Both boards are
-override-redirect popups, which is what the Windows boards are too (owned
-`WS_POPUP` windows): no titlebar, no taskbar/dock entry, no Alt-Tab entry.
+its close button ends it, exactly as on Windows. Both boards are managed
+popups (v1.6.4): they carry the popup properties the Windows owned `WS_POPUP`
+has - no titlebar (`_MOTIF_WM_HINTS` with the decorations bit cleared), no
+taskbar/dock entry (`_NET_WM_STATE_SKIP_TASKBAR`/`SKIP_PAGER`), sticky on
+every desktop like the bar it floats over (`_NET_WM_STATE_STICKY`; the
+post-map `_NET_WM_DESKTOP` request rides along for the EWMH-correct form),
+an exact rectangle (`USPosition` size hints) - but they are NOT
+override-redirect.
+An override-redirect board can be neither of the two things the Windows
+board is: coverable (KWin composites OR windows in the top layer, above
+every managed window, always) and movable (nothing ever translates an OR
+window). v1.6.3 shipped both defects; the managed board takes its stacking
+from the window manager instead: it maps into the normal layer and activates
+on open (the `_NET_ACTIVE_WINDOW` request carries the opening click's
+timestamp, which is what KWin's focus-stealing prevention accepts), so it
+lifts above the terminal the way the Windows board's
+`SetWindowPos(HWND_TOP)` does, other windows can cover it afterwards, and a
+left press in its title band drags it (the same band WM_NCHITTEST answers
+`HTCAPTION` on Windows); the drag holds a pointer grab so fast motion cannot
+escape to underlying windows, and the release that completes a drag ungrabs and
+never fires the button under the pointer.
 The keyboard diverges from Windows on purpose: Windows opens the board without
-activating it, but an override-redirect window on X is never activated by the
-window manager, so the board takes the keyboard itself while it is up - that
+activating it, but the board takes the keyboard itself while it is up - that
 is what makes Esc and q close it - and hands it back to the window that held
 it when the board closes. They open centred on the head the pointer is on,
-both axes, and re-centre as their content-fit changes the height.
+both axes, and the content-fit keeps whatever position the board sits at
+(dragged or centred) while it clamps the bottom edge, exactly as p_ui.c's
+dashFitToContent does.
 
 ## Tests
 
@@ -321,10 +341,14 @@ terminal and hides/returns as that terminal moves, the pet chip starts and stops
 the configured process (never a process that merely names it), the autostart row
 reads its state once per open and refuses to flip an unreadable unit, the
 Subscription row opens the real board (its close button ends it, a second
-activation toggles it shut), both boards read as override-redirect popups to
-xwininfo on the mapped window (no titlebar, no dock entry), and a left click
+activation toggles it shut), both boards read as managed popups to xwininfo
+and xprop on the mapped window (not override-redirect, skip-taskbar and
+skip-pager set, motif decorations cleared - no titlebar, no dock entry,
+coverable), and a left click
 on a right-group metric chip does nothing (hovering one still shows its
-title). The helper-stack gate runs against
+title). The board's drag is asserted too: a title-band press-and-move
+relocates the board and the reverse drag restores it, and an escaping drag
+ends cleanly without teleporting the board on the next hover. The helper-stack gate runs against
 a stub `org.kde.KWin` (`linux/tests/kwstub.py`) that answers `isScriptLoaded`
 and records every `unloadScript`/`loadScript` call, so the unload-before-load
 contract is observed on the bus rather than read off the source; the lock that
