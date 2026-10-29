@@ -293,17 +293,29 @@ static int fitToContent(void) {
     // height stays visible even when the user dragged the board's top edge
     // down to the floor: the old room-at-the-kept-position clamp instead
     // shrank a dragged-down board to its minimum-height sliver on the next
-    // fetch and left the lower panels off-screen. Same order as dash.c: the
-    // move-up MUST precede the height clamp.
-    if (d->y + want > hi) {
-        d->y = hi - want;
-        if (d->y < 0) d->y = 0;
-    }
-    int room = hi - d->y;
-    if (room <= 0) return 0;
-    if (want > room) want = room;
+    // fetch and left the lower panels off-screen. The height check comes
+    // FIRST - a fit whose content height is unchanged leaves the window and
+    // the struct exactly where they are, exactly as p_ui.c's dashFitToContent
+    // does; then the move-up precedes the height clamp inside the resize
+    // branch.
     if (d->h == want) return 0;
-    d->h = want;
+    // The target is COMPUTED, not written into the struct: the struct must
+    // never move without the window moving with it (the drag offset is read
+    // from d->x/d->y, so a struct-only move makes the next drag press jump the
+    // window to where the struct thinks it is), and a target equal to the
+    // current geometry must do nothing at all - a content taller than the
+    // head clamps to the same height on EVERY fit, and recreating the surface
+    // on that path repainted the whole board twice per event.
+    int ny = d->y;
+    if (ny + want > hi) {
+        ny = hi - want;
+        if (ny < 0) ny = 0;
+    }
+    int room = hi - ny;
+    if (room <= 0) return 0;
+    int nh = want > room ? room : want;
+    if (d->h == nh && ny == d->y) return 0;
+    d->y = ny; d->h = nh;
     if (d->surf) {
         cairo_destroy(d->cr);
         cairo_surface_destroy(d->surf);

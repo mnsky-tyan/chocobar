@@ -332,7 +332,7 @@ def main():
         # 3,507 zero-usage rows the board never counted). Tokens stay at the
         # two real rows' sum. The flag is per source, NOT the path's shape, so
         # both spellings below must agree.
-        def ledger_fixture(name, flag, path_is_file):
+        def ledger_fixture(name, flag, path_is_file, seed_ts=None):
             prof = root / name
             (prof / ".wizbar").mkdir(parents=True)
             now = int(time.time() * 1000)
@@ -363,6 +363,17 @@ def main():
                  "at": now - 800, "model": "Model-B"}]
             rows_path = (prof / "usage.jsonl") if path_is_file else (target / "usage.jsonl")
             rows_path.write_text("".join(dump(r) + "\n" for r in lrows), encoding="utf-8")
+            if seed_ts is not None:
+                # A legacy seed whose newest record is NEWER than some ledger
+                # rows: the boundary drops those rows (their usage lives in
+                # the seed's aggregates) - see the seeded case below.
+                cache = prof / ".wizbar" / "token-cache.json"
+                cache.write_text(dump([["seed1", {"app": "ledger", "ts": seed_ts,
+                                                  "input": 30, "output": 10,
+                                                  "cacheRead": 0, "cacheWrite": 0,
+                                                  "model": "Seed-Model"}]]),
+                                encoding="utf-8")
+                os.utime(cache, ((now - 60000) / 1000, (now - 60000) / 1000))
             return prof
         check("a ledger source counts a zero-usage row as a call, not a token",
               lambda: verify(run_child(exe, ledger_fixture("ledger-file", True, True)),
@@ -376,6 +387,20 @@ def main():
         check("without the ledger flag a zero-usage row is not a call",
               lambda: verify(run_child(exe, ledger_fixture("ledger-absent", False, True)),
                              [(265, 2, 2, 1, False), (265, 2, 2, 1, True)]))
+        # ... and the seed boundary must not eat a ledger's CALLS either: the
+        # boundary exists to stop the live scan re-adding usage the seed's
+        # aggregates already hold, but the Electron seed never counted an
+        # aborted ledger request, so a zero-usage row below the boundary is
+        # still staged - no usage can be double-counted, and CALLS keeps
+        # reading the ledger's own row count. Boundary at now-850: the
+        # now-1000 row drops (usage in the seed), the now-800 row stages, the
+        # zero row at now-900 stages as a call. Seed 40 + Model-B row 115 =
+        # 155 tokens; calls = seed 1 + zero 1 + live 1 = 3.
+        check("a ledger's zero-usage row below the seed boundary still counts as a call",
+              lambda: verify(run_child(exe, ledger_fixture(
+                                 "ledger-seeded", True, True,
+                                 seed_ts=int(time.time() * 1000) - 850)),
+                             [(155, 3, 3, 1, False), (155, 3, 3, 1, True)]))
 
         # The mask rides into the SEED half too: a seed record whose app label
         # matches the masked source is masked exactly like the live scan, so

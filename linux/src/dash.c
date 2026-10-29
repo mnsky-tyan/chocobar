@@ -999,26 +999,33 @@ static int dashFitToContent(void) {
     // leaves the window exactly where it is. That is what makes a board the
     // user parked partly below the work area STAY there across the hover and
     // scan repaints - clamping the position on every repaint would snap it
-    // back up (and subs.c's fit already has this shape: it only ever moves in
-    // its resize branch, with the height limited to the room at the kept
-    // position). So every clamp below lives inside the resize branch, which is
+    // back up. So the clamps below live inside the resize branch, which is
     // also where p_ui.c applies its move-up: the move-up MUST precede the
     // height clamp, or clamping to the room at the OLD position would make the
     // move unreachable (the order bug this code fixed once already).
     if (d->h == want) return 0;
-    if (d->y + want > headBottom) {
-        d->y = headBottom - want;
-        if (d->y < 0) d->y = 0;
+    // The target geometry is COMPUTED first and the struct written only when
+    // the window moves with it: a struct-only move would make the next drag
+    // press jump the window to the struct's position (the drag offset is read
+    // from d->x/d->y), and a target equal to the current geometry must do
+    // nothing at all - a content taller than the head clamps to the same
+    // height on EVERY fit, and recreating the surface on that path repainted
+    // the whole board twice per event.
+    int ny = d->y, nx = d->x;
+    if (ny + want > headBottom) {
+        ny = headBottom - want;
+        if (ny < 0) ny = 0;
     }
-    int hi = headBottom - d->y;
+    int hi = headBottom - ny;
     if (hi <= 0) return 0;
-    if (want > hi) want = hi;
+    int nh = want > hi ? hi : want;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
         int sw = DisplayWidth(d->dpy, scr);
-        if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
+        if (nx + d->w > sw) nx = sw - d->w > 0 ? sw - d->w : 0;
     }
-    d->h = want;
+    if (d->h == nh && ny == d->y && nx == d->x) return 0;
+    d->x = nx; d->y = ny; d->h = nh;
     if (d->surf) {
         cairo_destroy(d->cr);
         cairo_surface_destroy(d->surf);

@@ -714,7 +714,20 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                 int replyChars = 0;
                 int lineChars = estimating ? tokTextLen(p, len, &replyChars) : 0;
                 TokRec r;
-                int have = tokParseLine(p, len, tk, &r) && r.ts > g_cacheMaxTs;
+                int parsed = tokParseLine(p, len, tk, &r);
+                int have = parsed && r.ts > g_cacheMaxTs;
+                // A LEDGER's all-zero rows are CALLS the seed boundary would
+                // eat: the boundary exists so the live scan does not re-add
+                // usage the seed's aggregates already hold, and a zero-token
+                // row holds none - but its CALL is new, because the Electron
+                // seed never counted an aborted ledger request (the ledger
+                // flag and this rule arrive together). Stage it anyway: no
+                // usage can be double-counted, and CALLS reads the ledger's
+                // own row count. Nonzero rows at/below the boundary stay
+                // dropped, exactly as before.
+                if (parsed && !have && ledger &&
+                    r.in + r.out + r.cr + r.cw == 0)
+                    have = 1;
                 // provider routing: a source may declare which providers it owns
                 // (providers) and which it must not touch (exclude). This is how
                 // two ledgers that both hold the same request count it once -

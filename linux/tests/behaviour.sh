@@ -693,6 +693,38 @@ if [ -n "${SUBSWIN:-}" ]; then
     SUBY2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
     [ "$SUBX2" != "$SUBX" ] || [ "$SUBY2" != "$SUBY" ]
     check "the drag clears the subs board off the bar ($SUBX,$SUBY -> $SUBX2,$SUBY2)" $?
+    # The drag holds a POINTER GRAB (the same contract the token dashboard
+    # asserts above): press in the title band, fling the pointer far outside
+    # the board, release OUT there, then hover the title band - the geometry
+    # must not move. Without the grab the release is lost to whatever is
+    # under the pointer, dragging stays set, and the hover teleports the
+    # window.
+    xdotool mousemove --window "$SUBSWIN" 100 12
+    xdotool mousedown 1
+    xdotool mousemove_relative --sync 4000 4000 2>/dev/null
+    xdotool mouseup 1
+    sleep 0.4
+    SUBEX=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBEY=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    xdotool mousemove --window "$SUBSWIN" 100 12
+    sleep 0.5
+    SUBEX2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBEY2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    [ "$SUBEX2" = "$SUBEX" ] && [ "$SUBEY2" = "$SUBEY" ]
+    check "a subs drag that escapes the board ends cleanly - no teleport on the next hover" $?
+    # Drag it back clear of the bar (the toggle below right-clicks the bar at
+    # its LEFT end; the fling parked the board at the screen's bottom-right
+    # corner, which does not cover that point). The move doubles as the
+    # "the release was delivered" check.
+    xdotool mousemove --window "$SUBSWIN" 100 12
+    xdotool mousedown 1
+    xdotool mousemove $((SUBX2 + 100)) $((SUBY2 + 12))
+    xdotool mouseup 1
+    sleep 0.4
+    SUBBX=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBBY=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    [ "$SUBBX" = "$SUBX2" ] && [ "$SUBBY" = "$SUBY2" ]
+    check "after an escaped release the subs board still drags, and lands exactly where it is told ($SUBBX,$SUBBY)" $?
     "$XCLICK" $((X+40)) $((Y+10)) 3 full
     sleep 0.6
     read -r MENUX MENUY <<EOF
@@ -2458,6 +2490,39 @@ else
         DG2=$(dash_geom)
         [ "$DG1" != "$DG0" ] && [ "$DG2" = "$DG0" ]
         check "a title-band drag moves the token dashboard and the reverse drag restores it ($DG0 -> $DG1 -> $DG2)" $?
+        # The drag holds a POINTER GRAB: a fast drag outruns the async
+        # XMoveWindow, the pointer crosses OUT of the board, and without the
+        # grab the motion and the release go to whatever window is underneath
+        # - dragging stays set and the next hover TELEPORTS the window to the
+        # stale grab offset with no button held. Driven for real: press in the
+        # title band, fling the pointer far outside the board, release OUT
+        # there, then hover the title band - the geometry must not move. A
+        # WM-less Xvfb makes the release point decisive: nothing but the grab
+        # can route it back to the board.
+        read -r EGX0 EGY0 <<EOF
+$DG0
+EOF
+        xdotool mousemove --window "$HEATDASH" 100 12
+        xdotool mousedown 1
+        xdotool mousemove_relative --sync 4000 4000 2>/dev/null
+        xdotool mouseup 1
+        sleep 0.4
+        EG1=$(dash_geom)
+        xdotool mousemove --window "$HEATDASH" 100 12
+        sleep 0.5
+        EG2=$(dash_geom)
+        [ "$EG2" = "$EG1" ]
+        check "a drag that escapes the board ends cleanly - no teleport on the next hover ($EG1 -> $EG2)" $?
+        # The release was delivered, so the board must drag normally again and
+        # land EXACTLY back where it started (the drag is a pure translation).
+        xdotool mousemove --window "$HEATDASH" 100 12
+        xdotool mousedown 1
+        xdotool mousemove $((EGX0 + 100)) $((EGY0 + 12))
+        xdotool mouseup 1
+        sleep 0.4
+        EG3=$(dash_geom)
+        [ "$EG3" = "$EGX0 $EGY0" ]
+        check "after an escaped release the board still drags, and lands exactly where it is told ($EG1 -> $EG3)" $?
     fi
     eval "$(xdotool getwindowgeometry --shell "$HEATDASH")"
     # The bar's event loop is select-driven: a motion is handled some time
