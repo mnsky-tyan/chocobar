@@ -1241,10 +1241,13 @@ static int boardClose(XEvent *ev) {
             // handler the protocol advert would make the WM wait for a client
             // that never answers; WITH the protocol but no handler the
             // fallback would be an XKillClient on the bar's shared connection.
+            // Any OTHER ClientMessage (a _NET_WM_PING, say) must return 0 -
+            // falling off the switch would return an indeterminate value that
+            // can close the board on a routine ping.
             if (ev->xclient.message_type == XInternAtom(g_dash.dpy, "WM_PROTOCOLS", False) &&
                 (Atom)ev->xclient.data.l[0] == XInternAtom(g_dash.dpy, "WM_DELETE_WINDOW", False))
                 return 1;
-            break;
+            return 0;
         case ButtonPress:
             // a middle/right click also closes the window (p_ui.c dashProc
             // WM_RBUTTONUP destroys the board)
