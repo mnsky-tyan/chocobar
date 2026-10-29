@@ -375,6 +375,15 @@ function check(name, ok, detail) {
   check('linux: the bar never takes keyboard focus',
     /hints\.input = False/.test(lx) && /_NET_WM_USER_TIME/.test(lx),
     'a managed window that accepts focus would pull the keyboard off the terminal on map or click');
+  // The chip shows the DAY, not all time: p_ui.c formats g_tokensToday (the
+  // last day bucket, the same masked total the dashboard's Today card prints),
+  // and the Linux bar's scan tick must feed cbTokToday() into its chip for the
+  // same reason. The first Linux cut assigned cbTokAll() there, so the chip
+  // read 1.02B while the board said Today 15.0M - the bar contradicting
+  // itself about the one number the user reads as "what did I use today".
+  check('linux: the token chip shows the day (cbTokToday), not the all-time total',
+    /g_tokToday = cbTokToday\(\);/.test(lx) && !/g_tokToday = cbTokAll\(\)/.test(lx),
+    'Windows formats g_tokensToday in the chip; the Linux port must mean the same number');
   const motion = /static void onMotion\(XMotionEvent \*e\) \{([\s\S]*?)\n\}/.exec(lx);
   check('linux: the bar is not draggable',
     !/g_dragging/.test(lx) && !/\bsavePos\b/.test(lx) && !/linux-bar\.json/.test(lx) &&

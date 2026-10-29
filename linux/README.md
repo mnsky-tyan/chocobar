@@ -233,7 +233,7 @@ label - not a generic dark system popup.
 | battery | `/sys/class/power_supply/*` | green while charging, red only when low **and** on battery |
 | gpu | `amdgpu`'s `gpu_busy_percent`, then the i915 PMU | Intel needs the PMU (see the capability note above); without the capability the chip hides |
 | clock | local time, the config's `modules.clock.format` | same `{MMM} {dd} {Wkk} {HH}:{mm}` tokens |
-| tokens | the shared JSONL session scan | the chip shows the all-time total; sources may be directories OR single ledger files |
+| tokens | the shared JSONL session scan | the chip shows today's total; sources may be directories OR single ledger files |
 | subs gauge | the shared `p_subs.c` providers | one plan's weekly remaining %, rotating per `subs.rotateSec`; same fetchers as Windows |
 
 ### Token sources, including magpie and API-key traffic
