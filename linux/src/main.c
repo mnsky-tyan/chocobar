@@ -1423,12 +1423,14 @@ static void scanIfDue(time_t now) {
     cbScanTokens();
     g_lastScan = now;
     g_tokReady = 1;
-    // today's total: the bar's chip shows the day, as the Windows bar does. The
-    // all-time total is what the scan exposes; today is derived from the same
-    // aggregates on Windows by tokDeriveWindows, which is dashboard-side. For
-    // the bar's first Linux version the chip shows the all-time total, which is
-    // the number cbTokAll() owns and the one the scan verifies.
-    g_tokToday = cbTokAll();
+    // The chip shows the DAY, exactly as the Windows chip does: p_ui.c formats
+    // g_tokensToday, which tokDeriveWindows (p_agg.c) sets to the last day
+    // bucket - the same masked total the dashboard's Today card prints. Showing
+    // cbTokAll() here was a first-version shortcut that made the chip read as
+    // 1.02B while the board said Today 15.0M - three numbers where the user can
+    // only see one question ("what did I use today?"). cbTokToday() IS that
+    // shared aggregate; -1 (nothing read yet) still renders as the em dash.
+    g_tokToday = cbTokToday();
 }
 
 // ---- config reload ----------------------------------------------------------------------------------
