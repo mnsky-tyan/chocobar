@@ -628,9 +628,13 @@ if [ -n "${SUBSWIN:-}" ]; then
     # 400 px screen a board that used to centre to a negative y pinned itself
     # to the top edge - over the bar - and the next clicks landed on the board
     eval "$(xdotool getwindowgeometry --shell "$SUBSWIN")"
+    # the screen's real height, not the default 400: CHOCOBAR_TEST_XVFB_ARGS
+    # can replace the server geometry, and a taller screen legitimately lets
+    # the clamped board open lower
+    SCREEN_H=$(xdpyinfo | sed -n 's/^ *dimensions: *\([0-9]*\)x\([0-9]*\) pixels.*/\2/p' | head -1)
     BOTTOM=$((Y + HEIGHT))
-    [ "$BOTTOM" -le 400 ] && [ "$Y" -ge 0 ]
-    check "the subscription board opens inside the screen ($X,$Y ${WIDTH}x$HEIGHT on a 400 px screen)" $?
+    [ "$BOTTOM" -le "$SCREEN_H" ] && [ "$Y" -ge 0 ]
+    check "the subscription board opens inside the screen ($X,$Y ${WIDTH}x$HEIGHT on a ${SCREEN_H} px screen)" $?
     # the post-map all-desktops request: the ClientMessage monitor records the
     # BAR's request at startup, and the board's must appear after its map (a
     # board pinned to its opening desktop vanishes when the user switches

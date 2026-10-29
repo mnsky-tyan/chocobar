@@ -535,10 +535,9 @@ static void scanTokenCacheInner(const Config *cfg) {
         const char *keys[4] = { "\"input\":", "\"output\":", "\"cacheRead\":", "\"cacheWrite\":" };
         int lens[4] = { 8, 9, 12, 13 };
         long long fld[4] = { 0, 0, 0, 0 };
-        long long sum = 0;
         for (int k = 0; k < 4; k++) {
             const char *f = findStr(ae, recEnd, keys[k]);
-            if (f) { fld[k] = parseLL(f + lens[k], recEnd); sum += fld[k]; }
+            if (f) { fld[k] = parseLL(f + lens[k], recEnd); }
         }
         const char *mp = findStr(tsp + 5, recEnd, "\"model\":\"");
         const char *mv = NULL; int mlen = 0;

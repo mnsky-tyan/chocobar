@@ -73,6 +73,7 @@ extern long long cbTokModelOut(int i);
 extern long long cbTokModelCr(int i);
 extern long long cbTokModelCw(int i);
 extern int cbTokModelRowCap(void);
+extern long long cbTokDayAppSum(int daysBack, int i);
 extern long long cbTokDayAppIn(int daysBack, int i);
 extern long long cbTokDayAppOut(int daysBack, int i);
 extern long long cbTokDayAppCr(int daysBack, int i);
@@ -993,15 +994,18 @@ static int dashFitToContent(void) {
         }
     }
     if (headBottom <= 0) return 0;
-    // capture the position BEFORE the clamps below move it: the trailing
-    // XMoveWindow applies a clamp-only fit (one where the height did not change)
-    int yWas = d->y, xWas = d->x;
-    // keep the whole board on screen: p_ui.c moves the window up to the head's
-    // work-area bottom before sizing it, so a board whose content reaches the
-    // clamp still shows its last row (and the "last scan" footer) instead of
-    // having it clipped off the bottom edge. The move MUST come before the
-    // clamp: clamping to the room at the OLD position would make the move below
-    // unreachable, which is the bug this order fixes.
+    // p_ui.c's dashFitToContent moves the window ONLY when the height actually
+    // changes (the >4px delta path); a fit whose content height is unchanged
+    // leaves the window exactly where it is. That is what makes a board the
+    // user parked partly below the work area STAY there across the hover and
+    // scan repaints - clamping the position on every repaint would snap it
+    // back up (and subs.c's fit already has this shape: it only ever moves in
+    // its resize branch, with the height limited to the room at the kept
+    // position). So every clamp below lives inside the resize branch, which is
+    // also where p_ui.c applies its move-up: the move-up MUST precede the
+    // height clamp, or clamping to the room at the OLD position would make the
+    // move unreachable (the order bug this code fixed once already).
+    if (d->h == want) return 0;
     if (d->y + want > headBottom) {
         d->y = headBottom - want;
         if (d->y < 0) d->y = 0;
@@ -1014,25 +1018,16 @@ static int dashFitToContent(void) {
         int sw = DisplayWidth(d->dpy, scr);
         if (d->x + d->w > sw) d->x = sw - d->w > 0 ? sw - d->w : 0;
     }
-    if (d->h != want) {
-        d->h = want;
-        if (d->surf) {
-            cairo_destroy(d->cr);
-            cairo_surface_destroy(d->surf);
-            d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
-            d->cr = cairo_create(d->surf);
-        }
-        XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
-        dashReshape(d);
-        return 1;
+    d->h = want;
+    if (d->surf) {
+        cairo_destroy(d->cr);
+        cairo_surface_destroy(d->surf);
+        d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
+        d->cr = cairo_create(d->surf);
     }
-    // a fit that only MOVED the position (the move-up or the x-clamp fired but
-    // the height did not change) still has to reach the window, or d->x/d->y
-    // drift away from where the window really sits - the struct/window split
-    // the old re-centre path papered over with its unconditional move.
-    if ((d->y != yWas || d->x != xWas) && d->dpy)
-        XMoveWindow(d->dpy, d->win, d->x, d->y);
-    return 0;
+    XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
+    dashReshape(d);
+    return 1;
 }
 
 // Paint the live board and then latch it to the height it just painted - the
@@ -1230,10 +1225,10 @@ void dashRepaint(void) {
     paintAndFit(&g_dash);
 }
 
-// The board wants to close: Esc, q, a non-left click, or the window already
-// being gone. Returns 1 and lets the caller call dashClose(). (No WM close
-// message: the board is override-redirect, so there is no protocol to arrive
-// on - its own X button and the menu toggle are the close paths.)
+// The board wants to close: Esc, q, a non-left click, the WM's close request
+// (the WM_DELETE_WINDOW ClientMessage boardClose answers - the board is
+// managed, so Alt+F4 and the window menu reach it), or the window already
+// being gone. Returns 1 and lets the caller call dashClose().
 static int boardClose(XEvent *ev) {
     switch (ev->type) {
         case KeyPress: {
@@ -1309,8 +1304,7 @@ static void dashTipCell(Dash *d, int x, int y, int xRoot, int yRoot) {
         for (int i = 0; i < napp; i++) {
             int req = cbTokDayAppReqs(back, i);
             if (req <= 0) continue;
-            long long s = cbTokDayAppIn(back, i) + cbTokDayAppOut(back, i) +
-                          cbTokDayAppCr(back, i) + cbTokDayAppCw(back, i);
+            long long s = cbTokDayAppSum(back, i);
             char sn[24], line[80];
             fmtTok(s, sn, sizeof(sn));
             int ln = snprintf(line, sizeof(line), "\n%s: %s (%d)",

@@ -261,10 +261,13 @@ static int fitToContent(void) {
     int lo = (int)(d->cfgH * d->scale * 45 / 100);
     if (lo < minH) lo = minH;
     if (want < lo) want = lo;
-    // The fit KEEPS the position the board sits at (see dash.c's
-    // dashFitToContent): the user can drag the board now, and a re-centre on
-    // every repaint would snap it back to centre. The head lookup below reads
-    // the head the board is on now, so the clamp follows a dragged board.
+    // The fit moves the window only when the height actually changes (p_ui.c's
+    // dashFitToContent contract, and dash.c's fit now runs the same shape): a
+    // repaint whose content height is unchanged must not touch the window at
+    // all, so a board the user dragged partly off the work area STAYS there
+    // across every hover and fetch repaint. The height below is limited to the
+    // room at the kept position, so a resize can never hang past the head's
+    // bottom edge either.
     int hi = 0;
     if (d->dpy) {
         int scr = DefaultScreen(d->dpy);
@@ -290,6 +293,7 @@ static int fitToContent(void) {
     int minRoom = (int)(SUBS_MIN_CSS * d->scale);
     if (room < minRoom) room = minRoom;
     if (want > room) want = room;
+    if (d->h == want) return 0;
     if (d->h != want) {
         d->h = want;
         if (d->surf) {

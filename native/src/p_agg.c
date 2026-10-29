@@ -470,6 +470,15 @@ static int dayAggIndex(int daysBack) {
     if (daysBack < 0 || daysBack >= DASH_MAX_DAYS) return -1;
     return DASH_MAX_DAYS - 1 - daysBack;
 }
+// the day-detail card's per-app line reads the MASKED total (see TokAgg.sum),
+// so the card's per-app numbers and its headline (g_dayTot's masked sum) can
+// never disagree under a totalFields mask
+long long cbTokDayAppSum(int daysBack, int i) {
+    if (daysBack < 0 || daysBack >= DASH_MAX_DAYS || i < 0 || i >= DASH_MAX_APPS) return 0;
+    int di = DASH_MAX_DAYS - 1 - daysBack;
+    return g_dayApp[di][i].sum;
+}
+
 long long cbTokDayAppIn(int daysBack, int i) {
     int d = dayAggIndex(daysBack);
     return (d >= 0 && i >= 0 && i < g_appCount) ? g_dayApp[d][i].in : 0;

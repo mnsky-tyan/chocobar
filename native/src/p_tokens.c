@@ -1187,8 +1187,8 @@ long long tokLiveScan(const Config *cfg) {
                 }
             }
         }
-        // the file source IS a ledger: one line, one request (see the ledger
-        // branch in tokScanFile)
+        // the file spelling rides the same walk, recursive off: whether a
+        // zero-usage row counts as a call is the per-source ledger flag
         if (isFile) tokScanDir(parent, 0, s->app, &tk, cfg, s->totalMask, s->ledger);
     }
     g_tokFullReadNow = 0; // the walk is done; later rescans resume from cursors

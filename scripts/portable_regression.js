@@ -537,6 +537,15 @@ function check(name, ok, detail) {
       !!fit && fit[0].indexOf('boardCenterOnHead') < 0 &&
       fit[0].indexOf('XineramaQueryScreens') >= 0,
       'a fit that recentred would snap a dragged board back to centre on the next repaint');
+    // and it moves the window ONLY when the height changes (p_ui.c:2684's
+    // dashFitToContent contract): a position clamp applied on every hover
+    // repaint would snap a board the user parked partly below the work area
+    // straight back up
+    check(`linux: ${fitFile}'s fit moves the window only when the height changes`,
+      !!fit && /if \(d->h == want\) return 0;/.test(fit[0]) &&
+      fit[0].indexOf('if (d->h == want) return 0;') < fit[0].indexOf('XMoveResizeWindow') &&
+      !/XMoveWindow\(/.test(fit[0]),
+      'a position-only clamp on every repaint would snap a dragged board back up');
   }
   // the board is driven by the bar's loop: one pump, two windows. A nested
   // event loop (dashRun's own while/XPending) froze the bar's clock for as
