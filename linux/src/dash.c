@@ -1395,7 +1395,11 @@ int dashEvent(XEvent *ev) {
                 // a title-band drag ends silently: the release that completes a
                 // move must not also act as a click on whatever button the
                 // pointer ended over (Windows: HTCAPTION swallows the release)
-                if (d->dragging) { d->dragging = 0; break; }
+                if (d->dragging) {
+                    d->dragging = 0;
+                    XUngrabPointer(d->dpy, CurrentTime);
+                    break;
+                }
                 int b = buttonAt(d, ev->xbutton.x, ev->xbutton.y);
                 if (b == 2) return 1;                    // close
                 if (b == 1) {
@@ -1421,6 +1425,17 @@ int dashEvent(XEvent *ev) {
                 d->dragging = 1;
                 d->dragDx = ev->xbutton.x_root - d->x;
                 d->dragDy = ev->xbutton.y_root - d->y;
+                // grab the pointer for the drag (menu.c's menuRun is the
+                // in-repo precedent): a fast drag outruns the async
+                // XMoveWindow, the pointer crosses out of the board, and
+                // motion/release then go to whatever window is under it -
+                // dragging would stay 1 and the next hover would teleport the
+                // window. The grab keeps every event on the board until the
+                // release; owner_events=True keeps the board's own hover
+                // machinery live.
+                XGrabPointer(d->dpy, d->win, True,
+                             ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                             GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
                 break;
             }
             // a left click on a heatmap cell selects that day (p_ui.c's
@@ -1441,6 +1456,9 @@ int dashEvent(XEvent *ev) {
 void dashClose(void) {
     if (!g_boardOpen) return;
     Dash *d = &g_dash;
+    // a drag that never saw its release (the board closed under the pointer)
+    // must not leave the pointer grabbed: every event would stay routed here
+    XUngrabPointer(d->dpy, CurrentTime);
     g_boardOpen = 0;
     tipHide();   // the board's own heat card must not outlive the board
     if (d->cr) { cairo_destroy(d->cr); d->cr = NULL; }

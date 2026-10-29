@@ -481,8 +481,9 @@ function check(name, ok, detail) {
   // nothing translates it: v1.6.3 shipped both defects (stuck on top, could
   // not be dragged). The popup properties now travel as WM-visible state
   // (skip-taskbar, skip-pager, motif no-decorations) written by the shared
-  // helper both boards call, and the boards still install no WM_DELETE
-  // protocol (close stays the board's own X button or the menu toggle).
+  // helper both boards call; the WM_DELETE_WINDOW protocol they DO advertise
+  // is checked separately below - a managed, focused board without it hands
+  // the WM an XKillClient on the bar's shared connection.
   // Focus is separate: the boards take the X keyboard while they are up and
   // hand it back to the previous holder on close (dash.c/subs.c), the
   // take-and-restore linux/README.md documents.
@@ -517,10 +518,23 @@ function check(name, ok, detail) {
     /d->x = ev->xmotion\.x_root - d->dragDx;/.test(dash) &&
     /d->x = ev->xmotion\.x_root - d->dragDx;/.test(subs) &&
     /XMoveWindow\(d->dpy, d->win, d->x, d->y\)/.test(dash) &&
-    /XMoveWindow\(d->dpy, d->win, d->x, d->y\)/.test(subs) &&
-    /if \(d->dragging\) \{ d->dragging = 0; break; \}/.test(dash) &&
-    /if \(d->dragging\) \{ d->dragging = 0; break; \}/.test(subs),
+    /XMoveWindow\(d->dpy, d->win, d->x, d->y\)/.test(subs),
     'a managed board is immovable without its own drag; Windows gets it from HTCAPTION');
+  // The drag must hold a POINTER GRAB (menu.c's menuRun is the in-repo
+  // precedent). Without it a fast drag outruns the async XMoveWindow, the
+  // pointer crosses out of the board, the motion and the release go to
+  // whatever window is under it - dragging stays 1 and the next hover
+  // teleports the window to the stale grab offset with no button held.
+  // Windows cannot reach that state: DefWindowProc's modal move loop captures
+  // the pointer. The release must ungrab, and a close must ungrab too (a board
+  // closed mid-drag would otherwise keep every event routed to it).
+  for (const [name, src, closeFn] of [['dash.c', dash, 'dashClose'], ['subs.c', subs, 'subsClose']]) {
+    check(`linux: ${name}'s drag grabs the pointer and every exit releases it`,
+      /XGrabPointer\(d->dpy, d->win, True,\s*\n?\s*ButtonPressMask \| ButtonReleaseMask \| PointerMotionMask/.test(src) &&
+      /if \(d->dragging\) \{\s*\n?\s*d->dragging = 0;\s*\n?\s*XUngrabPointer\(d->dpy, CurrentTime\);/.test(src) &&
+      new RegExp(`void ${closeFn}\\(void\\) \\{[\\s\\S]{0,600}?XUngrabPointer\\(d->dpy, CurrentTime\\);`).test(src),
+      'a drag without a grab can escape the board and leave dragging stuck on');
+  }
   // The open-size clamp and the post-map all-desktops request are pinned by
   // the behaviour suite's WINDOW assertions (the board opens inside the
   // screen; the ClientMessage monitor sees the board's all-desktops request),

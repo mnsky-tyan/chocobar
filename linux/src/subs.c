@@ -288,25 +288,31 @@ static int fitToContent(void) {
         }
     }
     if (hi <= 0) return 0;
-    // the room under the board's top edge, never below the floor
+    // p_ui.c moves the window UP to the head's work-area bottom before sizing
+    // (ny = rcWork.bottom - want, floored at the top), so the FULL content
+    // height stays visible even when the user dragged the board's top edge
+    // down to the floor: the old room-at-the-kept-position clamp instead
+    // shrank a dragged-down board to its minimum-height sliver on the next
+    // fetch and left the lower panels off-screen. Same order as dash.c: the
+    // move-up MUST precede the height clamp.
+    if (d->y + want > hi) {
+        d->y = hi - want;
+        if (d->y < 0) d->y = 0;
+    }
     int room = hi - d->y;
-    int minRoom = (int)(SUBS_MIN_CSS * d->scale);
-    if (room < minRoom) room = minRoom;
+    if (room <= 0) return 0;
     if (want > room) want = room;
     if (d->h == want) return 0;
-    if (d->h != want) {
-        d->h = want;
-        if (d->surf) {
-            cairo_destroy(d->cr);
-            cairo_surface_destroy(d->surf);
-            d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
-            d->cr = cairo_create(d->surf);
-        }
-        XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
-        reshape(d);
-        return 1;
+    d->h = want;
+    if (d->surf) {
+        cairo_destroy(d->cr);
+        cairo_surface_destroy(d->surf);
+        d->surf = cairo_xlib_surface_create(d->dpy, d->win, d->visual, d->w, d->h);
+        d->cr = cairo_create(d->surf);
     }
-    return 0;
+    XMoveResizeWindow(d->dpy, d->win, d->x, d->y, (unsigned)d->w, (unsigned)d->h);
+    reshape(d);
+    return 1;
 }
 
 // Paint the live board and then latch it to the height it just painted. The
@@ -884,7 +890,11 @@ int subsEvent(XEvent *ev) {
             // a title-band drag ends silently: the release that completes a
             // move must not also act as a click on whatever button the
             // pointer ended over (Windows: HTCAPTION swallows the release)
-            if (d->dragging) { d->dragging = 0; break; }
+            if (d->dragging) {
+                d->dragging = 0;
+                XUngrabPointer(d->dpy, CurrentTime);
+                break;
+            }
             int b = buttonAt(d, ev->xbutton.x, ev->xbutton.y);
             if (b == 2) return 1;                    // close
             if (b == 1) {
@@ -911,6 +921,16 @@ int subsEvent(XEvent *ev) {
             d->dragging = 1;
             d->dragDx = ev->xbutton.x_root - d->x;
             d->dragDy = ev->xbutton.y_root - d->y;
+            // grab the pointer for the drag (menu.c's menuRun is the in-repo
+            // precedent): a fast drag outruns the async XMoveWindow, the
+            // pointer crosses out of the board, and motion/release then go to
+            // whatever window is under it - dragging would stay 1 and the next
+            // hover would teleport the window. The grab keeps every event on
+            // the board until the release; owner_events=True keeps the board's
+            // own hover machinery live.
+            XGrabPointer(d->dpy, d->win, True,
+                         ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
             break;
         }
         // middle/right click closes the board (the Windows dashProc does)
@@ -929,6 +949,9 @@ int subsEvent(XEvent *ev) {
 void subsClose(void) {
     Subs *d = &g_subs;
     if (!g_open) return;
+    // a drag that never saw its release (the board closed under the pointer)
+    // must not leave the pointer grabbed: every event would stay routed here
+    XUngrabPointer(d->dpy, CurrentTime);
     // hand the keyboard back before the focused window dies (same as dashClose;
     // only while the saved window is still mapped - SetInputFocus on an
     // unmapped window is a BadMatch)
