@@ -200,8 +200,17 @@ void boardMakeManaged(Display *dpy, Window win, const char *name,
     // same fact for the bar). The working request is the post-map ClientMessage,
     // which the open paths send through boardRequestAllDesktops().
     XStoreName(dpy, win, name);
-    XClassHint cls = { (char *)resName, (char *)"Chocobar" };
+    XClassHint cls = { (char *)resName, "Chocobar" };
     XSetClassHint(dpy, win, &cls);
+    // WM_DELETE_WINDOW is REQUIRED now that the board is managed and takes the
+    // keyboard: a closeable-but-not-closeable active window (Alt+F4, the
+    // window menu's Close) makes a WM fall back to XKillClient, and the boards
+    // share the bar's ONE Display connection - that kill takes the whole bar
+    // down. The protocol turns the close request into a ClientMessage the
+    // board's own event loop answers by closing the board (dash.c/subs.c),
+    // exactly what the override-redirect era never had to advertise.
+    Atom delwin = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(dpy, win, &delwin, 1);
 }
 
 // The post-map all-desktops request (EWMH _NET_WM_DESKTOP ClientMessage). The

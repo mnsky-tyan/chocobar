@@ -825,6 +825,16 @@ int subsEvent(XEvent *ev) {
             paintAndFit(d);
         }
         break;
+        case ClientMessage:
+            // WM_DELETE_WINDOW: the WM's close request (Alt+F4, the window
+            // menu) closes the board exactly like the X button - the protocol
+            // boardMakeManaged advertises, because a managed window that
+            // answers no close protocol drives a WM to XKillClient on the
+            // bar's shared connection.
+            if (ev->xclient.message_type == XInternAtom(d->dpy, "WM_PROTOCOLS", False) &&
+                (Atom)ev->xclient.data.l[0] == XInternAtom(d->dpy, "WM_DELETE_WINDOW", False))
+                return 1;
+            break;
     case KeyPress: {
         char buf[8];
         KeySym ks;

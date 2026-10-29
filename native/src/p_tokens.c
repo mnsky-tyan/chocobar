@@ -779,9 +779,11 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
                         // must NOT run here: a ledger has no transcript around the
                         // row to estimate from, so its prompt math reads 0 and the
                         // row used to vanish from CALLS (measured: magpie's ledger
-                        // held 3,507 zero-usage rows the board never counted).
-                        // Session files keep the estimator: there a zero row is a
-                        // user turn that may never have reached the API.
+                        // held 3,507 zero-usage rows the board never counted). The
+                        // flag is per source (tokens.sources[].ledger), not the
+                        // path's shape: a directory-spelled gateway store and a
+                        // file-spelled one are the same kind of store, and the
+                        // session stores that need the estimator must not lose it.
                         if (stage)
                             tokPendPush(appName, (int)strlen(appName), r.ts,
                                         0, 0, 0, 0, r.model, r.modelLen, 0, tmask);
@@ -848,14 +850,12 @@ static long long tokScanFile(const wchar_t *path, long long from, const char *ap
 // path or provider list can carry that JSON forbids raw are backslash (every
 // Windows path separator) and quote: escape on write, decode on read.
 //
-// TOK_SCAN_VER is the accounting the cursors were written under. When it moves,
-// every cursor written by an older build is stale in a way byte positions
-// cannot express: v2 taught ledger sources (file sources) to count a parsed
-// zero-usage row as a CALL, and a cursor sitting at EOF means those rows are
-// behind it - never re-read, never counted. The load compares versions and a
-// mismatch forces ONE clean re-read (full read + the drain's aggregate reset),
-// which rebuilds every number under the new rule without double counting.
-#define TOK_SCAN_VER 2
+// No accounting version lives here on purpose: every bar START already forces
+// one clean re-read (g_tokForceFullRead is born 1 and the first cache read
+// raises g_tokPendSeedReset, so the drain clears the aggregates before
+// applying), which rebuilds every number under the current rule without
+// double counting. A cursor only has to stay consistent WITHIN one bar
+// lifetime, which is what the byte positions do.
 static int tokJsonEsc(char *out, int cap, const char *s) {
     int n = 0;
     for (; *s; s++) {
@@ -906,16 +906,6 @@ static void tokCursorLoad(const Config *cfg) {
     jsmn_init(&p);
     jsmn_parse(&p, raw, (size_t)len, t, (unsigned int)nt);
     if (nt > 0 && t[0].type == JSMN_OBJECT) {
-        // the accounting version the cursors were written under: an older file
-        // (or one from before the key existed) forces one clean re-read under
-        // the current rule - see TOK_SCAN_VER. The "_scanVer" child is skipped
-        // by the loop below: its value is a number, not a per-path object.
-        if (tokJll(raw, t, 0, "_scanVer", 0) < TOK_SCAN_VER) {
-            g_tokForceFullRead = 1;
-            g_tokPendSeedReset = 1; // the drain clears the aggregates first
-            if (cfg->debug)
-                writeLogA("[wizbar] token cursors: older accounting found; one full re-read rebuilds the totals");
-        }
         int cnt = t[0].size; // object children are key/value PAIRS
         int k = 1;
         for (int i = 0; i < cnt && g_tokCursorN < TOK_MAX_FILES; i++) {
@@ -963,12 +953,6 @@ static void tokCursorSave(void) {
     char line[1344]; // escaped path + escaped real + three %lld + format overhead
     DWORD wrote = 0;
     WriteFile(h, "{\n", 2, &wrote, NULL);
-    // the accounting version first: the loader reads it before the paths (its
-    // number value is skipped by the per-path loop there)
-    {
-        int n = snprintf(line, sizeof(line), "  \"_scanVer\": %d,\n", TOK_SCAN_VER);
-        if (n > 0 && n < (int)sizeof(line)) WriteFile(h, line, (DWORD)n, &wrote, NULL);
-    }
     for (int i = 0; i < g_tokCursorN; i++) {
         char escP[1040], escR[160]; // 2x a full path / real list, plus NUL
         if (tokJsonEsc(escP, (int)sizeof(escP), g_tokCursor[i].path) < 0) continue;
@@ -1191,7 +1175,7 @@ long long tokLiveScan(const Config *cfg) {
             WIN32_FILE_ATTRIBUTE_DATA fa;
             if (GetFileAttributesExW(dir, GetFileExInfoStandard, &fa)) {
                 if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                    tokScanDir(dir, recursive, s->app, &tk, cfg, s->totalMask, 0);
+                    tokScanDir(dir, recursive, s->app, &tk, cfg, s->totalMask, s->ledger);
                 } else {
                     lstrcpynW(parent, dir, MAX_PATH);
                     wchar_t *slash = wcsrchr(parent, L'/');
@@ -1205,7 +1189,7 @@ long long tokLiveScan(const Config *cfg) {
         }
         // the file source IS a ledger: one line, one request (see the ledger
         // branch in tokScanFile)
-        if (isFile) tokScanDir(parent, 0, s->app, &tk, cfg, s->totalMask, 1);
+        if (isFile) tokScanDir(parent, 0, s->app, &tk, cfg, s->totalMask, s->ledger);
     }
     g_tokFullReadNow = 0; // the walk is done; later rescans resume from cursors
     if (g_tokCursorDirty) { tokCursorSave(); g_tokCursorDirty = 0; }

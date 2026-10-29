@@ -741,10 +741,13 @@ static void paint(Dash *d) {
         for (int i = 0; i < appN; i++) appOrder[i] = i;
         for (int i = 1; i < appN; i++) {
             int v = appOrder[i], j = i - 1;
-            long long vt = apps[v].in + apps[v].out + apps[v].cr + apps[v].cw;
+            // the rank follows the MASKED total (cbTokAppSum), the same number
+            // the cards show - the model table below already does this via
+            // cbTokModelSum; the columns stay raw
+            long long vt = cbTokAppSum(v);
             while (j >= 0) {
                 int u = appOrder[j];
-                long long ut = apps[u].in + apps[u].out + apps[u].cr + apps[u].cw;
+                long long ut = cbTokAppSum(u);
                 if (ut >= vt) break;
                 appOrder[j + 1] = appOrder[j];
                 j--;
@@ -848,7 +851,7 @@ static void paint(Dash *d) {
                 if (side == 0) {
                     long long maxAll = 1;
                     for (int i = 0; i < appN; i++) {
-                        long long s2 = apps[i].in + apps[i].out + apps[i].cr + apps[i].cw;
+                        long long s2 = cbTokAppSum(i);
                         if (s2 > maxAll) maxAll = s2;
                     }
                     int appRows = appN < rows ? appN : rows;
@@ -860,7 +863,7 @@ static void paint(Dash *d) {
                             cairo_fill(cr);
                             cairo_new_path(cr);
                         }
-                        long long s2 = apps[ai].in + apps[ai].out + apps[ai].cr + apps[ai].cw;
+                        long long s2 = cbTokAppSum(ai);
                         tableRow(d, cr, sx + 12 * S, inner, ry, rowH, xs,
                                  cbTokAppName(ai), appDotColor(cbTokAppName(ai), d),
                                  (double)s2 / (double)maxAll, &apps[ai]);
@@ -1143,8 +1146,11 @@ Window dashOpen(Display *dpy, int screen, Visual *visual, Colormap cmap, int dep
     // button, no Alt-Tab entry, no titlebar. Unlike the OR window this was,
     // the window manager now knows the board exists, so the stacking (HWND_TOP
     // at open, coverable afterwards) is the WM's normal-layer behaviour instead
-    // of a hardcoded topmost bit. Still no WM_DELETE protocol: close is the
-    // board's own X button or the menu toggle, exactly like Windows.
+    // of a hardcoded topmost bit. WM_DELETE_WINDOW IS advertised (the shared
+    // boardMakeManaged sets it): a managed, active window that answers no
+    // close protocol makes a WM fall back to XKillClient on the bar's shared
+    // connection, so the close request arrives as a ClientMessage and closes
+    // the board the way its own X button does.
     // The keyboard: Windows opens the board SWP_NOACTIVATE and never holds the
     // focus; on X the board takes the focus itself while it is up (that is
     // what lets Esc/q close it), saves whatever held the focus first, and
@@ -1234,6 +1240,16 @@ static int boardClose(XEvent *ev) {
             KeySym ks = XLookupKeysym(&ev->xkey, 0);
             return ks == XK_Escape || ks == XK_q;
         }
+        case ClientMessage:
+            // WM_DELETE_WINDOW: the WM's close request (Alt+F4, the window
+            // menu) closes the board exactly like the X button. Without this
+            // handler the protocol advert would make the WM wait for a client
+            // that never answers; WITH the protocol but no handler the
+            // fallback would be an XKillClient on the bar's shared connection.
+            if (ev->xclient.message_type == XInternAtom(g_dash.dpy, "WM_PROTOCOLS", False) &&
+                (Atom)ev->xclient.data.l[0] == XInternAtom(g_dash.dpy, "WM_DELETE_WINDOW", False))
+                return 1;
+            break;
         case ButtonPress:
             // a middle/right click also closes the window (p_ui.c dashProc
             // WM_RBUTTONUP destroys the board)

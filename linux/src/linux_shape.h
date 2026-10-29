@@ -80,7 +80,9 @@ void boardCenterOnHead(Display *dpy, int screen, int w, int h, int *ox, int *oy)
 // The window keeps its input handling: unlike the bar, a board takes the
 // keyboard (Esc/q close it), so this sets no InputHint and no _NET_WM_USER_TIME
 // - the caller activates the window itself after the map, the same way it did
-// when the board was override-redirect.
+// when the board was override-redirect. It DOES advertise WM_DELETE_WINDOW:
+// a managed window that takes focus but answers no close protocol makes a WM
+// fall back to XKillClient, which would sever the bar's shared connection.
 void boardMakeManaged(Display *dpy, Window win, const char *name,
                       const char *resName, int x, int y, int w, int h);
 

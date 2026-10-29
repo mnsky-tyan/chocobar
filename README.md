@@ -194,14 +194,15 @@ Stores must contain newline-terminated `.jsonl` records with usage numbers. `fie
                 "magpie-workbuddy-cn", "magpie-agy", "magpie-opencode",
                 "magpie-zcode", "magpie-kilo"] },
   { "app": "magpie", "path": "~/.config/magpie-runtime/magpie", "enabled": true,
-    "recursive": false, "timestampFormat": "iso",
+    "recursive": false, "timestampFormat": "iso", "ledger": true,
+    "totalFields": "input,output",
     "fields": { "input": "in", "output": "out", "cacheRead": "cache_read", "cacheWrite": "cache_write", "timestamp": "t" },
     "providers": ["qoder", "cline", "workbuddy-ai", "workbuddy", "opencode-zen",
                   "antigravity", "kilo", "zcode"] }
 ]
 ```
 
-Why those two halves: a Magpie record carries no session file of its own, so a subagent run - which the harness never writes to disk - is invisible without it. On the pi side, every request that DID reach a session file is one Magpie also logged, and the two ledgers report identical numbers for it; the `exclude` list is what stops that overlap being counted twice. The two lists must name the SAME set of providers: check the `exclude` list against the routes your own session files actually carry, or a route missing from it is counted twice. `tokens.estimateMissingUsage` is a session-file idea and should stay off for a gateway source, which reports exact usage for every request including the aborted ones. Note `path` names the DIRECTORY holding the store (Magpie's is `~/.config/magpie-runtime/magpie`, and its ledger file `usage.jsonl` is picked up by the extension filter), and the gateway's `fields` must map `timestamp` to its own key - Magpie calls it `t` - because a `timestampFormat: "iso"` value is decoded from the mapped key.
+Why those two halves: a Magpie record carries no session file of its own, so a subagent run - which the harness never writes to disk - is invisible without it. On the pi side, every request that DID reach a session file is one Magpie also logged, and the two ledgers report identical numbers for it; the `exclude` list is what stops that overlap being counted twice. The two lists must name the SAME set of providers: check the `exclude` list against the routes your own session files actually carry, or a route missing from it is counted twice. `tokens.estimateMissingUsage` is a session-file idea and should stay off for a gateway source, which reports exact usage for every request including the aborted ones - or flag that source `"ledger": true`, which disables the estimator for it outright. Note `path` names the DIRECTORY holding the store (Magpie's is `~/.config/magpie-runtime/magpie`, and its ledger file `usage.jsonl` is picked up by the extension filter), and the gateway's `fields` must map `timestamp` to its own key - Magpie calls it `t` - because a `timestampFormat: "iso"` value is decoded from the mapped key.
 
 The first scan after each start rebuilds history from the seed and session logs, so a large store can take time to populate. Later scans read only appends. Sources enabled later recover the eligible live history too. With a legacy seed, only files newer than the seed file and records beyond its latest timestamp contribute to that live half. A legacy seed file is optional; a fresh install reconstructs its totals without one.
 
@@ -453,12 +454,12 @@ Exact read sites, for reference: the shipped bar reads whatever `tokens.sources[
 The convention above is the DEFAULT, applied per source: `totalFields` absent means all four fields feed the total. A store whose tool does NOT count the cache columns in its own headline number can name the subset - a comma-separated, case-insensitive list of `input`, `output`, `cacheRead`, `cacheWrite` - and the dashboard's cards, heatmap and app/model totals then read exactly what that tool prints, while the table columns keep the full four-field breakdown:
 
 ```json
-{ "app": "magpie", "path": "~/.config/magpie/usage.jsonl", "totalFields": "input,output" }
+{ "app": "magpie", "path": "~/.config/magpie/usage.jsonl", "ledger": true, "totalFields": "input,output" }
 ```
 
 Magpie's `usage` prints `in + out` as "tokens" and lists the cache columns beside it, so without the mask the dashboard read ~13x the tool's number on a cache-heavy day. The mask rides with the record everywhere: the live scan and the seed cache both apply the source's mask (matched by app label), estimated turns are masked too, and the columns above are never affected.
 
-A source whose `path` names a FILE (one ledger, one request per line - the case the file-source feature exists for) also counts differently in one column: a row that parses but carries **no usage at all is still a call** (the request happened and billed nothing), so CALLS reads the ledger's own row count - the only number you can check with `wc -l`. The estimator does not run on a ledger: it works from the transcript around a turn, and a ledger row has none, so a zero-usage row used to vanish from CALLS while the row count said otherwise. Session stores (a directory source) keep the estimator: there a zero row is a turn that may never have reached the API, and estimating it from the transcript is the point. Upgrading to a build with this rule re-reads every source once (the byte cursors record which accounting they were written under) - the totals come back the same and CALLS gains the rows.
+`tokens.sources[].ledger` (default `false`) declares a source that is a LEDGER of requests - one parsed row is one call - rather than a session transcript. A row that parses but carries **no usage at all is still a call** (the request happened and billed nothing), so CALLS reads the ledger's own row count - the only number you can check with `wc -l` - and the estimator never runs on it: it works from the transcript around a turn, and a ledger row has none, so a zero-usage row used to vanish from CALLS while the row count said otherwise (measured on Magpie's ledger: 3,507 rows). The flag is per source on purpose, NOT inferred from the path's shape: the same store spelled as a directory and spelled as a single file are the same kind of store, and the session stores that need the estimator keep it - there a zero row is a turn that may never have reached the API, and estimating it from the transcript is the point. Every bar start re-reads every source once anyway (the first scan rebuilds the in-memory aggregates from scratch), so a change to this flag takes effect at the next start without double counting.
 
 ### When a route reports no usage at all
 

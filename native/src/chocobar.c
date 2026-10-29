@@ -106,6 +106,14 @@ typedef struct {
                             // magpie's `usage` prints in+out as "tokens" and lists
                             // the cache columns beside it - names the subset, so
                             // the dashboard's number is the tool's number.
+    unsigned ledger;        // this source is a LEDGER of requests (one parsed
+                            // row = one call), not a session transcript: a row
+                            // with no usage is still a call that billed nothing,
+                            // and the estimator never runs (it needs transcript
+                            // text around the turn, which a ledger row has none
+                            // of). Set per source: a gateway store spelled as a
+                            // directory and one spelled as a single file are the
+                            // same kind of store.
 } TokSource;
 
 // the longest provider/route name the matcher accepts, on BOTH sides: the
@@ -840,6 +848,7 @@ static int tokSourceFinish(TokSource *ts, const char *js, jsmntok_t *t, int obj)
     // recursion defaults ON: a flat store has no subdirectories to descend
     // into, a nested one needs it
     ts->recursive = jboolDefault(js, t, jobjGet(js, t, obj, "recursive"), 1);
+    ts->ledger = jboolDefault(js, t, jobjGet(js, t, obj, "ledger"), 0);
     int fl = jobjGet(js, t, obj, "fields");
     if (fl >= 0 && t[fl].type == JSMN_OBJECT) {
         tokFieldCopy(ts->kIn,    sizeof(ts->kIn),    js, t, fl, "input",     "input");

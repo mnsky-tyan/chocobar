@@ -251,7 +251,8 @@ To count magpie's traffic and API-key usage under one name:
   "labels": { "pi": "pi" },
   "sources": [
     { "app": "pi", "path": "~/.config/magpie/usage.jsonl", "enabled": true,
-      "recursive": false, "timestampFormat": "iso",
+      "recursive": false, "timestampFormat": "iso", "ledger": true,
+      "totalFields": "input,output",
       "fields": { "input": "in", "output": "out", "cacheRead": "cache_read",
                   "cacheWrite": "cache_write", "timestamp": "t" },
       "providers": ["workbuddy-ai", "workbuddy", "opencode-zen-free", "cline",

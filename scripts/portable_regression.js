@@ -315,7 +315,7 @@ function check(name, ok, detail) {
     'a KWin script that stopped must not pin the bar to a window that is gone');
   check('linux: a file source is scanned, not silently skipped',
     /static void tokScanFileSource/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8'))
-      || /tokScanDir\(parent, 0, s->app, &tk, cfg, s->totalMask, 1\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
+      || /tokScanDir\(parent, 0, s->app, &tk, cfg, s->totalMask, s->ledger\)/.test(fs.readFileSync(path.join(__dirname, '..', 'native', 'src', 'p_tokens.c'), 'utf8')),
     'magpie keeps ONE ledger file; the walk only enumerated directories, so that source contributed nothing');
 }
 
@@ -492,9 +492,18 @@ function check(name, ok, detail) {
     !/override_redirect = True/.test(dash) && !/override_redirect = True/.test(subs) &&
     !/CWOverrideRedirect/.test(dash) && !/CWOverrideRedirect/.test(subs) &&
     /_NET_WM_STATE_SKIP_TASKBAR/.test(shape) && /_NET_WM_STATE_SKIP_PAGER/.test(shape) &&
-    /_MOTIF_WM_HINTS/.test(shape) &&
-    !/XSetWMProtocols/.test(dash) && !/XSetWMProtocols/.test(subs),
+    /_MOTIF_WM_HINTS/.test(shape),
     'an OR board sits in the top layer and cannot be moved or covered; a decorated board or a dock entry is the other failure');
+  // A managed board TAKES the keyboard, so the WM may offer to close it
+  // (Alt+F4). Without WM_DELETE_WINDOW that close falls back to XKillClient,
+  // and the boards share the bar's one Display connection - the whole bar
+  // would die. The protocol must be advertised at the shared boundary AND
+  // answered in both event loops (close like the X button).
+  check('linux: both boards advertise and answer WM_DELETE_WINDOW (an XKillClient close would kill the bar)',
+    /XSetWMProtocols/.test(shape) && /WM_DELETE_WINDOW/.test(shape) &&
+    /case ClientMessage:/.test(dash) && /WM_DELETE_WINDOW/.test(dash) &&
+    /case ClientMessage:/.test(subs) && /WM_DELETE_WINDOW/.test(subs),
+    'a managed active window that answers no close protocol is killed by the WM, and the kill severs the shared connection');
   // The drag the managed board needs (Windows gets it free from WM_NCHITTEST
   // returning HTCAPTION): a Button1 press in the title band starts it, motion
   // re-applies the pointer offset, and the completing release must not also
@@ -512,24 +521,10 @@ function check(name, ok, detail) {
     /if \(d->dragging\) \{ d->dragging = 0; break; \}/.test(dash) &&
     /if \(d->dragging\) \{ d->dragging = 0; break; \}/.test(subs),
     'a managed board is immovable without its own drag; Windows gets it from HTCAPTION');
-  // The open path clamps the size to the screen BEFORE it centres (p_ui.c's
-  // dashToggle does the same with dashMaxH()): a board taller than the screen
-  // would centre to a NEGATIVE y, and the fit's keep-position rule would then
-  // pin it to the top edge - over the bar (measured on the 400 px test screen).
-  check('linux: both boards clamp their open size to the screen before centring',
-    /if \(d->w > sw - 40\) d->w = sw - 40;/.test(dash) &&
-    /if \(d->w > sw - 40\) d->w = sw - 40;/.test(subs) &&
-    /if \(maxH > 0 && d->h > maxH\) d->h = maxH;/.test(dash) &&
-    /if \(maxH > 0 && d->h > maxH\) d->h = maxH;/.test(subs),
-    'a board taller than the screen centres to a negative y and the fit pins it over the bar');
-  // All-desktops rides a POST-map request: a pre-map _NET_WM_DESKTOP does not
-  // survive the map on KWin (it resolves to the current desktop), so the open
-  // path must call boardRequestAllDesktops right after XMapWindow - the bar's
-  // afterMap() learned the same lesson.
-  check('linux: both boards request all desktops right after the map',
-    /XMapWindow\(dpy, d->win\);\s*\n\s*boardRequestAllDesktops\(dpy, d->win\);/.test(dash) &&
-    /XMapWindow\(dpy, d->win\);\s*\n\s*boardRequestAllDesktops\(dpy, d->win\);/.test(subs),
-    'a board pinned to its opening desktop vanishes when the user switches desktops while it is open');
+  // The open-size clamp and the post-map all-desktops request are pinned by
+  // the behaviour suite's WINDOW assertions (the board opens inside the
+  // screen; the ClientMessage monitor sees the board's all-desktops request),
+  // not by source text here: a regex passes on commented-out code.
   // The content-fit must NOT re-centre the board (v1.6.4): the user can drag
   // it now, and a fit that recentred would snap the window back to centre on
   // the next hover repaint. Windows' dashFitToContent keeps nx = dr.left,

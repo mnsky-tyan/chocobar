@@ -417,6 +417,24 @@ menu_wh() {
         if [ -n "$out" ]; then echo "$w $out"; return; fi
     done
 }
+# the row pick must click by the MENU WINDOW's own top-left, not by the bar
+# click's offsets: the menu flips UPWARD when the bar sits low (menu.c clamps
+# it on screen), and a click at pointer+ROW2_Y then lands two rows low - the
+# measured failure returned "Start on login" (id 5) instead of the
+# Subscription row (id 11). Echos the menu's absolute left and top. The menu
+# may need a beat to appear (and a stale bar coordinate can miss it entirely),
+# so this retries briefly; silence means the menu never opened and the caller
+# sees an empty pick instead of a wrong-row click.
+menu_abs() {
+    local w xy i
+    for i in 1 2 3 4 5; do
+        w=$(menu_wh | awk '{print $1}')
+        [ -n "$w" ] || { sleep 0.3; continue; }
+        xy=$(xwininfo -id "$w" | awk '/Absolute upper-left X/{x=$4} /Absolute upper-left Y/{y=$4} END{printf "%d %d", x, y}')
+        [ -n "$xy" ] && { echo "$xy"; return; }
+        sleep 0.3
+    done
+}
 # same count, minus the tooltip window: the tip is created once on the first
 # hover and then mapped/unmapped, so it must not read as "a click opened a window"
 root_children_excluding_tip() {
@@ -561,7 +579,10 @@ check "a click OUTSIDE the menu picks no row and leaves the bar running" $?
 #     root children, and the board IS one.
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.6
-"$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+read -r MENUX MENUY <<EOF
+$(menu_abs)
+EOF
+"$XCLICK" $((MENUX+40)) $((MENUY+ROW2_Y)) 1 full
 sleep 1.2
 SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
 [ -n "${SUBSWIN:-}" ]
@@ -597,6 +618,28 @@ board_is_managed_popup() {
 if [ -n "${SUBSWIN:-}" ]; then
     board_is_managed_popup "$SUBSWIN"
     check "the subscription board is a managed popup (no titlebar, no dock entry, coverable)" $?
+    # sticky on every desktop, like the bar it floats over: on a WM-less Xvfb
+    # the pre-map _NET_WM_STATE property IS the observable (the WM that would
+    # normalise it is absent)
+    xprop -id "$SUBSWIN" _NET_WM_STATE | grep -q "_NET_WM_STATE_STICKY"
+    check "the subscription board sits on every desktop like the bar (sticky)" $?
+    # the board must never hang off the screen: the open size is clamped to the
+    # screen BEFORE it centres (p_ui.c's dashMaxH parity), so on this short
+    # 400 px screen a board that used to centre to a negative y pinned itself
+    # to the top edge - over the bar - and the next clicks landed on the board
+    eval "$(xdotool getwindowgeometry --shell "$SUBSWIN")"
+    BOTTOM=$((Y + HEIGHT))
+    [ "$BOTTOM" -le 400 ] && [ "$Y" -ge 0 ]
+    check "the subscription board opens inside the screen ($X,$Y ${WIDTH}x$HEIGHT on a 400 px screen)" $?
+    # the post-map all-desktops request: the ClientMessage monitor records the
+    # BAR's request at startup, and the board's must appear after its map (a
+    # board pinned to its opening desktop vanishes when the user switches
+    # desktops). Only the bar's own id has messages at this point in the suite
+    # (the log is truncated at startup and the boards open later), so the
+    # board's decimal id cannot collide with an earlier sender's.
+    SUBSWIN_DEC=$(printf '%d' "$SUBSWIN")
+    grep -q "^$SUBSWIN_DEC _NET_WM_DESKTOP 4294967295$" "$CLIENTMSG"
+    check "the subscription board requests all desktops after its map" $?
 else
     check "the subscription board is a managed popup (no titlebar, no dock entry, coverable)" 1
 fi
@@ -620,10 +663,16 @@ else
 fi
 
 # 5g. activating the row again while the board is open closes it (a toggle,
-#     never a leak): open once more, then pick the same row again
+#     never a leak): open once more, then pick the same row again. The fake
+#     terminal's geom reports keep moving the bar, so read its position NOW -
+#     a stale X/Y right-clicks off the bar and no menu ever opens.
+eval "$(xdotool getwindowgeometry --shell "$BARWIN")"
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 0.6
-"$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+read -r MENUX MENUY <<EOF
+$(menu_abs)
+EOF
+"$XCLICK" $((MENUX+40)) $((MENUY+ROW2_Y)) 1 full
 sleep 1.2
 SUBSWIN=$(xwininfo -root -children 2>/dev/null | awk '/Subscriptions/ { print $1; exit }')
 if [ -n "${SUBSWIN:-}" ]; then
@@ -636,9 +685,16 @@ if [ -n "${SUBSWIN:-}" ]; then
     SUBY=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
     "$XCLICK" $((SUBX+40)) $((SUBY+12)) 1 drag $((SUBX+40+300)) $((SUBY+12+180))
     sleep 0.6
+    SUBX2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left X/ { print $4 }')
+    SUBY2=$(xwininfo -id "$SUBSWIN" | awk '/Absolute upper-left Y/ { print $4 }')
+    [ "$SUBX2" != "$SUBX" ] || [ "$SUBY2" != "$SUBY" ]
+    check "the drag clears the subs board off the bar ($SUBX,$SUBY -> $SUBX2,$SUBY2)" $?
     "$XCLICK" $((X+40)) $((Y+10)) 3 full
     sleep 0.6
-    "$XCLICK" $((X+40+40)) $((Y+10+ROW2_Y)) 1 full
+    read -r MENUX MENUY <<EOF
+$(menu_abs)
+EOF
+    "$XCLICK" $((MENUX+40)) $((MENUY+ROW2_Y)) 1 full
     sleep 1.2
     N=$(xwininfo -root -children 2>/dev/null | grep -c "Subscriptions")
     [ "$N" -eq 0 ]

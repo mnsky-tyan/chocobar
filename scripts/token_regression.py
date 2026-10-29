@@ -323,53 +323,59 @@ def main():
               lambda: verify(run_child(exe, comma),
                              [(240, 2, 2, 1, False), (240, 2, 2, 1, True)]))
 
-        # A FILE source is a ledger: one line, one request. A row that parses
-        # but carries no usage is still a call (it billed nothing) - the CALLS
-        # column must read the ledger's own row count, the only number the user
-        # can check with wc -l. The estimator must not run on a ledger: it has
-        # no transcript to read, so its prompt math reads 0 and the row used to
-        # vanish from CALLS (measured: magpie's ledger held 3,507 zero-usage
-        # rows the board never counted). Tokens stay at the two real rows' sum.
-        ledger = root / "ledger-file-source"
-        (ledger / ".wizbar").mkdir(parents=True)
-        now = int(time.time() * 1000)
-        lfields = {"input": "in", "output": "out", "cacheRead": "cache_read",
-                   "cacheWrite": "cache_write", "timestamp": "at", "model": "model"}
-        lconfig = {
-            "tokens": {"enabled": True, "estimateMissingUsage": True, "sources": [
-                {"app": "ledger", "path": windows_path(ledger / "usage.jsonl"),
-                 "enabled": True, "recursive": False, "fields": lfields}]},
-            "subs": {"enabled": False},
-            "general": {"autoStart": False, "checkUpdates": False, "debug": False}}
-        (ledger / ".wizbar" / "config.json").write_text(dump(lconfig), encoding="utf-8")
-        lrows = [
-            {"in": 100, "out": 40, "cache_read": 10, "cache_write": 0,
-             "at": now - 1000, "model": "Model-A"},
-            {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
-             "at": now - 900, "model": "Model-A"},
-            {"in": 80, "out": 20, "cache_read": 10, "cache_write": 5,
-             "at": now - 800, "model": "Model-B"}]
-        (ledger / "usage.jsonl").write_text("".join(dump(r) + "\n" for r in lrows), encoding="utf-8")
-        check("a file source counts a zero-usage row as a call, not a token",
-              lambda: verify(run_child(exe, ledger),
+        # A LEDGER source (tokens.sources[].ledger: one parsed row = one
+        # request) counts a row that parses but carries no usage as a CALL - it
+        # billed nothing - so CALLS reads the ledger's own row count, the only
+        # number the user can check with wc -l. The estimator must not run on a
+        # ledger: it has no transcript to read, so its prompt math reads 0 and
+        # the row used to vanish from CALLS (measured: magpie's ledger held
+        # 3,507 zero-usage rows the board never counted). Tokens stay at the
+        # two real rows' sum. The flag is per source, NOT the path's shape, so
+        # both spellings below must agree.
+        def ledger_fixture(name, flag, path_is_file):
+            prof = root / name
+            (prof / ".wizbar").mkdir(parents=True)
+            now = int(time.time() * 1000)
+            lfields = {"input": "in", "output": "out", "cacheRead": "cache_read",
+                       "cacheWrite": "cache_write", "timestamp": "at", "model": "model"}
+            src = {"app": "ledger", "enabled": True, "recursive": False,
+                   "fields": lfields}
+            if flag:
+                src["ledger"] = True
+            target = prof / "ledger-dir"
+            if not path_is_file:
+                target.mkdir()
+            src["path"] = windows_path(prof / "usage.jsonl") if path_is_file \
+                else windows_path(target)
+            lconfig = {
+                "tokens": {"enabled": True, "estimateMissingUsage": True,
+                            "sources": [src]},
+                "subs": {"enabled": False},
+                "general": {"autoStart": False, "checkUpdates": False,
+                             "debug": False}}
+            (prof / ".wizbar" / "config.json").write_text(dump(lconfig), encoding="utf-8")
+            lrows = [
+                {"in": 100, "out": 40, "cache_read": 10, "cache_write": 0,
+                 "at": now - 1000, "model": "Model-A"},
+                {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
+                 "at": now - 900, "model": "Model-A"},
+                {"in": 80, "out": 20, "cache_read": 10, "cache_write": 5,
+                 "at": now - 800, "model": "Model-B"}]
+            rows_path = (prof / "usage.jsonl") if path_is_file else (target / "usage.jsonl")
+            rows_path.write_text("".join(dump(r) + "\n" for r in lrows), encoding="utf-8")
+            return prof
+        check("a ledger source counts a zero-usage row as a call, not a token",
+              lambda: verify(run_child(exe, ledger_fixture("ledger-file", True, True)),
                              [(265, 3, 2, 1, False), (265, 3, 2, 1, True)]))
-
-        # The upgrade path: a cursor file written under the OLD accounting (no
-        # _scanVer key) sits at EOF, so the zero-usage rows behind it would
-        # never be re-read and CALLS would stay short for ever. The loader must
-        # detect the missing version and force ONE clean re-read (the drain
-        # resets the aggregates first, so nothing double counts): the totals
-        # come back identical and CALLS gains the zero rows.
-        cursor = ledger / ".wizbar" / "token-cursors.json"
-        old_cursor = cursor.read_text(encoding="utf-8")
-        stripped = "\n".join(l for l in old_cursor.splitlines() if "_scanVer" not in l) + "\n"
-        cursor.write_text(stripped, encoding="utf-8")
-        # the child always runs a warm second scan; scan 0 is the version-driven
-        # full re-read (bytes > 0, warm=False leaves it unchecked), scan 1 must
-        # be warm and byte-silent again
-        check("a v1 cursor file forces one clean re-read and the calls come back",
-              lambda: verify(run_child(exe, ledger),
+        check("a ledger flag on a directory-spelled store counts the same way",
+              lambda: verify(run_child(exe, ledger_fixture("ledger-dir", True, False)),
                              [(265, 3, 2, 1, False), (265, 3, 2, 1, True)]))
+        # without the flag the store is a transcript: the zero row is a turn
+        # that may never have reached the API, and the estimator (which cannot
+        # read a ledger) leaves it out - two calls, not three
+        check("without the ledger flag a zero-usage row is not a call",
+              lambda: verify(run_child(exe, ledger_fixture("ledger-absent", False, True)),
+                             [(265, 2, 2, 1, False), (265, 2, 2, 1, True)]))
 
         # The mask rides into the SEED half too: a seed record whose app label
         # matches the masked source is masked exactly like the live scan, so
