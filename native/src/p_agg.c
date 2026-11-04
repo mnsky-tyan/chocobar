@@ -449,6 +449,9 @@ unsigned long long cbTokDataVersion(void) { return g_tokDataVersion; }
 int cbTokModelCount(void) { return g_modelCount; }
 // the display label is the raw model id first seen for this "app|model" key
 const char *cbTokModelLabel(int i) { return (i >= 0 && i < g_modelCount) ? g_modelLabel[i] : ""; }
+// the raw "app|model" key itself: a front-end derives the model row's dot
+// color from the app half (p_ui.c appDotColor) without a second accessor
+const char *cbTokModelName(int i) { return (i >= 0 && i < g_modelCount) ? g_modelName[i] : ""; }
 long long cbTokModelSum(int i) { return (i >= 0 && i < g_modelCount) ? tokAggSum(&g_modelAgg[i]) : 0; }
 int cbTokModelReqs(int i) { return (i >= 0 && i < g_modelCount) ? (int)g_modelAgg[i].req : 0; }
 
