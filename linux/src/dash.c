@@ -64,6 +64,7 @@ extern long long cbTokAppCr(int i);
 extern long long cbTokAppCw(int i);
 extern int cbTokModelCount(void);
 extern const char *cbTokModelLabel(int i);
+extern const char *cbTokModelName(int i);
 extern long long cbTokModelSum(int i);
 extern int cbTokModelReqs(int i);
 extern int cbTokDayCount(void);
@@ -884,6 +885,13 @@ static void paint(Dash *d) {
                     int mdlRows = mdlN < rows ? mdlN : rows;
                     for (int i = 0; i < mdlRows; i++) {
                         int mi = mdlOrder[i];
+                        // dot = the owning app's color, keyed on the raw
+                        // "app|model" name (p_ui.c strips the |model half
+                        // and runs appDotColor on it)
+                        char mk[64];
+                        snprintf(mk, sizeof(mk), "%s", cbTokModelName(mi));
+                        char *bar = strchr(mk, '|');
+                        if (bar) *bar = 0;
                         if (i & 1) {
                             cairo_set_source_rgba(cr, d->zebra.r, d->zebra.g, d->zebra.b, 1.0);
                             cairo_rectangle(cr, sx + 1, ry, colW2 - 2, rowH);
@@ -892,7 +900,7 @@ static void paint(Dash *d) {
                         }
                         long long s2 = cbTokModelSum(mi);
                         tableRow(d, cr, sx + 12 * S, inner, ry, rowH, xs,
-                                 modelLabels[mi], d->dim, (double)s2 / (double)maxAll,
+                                 modelLabels[mi], appDotColor(mk, d), (double)s2 / (double)maxAll,
                                  &models[mi]);
                         ry += rowH;
                     }
