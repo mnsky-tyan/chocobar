@@ -79,6 +79,21 @@ static wchar_t g_tokCursorPath[MAX_PATH]; // ~/.wizbar/token-cursors.json
 // (see the HeapReAlloc in tokScanFile); 16 KB is ordinary for a pi turn.
 #define TOK_SCAN_CHUNK 16384
 
+// What one record may carry. The aggregates add up in a long long, so a
+// corrupt number - a torn write, a 19-digit value parseLL saturates - must
+// read as "nothing known", never as a negative or wrapped count that turns
+// a day's total upside down. A usage field outside [0, TOK_FIELD_MAX] reads
+// as 0, exactly what an unparsable field already read as: the record keeps
+// its other columns and still counts as a call.
+#define TOK_FIELD_MAX 0x7fffffffLL
+// A record dated past 2100-01-01 is not one the day tables can place (their
+// newest bucket ends tomorrow), and on Windows the cache seed takes its
+// newest ts as the live scan's boundary - a saturated timestamp there would
+// switch the live half off for good. So it is not a record: dropped whole,
+// like a line with no timestamp at all.
+#define TOK_TS_MAX 4102444800000LL
+long long tokUsageField(long long v) { return (v >= 0 && v <= TOK_FIELD_MAX) ? v : 0; }
+
 static long long g_cacheMaxTs = 0;     // newest ts the Electron cache holds
 static int g_tokForceFullRead = 1;     // startup must rebuild memory-only aggregates
 static int g_tokFullReadNow = 0;       // this walk is the forced full re-read
@@ -530,7 +545,7 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     if (!tp && !(tk->tsIso && out->ts > 0)) return 0;
     if (!tk->tsIso) {
         out->ts = parseLL(tp, end);
-        if (out->ts <= 0) return 0;
+        if (out->ts <= 0 || out->ts > TOK_TS_MAX) return 0;
     }
     // model: the marker stops at the colon, so the value's opening quote
     // has to be stepped over before the closing one is scanned for
@@ -570,7 +585,10 @@ static int tokParseLine(const char *ln, int len, const TokKeys *tk, TokRec *out)
     long long *dst[4] = { &out->in, &out->out, &out->cr, &out->cw };
     for (int k = 0; k < 4; k++) {
         for (int i = 0; i + tk->len[k] <= len; i++) {
-            if (memcmp(ln + i, tk->k[k], tk->len[k]) == 0) { *dst[k] = parseLL(ln + i + tk->len[k], end); break; }
+            if (memcmp(ln + i, tk->k[k], tk->len[k]) == 0) {
+                *dst[k] = tokUsageField(parseLL(ln + i + tk->len[k], end));
+                break;
+            }
         }
     }
     return 1;
@@ -917,8 +935,16 @@ static void tokCursorLoad(const Config *cfg) {
     jsmntok_t *t = (jsmntok_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(jsmntok_t) * (nt + 1));
     if (!t) { HeapFree(GetProcessHeap(), 0, raw); return; }
     jsmn_init(&p);
-    jsmn_parse(&p, raw, (size_t)len, t, (unsigned int)nt);
-    if (nt > 0 && t[0].type == JSMN_OBJECT) {
+    nt = jsmn_parse(&p, raw, (size_t)len, t, (unsigned int)nt);
+    // the file is rebuilt from a full re-read when it cannot be walked (see
+    // jtokVerify): the same recovery an unparsable file already got
+    if (nt <= 0 || !jtokTreeValid(t, nt)) {
+        if (cfg->debug) writeLogA("[wizbar] tokCursorLoad: malformed cursor file - ignored");
+        HeapFree(GetProcessHeap(), 0, t);
+        HeapFree(GetProcessHeap(), 0, raw);
+        return;
+    }
+    if (t[0].type == JSMN_OBJECT) {
         int cnt = t[0].size; // object children are key/value PAIRS
         int k = 1;
         for (int i = 0; i < cnt && g_tokCursorN < TOK_MAX_FILES; i++) {

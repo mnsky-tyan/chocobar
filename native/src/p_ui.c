@@ -527,6 +527,10 @@ static void scanTokenCacheInner(const Config *cfg) {
         const char *tsp = findStr(ae, end, "\"ts\":");
         if (!tsp) break;
         long long ts = parseLL(tsp + 5, end);
+        // a ts past TOK_TS_MAX is a corrupt number, and this loop's maximum
+        // becomes the live scan's boundary: read it as unknown (0) so the
+        // record keeps its usage, lands in no day, and moves no boundary
+        if (ts > TOK_TS_MAX) ts = 0;
         const char *next = findStr(tsp + 5, end, "\"app\":\"");
         const char *recEnd = next ? next : end;
         // per-field breakdown (the dash table columns); Electron rowTotal =
@@ -537,7 +541,7 @@ static void scanTokenCacheInner(const Config *cfg) {
         long long fld[4] = { 0, 0, 0, 0 };
         for (int k = 0; k < 4; k++) {
             const char *f = findStr(ae, recEnd, keys[k]);
-            if (f) { fld[k] = parseLL(f + lens[k], recEnd); }
+            if (f) { fld[k] = tokUsageField(parseLL(f + lens[k], recEnd)); }
         }
         const char *mp = findStr(tsp + 5, recEnd, "\"model\":\"");
         const char *mv = NULL; int mlen = 0;
@@ -3791,7 +3795,15 @@ void loadConfig(void) {
         return;
     }
     jsmn_init(&parser);
-    jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
+    ntok = jsmn_parse(&parser, raw, (size_t)len, toks, (unsigned int)ntok);
+    // a positive count is not a walkable tree (see jtokVerify): refuse it
+    // exactly like a parse error, so no reader ever pairs up a broken object
+    if (ntok < 0 || !jtokTreeValid(toks, ntok)) {
+        writeLogA("[wizbar] config: parse failed (malformed tree) - keeping previous");
+        HeapFree(GetProcessHeap(), 0, toks);
+        HeapFree(GetProcessHeap(), 0, raw);
+        return;
+    }
     Config *next = (Config *)HeapAlloc(GetProcessHeap(), 0, sizeof(Config));
     if (!next) { HeapFree(GetProcessHeap(), 0, toks); HeapFree(GetProcessHeap(), 0, raw); return; }
     parseConfigInto(next, raw, toks, 0);
