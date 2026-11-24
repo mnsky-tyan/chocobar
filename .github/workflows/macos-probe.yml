@@ -17,6 +17,17 @@
 # THIS MUST NOT BLOCK THE WINDOWS RELEASE PATH
 # `continue-on-error: true` and the release gate does not depend on this job.
 # A failing probe is information, not a broken build.
+#
+# THE RUNNER IMAGE IS A DATED THING
+# GitHub keeps only the two newest macOS images. The macOS 14 image was retired
+# on 2 November 2026, and from that day every run of this file was CANCELLED
+# about one second in, with no step run, annotated "The configuration
+# 'macos-14-arm64-us-default' is not supported" - for 19 days, unnoticed: a
+# cancelled job is a red cross on a pull request, and nothing at all on the
+# daily schedule. Both jobs run on macos-26, the image macos-latest points to.
+# When that signature returns, move to the newest image listed under
+# https://github.com/actions/runner-images#available-images. A cancelled job
+# here means this gate is OFF, never that the code passed it.
 name: macOS
 
 on:
@@ -59,7 +70,7 @@ jobs:
   build:
     # The macOS bar must COMPILE on every PR that touches it. This is a real
     # gate, unlike the probe below: a broken macOS build is a broken build.
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -151,7 +162,7 @@ jobs:
           retention-days: 30
 
   probe:
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 10
     # Measurement, not a gate. See the header. Deliberately NOT `needs: build`:
     # an independent measurement that is skipped exactly when the macOS build
