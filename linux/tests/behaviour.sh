@@ -2770,6 +2770,84 @@ EOF
     fi
 fi
 
+
+# ---------------------------------------------------------------------------
+# 15. CORRUPT INPUT IS REFUSED, NEVER WALKED OR ADDED.
+#
+#     Two readers meet data nobody typed by hand: the config file (edited)
+#     and the session stores (written by other tools). Both go through a
+#     NON-STRICT JSON parser, which accepts a broken object - a stray token
+#     inside it - and still returns a positive token count for a tree whose
+#     declared children run past the token array. The walkers then pair the
+#     children by that count and read past the allocation (AddressSanitizer,
+#     2026-11-24, on a fuzzed config). And a usage field with more digits than
+#     a long long holds overflowed the sum - undefined, and in practice a
+#     wrapped count that turned a day's total into garbage.
+#
+#     The fix refuses an unwalkable tree exactly like a parse error, and reads
+#     a usage field outside [0, 2^31) as 0. This section drives the real bar
+#     with a store holding one good record and three corrupt ones, and reads
+#     the sum the scan itself logs: it must be the good record's tokens plus
+#     the one honest column of the record whose other column was corrupt -
+#     never the wrapped value, never the far-future record. Then a config with
+#     the stray-token shape is written under the running bar: it must be
+#     refused out loud and the bar must keep running on its previous config.
+#     estimateMissingUsage is off so a record that reads as zero usage is
+#     dropped rather than estimated from its text, which keeps the sum exact.
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+sleep 0.5
+CORRUPT_STORE="$WORK/corruptstore"
+mkdir -p "$CORRUPT_STORE"
+CORRUPT_NOW=$(date +%s%3N)
+{
+    printf '{"type":"assistant","usage":{"input":1000,"output":2000,"cacheRead":3000,"cacheWrite":4000},"model":"m","timestamp":%s}\n' "$((CORRUPT_NOW - 1000))"
+    printf '{"type":"assistant","usage":{"input":99999999999999999999,"output":5,"cacheRead":0,"cacheWrite":0},"model":"m","timestamp":%s}\n' "$((CORRUPT_NOW - 900))"
+    printf '{"type":"assistant","usage":{"input":-7000,"output":0,"cacheRead":0,"cacheWrite":0},"model":"m","timestamp":%s}\n' "$((CORRUPT_NOW - 800))"
+    printf '{"type":"assistant","usage":{"input":50000,"output":0,"cacheRead":0,"cacheWrite":0},"model":"m","timestamp":99999999999999999999}\n'
+} > "$CORRUPT_STORE/usage.jsonl"
+cat > "$WORK/home/.wizbar/config.json" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 0, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": true, "estimateMissingUsage": false,
+              "sources": [ { "app": "pi", "path": "$CORRUPT_STORE", "recursive": false } ] },
+  "modules": { "pet": { "enabled": false } }
+}
+JSON
+NATIVE_LOG="$WORK/home/.wizbar/native.log"
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar-corrupt.log" 2>&1 &
+BAR_PID=$!
+# the scan runs off-thread; its own log line is the observable. The good
+# record is 10000 tokens, the overflow record keeps its honest output column
+# (5), the negative record and the far-future record read as nothing.
+wait_log "token live scan: +10005 tokens (live all-time 10005)" 15 "$NATIVE_LOG"; RC=$?
+check "corrupt usage fields read as nothing, so the scan logs the good records' 10005 tokens, not a wrapped or future count" "$RC"
+[ "$RC" -ne 0 ] && { echo "--- scan log lines seen:"; grep "token live scan" "$NATIVE_LOG" 2>/dev/null | tail -5; }
+kill -0 "$BAR_PID" 2>/dev/null && xdotool search --class chocobar 2>/dev/null | grep -q .
+check "the bar is still running after scanning the corrupt store" $?
+# the stray-token shape, written under the running bar: picked up on its own
+# 2 s config check and refused, and the previous config stays installed
+cat > "$WORK/home/.wizbar/config.json" <<JSON
+{
+  "bar": { "height": 30, "gap": 12, "fontSize": 10, "fontFamily": "sans",
+           "align": 0, "backgroundTint": "#E8D8C3", "backgroundAlpha": 120,
+           "backdrop": "acrylic", "radius": 8 },
+  "theme": { "foreground": "#080808", "foregroundDim": "#5a5245" },
+  "tokens": { "enabled": true, "estimateMissingUsage": false,
+              "sources": [ { "app": "pi", "path": "$CORRUPT_STORE", "recursive": false } ] },
+  "modules": { "pet": { "enabled": false } oops }
+}
+JSON
+wait_log "config parse failed (malformed tree) - keeping previous" 10 "$NATIVE_LOG"
+check "a config with a stray token inside an object is refused as malformed, not walked" $?
+kill -0 "$BAR_PID" 2>/dev/null && xdotool search --class chocobar 2>/dev/null | grep -q .
+check "the bar keeps running on its previous config after refusing the broken one" $?
+
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

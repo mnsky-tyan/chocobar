@@ -537,6 +537,51 @@ static int jtokSpan(const jsmntok_t *t, int i) {
     return n;
 }
 
+// Every walker above and below (jobjGet, each "k += 1 + jtokSpan(t, k + 1)"
+// loop) pairs an object's children by t[i].size and trusts the pairs to tile
+// the token array exactly. jsmn's non-strict mode breaks that promise WITHOUT
+// failing the parse: a stray token or a primitive key inside an object leaves
+// it with an odd child count, the fill pass still returns a positive count,
+// and the pairing then steps past the array's end - a config carrying one
+// stray token read one token past the allocation under AddressSanitizer. So
+// the tree is checked ONCE, right after a parse and before any walker sees
+// it, with the two facts jsmn does guarantee even for a malformed document:
+// every token lies inside its parent's brackets, and the declared children
+// must land exactly on the parent's span. Depth is capped because the walkers
+// recurse once per nesting level. Returns 1 when the tree is walkable.
+#define JSMN_MAX_DEPTH 128
+
+// span of the subtree at i the way jtokSpan will walk it, or -1 when that walk
+// would leave the array or its parent's brackets
+static int jtokVerify(const jsmntok_t *t, int i, int ntok, int depth) {
+    if (i < 0 || i >= ntok || depth > JSMN_MAX_DEPTH) return -1;
+    if (t[i].type == JSMN_PRIMITIVE || t[i].type == JSMN_STRING) return 1;
+    if (t[i].type != JSMN_OBJECT && t[i].type != JSMN_ARRAY) return -1;
+    int isObj = (t[i].type == JSMN_OBJECT);
+    int n = 1;
+    for (int c = 0; c < t[i].size; c++) {
+        // an object's value sits one past its key; an array's child is the
+        // next token. The key itself needs no test: tokens are in document
+        // order, so a leaf before an in-brackets value is inside too.
+        int child = i + n + isObj;
+        int s = jtokVerify(t, child, ntok, depth + 1);
+        // the orphan half of a broken pair is the value past the closing brace
+        if (s < 0 || t[child].end > t[i].end) return -1;
+        n += isObj + s;
+    }
+    return n;
+}
+
+static int jtokTreeValid(const jsmntok_t *t, int ntok) {
+    int i = 0;
+    while (i < ntok) {
+        int s = jtokVerify(t, i, ntok, 0);
+        if (s < 0 || i + s > ntok) return 0;
+        i += s;
+    }
+    return 1;
+}
+
 static int jobjGet(const char *js, const jsmntok_t *t, int obj, const char *key) {
     if (obj < 0 || t[obj].type != JSMN_OBJECT) return -1;
     int kids = t[obj].size;
@@ -577,7 +622,15 @@ static int jNumCopy(const char *js, const jsmntok_t *t, int i, char *b, int cch)
 
 static int jintTok(const char *js, const jsmntok_t *t, int i, int def) {
     char b[32];
-    return jNumCopy(js, t, i, b, (int)sizeof(b)) ? atoi(b) : def;
+    if (!jNumCopy(js, t, i, b, (int)sizeof(b))) return def;
+    // strtol saturates where atoi overflows - undefined for a 20-digit value,
+    // and a wrap can land inside the range a caller's check accepts. Clamped
+    // to int, a corrupt number reads as the largest value of its sign, which
+    // every range check already handles.
+    long v = strtol(b, NULL, 10);
+    if (v > 0x7fffffffL) return 0x7fffffff;
+    if (v < -0x7fffffffL - 1) return -0x7fffffff - 1;
+    return (int)v;
 }
 
 // a JSON number read as a double (theme.icons[].w); atof is locale-stable

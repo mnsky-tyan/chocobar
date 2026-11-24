@@ -232,7 +232,16 @@ static long long parseLL(const char *p, const char *end) {
     while (p < end && (*p == ' ' || *p == ':')) p++;
     int neg = 0; if (p < end && *p == '-') { neg = 1; p++; }
     long long v = 0;
-    while (p < end && *p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    // saturating: a 19+ digit number is a corrupt file, and the plain
+    // multiply used to overflow it - undefined, and in practice a wrap to a
+    // count of the opposite sign. Callers that care about a bound test the
+    // result (tokParseLine, the Windows seed); a saturated value never
+    // pretends to be a small real one.
+    while (p < end && *p >= '0' && *p <= '9') {
+        int d = *p++ - '0';
+        if (v > (0x7fffffffffffffffLL - d) / 10) { v = 0x7fffffffffffffffLL; break; }
+        v = v * 10 + d;
+    }
     return neg ? -v : v;
 }
 
@@ -629,6 +638,14 @@ int cbLoadConfig(const wchar_t *path) {
         char lb[96];
         sprintf(lb, "[wizbar] mac: config parse failed (jsmn %d) - keeping previous", ntok);
         writeLogA(lb);
+        HeapFree(GetProcessHeap(), 0, toks);
+        HeapFree(GetProcessHeap(), 0, raw);
+        return cfgDefaultsInstall();
+    }
+    // a positive count is not a walkable tree (see jtokVerify): refuse it
+    // exactly like a parse error, so no reader ever pairs up a broken object
+    if (!jtokTreeValid(toks, ntok)) {
+        writeLogA("[wizbar] mac: config parse failed (malformed tree) - keeping previous");
         HeapFree(GetProcessHeap(), 0, toks);
         HeapFree(GetProcessHeap(), 0, raw);
         return cfgDefaultsInstall();

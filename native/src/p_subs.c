@@ -472,7 +472,8 @@ static int subsFetchChatgpt(const Config *cfg, int idx) {
     jsmntok_t t[512];
     jsmn_parser p;
     jsmn_init(&p);
-    if (jsmn_parse(&p, body, len, t, 512) > 0 && t[0].type == JSMN_OBJECT) {
+    int parsed = jsmn_parse(&p, body, len, t, 512);
+    if (parsed > 0 && jtokTreeValid(t, parsed) && t[0].type == JSMN_OBJECT) {
         pt = subsJstr(body, t, 0, "plan_type");
         int rl = jobjGet(body, t, 0, "rate_limit");
         rem = 100;
@@ -570,6 +571,7 @@ static int subsFetchZai(const Config *cfg, int idx) {
     jsmn_parser p;
     jsmn_init(&p);
     int n = jsmn_parse(&p, body, len, t, 1024);
+    if (n > 0 && !jtokTreeValid(t, n)) n = 0; // unwalkable: read as no data
     int code = n > 0 ? subsJint(body, t, 0, "code", 200) : 0;
     int okShape = n > 0 && t[0].type == JSMN_OBJECT && code == 200 &&
                   subsJint(body, t, 0, "success", 1) != 0;
@@ -701,7 +703,13 @@ static int subsParseBig(const char *js, int len, jsmntok_t **outTok) {
         jsmn_parser p;
         jsmn_init(&p);
         int n = jsmn_parse(&p, js, len, t, sizes[s]);
-        if (n >= 0) { *outTok = t; return n; }
+        if (n >= 0) {
+            // the provider's JSON is untrusted input: a tree the walkers
+            // cannot tile is refused here, once, for every caller
+            if (jtokTreeValid(t, n)) { *outTok = t; return n; }
+            HeapFree(GetProcessHeap(), 0, t);
+            return 0;
+        }
         HeapFree(GetProcessHeap(), 0, t);
         if (n != JSMN_ERROR_NOMEM) return 0;
     }
@@ -974,7 +982,8 @@ static int subsAgyRefresh(AgyAuth *a, const wchar_t *clientId, const wchar_t *cl
     jsmn_parser p;
     jsmn_init(&p);
     int ok = 0;
-    if (jsmn_parse(&p, resp, len, t, 128) > 0 && t[0].type == JSMN_OBJECT) {
+    int parsed = jsmn_parse(&p, resp, len, t, 128);
+    if (parsed > 0 && jtokTreeValid(t, parsed) && t[0].type == JSMN_OBJECT) {
         wchar_t *acc = subsJstr(resp, t, 0, "access_token");
         wchar_t *ref = subsJstr(resp, t, 0, "refresh_token");
         double ein = subsJdouble(resp, t, 0, "expires_in", 3600);
