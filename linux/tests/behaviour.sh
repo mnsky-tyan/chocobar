@@ -104,6 +104,9 @@ buildable() { # buildable <pkg-config module>...
 # a bar built by an earlier run must not turn a missing libxtst-dev into a hard
 # FAIL on a developer machine
 buildable x11 xtst || skip "the X11/XTest development headers (libx11-dev, libxtst-dev) are not installed"
+# the kwinrc self-heal check (section 16) links the bar's D-Bus code straight
+# from the source
+buildable dbus-1 || skip "the D-Bus development headers (libdbus-1-dev) are not installed"
 
 BIN="$ROOT/linux/build/chocobar-linux"
 if [ ! -x "$BIN" ]; then
@@ -2917,6 +2920,61 @@ wait_log "config parse failed (malformed tree) - keeping previous" 10 "$NATIVE_L
 check "a config with a stray token inside an object is refused as malformed, not walked" $?
 kill -0 "$BAR_PID" 2>/dev/null && xdotool search --class chocobar 2>/dev/null | grep -q .
 check "the bar keeps running on its previous config after refusing the broken one" $?
+
+
+# ---------------------------------------------------------------------------
+# 16. THE KWINRC SELF-HEAL PRESERVES THE FILE IT EDITS.
+#
+#     At startup the bar appends its window class to the KDE rounded-corners
+#     effect's exclusion list in ~/.config/kwinrc. The code it replaced dropped
+#     the user's existing exclusions (alpha,beta came back as ,chocobar), and
+#     on a kwinrc whose group had no Exclusions key at all it passed snprintf a
+#     bound larger than its buffer: glibc's fortify turned that into a process
+#     abort, so the bar died on every start of such a profile (measured
+#     2026-11-25 against the shipped build flags).
+#
+#     Two proofs. The function itself, linked straight from the source into a
+#     small driver at the bar's own -O2 (fortify on): seventeen kwinrc shapes,
+#     each compared byte for byte afterwards, mode and leftovers included.
+#     And the real binary: started once with the aborting shape under the
+#     throwaway HOME, it must open its window and leave the file correct.
+SELFCHECK="$WORK/selfheal_check"
+gcc -O2 -Wall -Wextra -o "$SELFCHECK" "$HERE/selfheal_check.c" "$ROOT/linux/src/selfheal.c" \
+    -I"$ROOT/linux/src" $(pkg-config --cflags --libs dbus-1) 2>"$WORK/cc-selfheal.log" \
+    || { echo "FAIL: cannot build the kwinrc self-heal check"; cat "$WORK/cc-selfheal.log"; exit 1; }
+SELF_OUT=$("$SELFCHECK" "$WORK/selfheal-home" 2>&1); SELF_RC=$?
+echo "$SELF_OUT" | grep -v '^--- selfheal:' | sed 's/^/    /'
+if echo "$SELF_OUT" | grep -q '^--- selfheal:'; then
+    PASS=$((PASS + $(echo "$SELF_OUT" | grep -c '^PASS:')))
+    FAIL=$((FAIL + $(echo "$SELF_OUT" | grep -c '^FAIL:')))
+else
+    # no summary line: the driver died on the way, which is the old abort
+    echo "FAIL: the kwinrc self-heal check ran to its summary (rc=$SELF_RC)"
+    FAIL=$((FAIL+1))
+fi
+kill "$BAR_PID" 2>/dev/null
+wait "$BAR_PID" 2>/dev/null
+BAR_PID=""
+sleep 0.3
+mkdir -p "$WORK/home/.config"
+printf '[Round-Corners]\nExclusionList=alpha\nRoundness=8\n' > "$WORK/home/.config/kwinrc"
+HOME="$WORK/home" PATH="$WORK/fakebin:$PATH" \
+    "$BIN" >"$WORK/bar-selfheal.log" 2>&1 &
+BAR_PID=$!
+SWIN=""
+for _ in $(seq 1 100); do
+    SWIN=$(xdotool search --class chocobar 2>/dev/null | head -1)
+    [ -n "$SWIN" ] && break
+    sleep 0.1
+done
+[ -n "$SWIN" ]; RC=$?
+check "the bar opens its window on a kwinrc whose effect group has no Exclusions key (the shape that aborted it)" "$RC"
+[ "$RC" -ne 0 ] && { echo "--- bar log tail:"; tail -5 "$WORK/bar-selfheal.log" | sed 's/^/    /'; }
+[ "$(cat "$WORK/home/.config/kwinrc")" = "$(printf '[Round-Corners]\nExclusions=chocobar\nExclusionList=alpha\nRoundness=8\n')" ]
+check "the real bar inserts Exclusions=chocobar and keeps every other line" $?
+ls "$WORK/home/.config" | grep -q '\.chocobar-.*\.tmp'; RC=$?
+[ "$RC" -ne 0 ]
+check "no temporary file is left next to kwinrc" $?
 
 echo
 echo "--- behaviour: $PASS passed, $FAIL failed"

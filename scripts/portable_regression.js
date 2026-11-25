@@ -681,9 +681,35 @@ function check(name, ok, detail) {
     /cbKwinSelfHeal\(\);/.test(selfMainBody),
     'without the exclusion the effect strokes black over the bar border on every start');
   check('linux: the self-heal appends its class instead of rewriting kwinrc',
-    /hasClass\(tmp\)/.test(sh) && /out\[head\+\+\] = ',';/.test(sh) &&
+    /hasClass\(val, valLen\)/.test(sh) && /out\[head\+\+\] = ',';/.test(sh) &&
+    /memcpy\(out \+ head, val, valLen\);/.test(sh) &&
     /st\.st_uid != getuid\(\)/.test(sh),
     'rewriting kwinrc wholesale would drop the user other keys; appending one class keeps them');
+  // MEASURED 2026-11-25: the old editor copied everything EXCEPT the old value
+  // (Exclusions=alpha,beta came back as Exclusions=,chocobar), took a key that
+  // merely starts with Exclusions and a group name quoted in a comment for the
+  // real ones, and handed snprintf a bound past its buffer - an abort under
+  // fortify on a kwinrc with no Exclusions key. The whole-value test, the
+  // whole-word key match, the line-anchored group search and the rename are
+  // each load-bearing; linux/tests/selfheal_check.c holds the behaviour, this
+  // holds the shape.
+  check('linux: the self-heal keeps the old value, matches the whole key and replaces kwinrc atomically',
+    /static char \*exclValue\(char \*p, char \*lineEnd\)/.test(sh) &&
+    /\(q < lineEnd && \*q == '='\) \? q \+ 1 : NULL/.test(sh) &&
+    /static char \*findGroup\(const char \*buf\)/.test(sh) &&
+    /char \*grp = findGroup\(buf\);/.test(sh) &&
+    /rename\(tmp, path\) != 0/.test(sh) &&
+    /O_WRONLY \| O_CREAT \| O_EXCL, mode\)/.test(sh) &&
+    /if \(memchr\(buf, 0, \(size_t\)n\)\) \{ free\(buf\); return 0; \}/.test(sh),
+    'a truncated kwinrc or a wiped exclusion list is the user\'s window manager config');
+  // The replace renames a new file over the old one, which over a SYMLINK
+  // swaps the link for a plain file: a dotfiles manager that keeps kwinrc as a
+  // link would find its link gone after the first edit.
+  check('linux: the self-heal keeps a symlinked kwinrc a link',
+    /if \(!realpath\(link, path\)\) return 0;/.test(sh) &&
+    /char link\[1024\], path\[PATH_MAX\];/.test(sh) &&
+    /if \(stat\(link, &st\) != 0\) return 0;/.test(sh),
+    'a kwinrc the user keeps as a link must not be replaced by a plain file, and realpath under fortify aborts over a buffer shorter than PATH_MAX');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);
