@@ -244,6 +244,17 @@ function check(name, ok, detail) {
   check('tokens: the forced flag is consumed by the scan, not left set',
     /int fullRead = g_tokForceFullRead;\s*\n\s*g_tokForceFullRead = 0;/.test(tk),
     'left set, every later rescan would re-read from byte 0');
+  // TokKeys is a pre-wrapped COPY of TokSource's field names (a key is the name
+  // in quotes plus a colon; the record needle is copied bare). Neither size is
+  // derived from the other, so the pair is pinned at compile time: a field
+  // that outgrows its key, or a needle longer than its copy, fails the build
+  // on all three platforms instead of overflowing sprintf at runtime.
+  check('tokens: the key buffers are pinned to the source fields at compile time',
+    /_Static_assert\(sizeof\(\(\(TokSource \*\)0\)->kIn\) \+ TOK_KEY_WRAP <= sizeof\(\(\(TokKeys \*\)0\)->k\[0\]\)/.test(tk) &&
+    /_Static_assert\(sizeof\(\(\(TokSource \*\)0\)->record\) <= sizeof\(\(\(TokKeys \*\)0\)->rec\)/.test(tk) &&
+    /sizeof\(\(\(TokKeys \*\)0\)->k\) \/ sizeof\(\(\(TokKeys \*\)0\)->k\[0\]\) == 6 &&\s*\n\s*sizeof\(\(\(TokKeys \*\)0\)->len\) \/ sizeof\(\(\(TokKeys \*\)0\)->len\[0\]\) == 6/.test(tk) &&
+    /sizeof\(\(\(TokSource \*\)0\)->kModel\) >= sizeof\(TOK_DFLT_MODEL\)/.test(tk),
+    'without them a field that outgrows its buffer overflows sprintf when a source is scanned');
 }
 
 // --- Linux bar: the invariants a reviewer cannot see in a screenshot -------------
