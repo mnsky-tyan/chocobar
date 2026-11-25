@@ -702,6 +702,14 @@ function check(name, ok, detail) {
     /O_WRONLY \| O_CREAT \| O_EXCL, mode\)/.test(sh) &&
     /if \(memchr\(buf, 0, \(size_t\)n\)\) \{ free\(buf\); return 0; \}/.test(sh),
     'a truncated kwinrc or a wiped exclusion list is the user\'s window manager config');
+  // The replace renames a new file over the old one, which over a SYMLINK
+  // swaps the link for a plain file: a dotfiles manager that keeps kwinrc as a
+  // link would find its link gone after the first edit.
+  check('linux: the self-heal keeps a symlinked kwinrc a link',
+    /if \(!realpath\(link, path\)\) return 0;/.test(sh) &&
+    /char link\[1024\], path\[PATH_MAX\];/.test(sh) &&
+    /if \(stat\(link, &st\) != 0\) return 0;/.test(sh),
+    'a kwinrc the user keeps as a link must not be replaced by a plain file, and realpath under fortify aborts over a buffer shorter than PATH_MAX');
 }
 
 console.log(failures === 0 ? 'All portable checks passed.' : `FAILURES: ${failures}`);

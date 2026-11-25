@@ -19,6 +19,8 @@
 // root is left untouched and reported as "nothing done". No line is ever
 // removed. The new text replaces the file through a sibling temporary file
 // and rename, so a crash or a full disk can never leave kwinrc truncated.
+// A kwinrc that is a symlink stays one: the file the link points to is the one
+// replaced, never the link itself.
 //
 // MEASURED 2026-11-25, on the code this replaced: it dropped the old value
 // (Exclusions=alpha,beta came back as Exclusions=,chocobar), it took a key
@@ -33,12 +35,17 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>   // getuid
 #include <sys/stat.h>
 #include <dbus/dbus.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 // The bar's own window class (XClassHint in main.c): the exclusion matches it.
 #define CB_WIN_CLASS "chocobar"
@@ -103,7 +110,7 @@ static char *exclValue(char *p, char *lineEnd) {
 // the rename is atomic) with the original's mode, and replaces the original
 // only once it is complete on disk. 1 = replaced, 0 = nothing was changed.
 static int replaceFile(const char *path, const char *data, size_t len, mode_t mode) {
-    char tmp[1200];
+    char tmp[PATH_MAX + 32];
     int w = snprintf(tmp, sizeof tmp, "%s.chocobar-%ld.tmp", path, (long)getpid());
     if (w <= 0 || w >= (int)sizeof tmp) return 0;
     // created with the original's mode and only when no such file exists, so
@@ -143,12 +150,20 @@ static void kwinReconfigure(void) {
 }
 
 int cbKwinSelfHeal(void) {
-    char path[1024];
-    cbPath(path, sizeof(path));
-    if (!path[0]) return 0;
+    // realpath is handed PATH_MAX and no less: under fortify (the bar's -O2)
+    // glibc aborts the process over a smaller buffer, the way the old editor
+    // was aborted by its own oversized bound
+    char link[1024], path[PATH_MAX];
+    cbPath(link, sizeof(link));
+    if (!link[0]) return 0;
 
     struct stat st;
-    if (stat(path, &st) != 0) return 0;
+    if (stat(link, &st) != 0) return 0;
+    // The rename below replaces a FILE. Done over the path the user has, it
+    // would put a plain file where a dotfiles manager keeps a link, so the
+    // edit is aimed at the file the link points to. A link to a file the user
+    // does not own is still refused: stat above followed it.
+    if (!realpath(link, path)) return 0;
     if (st.st_uid != getuid()) return 0;   // only ever touch the user's own file
 
     FILE *f = fopen(path, "rb");

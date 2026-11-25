@@ -10,6 +10,7 @@
 //
 // The session bus is pointed at a path that does not exist, so the KWin
 // reconfigure call is a no-op and nothing here reaches a real session.
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,20 @@ int cbKwinSelfHeal(void);
 
 static int passed = 0, failed = 0;
 static char root[1024];
+
+// kwinrc as a dotfiles manager leaves it: a link, inside <name>/.config, to a
+// file elsewhere in that HOME. 1 = the link is in place.
+static int makeLink(const char *name, const char *target) {
+    char home[1200], cfg[1240], link[1300];
+    snprintf(home, sizeof home, "%s/%s", root, name);
+    snprintf(cfg, sizeof cfg, "%s/.config", home);
+    if ((mkdir(home, 0755) != 0 && errno != EEXIST) ||
+        (mkdir(cfg, 0755) != 0 && errno != EEXIST)) return 0;
+    snprintf(link, sizeof link, "%s/kwinrc", cfg);
+    if (symlink(target, link) != 0 && errno != EEXIST) return 0;
+    struct stat st;
+    return lstat(link, &st) == 0 && S_ISLNK(st.st_mode);
+}
 
 static void report(const char *name, int ok, const char *detail) {
     if (ok) { printf("PASS: %s\n", name); passed++; }
@@ -59,6 +74,10 @@ static void run(const char *name, const char *before, size_t blen,
     fwrite(before, 1, blen, f);
     fclose(f);
     chmod(path, mode);
+    // a case may hand kwinrc over as a SYMLINK to another file (set up before
+    // this call): it is written through, and must still be a link afterwards
+    struct stat lst;
+    int wasLink = lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode);
     setenv("HOME", home, 1);
     setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent-selfheal-check", 1);
     int rc = cbKwinSelfHeal();
@@ -85,6 +104,9 @@ static void run(const char *name, const char *before, size_t blen,
         snprintf(detail, sizeof detail, "mode %o, wanted %o", (unsigned)(st.st_mode & 0777), (unsigned)mode);
         report(name, 0, detail);
         return;
+    }
+    if (wasLink && (lstat(path, &lst) != 0 || !S_ISLNK(lst.st_mode))) {
+        report(name, 0, "the link was replaced by a plain file"); return;
     }
     if (!onlyKwinrc(cfg)) { report(name, 0, "a temporary file was left behind"); return; }
     report(name, 1, "");
@@ -132,6 +154,15 @@ int main(int argc, char **argv) {
         "[Round-Corners] old\nExclusions=alpha\n", NULL, 0, 0644);
     runz("a private file mode is kept through the replace",
         "[Round-Corners]\nExclusions=alpha\n", "[Round-Corners]\nExclusions=alpha,chocobar\n", 1, 0600);
+    // a dotfiles manager's kwinrc is often a link to a file in its repository:
+    // the edit lands in that file and the link survives it. The link is made
+    // in THIS case's own HOME, which run() names after the case
+    static const char linked[] = "a symlinked kwinrc stays a link: the file it points to gains the class";
+    if (makeLink(linked, "../kwinrc-real"))
+        runz(linked, "[Round-Corners]\nExclusions=alpha\n",
+            "[Round-Corners]\nExclusions=alpha,chocobar\n", 1, 0600);
+    else
+        report(linked, 0, "cannot set up the link");
 
     // nothing to do: the file must come back byte for byte and untouched
     runz("the class already present (any case) leaves the file alone",

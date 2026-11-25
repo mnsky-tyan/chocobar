@@ -2934,7 +2934,7 @@ check "the bar keeps running on its previous config after refusing the broken on
 #     2026-11-25 against the shipped build flags).
 #
 #     Two proofs. The function itself, linked straight from the source into a
-#     small driver at the bar's own -O2 (fortify on): sixteen kwinrc shapes,
+#     small driver at the bar's own -O2 (fortify on): seventeen kwinrc shapes,
 #     each compared byte for byte afterwards, mode and leftovers included.
 #     And the real binary: started once with the aborting shape under the
 #     throwaway HOME, it must open its window and leave the file correct.
