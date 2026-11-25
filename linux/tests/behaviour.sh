@@ -138,9 +138,9 @@ cleanup() {
 trap cleanup EXIT
 
 PASS=0; FAIL=0
-check() { # check <name> <condition-result>
+check() { # check <name> <condition-result> [what was seen: printed only on a failure]
     if [ "$2" -eq 0 ]; then echo "PASS: $1"; PASS=$((PASS+1))
-    else echo "FAIL: $1"; FAIL=$((FAIL+1)); fi
+    else echo "FAIL: $1${3:+ ($3)}"; FAIL=$((FAIL+1)); fi
 }
 # Wait for a line to appear in the bar's log, up to <timeout> seconds. The bar
 # picks a config change up on its OWN 2 s config check and only then logs
@@ -1249,10 +1249,30 @@ chmod +x "$WORK/home/pet"
 rm -f "$WORK/pet.pid" "$WORK/pet.state"
 fi
 
-# 6g. no zombie children. The pet and the detached spawns are fire-and-forget,
-#     so a bar that never waits keeps one defunct entry per invocation for as
-#     long as the service runs. One start/stop cycle above and a second one here
-#     must leave the bar's child table with no Z state at all.
+# 6g. the stopped pet is reaped. The pet and the detached spawns are
+#     fire-and-forget, and the bar waits for them in its tick (reapChildren), so
+#     a bar that never waits keeps one defunct entry per invocation for as long
+#     as the service runs.
+#
+#     MEASURED 2026-11-25, a 2 ms sampler on the bar's child table: after a stop
+#     the pet's corpse is a zombie for 0.95 s, until the next tick takes it, and
+#     the volume poll's pactl for 2 ms. So the table is NOT empty at every
+#     instant, and this check used to sample it once, 2 s after a stop click
+#     sent a fixed 1.2 s after the start click. It had under a second of slack
+#     twice over: a tick that ran late, or a start slower than 1.2 s (the bar
+#     gives one 5 s to report, PET_HANDSHAKE_MS, and refuses a click that
+#     arrives before the report), failed it with no defect in the bar. It failed
+#     once in nine runs of the full suite on one day, on a build that passed it
+#     in the other eight and in CI; 175 timed start/stop cycles did not
+#     reproduce it.
+#
+#     Both waits are now the product's own. Wait for the report, then stop;
+#     then wait for the reap, bounded, so a bar that never reaps still fails
+#     (that is proven against a build with the reaping removed). The oracle is
+#     the pet's own pid: it leaves /proc only once the bar has waited for it.
+#     A failure now prints what was seen, and the three waits print how long
+#     they took on every run, so a loop that ran late leaves its trace in a
+#     passing log too.
 zombies() {
     local n=0 pid st
     for pid in $(cat "/proc/$BAR_PID/task/$BAR_PID/children" 2>/dev/null); do
@@ -1261,16 +1281,66 @@ zombies() {
     done
     echo "$n"
 }
+zombie_names() { # the names of the bar's zombie children, for a failure's detail
+    local pid st names=""
+    for pid in $(cat "/proc/$BAR_PID/task/$BAR_PID/children" 2>/dev/null); do
+        st=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)
+        [ "$st" = "Z" ] && names="$names $(cat "/proc/$pid/comm" 2>/dev/null)"
+    done
+    echo "${names:- none}"
+}
+wait_no_zombies() { # wait_no_zombies <timeout-seconds>: 0 once the child table holds no Z state
+    local limit="$1" waited=0
+    while [ "$waited" -lt "$((limit * 10))" ]; do
+        [ "$(zombies)" -eq 0 ] && return 0
+        sleep 0.1
+        waited=$((waited+1))
+    done
+    return 1
+}
+wait_gone() { # wait_gone <pid> <timeout-seconds>: 0 once that pid has left /proc
+    local pid="$1" limit="$2" waited=0
+    while [ "$waited" -lt "$((limit * 10))" ]; do
+        [ ! -d "/proc/$pid" ] && return 0
+        sleep 0.1
+        waited=$((waited+1))
+    done
+    return 1
+}
+wait_log_count() { # wait_log_count <pattern> <count> <timeout-seconds>: 0 once the log holds that many lines
+    local pat="$1" want="$2" limit="$3" waited=0
+    while [ "$waited" -lt "$((limit * 10))" ]; do
+        [ "$(grep -c "$pat" "$WORK/bar.log" || true)" -ge "$want" ] && return 0
+        sleep 0.1
+        waited=$((waited+1))
+    done
+    return 1
+}
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
 STARTED_BEFORE=$(grep -c "pet: starting" "$WORK/bar.log" || true)
 STOPPED_BEFORE=$(grep -c "pet: stopped" "$WORK/bar.log" || true)
+T0=$(now_ms)
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
-sleep 1.2
+wait_log_count "pet: starting" $((STARTED_BEFORE+1)) 6; REPORTED=$?
+T1=$(now_ms)
+PET_PID=""
+for _ in $(seq 1 30); do
+    PET_PID=$(cat "$WORK/pet.pid" 2>/dev/null)
+    [ -n "$PET_PID" ] && break
+    sleep 0.1
+done
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
-sleep 2
-[ "$(grep -c "pet: starting" "$WORK/bar.log" || true)" -eq $((STARTED_BEFORE+1)) ] &&
-    [ "$(grep -c "pet: stopped" "$WORK/bar.log" || true)" -eq $((STOPPED_BEFORE+1)) ] &&
-    [ "$(zombies)" -eq 0 ]
-check "a pet start/stop cycle leaves no zombie child of the bar" $?
+wait_log_count "pet: stopped" $((STOPPED_BEFORE+1)) 6; STOPPED=$?
+T2=$(now_ms)
+[ "$REPORTED" -eq 0 ] && [ "$STOPPED" -eq 0 ]; RC=$?
+check "a pet start is reported and the next click stops it" "$RC" \
+    "starts +$(( $(grep -c 'pet: starting' "$WORK/bar.log") - STARTED_BEFORE )), stops +$(( $(grep -c 'pet: stopped' "$WORK/bar.log") - STOPPED_BEFORE )), $(grep -c 'click was ignored' "$WORK/bar.log") click(s) refused as not reported yet"
+REAPED=1
+[ -n "$PET_PID" ] && wait_gone "$PET_PID" 5 && wait_no_zombies 5 && REAPED=0
+T3=$(now_ms)
+check "the stopped pet is reaped: its pid is gone and the bar holds no zombie" "$REAPED" \
+    "pet pid ${PET_PID:-never written}, $( [ -n "$PET_PID" ] && [ -d "/proc/$PET_PID" ] && echo still in /proc || echo gone ), zombies now $(zombies):$(zombie_names)"
+echo "    measured: start reported after $((T1 - T0)) ms, stop reported after $((T2 - T1)) ms, reaped after $((T3 - T2)) ms"
 
 # 6h. a DIRECTORY as the pet path is refused: access(X_OK) on a directory
 #     tests search permission, so a directory used to pass as "the pet" and
@@ -1360,7 +1430,7 @@ check "a pet that cannot exec logs 'cannot start' and claims no start" $?
 #       loop must still answer a click (the menu opens).
 "$XCLICK" $((X+40)) $((Y+10)) 3 full
 sleep 1.5
-menu_open && [ "$(zombies)" -eq 0 ]
+menu_open && wait_no_zombies 5
 check "the bar still opens the menu after a refused pet start, and reaps its child" $?
 "$XCLICK" 100 300 1 full
 sleep 0.8
@@ -1602,7 +1672,7 @@ check "the abandoned child still lands its exec, and the pet runs" $?
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.5
 grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
-    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && wait_no_zombies 5
 check "the pet the deadline did not kill is stopped by a click and leaves no zombie" $?
 
 # 6j-4. a menu held open past the deadline must not count against the park's
@@ -1651,10 +1721,10 @@ eval "$(xdotool getwindowgeometry --shell "$BARWIN6")"
 "$XCLICK" $((X+PET_X)) $((Y+10)) 1 full
 sleep 1.5
 grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
-    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && wait_no_zombies 5
 check "the pet the protected start ran stops on a click and leaves no zombie" $?
 grep -q "pet: stopped" "$WORK/bar6.log" && [ ! -e "$WORK/pet.pid" ] &&
-    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && [ "$(zombies)" -eq 0 ]
+    [ "$(cat "$WORK/pet.state" 2>/dev/null)" = "SIGTERM" ] && wait_no_zombies 5
 check "the pet the protected start ran stops on a click and leaves no zombie" $?
 
 # back to the ordinary bar: the shim was this check's tool, not a property of
