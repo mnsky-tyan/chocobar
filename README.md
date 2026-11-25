@@ -526,6 +526,13 @@ where one of those is missing it skips cleanly on a developer machine and fails
 in CI. Nothing it does touches the user's session: the display, the bus, the
 HOME and the pointer it drives are all throwaway.
 
+`linux/tests/smoke.sh` is the quick product smoke on its own, outside the
+`npm test` gate: the built bar on a private display, bus and HOME, waited for
+its window and for one scan of a seeded store, then stopped by the PID it
+captured. Under a second. `linux/tests/selfheal_check.c` is the kwinrc self-heal's own driver
+(seventeen file shapes, each compared byte for byte); the behaviour suite runs
+it in its last section.
+
 ```bash
 npm test
 ```
@@ -555,7 +562,7 @@ native/src/p_agg.c      token aggregation: per-app / per-model / per-day totals
 native/src/p_ui.c       bar window, chips, follow loop, tray, dashboards, wWinMain entry
 native/src/p_utils.c    logging, string, and config helpers
 native/README.md        native build, run, and verification notes
-linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons, and linux/tests/ (behaviour.sh + xclick.c/xmonitor.c + kwstub.py) which CI builds and drives
+linux/                  Linux front-end: floating X11 bar, Linux metrics, cairo icons, and linux/tests/ (behaviour.sh + xclick.c/xmonitor.c + kwstub.py + selfheal_check.c, and smoke.sh, the standalone product smoke) which CI builds and drives
 macos/                  macOS front-end (Win32 adapter + bar) over the shared core parts
 scripts/                the portable regression suite (node scripts/portable_regression.js, half of `npm test` with the Linux behaviour suite) and the Windows token regression runner
 ```
