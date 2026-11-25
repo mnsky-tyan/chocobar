@@ -376,6 +376,18 @@ typedef struct {
     const char *prov; int provLen; // "provider" (pi) - the route the turn travelled
 } TokRec;
 
+// The six default field names. Macros rather than literals in two places: the
+// size assertions below and the fallback table in tokKeysBuild must quote the
+// same strings, or a default that outgrew its source field would still compile.
+#define TOK_DFLT_IN    "input"
+#define TOK_DFLT_OUT   "output"
+#define TOK_DFLT_CR    "cacheRead"
+#define TOK_DFLT_CW    "cacheWrite"
+#define TOK_DFLT_TS    "timestamp"
+#define TOK_DFLT_MODEL "model"
+// a key is "name": the name plus a quote on each side and a colon
+#define TOK_KEY_WRAP 3
+
 // the six field names a source uses, pre-quoted for the substring search. Built
 // once per scan (not per line) so the hot path stays a memcmp.
 // rec/recLen: the source's `record` needle, pre-wrapped in quotes ("X"), so
@@ -383,8 +395,48 @@ typedef struct {
 // field search runs (codex: token_usage_record rows only - the cumulative
 // token_count lines in the same file must never count).
 typedef struct { char k[6][32]; int len[6]; int tsIso; const char *provList, *exclList; char rec[66]; int recLen; } TokKeys;
+
+// TokKeys is a pre-wrapped COPY of TokSource's field names, so the two layouts
+// are coupled: a key is the source name in quotes plus a colon ("name":), and
+// the record needle is copied bare. Neither size is derived from the other, so
+// a source field that grows or a key/record destination that shrinks would
+// overflow sprintf at runtime instead of failing the build. These make either
+// change a compile error. The defaults are asserted too: a source field shrunk
+// below its own default silently keeps a truncated default (lstrcpynA) rather
+// than the configured name - the same silent key corruption, one step earlier.
+_Static_assert(sizeof(((TokSource *)0)->kIn) + TOK_KEY_WRAP <= sizeof(((TokKeys *)0)->k[0]),
+               "TokKeys.k[0] must hold a quoted TokSource.kIn plus a colon");
+_Static_assert(sizeof(((TokSource *)0)->kOut) + TOK_KEY_WRAP <= sizeof(((TokKeys *)0)->k[1]),
+               "TokKeys.k[1] must hold a quoted TokSource.kOut plus a colon");
+_Static_assert(sizeof(((TokSource *)0)->kCr) + TOK_KEY_WRAP <= sizeof(((TokKeys *)0)->k[2]),
+               "TokKeys.k[2] must hold a quoted TokSource.kCr plus a colon");
+_Static_assert(sizeof(((TokSource *)0)->kCw) + TOK_KEY_WRAP <= sizeof(((TokKeys *)0)->k[3]),
+               "TokKeys.k[3] must hold a quoted TokSource.kCw plus a colon");
+_Static_assert(sizeof(((TokSource *)0)->kTs) + TOK_KEY_WRAP <= sizeof(((TokKeys *)0)->k[4]),
+               "TokKeys.k[4] must hold a quoted TokSource.kTs plus a colon");
+_Static_assert(sizeof(((TokSource *)0)->kModel) + TOK_KEY_WRAP <= sizeof(((TokKeys *)0)->k[5]),
+               "TokKeys.k[5] must hold a quoted TokSource.kModel plus a colon");
+_Static_assert(sizeof(((TokSource *)0)->record) <= sizeof(((TokKeys *)0)->rec),
+               "TokKeys.rec must hold the bare TokSource.record needle");
+_Static_assert(sizeof(((TokKeys *)0)->k) / sizeof(((TokKeys *)0)->k[0]) == 6 &&
+               sizeof(((TokKeys *)0)->len) / sizeof(((TokKeys *)0)->len[0]) == 6,
+               "TokKeys needs one key and one length per source field");
+_Static_assert(sizeof(((TokSource *)0)->kIn) >= sizeof(TOK_DFLT_IN),
+               "TokSource.kIn must hold its default name");
+_Static_assert(sizeof(((TokSource *)0)->kOut) >= sizeof(TOK_DFLT_OUT),
+               "TokSource.kOut must hold its default name");
+_Static_assert(sizeof(((TokSource *)0)->kCr) >= sizeof(TOK_DFLT_CR),
+               "TokSource.kCr must hold its default name");
+_Static_assert(sizeof(((TokSource *)0)->kCw) >= sizeof(TOK_DFLT_CW),
+               "TokSource.kCw must hold its default name");
+_Static_assert(sizeof(((TokSource *)0)->kTs) >= sizeof(TOK_DFLT_TS),
+               "TokSource.kTs must hold its default name");
+_Static_assert(sizeof(((TokSource *)0)->kModel) >= sizeof(TOK_DFLT_MODEL),
+               "TokSource.kModel must hold its default name");
+
 static void tokKeysBuild(const TokSource *s, TokKeys *tk) {
-    static const char *dflt[6] = { "input", "output", "cacheRead", "cacheWrite", "timestamp", "model" };
+    static const char *dflt[6] = { TOK_DFLT_IN, TOK_DFLT_OUT, TOK_DFLT_CR,
+                                   TOK_DFLT_CW, TOK_DFLT_TS, TOK_DFLT_MODEL };
     const char *src[6];
     src[0] = s->kIn; src[1] = s->kOut; src[2] = s->kCr;
     src[3] = s->kCw;  src[4] = s->kTs;  src[5] = s->kModel;
