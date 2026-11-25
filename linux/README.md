@@ -138,6 +138,11 @@ every startup (`linux/src/selfheal.c`) and asks KWin to reconfigure, so a fresh
 install needs no manual step. It edits exactly that one key - appending to the
 value when other exclusions exist, leaving the rest of the file byte-for-byte -
 and does nothing when the exclusion is already in place.
+`linux/tests/selfheal_check.c` holds the seventeen kwinrc shapes it is held to,
+among them a value with other exclusions in it, CRLF endings, a comment naming
+the group, a NUL byte, no `Exclusions` key at all, and a kwinrc that is a
+symlink; the behaviour suite runs it in its last section, at the bar's own
+`-O2`.
 
 ## Measured on this machine (Ubuntu 25.10, KDE Plasma 6.6 on Wayland, 2880x1800)
 
